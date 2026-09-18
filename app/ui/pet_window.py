@@ -21,8 +21,9 @@ from typing import Callable, Optional
 from app.core.qt_compat import (
     QAction, QApplication, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
     QDragMoveEvent, QDropEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
-    QMouseEvent, QPixmap, QPoint, QProgressBar, QSize, QSizePolicy, Qt,
-    QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
+    QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
+    QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
+    QGraphicsDropShadowEffect,
     event_global_pos, event_local_pos,
 )
 from app.animation.animations import Animation, AnimationPlayer, Frame
@@ -196,12 +197,38 @@ class PetWindow(QWidget):
         self._sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._sprite_label.setStyleSheet("background-color: transparent;")
 
-        # 气泡 label（替代 _draw_bubble）
+        # 气泡 label（替代 _draw_bubble）—— v2 美化：白底大圆角 + 淡紫描边 + 柔和阴影 + 尖角
         self._bubble_label = QLabel(self)
         self._bubble_label.setStyleSheet(
-            "QLabel { background-color: rgba(255,255,255,235); color: #28283c; ""border-radius: 10px; padding: 5px 10px; font-weight: bold; ""font-family: 'Microsoft YaHei', sans-serif; font-size: 12px; }")
+            "QLabel { background-color: rgba(255,255,255,242); color: #28283c; "
+            "border: 1px solid #e4dff5; "
+            "border-radius: 12px; padding: 6px 12px; font-weight: bold; "
+            "font-family: 'Microsoft YaHei', sans-serif; font-size: 11px; }")
         self._bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._bubble_shadow = QGraphicsDropShadowEffect(self._bubble_label)
+        self._bubble_shadow.setBlurRadius(18)
+        self._bubble_shadow.setOffset(0, 3)
+        self._bubble_shadow.setColor(QColor(70, 60, 140, 50))
+        self._bubble_label.setGraphicsEffect(self._bubble_shadow)
         self._bubble_label.hide()
+
+        # 气泡尖角（小三角，与气泡同色，贴合气泡底部）
+        self._bubble_tail = QLabel(self)
+        _tail = QPixmap(18, 12)
+        _tail.fill(Qt.GlobalColor.transparent)
+        _tp = QPainter(_tail)
+        _tp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        _tp.setPen(Qt.PenStyle.NoPen)
+        _tp.setBrush(QColor(255, 255, 255, 242))
+        _path = QPainterPath()
+        _path.moveTo(2, 1)
+        _path.lineTo(16, 1)
+        _path.lineTo(9, 11)
+        _path.closeSubpath()
+        _tp.drawPath(_path)
+        _tp.end()
+        self._bubble_tail.setPixmap(_tail)
+        self._bubble_tail.hide()
 
         # 气泡
         self._bubble_text: str = ""
@@ -323,14 +350,22 @@ class PetWindow(QWidget):
         self._start_frame_timer()  # 重启帧计时器
         log.info("拖拽图已切换显示")
 
+    def _place_bubble(self) -> None:
+        """把气泡 + 尖角一起居中定位在窗口顶部。"""
+        self._bubble_label.adjustSize()
+        bw = self._bubble_label.width()
+        bx = (self._window_size.width() - bw) // 2
+        self._bubble_label.move(bx, 10)
+        tw = self._bubble_tail.width()
+        self._bubble_tail.move(bx + (bw - tw) // 2,
+                               10 + self._bubble_label.height() - 4)
+        self._bubble_tail.show()
+
     def show_bubble(self, text: str, duration_ms: int = 4000) -> None:
         self._bubble_text = text if len(text) <= 60 else text[:57] + "…"
         self._bubble_until = time.time() + duration_ms / 1000.0
         self._bubble_label.setText(self._bubble_text)
-        self._bubble_label.adjustSize()
-        # 居中显示在窗口顶部
-        bx = (self._window_size.width() - self._bubble_label.width()) // 2
-        self._bubble_label.move(bx, 10)
+        self._place_bubble()
         self._bubble_label.show()
 
     def show_streaming_bubble(self, text: str) -> None:
@@ -343,9 +378,7 @@ class PetWindow(QWidget):
         self._bubble_text = display
         self._bubble_until = time.time() + 9999.0  # 不自动隐藏
         self._bubble_label.setText(display)
-        self._bubble_label.adjustSize()
-        bx = (self._window_size.width() - self._bubble_label.width()) // 2
-        self._bubble_label.move(bx, 10)
+        self._place_bubble()
         self._bubble_label.show()
 
     def stop_streaming_bubble(self) -> None:
@@ -361,14 +394,17 @@ class PetWindow(QWidget):
             return
         self._status_bar = QWidget(self)
         self._status_bar.setStyleSheet(
-            "QWidget { background-color: rgba(0,0,0,100); border-radius: 4px; }")
+            "QWidget { background-color: rgba(58,46,110,160); border: 1px solid "
+            "rgba(255,255,255,45); border-radius: 10px; }")
         layout = QVBoxLayout(self._status_bar)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(3)
 
         bar_style = (
-            "QProgressBar {{ background: rgba(255,255,255,30); border: none; ""border-radius: 2px; height: 6px; }}""QProgressBar::chunk {{ border-radius: 2px; background: {color}; }}")
-        label_style = "color: rgba(255,255,255,180); font-size: 10px; font-family: 'Microsoft YaHei', sans-serif;"
+            "QProgressBar {{ background: rgba(255,255,255,26); border: none; "
+            "border-radius: 3px; height: 6px; }}"
+            "QProgressBar::chunk {{ border-radius: 3px; background: {color}; }}")
+        label_style = "color: rgba(255,255,255,190); font-size: 10px; font-family: 'Microsoft YaHei', sans-serif;"
         rows = [
             ("体力", "strength", "rgba(100,200,150,160)"),
             ("饱食", "food",     "rgba(200,180,80,160)"),
@@ -502,6 +538,7 @@ class PetWindow(QWidget):
         if self._bubble_text and not self._streaming_bubble and time.time() >= self._bubble_until:
             self._bubble_text = ""
             self._bubble_label.hide()
+            self._bubble_tail.hide()
 
         # PR-bugfix: 重用同一个 QTimer 实例。先 stop 旧 timer 避免多 timer 并发。
         if self._frame_timer is None:

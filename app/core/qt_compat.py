@@ -9,7 +9,7 @@ try:
     from PyQt5 import QtCore, QtGui, QtWidgets
     from PyQt5.QtCore import (
         pyqtSignal as Signal, pyqtSlot as Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
-        QStringListModel,
+        QStringListModel, QEvent, QUrl, QBuffer, QByteArray,
     )
     from PyQt5.QtCore import Qt as _Qt
     if not hasattr(Qt, "AlignmentFlag"):
@@ -40,7 +40,8 @@ try:
     from PyQt5.QtGui import (
         QColor, QCursor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent,
         QDropEvent, QFont, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence,
-        QMouseEvent, QPainter, QPaintEvent, QPixmap, QTextCursor, QTransform,
+        QMouseEvent, QPainter, QPainterPath, QLinearGradient, QPaintEvent, QPixmap,
+        QTextCursor, QTextDocument, QTransform,
     )
     from PyQt5.QtWidgets import QAction
     from PyQt5.QtWidgets import (
@@ -49,7 +50,7 @@ try:
         QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
         QSpinBox, QSplitter, QSystemTrayIcon, QTabWidget, QTextBrowser,
-        QToolButton, QVBoxLayout, QWidget,
+        QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     if not hasattr(QtCore, "QMimeData"):
         from PyQt5.QtCore import QMimeData as _QM
@@ -59,12 +60,12 @@ try:
 except ImportError:
     # PySide6 fallback（开发环境备用）
     from PySide6 import QtCore, QtGui, QtWidgets
-    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt
+    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEvent, QUrl, QBuffer, QByteArray
     from PySide6.QtGui import (
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
-        QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPaintEvent, QPixmap,
-        QMimeData, QTextCursor, QTransform,
+        QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QLinearGradient,
+        QPaintEvent, QPixmap, QMimeData, QTextCursor, QTextDocument, QTransform,
     )
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
@@ -72,7 +73,7 @@ except ImportError:
         QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
         QSpinBox, QSplitter, QStringListModel, QSystemTrayIcon, QTabWidget, QTextBrowser,
-        QToolButton, QVBoxLayout, QWidget,
+        QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     _BACKEND = "PySide6"
 
@@ -107,16 +108,18 @@ def event_local_pos(evt) -> "QPoint":
 
 __all__ = [
     "BACKEND", "Signal", "Slot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
+    "QEvent", "QUrl", "QBuffer", "QByteArray",
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
-    "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPaintEvent", "QPixmap",
-    "QTextCursor", "QTransform",
+    "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
+    "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",
     "QApplication", "QCheckBox", "QComboBox", "QCompleter", "QDoubleSpinBox", "QFormLayout",
     "QFrame", "QGridLayout", "QGroupBox",
     "QHBoxLayout", "QLabel", "QLineEdit", "QDialog", "QDialogButtonBox", "QFileDialog",
     "QInputDialog", "QListWidget", "QListWidgetItem",
     "QMenu", "QMessageBox", "QPlainTextEdit", "QProgressBar", "QPushButton", "QSizePolicy",
     "QSlider", "QSpinBox", "QSplitter", "QStringListModel", "QSystemTrayIcon", "QTabWidget",
-    "QTextBrowser", "QToolButton", "QVBoxLayout", "QWidget",
+    "QTextBrowser", "QToolButton", "QVBoxLayout", "QWidget", "QGraphicsDropShadowEffect",
+    "QScrollArea",
     "QDragEnterEvent", "QDragLeaveEvent", "QDragMoveEvent", "QDropEvent",
     "event_global_pos", "event_local_pos",
 ]

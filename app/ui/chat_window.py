@@ -26,8 +26,11 @@ from app.core.qt_compat import (
     QApplication, QFont, QFrame, QHBoxLayout, QKeyEvent,
     QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QObject, QPixmap, QPlainTextEdit, QPoint, QPushButton,
-    QSplitter, Qt, QTextBrowser, QTextCursor, QToolButton, QVBoxLayout,
-    QWidget, Signal, QThread, QSize,
+    QSplitter, Qt, QTextBrowser, QTextCursor, QTextDocument, QToolButton,
+    QVBoxLayout, QWidget, Signal, QThread, QSize, QColor, QEvent, QRect,
+    QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
+    QUrl, QBuffer, QByteArray,
+    event_global_pos, event_local_pos,
 )
 
 # Re-export for type hints
@@ -376,6 +379,50 @@ class _CommandCompleter(QObject):
         self.edit.setTextCursor(cursor)
 
 
+class _TitleBarDrag(QObject):
+    """无边框窗口标题栏拖动：按住标题区 / 头像即可拖动整个窗口。"""
+
+    def __init__(self, win: "ChatWindow"):
+        super().__init__(win)
+        self._win = win
+        self._offset = QPoint()
+        self._dragging = False
+
+    def eventFilter(self, obj, ev) -> bool:
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress and \
+                ev.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._offset = (event_global_pos(ev)
+                            - self._win.frameGeometry().topLeft())
+            return True
+        if t == QEvent.Type.MouseMove and self._dragging and \
+                (ev.buttons() & Qt.MouseButton.LeftButton):
+            self._win.move(event_global_pos(ev) - self._offset)
+            return True
+        if t == QEvent.Type.MouseButtonRelease:
+            self._dragging = False
+            return True
+        return False
+
+
+class _InputFocusWatcher(QObject):
+    """输入框获得 / 失去焦点时高亮输入容器边框（Qt QSS 不支持 :focus-within）。"""
+
+    def __init__(self, container: QFrame):
+        super().__init__(container)
+        self._container = container
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QEvent.Type.FocusIn:
+            self._container.setStyleSheet(
+                "QFrame { background: #ffffff; border: 2px solid #a99bfa; "
+                "border-radius: 16px; }")
+        elif ev.type() == QEvent.Type.FocusOut:
+            self._container.setStyleSheet("")
+        return False
+
+
 class ChatWindow(QWidget):
     """独立聊天窗。"""
 
@@ -427,29 +474,127 @@ class ChatWindow(QWidget):
 
         self.setWindowTitle(f"和 {char_cfg.name} 聊天")
         # 设置窗口图标
-        _ico = Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
+        _ico = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
             from app.core.qt_compat import QIcon
             self.setWindowIcon(QIcon(str(_ico)))
         self.resize(720, 540)
         self.setMinimumSize(560, 400)
+        # v2 美化：无边框圆角窗口（窗口透明，内部白色圆角卡片 + 自绘标题栏）
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("chat_root")
         self.setStyleSheet(ui_style.CHAT_QSS)
 
         self._avatar_path = self._pick_avatar()
         self.avatar_label: Optional[QLabel] = None
+        # 富文本圆形头像（QTextBrowser 对 document 资源在 clear() 后会失效，
+        # 改用自包含的 data URI：<img src="data:image/png;base64,...">）
+        self._avatar_data_bot: str = ""
+        self._avatar_data_user: str = ""
         self._build_ui()
+        self._register_avatar_resources()
         self._append_system_welcome()
         self._load_history()  # 从 JSON 加载上次的聊天记录
 
     def _pick_avatar(self) -> Optional[Path]:
-        """挑一张头像（优先 idle_calm/0，否则任意 jpg）。"""
-        for d in ['idle_calm', 'idle_blink', 'idle_bounce']:
+        """挑一张头像（优先日常/开心动作的第一帧，兼容旧 idle_calm 命名）。"""
+        candidates = [
+            'Default', 'Idle_tail', 'Idle_shake', 'Emotion_happy',
+            'Idle_stars', 'Idle_yawning',
+            'idle_calm', 'idle_blink', 'idle_bounce',
+        ]
+        for d in candidates:
             p = self.sprite_dir / d
             if p.is_dir():
-                files = sorted(p.glob('*.jpg'))
+                # 素材可能是 PNG（rmbg-*）或旧 JPG
+                files = sorted(list(p.glob('*.png')) + list(p.glob('*.jpg')))
                 if files:
                     return files[0]
         return None
+
+    # ---- 头像（QTextBrowser 富文本用的圆形 PNG）----
+    def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
+        """生成圆形头像 QPixmap（外圈 2px 白边）。
+
+        bot 角色：角色头像图（居中裁剪成圆）；无图则用首字 + 粉紫渐变。
+        user 角色：首字「我」+ 蓝色渐变。
+        """
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+
+        if role == "bot":
+            src = QPixmap(str(self._avatar_path)) if self._avatar_path else QPixmap()
+            if not src.isNull():
+                # 先画白色底圆（即 2px 白边）
+                p.setBrush(QColor(255, 255, 255))
+                p.drawEllipse(0, 0, size, size)
+                # 内圆裁剪后画头像图（居中裁剪填满圆）
+                inner = QPainterPath()
+                m = 2
+                inner.addEllipse(m, m, size - 2 * m, size - 2 * m)
+                p.setClipPath(inner)
+                scaled = src.scaled(size - 2 * m, size - 2 * m,
+                                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                    Qt.TransformationMode.SmoothTransformation)
+                x = (size - scaled.width()) // 2
+                y = (size - scaled.height()) // 2
+                p.drawPixmap(x, y, scaled)
+            else:
+                grad = QLinearGradient(0, 0, size, size)
+                grad.setColorAt(0.0, QColor("#f9a8d4"))
+                grad.setColorAt(1.0, QColor("#ec6aa9"))
+                p.setBrush(grad)
+                p.drawEllipse(0, 0, size, size)
+                self._draw_avatar_char(p, (self.char_cfg.name or "宠")[:1], size)
+        else:
+            grad = QLinearGradient(0, 0, size, size)
+            grad.setColorAt(0.0, QColor("#60a5fa"))
+            grad.setColorAt(1.0, QColor("#3b6cf0"))
+            p.setBrush(grad)
+            p.drawEllipse(0, 0, size, size)
+            self._draw_avatar_char(p, "我", size)
+        p.end()
+        return pm
+
+    @staticmethod
+    def _draw_avatar_char(p: QPainter, ch: str, size: int) -> None:
+        """在圆形头像中央画白色加粗字符。"""
+        from app.core.qt_compat import QFont
+        f = QFont("Microsoft YaHei UI")
+        f.setPixelSize(max(12, int(size * 0.5)))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRect(0, 0, size, size),
+                   Qt.AlignmentFlag.AlignCenter, ch)
+
+    def _pixmap_to_data_uri(self, pm: QPixmap) -> str:
+        """QPixmap → data:image/png;base64,...（自包含，clear() 后也不会失效）。"""
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.ReadWrite)
+        pm.save(buf, "PNG")
+        buf.close()
+        import base64
+        return "data:image/png;base64," + base64.b64encode(bytes(ba)).decode("ascii")
+
+    def _register_avatar_resources(self) -> None:
+        """生成并缓存两枚圆形头像的 data URI（bot/user，40px）。"""
+        self._avatar_data_bot = self._pixmap_to_data_uri(self._make_avatar_pixmap("bot", 40))
+        self._avatar_data_user = self._pixmap_to_data_uri(self._make_avatar_pixmap("user", 40))
+
+    def set_avatar(self, path: Path) -> None:
+        """外部更新角色头像（切换角色时用）。"""
+        self._avatar_path = path
+        # 标题栏头像
+        self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 44))
+        self.avatar_label.setFixedSize(44, 44)
+        # 富文本头像缓存（只影响之后的新消息）
+        self._register_avatar_resources()
 
     # ---------------- UI ----------------
     def _build_ui(self) -> None:
@@ -479,120 +624,109 @@ class ChatWindow(QWidget):
             └──────────────────────────────────────────────┘
         """
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(18, 14, 18, 18)
+        root.setSpacing(0)
 
-        # ============ 顶部：标题 + 状态 ============
-        header = QFrame()
-        header.setObjectName("chat_header")
-        header.setStyleSheet("""
-            QFrame#chat_header {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #f8f7ff, stop:1 #fdf2f8);
-                border: 1px solid #e9e3ff;
-                border-radius: 12px;
-            }
-        """)
+        # ============ 白色圆角卡片容器（窗口透明，卡片负责圆角 + 阴影）============
+        card = QFrame(self)
+        card.setObjectName("window_card")
+        card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(48)
+        _shadow.setOffset(0, 10)
+        _shadow.setColor(QColor(90, 78, 200, 55))
+        card.setGraphicsEffect(_shadow)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(8)
+        root.addWidget(card, 1)
+
+        # ============ 自绘标题栏（可拖动）============
+        header = QFrame(card)
+        header.setObjectName("titlebar")
+        header.setStyleSheet(ui_style.TITLEBAR_QSS)
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(14, 10, 14, 10)
+        hl.setContentsMargins(14, 8, 10, 8)
+        hl.setSpacing(10)
 
-        # 头像
+        # 头像（圆形裁剪 + 白色描边，复用富文本头像的统一绘制）
         self.avatar_label = QLabel()
-        if self._avatar_path:
-            pix = QPixmap(str(self._avatar_path))
-            if not pix.isNull():
-                pix = pix.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
-                self.avatar_label.setPixmap(pix)
+        self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 44))
+        self.avatar_label.setFixedSize(44, 44)
         hl.addWidget(self.avatar_label)
 
-        # 标题 + 副标题（状态）
-        title_box = QVBoxLayout()
-        title_box.setSpacing(0)
+        # 标题区（标题 + 副标题；按住可拖动窗口）
+        drag_zone = QWidget(header)
+        dz = QVBoxLayout(drag_zone)
+        dz.setContentsMargins(0, 0, 0, 0)
+        dz.setSpacing(1)
         title = QLabel(f"和 {self.char_cfg.name} 的对话")
-        title_font = QFont()
-        title_font.setPointSize(13)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        title.setStyleSheet("color: #2c2c38;")
-        title_box.addWidget(title)
-
+        title.setObjectName("titlebar_title")
+        dz.addWidget(title)
         self.subtitle_label = QLabel(self._status_text())
-        self.subtitle_label.setStyleSheet("color: #8a8a9c; font-size: 9pt;")
-        title_box.addWidget(self.subtitle_label)
-        hl.addLayout(title_box, 1)
+        self.subtitle_label.setObjectName("titlebar_subtitle")
+        dz.addWidget(self.subtitle_label)
+        hl.addWidget(drag_zone, 1)
 
-        # 右侧按钮：清空 + 调试面板（不用 emoji，按钮只放文字 + tooltip）
-        btn_style = """
-            QPushButton {
-                background: transparent;
-                border: 1px solid #e0e0ee;
-                border-radius: 8px;
-                padding: 6px 12px;
-                font-size: 10pt;
-                color: #5b4f9c;
-            }
-            QPushButton:hover { background: #f0eaff; border-color: #a78bfa; }
-        """
+        # 右侧操作按钮（清空 / 调试 / 最小化 / 关闭）
         self.btn_clear = QPushButton("清空")
+        self.btn_clear.setObjectName("ghost_btn")
         self.btn_clear.setToolTip("清空上下文（不影响长期记忆）")
-        self.btn_clear.setStyleSheet(btn_style)
         self.btn_clear.clicked.connect(self._on_clear)
         hl.addWidget(self.btn_clear)
 
-        self.btn_dashboard = QPushButton("调试面板")
+        self.btn_dashboard = QPushButton("调试")
+        self.btn_dashboard.setObjectName("ghost_btn")
         self.btn_dashboard.setToolTip("打开可视化调试面板 http://127.0.0.1:8765")
-        self.btn_dashboard.setStyleSheet(btn_style)
         self.btn_dashboard.clicked.connect(self._open_dashboard)
         hl.addWidget(self.btn_dashboard)
 
-        root.addWidget(header)
+        self.btn_min = QToolButton()
+        self.btn_min.setObjectName("win_btn")
+        self.btn_min.setText("─")
+        self.btn_min.setToolTip("最小化")
+        self.btn_min.clicked.connect(self.showMinimized)
+        hl.addWidget(self.btn_min)
+
+        self.btn_close = QToolButton()
+        self.btn_close.setObjectName("win_btn_close")
+        self.btn_close.setText("✕")
+        self.btn_close.setToolTip("关闭")
+        self.btn_close.clicked.connect(self.close)
+        hl.addWidget(self.btn_close)
+
+        cl.addWidget(header)
+
+        # 标题栏拖动（头像 / 标题 / 副标题区域）
+        self._titlebar = header
+        self._drag_filter = _TitleBarDrag(self)
+        drag_zone.installEventFilter(self._drag_filter)
+        self.avatar_label.installEventFilter(self._drag_filter)
+        title.installEventFilter(self._drag_filter)
 
         # ============ 中间：聊天气泡区（占满剩余空间）============
         self.chat_view = QTextBrowser()
+        self.chat_view.setObjectName("chat_view")
         self.chat_view.setOpenExternalLinks(True)
-        self.chat_view.setStyleSheet("""
-            QTextBrowser {
-                background: #fbfbfd;
-                border: 1px solid #e9e9f0;
-                border-radius: 12px;
-                padding: 8px 6px;
-            }
-        """)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
         chat_font.setPointSize(10)
         self.chat_view.setFont(chat_font)
         self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_BUBBLE_CSS)
-        root.addWidget(self.chat_view, 1)
+        cl.addWidget(self.chat_view, 1)
 
         # ============ 输入区（多行 + 工具栏）============
         input_container = QFrame()
-        input_container.setStyleSheet("""
-            QFrame {
-                background: #ffffff;
-                border: 2px solid #e7e3f5;
-                border-radius: 14px;
-            }
-            QFrame:focus-within { border-color: #a78bfa; }
-        """)
+        input_container.setObjectName("input_container")
         il = QVBoxLayout(input_container)
-        il.setContentsMargins(10, 8, 10, 6)
+        il.setContentsMargins(12, 8, 12, 8)
         il.setSpacing(4)
 
         self.input_edit = QPlainTextEdit()
+        self.input_edit.setObjectName("chat_input")
         self.input_edit.setPlaceholderText(
             "输入消息，回车发送（Shift+回车 或 Ctrl+回车 换行）")
         self.input_edit.setMaximumHeight(110)
-        self.input_edit.setStyleSheet("""
-            QPlainTextEdit {
-                background: transparent;
-                border: none;
-                font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
-                font-size: 10pt;
-                color: #2c2c38;
-            }
-        """)
         # 自定义按键事件：Enter 发送，Shift+Enter 换行
         self.input_edit.keyPressEvent = self._input_key_press
         # / 命令补全
@@ -608,22 +742,11 @@ class ChatWindow(QWidget):
 
         # 麦克风（文字 + 图标）
         self.mic_btn = QPushButton("语音")
+        self.mic_btn.setObjectName("ghost_btn")
         self.mic_btn.setToolTip("按住说话，松开自动识别并发送" if self.asr
                                 else "未安装 faster-whisper / sounddevice")
         self.mic_btn.setFixedHeight(28)
         self.mic_btn.setEnabled(self.asr is not None)
-        self.mic_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: 1px solid #e0e0ee;
-                border-radius: 8px;
-                padding: 4px 10px;
-                font-size: 9pt;
-                color: #5b4f9c;
-            }
-            QPushButton:hover { background: #f0eaff; border-color: #a78bfa; }
-            QPushButton:disabled { color: #ccc; border-color: #f0f0f0; }
-        """)
         if self.asr is not None:
             self.mic_btn.pressed.connect(self._on_mic_pressed)
             self.mic_btn.released.connect(self._on_mic_released)
@@ -655,7 +778,11 @@ class ChatWindow(QWidget):
         bottom_row.addWidget(self.send_btn)
 
         il.addLayout(bottom_row)
-        root.addWidget(input_container)
+        cl.addWidget(input_container)
+
+        # 输入框焦点高亮输入容器边框
+        self._focus_watcher = _InputFocusWatcher(input_container)
+        self.input_edit.installEventFilter(self._focus_watcher)
 
         # 旧属性兼容
         self.history_list = None
@@ -1290,15 +1417,23 @@ class ChatWindow(QWidget):
         self.streaming_done.emit()
 
     # ---------------- 渲染 ----------------
+    # 气泡内联样式（Qt 富文本对多 class 选择器 / td border-radius 支持不稳定，
+    # 直接内联最可靠）
+    _BUBBLE_STYLE_USER = (
+        "background:#95ec69;border:1px solid #7ed463;padding:9px 13px;"
+        "color:#1f2937;font-size:10pt;line-height:1.55;")
+    _BUBBLE_STYLE_BOT = (
+        "background:#ffffff;border:1px solid #e9e6f7;padding:9px 13px;"
+        "color:#2c2c38;font-size:10pt;line-height:1.55;")
+
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
         """按已完成的 Message 渲染成 HTML 字符串（气泡式聊天）。
 
-        设计：
-            - 系统消息：居中灰条
-            - 用户消息：右对齐 + 蓝色头像 + 微信风绿白色气泡
-            - 桌宠消息：左对齐 + 粉色头像 + 白色气泡（带名字 + 时间）
-            - 工具调用：在桌宠气泡下方用一个紧凑浅紫卡片显示（div.tools）
-            - 流式输出中：bot 气泡末尾追加一个 ⏳ 提示
+        布局（Qt 富文本最稳的 table 方案）：
+            外层 table 宽 100%，两列：
+              - 头像列固定 44px（<img> 圆形头像，由 QPainter 预生成）
+              - 内容列：meta（名字/时间）+ 内层 shrink-to-fit table（整块气泡背景）
+            用户消息：内容列右对齐、头像列在右；桌宠消息反之。
         """
         # ---- 系统消息：居中灰色条 ----
         if msg.role == "system":
@@ -1325,60 +1460,65 @@ class ChatWindow(QWidget):
 
         # 流式输出中：bot 气泡末尾追加 typing 提示
         if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
-            safe = safe + f' <span style="color:#a78bfa;">⏳</span>'
+            safe = safe + ' <span style="color:#a78bfa;">⏳</span>'
 
-        # 工具调用（bot 消息专用，浅紫小卡片，紧凑）
+        # 工具调用（bot 消息专用，放在气泡内底部，浅紫小卡片）
         tools_html = "".join(
             f'<div class="tools">↳ <b>{name}</b> → {summary}</div>'
             for name, summary in msg.tools
         )
+        if tools_html:
+            safe = safe + tools_html
 
-        # 头像字符（首字 / 表情）
-        avatar_text = "我" if is_user else (self.char_cfg.name or "桌宠")[:1]
+        time_str = _format_time_short(msg.ts)
 
-        # meta 行（桌宠气泡上方：名字 + 时间；用户气泡上方：时间靠右）
         if is_user:
-            meta_html = (
-                '<span class="meta right">'
-                f'<span class="time">{_format_time_short(msg.ts)}</span>'
-                '</span>'
+            # 右对齐：内容列 + 头像列
+            meta_html = f'<span class="meta right">{time_str}</span><br/>'
+            bubble = (
+                '<table cellspacing="0" cellpadding="0" border="0">'
+                '<tr><td class="bubble user" '
+                f'style="{self._BUBBLE_STYLE_USER}">{safe}</td></tr></table>'
             )
-            layout = (
-                f'{meta_html}'
-                f'<span class="avatar-col user">{_html_escape(avatar_text)}</span>'
-                f'<span class="bubble user">{safe}</span>'
+            avatar = (
+                '<span class="avatar-col user">'
+                f'<img src="{self._avatar_data_user}" width="40" height="40" alt="我"/></span>'
             )
-        else:
-            meta_html = (
-                '<span class="meta left">'
-                f'<span class="name">{_html_escape(self.char_cfg.name or "桌宠")}</span>'
-                f'<span class="time">{_format_time_short(msg.ts)}</span>'
-                '</span>'
-            )
-            layout = (
-                f'{meta_html}'
-                f'<span class="avatar-col bot">{_html_escape(avatar_text)}</span>'
-                f'<span class="bubble bot">{safe}</span>'
-            )
-            if tools_html:
-                layout += tools_html
-
-        # 整段放在一个 table 里以便：头像与气泡顶部对齐；用户气泡靠右、桌宠气泡靠左
-        # Qt 的 QTextBrowser 支持 <table>，是表格化对齐气泡最稳的方式。
-        if is_user:
             return (
-                '<table width="100%" cellspacing="0" cellpadding="0" '
-                'style="margin:8px 0;border-collapse:collapse;">'
-                '<tr><td align="right" style="vertical-align:top;">'
-                f'{layout}'
-                '</td></tr></table>'
+                '<table width="100%" cellspacing="0" cellpadding="0" border="0" '
+                'style="margin:10px 0;">'
+                '<tr>'
+                '<td valign="top" align="right" style="padding:0 6px 0 48px;">'
+                f'{meta_html}{bubble}</td>'
+                '<td width="44" valign="top" align="center">'
+                f'{avatar}</td>'
+                '</tr></table>'
             )
+
+        # 桌宠：头像列 + 内容列
+        meta_html = (
+            '<span class="meta left">'
+            f'<span class="name">{_html_escape(self.char_cfg.name or "桌宠")}</span>'
+            f'{time_str}</span><br/>'
+        )
+        bubble = (
+            '<table cellspacing="0" cellpadding="0" border="0">'
+            '<tr><td class="bubble bot" '
+            f'style="{self._BUBBLE_STYLE_BOT}">{safe}</td></tr></table>'
+        )
+        avatar = (
+            '<span class="avatar-col bot">'
+            f'<img src="{self._avatar_data_bot}" width="40" height="40" alt=""/></span>'
+        )
         return (
-            '<table width="100%" cellspacing="0" cellpadding="0" '
-            'style="margin:8px 0;border-collapse:collapse;">'
-            '<tr><td align="left" style="vertical-align:top;">'
-            f'{layout}'
-            '</td></tr></table>'
+            '<table width="100%" cellspacing="0" cellpadding="0" border="0" '
+            'style="margin:10px 0;">'
+            '<tr>'
+            '<td width="44" valign="top" align="center">'
+            f'{avatar}</td>'
+            '<td valign="top" align="left" style="padding:0 48px 0 6px;">'
+            f'{meta_html}{bubble}</td>'
+            '</tr></table>'
         )
 
     def _clean_content(self, text: str) -> str:

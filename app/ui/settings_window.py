@@ -22,7 +22,9 @@ from app.core.qt_compat import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
     QSizePolicy, QSize, QSlider, QTabWidget, QVBoxLayout,
-    QWidget, Signal, Qt,
+    QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
+    QToolButton, QObject, QScrollArea,
+    event_global_pos,
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
@@ -31,6 +33,36 @@ if TYPE_CHECKING:
     from app.core.config import CharacterConfig
 
 log = logging.getLogger(__name__)
+
+
+class _SettingsDrag(QObject):
+    """设置窗口自绘标题栏拖动。"""
+
+    def __init__(self, win: "SettingsWindow"):
+        super().__init__(win)
+        self._win = win
+        self._offset = None
+        self._dragging = False
+
+    def eventFilter(self, obj, ev) -> bool:
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress and \
+                ev.button() == Qt.MouseButton.LeftButton:
+            # 若按在按钮上（最小化/关闭），不拦截，让按钮正常响应
+            child = obj.childAt(ev.pos()) if hasattr(obj, "childAt") else None
+            if child is not None and isinstance(child, QToolButton):
+                return False
+            self._dragging = True
+            self._offset = event_global_pos(ev) - self._win.frameGeometry().topLeft()
+            return True
+        if t == QEvent.Type.MouseMove and self._dragging and \
+                (ev.buttons() & Qt.MouseButton.LeftButton):
+            self._win.move(event_global_pos(ev) - self._offset)
+            return True
+        if t == QEvent.Type.MouseButtonRelease:
+            self._dragging = False
+            return True
+        return False
 
 
 class SettingsWindow(QWidget):
@@ -65,11 +97,15 @@ class SettingsWindow(QWidget):
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
         # 设置窗口图标
-        _ico = Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
+        _ico = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
             from app.core.qt_compat import QIcon
             self.setWindowIcon(QIcon(str(_ico)))
         self.setMinimumSize(QSize(520, 760))
+        self.resize(620, 800)
+        # v2 美化：无边框圆角窗口（窗口透明，内部白色圆角卡片 + 自绘标题栏）
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(ui_style.SETTINGS_QSS)
         # 角色配置（用于「试听」按钮显示角色名 + 后续扩展）；允许为 None 以保留向后兼容
         self.char_cfg = char_cfg
@@ -108,20 +144,69 @@ class SettingsWindow(QWidget):
     # ============================================================
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setContentsMargins(18, 14, 18, 18)
+        root.setSpacing(0)
+
+        # 白色圆角卡片容器（窗口透明，卡片负责圆角 + 阴影）
+        card = QFrame(self)
+        card.setObjectName("window_card")
+        card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(48)
+        _shadow.setOffset(0, 10)
+        _shadow.setColor(QColor(90, 78, 200, 55))
+        card.setGraphicsEffect(_shadow)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(8)
+        root.addWidget(card, 1)
+
+        # 自绘标题栏（可拖动）
+        header = QFrame(card)
+        header.setObjectName("titlebar")
+        header.setStyleSheet(ui_style.TITLEBAR_QSS)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(16, 8, 10, 8)
+        hl.setSpacing(10)
+
+        title = QLabel("桌宠设置")
+        title.setObjectName("titlebar_title")
+        hl.addWidget(title)
+        hl.addStretch(1)
+
+        self.btn_min = QToolButton()
+        self.btn_min.setObjectName("win_btn")
+        self.btn_min.setText("─")
+        self.btn_min.setToolTip("最小化")
+        self.btn_min.clicked.connect(self.showMinimized)
+        hl.addWidget(self.btn_min)
+
+        self.btn_title_close = QToolButton()
+        self.btn_title_close.setObjectName("win_btn_close")
+        self.btn_title_close.setText("✕")
+        self.btn_title_close.setToolTip("关闭")
+        self.btn_title_close.clicked.connect(self.close)
+        hl.addWidget(self.btn_title_close)
+
+        cl.addWidget(header)
+
+        # 标题栏拖动
+        self._drag_filter = _SettingsDrag(self)
+        title.installEventFilter(self._drag_filter)
+        header.installEventFilter(self._drag_filter)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_tab_status(),  "桌宠状态")
+        tabs.addTab(self._build_tab_status(),  "状态")
         tabs.addTab(self._build_tab_fps(),     "帧时长")
-        tabs.addTab(self._build_tab_visual(),  "缩放 & 动画切换")
-        tabs.addTab(self._build_tab_control(), "聊天 · 表情 · 睡觉")
+        tabs.addTab(self._build_tab_visual(),  "视觉")
+        tabs.addTab(self._build_tab_control(), "控制")
         tabs.addTab(self._build_tab_model(),   "模型配置")
-        root.addWidget(tabs, 1)
+        cl.addWidget(tabs, 1)
 
         # —— 底部状态栏 + 按钮 ——
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setStyleSheet(f"color: {ui_style.TEXT_SUB};")
-        root.addWidget(self.lbl_status)
+        cl.addWidget(self.lbl_status)
 
         row = QHBoxLayout()
         self.btn_reset = QPushButton("重置默认值")
@@ -129,7 +214,7 @@ class SettingsWindow(QWidget):
         row.addWidget(self.btn_reset)
         row.addStretch(1)
         row.addWidget(self.btn_close)
-        root.addLayout(row)
+        cl.addLayout(row)
 
     # ---------- Tab: 状态 ----------
     def _build_tab_status(self) -> QWidget:
@@ -372,8 +457,20 @@ class SettingsWindow(QWidget):
     # ---------- Tab: 模型配置 ----------
     def _build_tab_model(self) -> QWidget:
         """模型配置：LLM API 地址、密钥、模型名、参数。"""
+        # 内容较多（API + 参数 + 预设 + TTS），外层包 QScrollArea 防止压缩重叠
         page = QWidget()
-        v = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
         # —— API 连接 ——
@@ -391,11 +488,14 @@ class SettingsWindow(QWidget):
         self.edt_api_key.setPlaceholderText("sk-xxxxxxx")
         self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.edt_api_key.textChanged.connect(self._on_model_config_changed)
-        self.btn_toggle_key = QPushButton("")
-        self.btn_toggle_key.setFixedWidth(32)
+        self.btn_toggle_key = QPushButton("显示")
+        self.btn_toggle_key.setFixedWidth(64)
+        self.btn_toggle_key.setFixedHeight(34)
+        self.btn_toggle_key.setStyleSheet("padding: 4px 8px;")
         self.btn_toggle_key.setToolTip("显示/隐藏密钥")
         self.btn_toggle_key.clicked.connect(self._toggle_api_key_visibility)
         key_row = QHBoxLayout()
+        key_row.setSpacing(8)
         key_row.addWidget(self.edt_api_key, 1)
         key_row.addWidget(self.btn_toggle_key)
         form.addRow("API Key：", key_row)
@@ -442,12 +542,14 @@ class SettingsWindow(QWidget):
         self.spin_max_tokens = QSpinBox()
         self.spin_max_tokens.setRange(128, 8192)
         self.spin_max_tokens.setSingleStep(128)
+        self.spin_max_tokens.setMaximumWidth(240)
         self.spin_max_tokens.valueChanged.connect(lambda _: self._on_model_config_changed())
         pform.addRow("最大 Tokens：", self.spin_max_tokens)
 
         self.spin_timeout = QSpinBox()
         self.spin_timeout.setRange(10, 300)
         self.spin_timeout.setSuffix("s")
+        self.spin_timeout.setMaximumWidth(240)
         self.spin_timeout.valueChanged.connect(lambda _: self._on_model_config_changed())
         pform.addRow("超时时间：", self.spin_timeout)
 
@@ -509,6 +611,7 @@ class SettingsWindow(QWidget):
 
         self.btn_preview_voice = QPushButton("试听")
         self.btn_preview_voice.setFixedWidth(80)
+        self.btn_preview_voice.setFixedHeight(32)
         self.btn_preview_voice.clicked.connect(self._on_preview_voice)
         vform.addRow("试听：", self.btn_preview_voice)
 
@@ -888,10 +991,10 @@ class SettingsWindow(QWidget):
     def _toggle_api_key_visibility(self) -> None:
         if self.edt_api_key.echoMode() == QLineEdit.EchoMode.Password:
             self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_toggle_key.setText("")
+            self.btn_toggle_key.setText("隐藏")
         else:
             self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_toggle_key.setText("")
+            self.btn_toggle_key.setText("显示")
 
     def _on_preset_clicked(self, btn, cfg: dict) -> None:
         """点击预设按钮，自动填充对应 API 地址和模型名。"""
