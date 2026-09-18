@@ -11,8 +11,8 @@
 
 参考 VPet Simulator 的动画系统设计，接入任何 **OpenAI 兼容协议** 的大模型 API（DeepSeek / MiniMax / OpenAI / 硅基流动 / 本地中转 / **Ollama 本地**）。
 
-> 📖 详细架构演进：[`ARCHITECTURE.md`](ARCHITECTURE.md)
-> 🔍 功能清单验证：`python scripts/verify_features.py`
+>  详细架构演进：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+>  功能清单验证：`python scripts/verify_features.py`
 
 ---
 
@@ -33,9 +33,7 @@ python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboar
 
 ---
 
-## 📂 数据存储位置
-
-> 用户最常问：**「我的聊天记录 / 记忆 / 存档存在哪？」**
+## 数据存储位置
 
 | 文件 | 位置 | 用途 | 何时创建 |
 |------|------|------|---------|
@@ -57,40 +55,40 @@ python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboar
 
 ---
 
-## ✨ 核心能力
+## 核心能力
 
 | 模块 | 能力 |
 |------|------|
-| 🪟 **桌宠本体** | 透明无边框、置顶、可拖动、idle bob 微动效 |
-| 🎞️ **帧动画系统** | VPet 同款：`Frame(duration_ms)` + 多循环变体 + LOOP/ONCE/PINGPONG |
-| 🎨 **表情切换** | 8 种情绪 × 多种动画变体，按 LLM 回复自动切 |
-| 🤚 **触摸热区** | 头部/身体/拖动区分别触发不同反应 |
-| 🚶 **移动系统** | 桌宠自动沿屏幕走动/爬行/边缘隐藏 |
-| 💬 **LLM 聊天** | 流式输出，自动朗读（TTS），多行输入 + `/` 命令补全 |
-| 😊 **情绪驱动** | 模型回复末尾 `[happy]` 等标签驱动表情 |
-| ⏰ **智能提醒** | 「30 分钟后提醒我喝水」自动识别 + 后台轮询 |
-| 🔊 **语音合成** | edge-tts 免费，无需 API Key |
-| 🎙️ **语音输入（ASR）** | faster-whisper，按住说话自动识别 |
-| 🖱️ **系统托盘** | 右键菜单：显示/隐藏/打开聊天/设置/调试面板/查看记忆/退出 |
+| **桌宠本体** | 透明无边框、置顶、可拖动、idle bob 微动效 |
+| **帧动画系统** | VPet 同款：`Frame(duration_ms)` + 多循环变体 + LOOP/ONCE/PINGPONG |
+| **表情切换** | 8 种情绪 × 多种动画变体，按 LLM 回复自动切 |
+| **触摸热区** | 头部/身体/拖动区分别触发不同反应 |
+| **移动系统** | 桌宠自动沿屏幕走动/爬行/边缘隐藏 |
+| **LLM 聊天** | 流式输出，自动朗读（TTS），多行输入 + `/` 命令补全 |
+| **情绪驱动** | 模型回复末尾 `[happy]` 等标签驱动表情 |
+| **智能提醒** | 「30 分钟后提醒我喝水」自动识别 + 后台轮询 |
+| **语音合成** | edge-tts 免费，无需 API Key |
+| **语音输入（ASR）** | faster-whisper，按住说话自动识别 |
+| **系统托盘** | 右键菜单：显示/隐藏/打开聊天/设置/调试面板/查看记忆/退出 |
 
 ### 智能体方向（v3.0 新增）
 
 | 模块 | 能力 | 文件 |
 |------|------|------|
-| 🧠 **ReAct Planner** | 把用户目标拆解为 JSON 步骤（含 thought / kind / arguments） | `app/brain/planner.py` |
-| ⚙️ **Plan Executor** | **并行执行** Plan 步骤（`parallel_group` 同组 gather）+ 重试 | `app/brain/executor.py` |
-| 🪞 **Reflector** | 启发式 / LLM 双重评估每步结果，决定 ok / retry / replan | `app/brain/reflector.py` |
-| 🧠 **向量长期记忆** | TF-IDF（默认）/ sentence-transformers（可选）/ 子串（兜底），重要性评分 + 时间衰减 + 冲突检测 | `app/brain/memory.py` |
-| 🔌 **MCP 客户端** | stdio JSON-RPC，自动桥接 MCP tools 到 OpenAI Schema | `app/mcp/protocol.py` |
-| 🛡️ **MCP Filesystem Server** | 沙箱文件访问（限制根目录）示例实现 | `app/mcp/filesystem_server.py` |
-| 👥 **Sub-agent 框架** | `BaseAgent` + `LifeAgent` / `ResearchAgent` / `CodeAgent` + `Orchestrator` 分派 | `app/agents/base.py` |
-| 🛰️ **Agent Trace** | 每次运行完整 trace 落 SQLite | `app/brain/trace.py` |
-| 📊 **FastAPI Dashboard** | run 列表 / run 详情 / stats / memory 可视化（端口 8765） | `app/web/dashboard.py` |
-| 🧪 **Evaluator** | Mock LLM 驱动的 Eval 套件 + Markdown 报告 | `app/eval/cases.py` |
+| **ReAct Planner** | 把用户目标拆解为 JSON 步骤（含 thought / kind / arguments） | `app/brain/planner.py` |
+| **Plan Executor** | **并行执行** Plan 步骤（`parallel_group` 同组 gather）+ 重试 | `app/brain/executor.py` |
+| **Reflector** | 启发式 / LLM 双重评估每步结果，决定 ok / retry / replan | `app/brain/reflector.py` |
+| **向量长期记忆** | TF-IDF（默认）/ sentence-transformers（可选）/ 子串（兜底），重要性评分 + 时间衰减 + 冲突检测 | `app/brain/memory.py` |
+| **MCP 客户端** | stdio JSON-RPC，自动桥接 MCP tools 到 OpenAI Schema | `app/mcp/protocol.py` |
+| **MCP Filesystem Server** | 沙箱文件访问（限制根目录）示例实现 | `app/mcp/filesystem_server.py` |
+| **Sub-agent 框架** | `BaseAgent` + `LifeAgent` / `ResearchAgent` / `CodeAgent` + `Orchestrator` 分派 | `app/agents/base.py` |
+| **Agent Trace** | 每次运行完整 trace 落 SQLite | `app/brain/trace.py` |
+| **FastAPI Dashboard** | run 列表 / run 详情 / stats / memory 可视化（端口 8765） | `app/web/dashboard.py` |
+| **Evaluator** | Mock LLM 驱动的 Eval 套件 + Markdown 报告 | `app/eval/cases.py` |
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 安装依赖（已完成，可跳过）
 
@@ -141,7 +139,7 @@ python -m pytest tests/ -q            # 125 个测试
 
 ---
 
-## ⚙️ 配置 `config.yaml`
+## 配置 `config.yaml`
 
 ```yaml
 llm:
@@ -182,7 +180,7 @@ llm:
 
 ---
 
-## 🛠️ 文件结构
+## 文件结构
 
 ```
 desktop-pet/
@@ -262,7 +260,7 @@ desktop-pet/
 
 ---
 
-## 🧪 测试
+## 测试
 
 ```powershell
 # 全部单元测试（125 个）
@@ -279,7 +277,7 @@ python -m pytest tests/test_agents.py -v   # Sub-agent
 
 ---
 
-## 📊 实测数据示例
+## 实测数据示例
 
 跑 `scripts/verify_features.py` 后生成：
 
@@ -303,7 +301,7 @@ python -m pytest tests/test_agents.py -v   # Sub-agent
 
 ---
 
-## ❓ FAQ
+## FAQ
 
 **桌宠启动后看不到？**
 看右下角系统托盘有没有「鲸鱼娘」图标，单击显隐。
@@ -334,7 +332,7 @@ pip install sentence-transformers
 
 ---
 
-## 📝 v3.0 升级亮点（适合写简历）
+## v3.0 升级亮点
 
 1. **多智能体架构**：Planner / Executor / Reflector 三层 ReAct，含并行执行（`parallel_group` 同组 gather）；配合 Life / Research / Code 三个 Sub-agent + 主 Orchestrator
 2. **本地 RAG 长期记忆**：TF-IDF / sentence-transformers 可插拔后端，含重要性评分 / 时间衰减 / 冲突检测
