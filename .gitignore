@@ -1,0 +1,71 @@
+# 敏感凭据：API key 等
+config.yaml
+config.local.yaml
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 运行时数据
+data/traces.db
+data/dashboard.log
+data/eval_report.md
+data/feature_check.txt
+data/chat_history.json
+data/memory.json
+data/reminders.json
+data/foods.json
+data/works.json
+data/app_registry.json
+data/dashboard_test.log
+
+# 用户家目录存档（不进 git，但项目下若有人误建）
+save.json
+
+# 用户状态文件
+settings.json
+crash.log
+
+# 根目录的提醒存档（state_manager 默认路径）
+reminders.json
+
+# 运行时调试输出
+debug_compare.txt
+agent_compare.txt
+
+# 本地 Python 依赖（项目自带 .local-packages/）
+.local-packages/
+.pytest_cache/
+
+# 临时 / 系统
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 精灵图（720MB，仓库里不放；用 prompts_for_doubao.md 自己生成）
+assets/sprites/
+# TTS 缓存（运行时生成）
+assets/tts_cache/

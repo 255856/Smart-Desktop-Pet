@@ -1,0 +1,58 @@
+# 桌面宠物 · 示例配置
+# 复制为 config.yaml 并按需填好 llm.api_key。
+
+llm:
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "PUT-YOUR-API-KEY-HERE"
+  model: "deepseek-chat"
+  stream: true
+  temperature: 0.8
+  max_tokens: 1024
+  timeout: 60
+
+character:
+  name: "小深"
+  # 用一段完整人格描述作为 system prompt
+  persona: |
+    你叫「小深」，是一位元气的桌面宠物。
+    你会用中文回答，简洁，口头禅 "喵~"。
+    回答末尾用 [happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking] 之一标注你当下的情绪。
+  tts_enabled: true
+  tts_voice: "zh-CN-XiaoxiaoNeural"
+
+window:
+  start_x: 200
+  start_y: 200
+  scale: 0.4
+  always_on_top: true
+  show_in_taskbar: false
+
+reminder:
+  enabled: true
+  data_file: "reminders.json"
+
+app:
+  open_chat_on_start: false
+  start_minimized: false
+  log_level: "INFO"
+
+sprite:
+  directory: "assets/sprites"
+  fallback: "assets/sprites/body_front.png"
+
+# ---- 语音输入（ASR） ----
+asr:
+  enabled: true
+  model_size: "base"      # tiny/base/small/medium/large-v3
+  language: "zh"          # zh=中文，en=英文
+
+# ---- 智能中枢（工具调用 / 长期记忆 / 主动行为）----
+brain:
+  # 允许模型调用工具：设提醒、记事情、开网页/应用、买东西吃、看状态等
+  tools_enabled: true
+  # 长期记忆落盘位置（相对项目根目录）
+  memory_file: "data/memory.json"
+  # 空闲时主动找主人说一句话（基于时间/状态/记忆，由小模型生成）
+  proactive_enabled: true
+  proactive_min_minutes: 25    # 随机间隔下限（分钟）
+  proactive_max_minutes: 45    # 随机间隔上限（分钟）

@@ -1,0 +1,26 @@
+# 桌面宠物运行时依赖
+# 安装：pip install -r requirements.txt
+#
+# GUI：PySide6（首选，LGPL）与 PyQt5 二选一即可。
+#   pip install PySide6
+#   或 pip install PyQt5
+# 程序会自动检测哪个可用。
+
+# 图像处理（裁剪表情/立绘）
+Pillow>=10.0.0
+
+# 大模型 HTTP 客户端（流式 SSE）
+httpx>=0.27.0
+
+# TTS（Microsoft Edge 免费在线语音，无需 API Key）
+edge-tts>=6.1.10
+
+# 音频播放（edge-tts 生成 mp3 后用于播放）
+pygame>=2.5.0
+
+# YAML 配置
+PyYAML>=6.0
+
+# 语音输入（ASR）—— 按住说话功能
+faster-whisper>=1.0.0
+sounddevice>=0.4.6

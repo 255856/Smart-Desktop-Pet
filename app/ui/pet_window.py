@@ -1,0 +1,819 @@
+"""桌宠主窗口（重写）—— VPet 风格
+
+特性：
+    - 透明无边框置顶
+    - VPet 同款帧动画（QTimer.singleShot 按帧持续时间驱动）
+    - 触摸热区（head/body/drag）
+    - 拖动 = raise（抓住角色整只移动）
+    - 单击身体不同部位触发不同反应
+    - 头顶气泡
+    - 移动动画（由 motion.py 驱动）
+"""
+from __future__ import annotations
+
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from app.core.qt_compat import (
+    QAction, QApplication, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
+    QDragMoveEvent, QDropEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
+    QMouseEvent, QPixmap, QPoint, QProgressBar, QSize, QSizePolicy, Qt,
+    QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
+    event_global_pos, event_local_pos,
+)
+from app.animation.animations import Animation, AnimationPlayer, Frame
+from app.animation.sprite_atlas import PetAnimator, SpriteAtlas
+from app.ui import ui_style
+
+log = logging.getLogger(__name__)
+
+
+# 缓存：{(pixmap_id, width, height): scaled_pixmap}
+# pixmap_id 用 id(pixmap) 或帧内容 hash 标识，避免每帧重新缩放
+_scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
+_CACHE_MAX_SIZE = 8  # 最多缓存 8 个缩放后的 pixmap
+
+
+def _current_anim_ms(player) -> int:
+    """取当前 player 动画的 frame 时长（用于右键菜单标当前帧率）。"""
+    anim = player.current_animation()
+    if not anim or not anim.frames:
+        return 0
+    idx = player._frame_idx
+    if idx < 0 or idx >= len(anim.frames):
+        return 0
+    return anim.frames[idx].duration_ms
+
+
+def _scale_pixmap_keep_alpha(pix: QPixmap, size: QSize, cache_key: tuple = None) -> QPixmap:
+    """等比缩放 QPixmap 同时**保留 alpha 并消除白点**。
+
+    PyQt5 下 ``QPixmap.scaled(Qt.SmoothTransformation)`` 会丢 alpha，导致
+    透明 PNG 缩放后背景变白。这里先转 QImage（保留 alpha），QImage 缩放
+    （保 alpha），再扫一遍"a != 0 但 RGB 全接近 255"的边缘像素，把它们
+    的 a 强制设为 0 —— 否则在透明窗口底色上看着就是"白点闪烁"。
+
+    使用 cache_key 可以缓存缩放结果，避免每帧重复计算。
+    """
+    if pix.isNull():
+        return pix
+
+    # 如果有 cache_key 且缓存命中，直接返回
+    if cache_key is not None and cache_key in _scaled_pixmap_cache:
+        return _scaled_pixmap_cache[cache_key]
+
+    try:
+        import numpy as np
+        img = pix.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        scaled = img.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        # 扫白边像素 → 强制 a=0
+        arr = np.array(scaled, copy=True)
+        rgb = arr[..., :3]
+        a = arr[..., 3]
+        # "近白": RGB 全 >= 245 (留一些余地防止误伤真正浅色角色)
+        white_mask = (
+            (rgb[..., 0] >= 245) &
+            (rgb[..., 1] >= 245) &
+            (rgb[..., 2] >= 245)
+        ) & (a > 0)
+        arr[white_mask, 3] = 0
+        from PIL import Image as _PI
+        cleaned = _PI.fromarray(arr, "RGBA")
+        result = QPixmap.fromImage(cleaned.toImage())
+    except Exception:
+        result = pix.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+
+    # 缓存结果
+    if cache_key is not None:
+        if len(_scaled_pixmap_cache) >= _CACHE_MAX_SIZE:
+            # 简单 LRU：删除最旧的一个
+            oldest_key = next(iter(_scaled_pixmap_cache))
+            del _scaled_pixmap_cache[oldest_key]
+        _scaled_pixmap_cache[cache_key] = result
+
+    return result
+
+
+def _clear_pixmap_cache() -> None:
+    """清空缩放缓存（在切换角色或窗口尺寸变化时调用）。"""
+    _scaled_pixmap_cache.clear()
+
+
+# 触摸热区（在 sprite 坐标系内的相对比例，0.0-1.0）
+# VPet 同款约定（GameCore.cs TouchArea 重构）
+@dataclass
+class TouchArea:
+    """VPet 同款触摸热区（src: GameCore.cs TouchArea）。
+
+    美术改 sprite 尺寸后，只要调整这里的比例即可，**不用改业务逻辑**。
+    locate 和 size 都是 0.0-1.0 的相对比例，基于 SPRITE_SIZE 转换。
+    """
+    name: str                                  # 'head' / 'body' / 'raise' / 自定义
+    locate: tuple[float, float] = (0.0, 0.0)   # (x, y) 左上角，相对比例
+    size: tuple[float, float] = (1.0, 1.0)     # (w, h) 矩形，相对比例
+    on_click: Optional[Callable[[], None]] = None    # 单击 / 双击 触发的回调
+    on_press: Optional[Callable[[], None]] = None    # 长按才触发（VPet IsPress）
+    is_press: bool = False          # VPet 同款：True 表示要长按才触发 on_press
+    priority: int = 0              # 同坐标命中时高 priority 优先
+
+    def hit(self, sx: int, sy: int, sprite_size: tuple[int, int]) -> bool:
+        """(sx, sy) 是 SPRITE_SIZE 坐标系下的点。
+
+        把相对比例转为像素坐标后做矩形命中检测。
+        """
+        lx = self.locate[0] * sprite_size[0]
+        ly = self.locate[1] * sprite_size[1]
+        lw = self.size[0] * sprite_size[0]
+        lh = self.size[1] * sprite_size[1]
+        return lx <= sx <= lx + lw and ly <= sy <= ly + lh
+
+
+# 兼容老代码（仍用字符串 'head' / 'body' / 'raise' 标识）
+class HitZone:
+    HEAD = "head"
+    BODY = "body"
+    RAISE = "raise"
+
+
+class PetWindow(QWidget):
+    """桌宠本体。"""
+
+    chat_requested = Signal()
+    quit_requested = Signal()
+    reaction_requested = Signal(str)   # 触摸了 head / body
+    # PR-right-click-settings: 让 main.py 弹出 SettingsWindow
+    open_settings_requested = Signal()
+    # PR-right-click-fps: 让 main.py 跑 retune_ms + reload atlas
+    retune_ms_requested = Signal(int)
+    # PR-right-click-settings: 动态改缩放 / crossfade / lock_idle
+    scale_changed = Signal(float)
+    crossfade_toggled = Signal(bool, int)
+    lock_first_idle_toggled = Signal(bool)
+
+    # 鼠标进入/离开桌宠窗（PR-mute-motion：进入后不再自主运动）
+    mouse_entered = Signal()
+    mouse_left = Signal()
+
+    # 状态栏显示/隐藏（PR-status-overlay：VPet 同款状态条）
+    status_bar_toggled = Signal(bool)  # True = 显示，False = 隐藏
+
+    # 吃饭（右键菜单触发：播放吃饭动画 + 主程序涨饱食/体力）
+    eat_requested = Signal()
+
+    # 快捷聊天输入（底部输入框发送消息）
+    chat_input_sent = Signal(str)
+
+    # sprite 设计尺寸（与生成器一致）
+    SPRITE_SIZE = QSize(1000, 1000)
+
+    def __init__(self, sprite_dir: str | Path,
+                 fallback_image: str | Path | None = None,
+                 scale: float = 0.4,
+                 always_on_top: bool = True):
+        super().__init__()
+        # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
+        self._window_size = QSize(
+            int(self.SPRITE_SIZE.width() * scale),
+            int(self.SPRITE_SIZE.height() * scale),
+        )
+        self._scale = scale
+
+        self.atlas = SpriteAtlas(sprite_dir, fallback_image=fallback_image)
+        # 预缩放所有帧到目标窗口尺寸
+        self.atlas.prescale(self._window_size, _scale_pixmap_keep_alpha)
+        _clear_pixmap_cache()
+
+        self.player = AnimationPlayer()
+        self.animator = PetAnimator(self.atlas, self.player,
+                                     on_animation_changed=self._start_frame_timer)
+
+        # 使用 QLabel 显示精灵（替代 paintEvent，性能更好）
+        self._sprite_label = QLabel(self)
+        self._sprite_label.setGeometry(0, 0, self._window_size.width(), self._window_size.height())
+        self._sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sprite_label.setStyleSheet("background-color: transparent;")
+
+        # 气泡 label（替代 _draw_bubble）
+        self._bubble_label = QLabel(self)
+        self._bubble_label.setStyleSheet(
+            "QLabel { background-color: rgba(255,255,255,235); color: #28283c; "
+            "border-radius: 10px; padding: 5px 10px; font-weight: bold; "
+            "font-family: 'Microsoft YaHei', sans-serif; font-size: 12px; }"
+        )
+        self._bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._bubble_label.hide()
+
+        # 气泡
+        self._bubble_text: str = ""
+        self._bubble_until: float = 0.0
+        self._streaming_bubble: bool = False
+
+        # VPet 同款状态栏（透明背景，小进度条显示关键指标）
+        self._status_bar: Optional[QWidget] = None
+        self._status_bars: dict[str, QProgressBar] = {}
+        self._attached_state = None
+        self._status_visible = False
+
+        # 快捷聊天输入框（底部简单输入框）
+        self._chat_input: Optional[QLineEdit] = None
+
+        # 拖动
+        self._dragging = False
+        self._drag_start = QPoint()
+        # 用户交互时间戳（PR-mute-motion：press / drag / hover 都算）
+        self._last_user_interaction_ts = 0.0
+        self._user_inside = False
+        # 帧计时器（用 singleShot 按帧持续时间驱动，VPet 同款方式）
+        self._frame_timer: Optional[QTimer] = None
+
+        self._build_window(always_on_top)
+        # 默认播放待机
+        self.animator.set_idle()
+        # 立即显示第一帧并启动帧计时器
+        self._start_frame_timer()
+
+    # ---------------- 窗口初始化 ----------------
+    def _build_window(self, always_on_top: bool) -> None:
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFixedSize(self._window_size)
+        self.setMouseTracking(True)
+        # PR-drag-drop: 让 widget 接收系统拖拽
+        self.setAcceptDrops(True)
+
+        # PR-V2: VPet 同款 TouchArea（src: GameCore.cs TouchArea）
+        # 每个区域带 on_click / on_press 回调，加 sprite 改尺寸不用改业务代码。
+        self._init_touch_areas()
+
+    def _init_touch_areas(self) -> None:
+        """配置触摸热区（VPet 同款 TouchArea 数据驱动）。
+
+        美术改了 sprite 尺寸后，只要调整这里的坐标 + size 即可——业务逻辑
+        （mouseReleaseEvent 等）不用动。
+        """
+        self.touch_areas: list[TouchArea] = [
+            TouchArea(
+                name=HitZone.HEAD,
+                locate=(0.28, 0.06), size=(0.44, 0.36),  # 头部区域
+                on_click=self._on_touch_head_click,
+                on_press=None, is_press=False,
+            ),
+            TouchArea(
+                name=HitZone.BODY,
+                locate=(0.22, 0.42), size=(0.56, 0.30),  # 身体区域
+                on_click=self._on_touch_body_click,
+                on_press=None, is_press=False,
+            ),
+            TouchArea(
+                name=HitZone.RAISE,
+                locate=(0.18, 0.72), size=(0.64, 0.28),  # 整只脚 / 拖动区
+                on_click=self._on_touch_raise_click,
+                on_press=None, is_press=False,
+            ),
+        ]
+
+    # ---- TouchArea 回调 ----
+    def _on_touch_head_click(self) -> None:
+        self.animator.play_reaction('head')
+        self.reaction_requested.emit('head')
+
+    def _on_touch_body_click(self) -> None:
+        self.animator.play_reaction('body')
+        self.reaction_requested.emit('body')
+
+    def _on_touch_raise_click(self) -> None:
+        self.chat_requested.emit()
+
+    def _on_chat_input_sent(self) -> None:
+        """底部输入框回车发送消息到聊天。"""
+        if self._chat_input is None:
+            return
+        text = self._chat_input.text().strip()
+        if text:
+            self.chat_input_sent.emit(text)
+            self._chat_input.clear()
+            self._chat_input.hide()
+
+    # ---------------- 公开 API ----------------
+    def play_reaction(self, where: str) -> None:
+        """由外部调用（chat reply / mood trigger）：play reaction。"""
+        self.animator.play_reaction(where)
+
+    def play_emotion(self, name: str) -> None:
+        self.animator.set_emotion(name)
+
+    def set_idle(self) -> None:
+        self.animator.set_idle()
+
+    def set_drag_image(self, pixmap: QPixmap, duration_ms: int = 200) -> None:
+        """播放用户拖进窗口的「拖拽图」作为一次性动画。"""
+        if pixmap is None or pixmap.isNull():
+            return
+        anim = Animation(
+            name="drag_dropped",
+            frames=[Frame(pixmap=pixmap, duration_ms=duration_ms)],
+            mode=Animation.ONCE,
+        )
+        self.animator.player.play_one_shot(anim, on_finished=self.animator.set_idle)
+        self._start_frame_timer()  # 重启帧计时器
+        log.info("拖拽图已切换显示")
+
+    def show_bubble(self, text: str, duration_ms: int = 4000) -> None:
+        self._bubble_text = text if len(text) <= 60 else text[:57] + "…"
+        self._bubble_until = time.time() + duration_ms / 1000.0
+        self._bubble_label.setText(self._bubble_text)
+        self._bubble_label.adjustSize()
+        # 居中显示在窗口顶部
+        bx = (self._window_size.width() - self._bubble_label.width()) // 2
+        self._bubble_label.move(bx, 10)
+        self._bubble_label.show()
+
+    def show_streaming_bubble(self, text: str) -> None:
+        """流式输出气泡：展示模型正在生成的文本（最多 120 字），不自动隐藏。"""
+        self._streaming_bubble = True
+        # 折叠换行和多余空白，避免气泡里出现大段空白
+        display = re.sub(r'\s+', ' ', text).strip()
+        if len(display) > 120:
+            display = display[:117] + "…"
+        self._bubble_text = display
+        self._bubble_until = time.time() + 9999.0  # 不自动隐藏
+        self._bubble_label.setText(display)
+        self._bubble_label.adjustSize()
+        bx = (self._window_size.width() - self._bubble_label.width()) // 2
+        self._bubble_label.move(bx, 10)
+        self._bubble_label.show()
+
+    def stop_streaming_bubble(self) -> None:
+        """流式输出结束：隐藏气泡，或保留 3 秒后自动消失。"""
+        self._streaming_bubble = False
+        if self._bubble_text:
+            # 保留最后内容 3 秒
+            self._bubble_until = time.time() + 3.0
+
+    def _build_status_bar(self) -> None:
+        """构建状态栏：4 行，每行文字+进度条，左下角显示。"""
+        if self._status_bar is not None:
+            return
+        self._status_bar = QWidget(self)
+        self._status_bar.setStyleSheet(
+            "QWidget { background-color: rgba(0,0,0,100); border-radius: 4px; }"
+        )
+        layout = QVBoxLayout(self._status_bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+
+        bar_style = (
+            "QProgressBar {{ background: rgba(255,255,255,30); border: none; "
+            "border-radius: 2px; height: 6px; }}"
+            "QProgressBar::chunk {{ border-radius: 2px; background: {color}; }}"
+        )
+        label_style = "color: rgba(255,255,255,180); font-size: 10px; font-family: 'Microsoft YaHei', sans-serif;"
+
+        rows = [
+            ("💪 体力", "strength", "rgba(100,200,150,160)"),
+            ("🍚 饱食", "food",     "rgba(200,180,80,160)"),
+            ("💧 口渴", "drink",    "rgba(80,160,220,160)"),
+            ("😊 心情", "feeling",  "rgba(200,120,80,160)"),
+        ]
+        for text, key, color in rows:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel(text)
+            lbl.setStyleSheet(label_style)
+            lbl.setFixedWidth(48)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(100)
+            bar.setFormat("")
+            bar.setStyleSheet(bar_style.format(color=color))
+            bar.setFixedHeight(6)
+            self._status_bars[key] = bar
+            row.addWidget(lbl)
+            row.addWidget(bar, 1)
+            layout.addLayout(row)
+
+        # 左下角
+        self._status_bar.adjustSize()
+        self._status_bar.hide()
+
+    def toggle_status_bar(self, visible: bool) -> None:
+        """显示/隐藏状态栏。"""
+        if self._status_bar is None:
+            self._build_status_bar()
+        self._status_visible = visible
+        if visible:
+            # 每次显示时重新定位到左下角（窗口尺寸可能变化）
+            self._status_bar.adjustSize()
+            bw = self._status_bar.width()
+            bh = self._status_bar.height()
+            self._status_bar.move(2, self._window_size.height() - bh - 2)
+            self._status_bar.show()
+        else:
+            self._status_bar.hide()
+        self.status_bar_toggled.emit(visible)
+
+    def attach_state(self, state) -> None:
+        """挂载 PetState，状态变化自动刷新状态栏。"""
+        if self._attached_state is state:
+            return
+        self._attached_state = state
+        if state is not None:
+            # 在原有 on_change 上叠加刷新 UI，不覆盖其他回调
+            original_on_change = getattr(state, 'on_change', None)
+            def _combined():
+                self._refresh_status_bar()
+                if original_on_change is not None:
+                    try:
+                        original_on_change()
+                    except Exception:  # noqa: BLE001
+                        pass
+            state.on_change = _combined
+            self._refresh_status_bar()
+
+    def _refresh_status_bar(self) -> None:
+        """刷新状态栏进度条。"""
+        if self._attached_state is None or not self._status_visible:
+            return
+        s = self._attached_state
+        self._status_bars["strength"].setValue(int(s.strength))
+        self._status_bars["food"].setValue(int(s.strength_food))
+        self._status_bars["drink"].setValue(int(s.strength_drink))
+        self._status_bars["feeling"].setValue(int(s.feeling))
+
+    def _build_chat_input(self) -> None:
+        """构建底部快捷聊天输入框。"""
+        if self._chat_input is not None:
+            return
+        self._chat_input = QLineEdit(self)
+        self._chat_input.setPlaceholderText("输入消息...")
+        self._chat_input.setStyleSheet(
+            "QLineEdit { background-color: rgba(255,255,255,200); border: 1px solid "
+            "rgba(0,0,0,50); border-radius: 4px; padding: 4px 8px; font-size: 11px; }"
+        )
+        self._chat_input.returnPressed.connect(self._on_chat_input_sent)
+        # 定位到窗口底部
+        self._chat_input.setFixedHeight(28)
+        self._chat_input.adjustSize()
+        self._chat_input.hide()
+
+    def toggle_chat_input(self, visible: bool) -> None:
+        """显示/隐藏底部聊天输入框。"""
+        if self._chat_input is None:
+            self._build_chat_input()
+        if visible:
+            self._chat_input.setFixedWidth(self._window_size.width() - 4)
+            self._chat_input.move(2, self._window_size.height() - self._chat_input.height() - 2)
+            self._chat_input.show()
+            self._chat_input.setFocus()
+        else:
+            self._chat_input.hide()
+
+    # ---------------- 内部：帧推进 ----------------
+    # PR-right-click-fps: 帧率统计（右键「显示 FPS」勾选时启用）
+    _fps_enabled: bool = False
+    _fps_count: int = 0
+    _fps_window_start: float = 0.0
+    _last_fps_report: float = 0.0
+
+    def _start_frame_timer(self) -> None:
+        """显示当前帧并按其 duration_ms 调度 advance（VPet 同款方式）。
+
+        PR-bugfix：
+            1. advance 在 setPixmap 之后立即调，**第 0 帧永远只显示一帧**——已
+               把 advance 挪到 _on_frame_timeout 回调里。
+            2. **「每次点击加速」真因**：之前每次 set_idle/set_walk/... 都新建一个
+               QTimer 实例，**旧 timer 没被 stop**。多次点击 → 多个 timer
+               同时 pending → _on_frame_timeout 被多次触发 → advance 频率
+               倍增 → 动画加速 N 倍。
+               现在先 stop 旧 timer 再 start 新 timer，保证同时只有 1 个 timer。
+        """
+        anim = self.player.current_animation()
+        if not anim or not anim.frames:
+            return
+        # 显示当前帧
+        pix = self.player.current_pixmap()
+        if pix and not pix.isNull():
+            self._sprite_label.setPixmap(pix)
+        # 当前帧停留时长（advance 前的帧）
+        frame_idx = self.player._frame_idx
+        if frame_idx < 0 or frame_idx >= len(anim.frames):
+            return
+        duration_ms = max(1, anim.frames[frame_idx].duration_ms)
+
+        # 自动隐藏气泡（流式气泡在结束前不自动隐藏）
+        if self._bubble_text and not self._streaming_bubble and time.time() >= self._bubble_until:
+            self._bubble_text = ""
+            self._bubble_label.hide()
+
+        # PR-bugfix: 重用同一个 QTimer 实例。先 stop 旧 timer 避免多 timer 并发。
+        if self._frame_timer is None:
+            self._frame_timer = QTimer(self)
+            self._frame_timer.setSingleShot(True)
+            self._frame_timer.timeout.connect(self._on_frame_timeout)
+        else:
+            self._frame_timer.stop()
+        self._frame_timer.start(duration_ms)
+
+    def _on_frame_timeout(self) -> None:
+        """单触发：advance 到下一帧 + 重新调度显示。"""
+        # PR-right-click-fps: 累计帧数
+        self._fps_count += 1
+        self.player._advance()
+        if self._fps_enabled:
+            now = time.monotonic()
+            if self._fps_window_start == 0.0:
+                self._fps_window_start = now
+            elif now - self._fps_window_start >= 1.0:
+                fps = self._fps_count / (now - self._fps_window_start)
+                self._fps_count = 0
+                self._fps_window_start = now
+                # 每秒刷一次气泡显示
+                if now - self._last_fps_report >= 1.0:
+                    self.show_bubble(f"⚡ {fps:.1f} FPS")
+                    self._last_fps_report = now
+        self._start_frame_timer()
+
+    # ---------------- 绘制（由 QLabel 完成，无需自定义 paintEvent）---------------
+    # 但保留一个简单的 paintEvent 用于调试
+    def paintEvent(self, evt) -> None:
+        # QLabel 会处理精灵绘制，这里什么都不做
+        pass
+
+    # ---------------- 触摸热区（PR-V2: VPet TouchArea 数据驱动） ----------------
+    def _hit_zone(self, pos: QPoint) -> Optional[TouchArea]:
+        """把窗口坐标归一化到 sprite 1000x1000，按 priority 找命中的 TouchArea。
+
+        返回 TouchArea 对象（None = 未命中）。优先级：priority 高者胜出。
+        """
+        if not self.touch_areas:
+            return None
+        sx = pos.x() / max(1, self.width()) * self.SPRITE_SIZE.width()
+        sy = pos.y() / max(1, self.height()) * self.SPRITE_SIZE.height()
+        # 按 priority 倒序排，重叠时高 priority 胜出
+        sprite_size_tuple = (self.SPRITE_SIZE.width(), self.SPRITE_SIZE.height())
+        for area in sorted(self.touch_areas,
+                           key=lambda a: -a.priority):
+            if area.hit(int(sx), int(sy), sprite_size_tuple):
+                return area
+        return None
+
+    # ---------------- 鼠标事件 ----------------
+    def mousePressEvent(self, evt: QMouseEvent) -> None:
+        self._last_user_interaction_ts = time.time()
+        self._drag_animation_started = False  # 重置拖动动画标记
+        if evt.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start = event_global_pos(evt) - self.frameGeometry().topLeft()
+            self._press_pos = event_global_pos(evt)  # 保存按下位置用于判断是否拖动
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            # 不接受事件，让 Qt 能正常识别双击
+        elif evt.button() == Qt.MouseButton.RightButton:
+            self._show_context_menu(event_global_pos(evt))
+            evt.accept()
+
+    def mouseMoveEvent(self, evt: QMouseEvent) -> None:
+        if self._dragging:
+            self._last_user_interaction_ts = time.time()
+            self.move(event_global_pos(evt) - self._drag_start)
+            # 真正移动时才开始播放拖动动画（移动距离 ≥5 像素才算拖动）
+            if not self._drag_animation_started:
+                dist = (event_global_pos(evt) - self._press_pos).manhattanLength()
+                if dist >= 5:
+                    self._drag_animation_started = True
+                    self.animator.start_drag()
+            evt.accept()
+
+    def enterEvent(self, evt) -> None:
+        """鼠标进入桌宠窗：进入「在看」模式（PR-mute-motion 配合用）。"""
+        self._user_inside = True
+        self._last_user_interaction_ts = time.time()
+        self.mouse_entered.emit()
+        super().enterEvent(evt)
+
+    def leaveEvent(self, evt) -> None:
+        self._user_inside = False
+        self.mouse_left.emit()
+        super().leaveEvent(evt)
+
+    def mouseReleaseEvent(self, evt: QMouseEvent) -> None:
+        if evt.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._drag_animation_started
+            self._dragging = False
+            self._drag_animation_started = False
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            if was_dragging:
+                # 拖动结束，回到待机
+                self.animator.end_drag()
+            else:
+                # 没拖动：算一次 click → 走 TouchArea.on_click 回调
+                # 注意：双击的第二次 release 也会进入这里，但不会触发双击（因为
+                # mouseDoubleClickEvent 已经处理了双击逻辑）
+                area = self._hit_zone(event_local_pos(evt))
+                if area is not None and area.on_click is not None:
+                    area.on_click()
+            evt.accept()
+
+    def mouseDoubleClickEvent(self, evt: QMouseEvent) -> None:
+        # 双击播放转圈圈动画（一次性）
+        if evt.button() == Qt.MouseButton.LeftButton:
+            self.animator.play_spin()
+            evt.accept()
+
+    # ---------------- 拖拽文件接收 ----------------
+    _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+    @classmethod
+    def _is_image_url(cls, url) -> bool:
+        local = url.toLocalFile() if hasattr(url, "toLocalFile") else ""
+        if not local:
+            return False
+        return Path(local).suffix.lower() in cls._IMAGE_SUFFIXES
+
+    @staticmethod
+    def _is_file_url(url) -> bool:
+        """判断 URL 是否是本地文件。"""
+        local = url.toLocalFile() if hasattr(url, "toLocalFile") else ""
+        return bool(local)
+
+    def dragEnterEvent(self, evt: QDragEnterEvent) -> None:
+        md = evt.mimeData()
+        if md.hasUrls() and any(self._is_file_url(u) for u in md.urls()):
+            evt.acceptProposedAction()
+            self.show_bubble("放下文件试试~", duration_ms=2000)
+        else:
+            evt.ignore()
+
+    def dragMoveEvent(self, evt: QDragMoveEvent) -> None:
+        if evt.mimeData().hasUrls():
+            evt.acceptProposedAction()
+        else:
+            evt.ignore()
+
+    def dropEvent(self, evt: QDropEvent) -> None:
+        md = evt.mimeData()
+        if not md.hasUrls():
+            evt.ignore()
+            return
+        for url in md.urls():
+            local = url.toLocalFile()
+            if not local:
+                continue
+            p = Path(local)
+            if not p.is_file():
+                continue
+
+            # 图片：直接设置桌宠图片（旧行为）
+            if p.suffix.lower() in self._IMAGE_SUFFIXES:
+                pix = QPixmap(str(p))
+                if not pix.isNull():
+                    self.set_drag_image(pix)
+                    self.show_bubble(f"收到图：{p.name}", duration_ms=2500)
+                    evt.acceptProposedAction()
+                    log.info("用户拖入图片：%s", p)
+                    return
+
+            # 其他文件：弹出操作弹窗（吃掉 / 转换）
+            self._on_file_dropped(p)
+            evt.acceptProposedAction()
+            return
+        evt.ignore()
+
+    def _on_file_dropped(self, path: Path) -> None:
+        """文件拖入弹窗：吃掉或转换。"""
+        from app.ui.file_dialog import (
+            show_file_dialog, send_to_recycle_bin, convert_file,
+        )
+        from app.core.qt_compat import QMessageBox
+
+        try:
+            action, convert_suffix = show_file_dialog(path, None)
+        except Exception as e:  # noqa: BLE001
+            log.error("文件弹窗出错：%s", e)
+            self.show_bubble("出错了…", duration_ms=2000)
+            return
+
+        if action == "eat":
+            # 吃掉：移到回收站 + 播放 file 动画
+            if send_to_recycle_bin(path):
+                self.animator.play_file()
+                self.show_bubble(f"📄 吃掉了 {path.name}！", duration_ms=3000)
+                self.eat_requested.emit()
+                log.info("文件被吃掉（已回收站）：%s", path)
+            else:
+                self.show_bubble("吃不了这个…", duration_ms=2000)
+                QMessageBox.warning(self, "错误", "无法将文件移到回收站")
+
+        elif action == "convert" and convert_suffix:
+            # 转换格式
+            dest = convert_file(path, convert_suffix)
+            if dest:
+                self.animator.play_file()
+                self.show_bubble(f"🔄 转换成功：{dest.name}", duration_ms=3000)
+                log.info("文件转换成功：%s -> %s", path, dest)
+            else:
+                self.show_bubble("转换失败了…", duration_ms=2000)
+                QMessageBox.warning(self, "转换失败", f"无法将 {path.name} 转换为 {convert_suffix}")
+
+    # ---------------- 右键菜单信号包装器 ----------------
+    def _emit_open_settings(self) -> None:
+        self.open_settings_requested.emit()
+
+    def _on_eat_menu(self) -> None:
+        """右键菜单「吃饭」：播放吃饭动画 + 通知主程序涨状态。"""
+        self.animator.play_eat()
+        self.eat_requested.emit()
+
+    def _on_swim_menu(self) -> None:
+        """右键菜单「游泳」：播放游泳动画（once）→ 回到 idle。"""
+        from app.animation.animations import Animation as AnimCls
+        self.atlas.ensure_loaded('playing_water')
+        grp = self.atlas.playing_water
+        if not grp:
+            return
+        from random import choice
+        a = choice(grp)
+        if a:
+            once_anim = AnimCls(a.name, a.frames, AnimCls.ONCE)
+            self.animator.player.play_one_shot(once_anim, on_finished=self.animator.set_idle)
+
+    def _toggle_quick_chat_menu(self) -> None:
+        """切换底部快捷输入框显示/隐藏。"""
+        self._chat_input_visible = not getattr(self, '_chat_input_visible', False)
+        self.toggle_chat_input(self._chat_input_visible)
+
+    # ---------------- 右键菜单（精简版） ----------------
+    def _show_context_menu(self, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+
+        # === 聊天入口 ===
+        a1 = QAction("💬  和鲸鱼娘聊聊", self)
+        a1.triggered.connect(self.chat_requested.emit)
+        menu.addAction(a1)
+        menu.addSeparator()
+
+        # === 完整设置面板 ===
+        act_settings = QAction("⚙️  设置面板", self)
+        act_settings.triggered.connect(self._emit_open_settings)
+        menu.addAction(act_settings)
+        menu.addSeparator()
+
+        # === 切换表情 ===
+        emo_menu = menu.addMenu("😊  切换表情")
+        for name, label in [
+            ('happy', '开心'), ('sad', '悲伤'), ('angry', '生气'),
+            ('shy', '害羞'), ('think', '思考'),
+        ]:
+            a = QAction(label, self)
+            a.triggered.connect(lambda _=False, n=name: self.animator.set_emotion(n))
+            emo_menu.addAction(a)
+        menu.addSeparator()
+
+        # === 睡觉 / 醒来 ===
+        act_sleep = QAction("💤  睡觉", self)
+        act_sleep.triggered.connect(self.animator.set_sleep)
+        menu.addAction(act_sleep)
+        act_wake = QAction("🐾  醒来", self)
+        act_wake.triggered.connect(self.animator.set_wake)
+        menu.addAction(act_wake)
+        menu.addSeparator()
+
+        # === 吃饭 ===
+        act_eat = QAction("🍚  吃饭", self)
+        act_eat.triggered.connect(self._on_eat_menu)
+        menu.addAction(act_eat)
+        menu.addSeparator()
+
+        # === 玩耍 (spin/游泳) ===
+        play_menu = menu.addMenu("🎮  玩耍")
+        act_spin = QAction("🏃  转圈圈", self)
+        act_spin.triggered.connect(self.animator.play_spin)
+        play_menu.addAction(act_spin)
+        act_swim = QAction("🏊  游泳", self)
+        act_swim.triggered.connect(self._on_swim_menu)
+        play_menu.addAction(act_swim)
+        menu.addSeparator()
+
+        # === 状态栏显示/隐藏 ===
+        act_status = QAction("📊 显示状态栏" if not self._status_visible else "📊 隐藏状态栏", self)
+        act_status.triggered.connect(lambda _: self.toggle_status_bar(not self._status_visible))
+        menu.addAction(act_status)
+
+        # === 快捷聊天输入 ===
+        quick_chat_visible = getattr(self, '_chat_input_visible', False)
+        act_quick_chat = QAction(f"{'💬 快速输入' if not quick_chat_visible else '💬 隐藏输入'}", self)
+        act_quick_chat.triggered.connect(self._toggle_quick_chat_menu)
+        menu.addAction(act_quick_chat)
+
+        ui_style.style_menu(menu)   # 圆角卡片皮肤（含所有子菜单）
+        menu.exec(global_pos)
