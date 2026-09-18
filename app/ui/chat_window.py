@@ -39,6 +39,7 @@ from app.voice.character import Emotion, guess_emotion, parse_reply
 from app.core.config import CharacterConfig, LLMConfig
 from app.brain.llm_client import ChatMessage, LLMClient, LLMError
 from app.brain.agent import AgentLoop
+from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
 from app.engine.tools import ToolRegistry
 from app.voice.asr import SpeechRecognizer, asr_available
 from app.engine.chat_store import ChatStore
@@ -301,7 +302,9 @@ class ChatWindow(QWidget):
                  asr_language: str = "zh",
                  registry: Optional[ToolRegistry] = None,
                  context_provider: Optional[Callable[[], str]] = None,
-                 trace_recorder: Optional[TraceRecorder] = None):
+                 trace_recorder: Optional[TraceRecorder] = None,
+                 backend: str = "lightweight",
+                 langchain_cfg: Optional[LangChainAgentConfig] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
@@ -316,6 +319,9 @@ class ChatWindow(QWidget):
         self.context_provider = context_provider
         # Agent Trace recorder（None = 不记录）
         self.trace = trace_recorder
+        # Agent 后端选择："lightweight"（手写 ReAct） 或 "standard"（LangChain 1.0+）
+        self.backend = backend
+        self.langchain_cfg = langchain_cfg or LangChainAgentConfig()
         self._trace_run_id: Optional[str] = None
         self.history: list[Message] = []
         self._MAX_HISTORY = 50  # 最多保留 50 轮对话（超出则丢弃最早的）
@@ -888,11 +894,27 @@ class ChatWindow(QWidget):
         self.thinking_started.emit()
 
         if self.registry is not None and self.registry.names():
-            self._worker = _AgentWorker(
-                AgentLoop(client, self.registry),
-                [{"role": m.role, "content": m.content} for m in msgs])
-            self._worker.chunk.connect(self._on_chunk)
-            self._worker.tool_used.connect(self._on_tool)
+            # 根据 backend 选择 Agent：手写轻量级 或 LangChain 标准实现
+            if self.backend == "standard":
+                lc_agent = LangChainAgent(
+                    llm_cfg=self.llm_cfg,
+                    registry=self.registry,
+                    persona=system_prompt,
+                    cfg=self.langchain_cfg,
+                )
+                self._worker = _AgentWorker(
+                    lc_agent,
+                    [{"role": m.role, "content": m.content} for m in msgs])
+                self._worker.chunk.connect(self._on_chunk)
+                self._worker.tool_used.connect(self._on_tool)
+                # 标准后端关闭在 _on_done / _on_failed 里做
+                self._lc_agent = lc_agent
+            else:
+                self._worker = _AgentWorker(
+                    AgentLoop(client, self.registry),
+                    [{"role": m.role, "content": m.content} for m in msgs])
+                self._worker.chunk.connect(self._on_chunk)
+                self._worker.tool_used.connect(self._on_tool)
         else:
             self._worker = _StreamWorker(client, msgs)
             self._worker.chunk.connect(self._on_chunk)
@@ -936,6 +958,13 @@ class ChatWindow(QWidget):
             self.streaming_chunk.emit(text)
 
     def _on_done(self, full: str) -> None:
+        # LangChain 标准后端：释放 SqliteSaver 连接
+        if self.backend == "standard" and getattr(self, "_lc_agent", None) is not None:
+            try:
+                self._lc_agent.close()
+            except Exception:  # noqa: BLE001
+                log.exception("close lc agent")
+            self._lc_agent = None
         # 解析 [emotion] 标签
         parsed = parse_reply(full)
         # 最终清洗（每个 chunk 内 sanitize 过，但跨 chunk 的长括号段要等全文）
@@ -981,6 +1010,13 @@ class ChatWindow(QWidget):
         self._streaming_anchor_pos = None
 
     def _on_failed(self, err: str) -> None:
+        # LangChain 标准后端：释放 SqliteSaver 连接
+        if self.backend == "standard" and getattr(self, "_lc_agent", None) is not None:
+            try:
+                self._lc_agent.close()
+            except Exception:  # noqa: BLE001
+                log.exception("close lc agent on fail")
+            self._lc_agent = None
         self._current_bot_msg.content = f"[错误] {err}"
         self._current_bot_msg.emotion = Emotion.SAD
         self._refresh_streaming_message(finished=True, emotion="sad")
@@ -1002,53 +1038,58 @@ class ChatWindow(QWidget):
 
     # ---------------- 渲染 ----------------
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
-        """按已完成的 Message 渲染成 HTML 字符串。
+        """按已完成的 Message 渲染成 HTML 字符串（纯文字左右聊天）。
 
-        设计：用户消息靠右蓝色气泡 + 👤 头像，桌宠消息靠左粉色气泡 + 🐳 头像。
-        系统消息居中浅灰条。Qt 不支持 flex，用 <div style="text-align:xxx"> + <span> 实现左右对齐。
+        设计：每条消息 = meta 行（名字+时间）+ 消息体。
+        不用头像、不用气泡框，纯文字 + 左右对齐 + 名字颜色区分。
+        视觉上像控制台聊天，但比控制台更精致。
         """
-        # 系统消息：居中灰色条
+        # ---- 系统消息：居中灰色条 ----
         if msg.role == "system":
             raw = (msg.content or "").replace("&", "&amp;").replace(
                 "<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
             return (
-                '<p style="text-align:center;margin:6px 4px;">'
-                f'<span style="display:inline-block;background:#f1f1f5;'
-                f'color:#8a8a9c;padding:4px 12px;border-radius:10px;'
-                f'font-size:9pt;">{raw}</span></p>'
+                '<div style="text-align:center;margin:10px 0;">'
+                f'<span class="system-msg">{raw}</span></div>'
             )
 
         is_user = msg.role == "user"
         cls = "user" if is_user else "bot"
         who = "你" if is_user else self.char_cfg.name
-        avatar = "👤" if is_user else "🐳"
         align = "right" if is_user else "left"
 
-        # 清理内容：去掉首尾空白，处理字面量 \n
+        # 清理内容
         raw = msg.content or ""
         raw = self._clean_content(raw)
 
         if is_user:
-            body = raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+            body = raw.replace("&", "&amp;").replace("<", "&lt;").replace(
+                ">", "&gt;").replace("\n", "<br/>")
         else:
             body = self._render_markdown(raw)
 
-        tool_html = "".join(
-            f'<div class="tools">🔧 {name} → {summary}</div>'
+        # 工具调用（bot 消息专用）
+        tools_html = "".join(
+            f'<div class="msg-row {align}"><span class="tools-line">{name} → {summary}</span></div>'
             for name, summary in msg.tools
         )
+
         if streaming_meta is not None:
             meta_text = f'⏳ {streaming_meta}'
         else:
             meta_text = time.strftime("%H:%M:%S", time.localtime(msg.ts))
 
-        return (
-            f'<p style="text-align:{align};margin:8px 4px;">'
-            f'<span class="msg {cls}">'
-            f'<span class="avatar">{avatar}</span> '
-            f'<b class="who">{who}</b> <span class="meta">{meta_text}</span><br/>'
-            f'{tool_html}{body}</span></p>'
+        # meta 行（名字 + 时间），名字按角色带颜色
+        meta_line = (
+            f'<div class="meta-line {align}">'
+            f'<span class="name {cls}">{who}</span>'
+            f'<span class="time">{meta_text}</span></div>'
         )
+
+        # 消息体
+        body_line = f'<div class="msg-row {align} body {cls}">{body}</div>'
+
+        return f'{meta_line}{tools_html}{body_line}'
 
     def _clean_content(self, text: str) -> str:
         """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行。"""
@@ -1063,16 +1104,18 @@ class ChatWindow(QWidget):
         import re
 
         # 先转义 HTML 特殊字符（防止 XSS）
-        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace("&", "&amp;")
+        text = text.replace("<", "&lt;")
+        text = text.replace(">", "&gt;")
 
-        # 代码块
+        # 代码块（用 class，由 CHAT_BUBBLE_CSS 接管样式）
         text = re.sub(r'```(\w+)?\n(.*?)```',
-                      r'<pre style="background:#f0f0f5;padding:8px;border-radius:6px;overflow-x:auto;"><code>\2</code></pre>',
+                      r'<pre><code>\2</code></pre>',
                       text, flags=re.DOTALL)
 
         # 行内代码
         text = re.sub(r'`([^`]+)`',
-                      r'<code style="background:#f0f0f5;padding:1px 4px;border-radius:3px;">\1</code>',
+                      r'<code>\1</code>',
                       text)
 
         # 加粗

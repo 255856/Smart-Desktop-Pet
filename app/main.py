@@ -370,8 +370,9 @@ class App:
             lambda: self.pet.animator.is_sleeping())
         tool_count = len(self.brain.tool_registry.names()) if self.brain.tool_registry else 0
         mem_count = self.brain.memory.count()
+        backend_label = "LangChain 1.0+" if cfg.brain.backend == "standard" else "手写 ReAct"
         banner.ok("BrainController",
-                  f"{tool_count} 个工具 · {mem_count} 条记忆")
+                  f"{tool_count} 个工具 · {mem_count} 条记忆 · 后端={backend_label}")
         if self.brain.proactive is not None:
             banner.ok("主动行为", "已启用（空闲时会主动关心）")
 
@@ -604,6 +605,7 @@ def _main_inner() -> int:
     if core.cfg.app.open_chat_on_start:
         from .ui.chat_window import ChatWindow
         from .brain.trace import TraceRecorder
+        from .brain.langchain_agent import LangChainAgentConfig
         trace = TraceRecorder(core.root / "data" / "traces.db")
         cw = ChatWindow(
             core.cfg.llm, core.cfg.character, core.cfg.sprite.directory,
@@ -613,6 +615,13 @@ def _main_inner() -> int:
             registry=core.tool_registry,
             context_provider=core._chat_context,
             trace_recorder=trace,
+            backend=core.cfg.brain.backend,
+            langchain_cfg=LangChainAgentConfig(
+                enable_checkpointer=core.cfg.brain.langchain.enable_checkpointer,
+                checkpoint_db=str(core.root / core.cfg.brain.langchain.checkpoint_db),
+                max_iterations=core.cfg.brain.langchain.max_iterations,
+                return_intermediate_steps=core.cfg.brain.langchain.return_intermediate_steps,
+            ),
         )
         cw.reply_ready.connect(core._on_chat_reply_ready)
         cw.show()

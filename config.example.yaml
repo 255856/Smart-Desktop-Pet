@@ -48,6 +48,11 @@ asr:
 
 # ---- 智能中枢（工具调用 / 长期记忆 / 主动行为）----
 brain:
+  # Agent 后端选择
+  #   lightweight: 手写 ReAct（Planner + Executor + Reflector），零额外依赖
+  #   standard:    LangChain 1.0+ create_agent + LangGraph SqliteSaver
+  #                （需 pip install langchain langchain-openai langgraph langgraph-checkpoint-sqlite）
+  backend: lightweight
   # 允许模型调用工具：设提醒、记事情、开网页/应用、买东西吃、看状态等
   tools_enabled: true
   # 长期记忆落盘位置（相对项目根目录）
@@ -56,3 +61,17 @@ brain:
   proactive_enabled: true
   proactive_min_minutes: 25    # 随机间隔下限（分钟）
   proactive_max_minutes: 45    # 随机间隔上限（分钟）
+
+  # ---- Agent v2 顶层参数（两种 backend 共用）----
+  agent:
+    mode: react              # react = 多步规划；single = 单轮 N 步
+    max_turns: 6             # single 模式的最大轮数
+    max_replans: 2           # react 模式失败后最多重新规划次数
+    reflector_mode: heuristic   # heuristic | llm | off
+
+  # ---- LangChain 标准后端参数（仅 backend=standard 时生效）----
+  langchain:
+    enable_checkpointer: true     # 是否启用 SqliteSaver 记忆持久化
+    checkpoint_db: "data/langchain_checkpoints.db"
+    max_iterations: 10
+    return_intermediate_steps: false

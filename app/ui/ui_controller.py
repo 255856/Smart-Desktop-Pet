@@ -353,6 +353,7 @@ class UIController(QObject):
         if cw is None or not cw.isVisible():
             # 创建 trace recorder（聊天每次会写一条 run 到 SQLite，Dashboard 显示）
             from app.brain.trace import TraceRecorder
+            from app.brain.langchain_agent import LangChainAgentConfig
             trace = TraceRecorder(self.root / "data" / "traces.db")
             cw = ChatWindow(
                 self.cfg.llm, self.cfg.character,
@@ -363,6 +364,13 @@ class UIController(QObject):
                 registry=self.brain.tool_registry,
                 context_provider=self.brain.chat_context,
                 trace_recorder=trace,
+                backend=self.cfg.brain.backend,
+                langchain_cfg=LangChainAgentConfig(
+                    enable_checkpointer=self.cfg.brain.langchain.enable_checkpointer,
+                    checkpoint_db=str(self.root / self.cfg.brain.langchain.checkpoint_db),
+                    max_iterations=self.cfg.brain.langchain.max_iterations,
+                    return_intermediate_steps=self.cfg.brain.langchain.return_intermediate_steps,
+                ),
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)

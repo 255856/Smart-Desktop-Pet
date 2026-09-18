@@ -24,3 +24,11 @@ PyYAML>=6.0
 # 语音输入（ASR）—— 按住说话功能
 faster-whisper>=1.0.0
 sounddevice>=0.4.6
+
+# ---- Agent 标准后端（可选；启用 brain.backend=standard 时安装）----
+# LangChain 1.0+ / LangGraph + sqlite checkpoint + OpenAI 兼容 chat 模型
+# 不启用时可注释掉这一段
+langchain>=1.0.0
+langchain-openai>=0.3.0
+langgraph>=1.0.0
+langgraph-checkpoint-sqlite>=3.0.0

@@ -20,7 +20,7 @@
 
 ```powershell
 cd E:\study\desktop-pet
-python -m pytest tests/ -q                        # 单元测试 125 个，应全过
+python -m pytest tests/ -q                        # 单元测试 152 个，应全过
 python scripts/verify_features.py                  # 功能验证 70 项，应全过
 python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboard
 ```
@@ -97,7 +97,12 @@ cd E:\study\desktop-pet
 # 依赖已装好在 .local-packages/
 ```
 
-### 2. 启动桌宠
+### 2. 下载桌宠动画文件
+```
+链接：
+```
+
+### 3. 启动桌宠
 
 ```powershell
 python main.py
@@ -173,7 +178,7 @@ brain:                              # v3.0 智能体配置
 llm:
   base_url: "http://127.0.0.1:11434/v1"
   api_key: "ollama"                          # 任意非空字符串
-  model: "qwen3.5:4b"                        # 或 deepseek-r1:8b
+  model: "qwen3.5:4b"                        # 本地模型
 ```
 
 启动时 main.py 会自动探测 `http://127.0.0.1:11434/api/tags` 并列出本地模型。
@@ -224,7 +229,7 @@ desktop-pet/
 │   │   ├── chat_store.py
 │   │   ├── works.py
 │   │   └── screenshot.py
-│   ├── brain/                     # 🧠 智能中枢 v3.0
+│   ├── brain/                     # 智能中枢 v3.0
 │   │   ├── llm_client.py
 │   │   ├── agent.py               # 旧版 Agent Loop（兼容）
 │   │   ├── agent_v2.py            # 新 Agent Loop（react / single 切换）
@@ -236,15 +241,15 @@ desktop-pet/
 │   │   ├── memory_evolution.py    # Memory Curator（兼容旧名）
 │   │   ├── proactive.py
 │   │   ├── brain_controller.py
-│   │   └── trace.py               # 🛰️ SQLite Trace
-│   ├── mcp/                       # 🔌 MCP 协议
+│   │   └── trace.py               # SQLite Trace
+│   ├── mcp/                       # MCP 协议
 │   │   ├── protocol.py            # stdio JSON-RPC
 │   │   └── filesystem_server.py
-│   ├── agents/                    # 👥 Sub-agent 框架
+│   ├── agents/                    # Sub-agent 框架
 │   │   └── base.py
-│   ├── web/                       # 📊 FastAPI Dashboard
+│   ├── web/                       # FastAPI Dashboard
 │   │   └── dashboard.py
-│   └── eval/                      # 🧪 Agent 评估
+│   └── eval/                      # Agent 评估
 │       └── cases.py
 ├── assets/
 │   └── sprites/                   # 静态兜底素材
@@ -319,6 +324,17 @@ python -m pytest tests/test_agents.py -v   # Sub-agent
 pip install sentence-transformers
 # 然后 config.yaml 里（需新增字段或改默认 backend）
 ```
+
+**切换到 LangChain 标准后端？**
+```powershell
+pip install langchain langchain-openai langgraph langgraph-checkpoint-sqlite
+```
+然后 `config.yaml`：
+```yaml
+brain:
+  backend: standard   # 默认 lightweight（手写 ReAct 零依赖）；standard = LangChain 1.0+
+```
+两种后端共用同一份 UI 和工具集，事件协议完全兼容。可在 `langchain:` 段配置 SqliteSaver 持久化、最大步数等。
 
 **启动 Dashboard？**
 - 命令行：`python main.py --with-dashboard`

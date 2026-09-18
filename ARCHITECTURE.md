@@ -2,8 +2,8 @@
 
 > 本文档面向简历读者 / 面试官，说明 **桌面宠物 → 桌面智能体** 的演进路径与技术深度。
 >
-> 当前版本：`v2.0 — Pet-Agent`（基础 Agent + 工具调用 + 长期记忆 + 主动行为）
-> 目标版本：`v3.0 — Multi-Agent Desktop Companion`（RAG + Plan/Reflect + MCP + Sub-agent + Trace）
+> 当前版本：`v3.1 — Dual-Backend Agent`（双 Agent 后端：手写 ReAct + LangChain 1.0+）
+> 前一版本：`v3.0 — Multi-Agent Desktop Companion`（RAG + Plan/Reflect + MCP + Sub-agent + Trace）
 
 ---
 
@@ -32,6 +32,26 @@
 | TTS / ASR | `app/voice/` | edge-tts + faster-whisper |
 
 **单测**：`tests/` 下 6 个测试文件，覆盖 Tool/Memory/ASR/State/Reminder。
+
+### v3.1 新增：双 Agent 后端
+
+| 后端 | 实现 | 依赖 | 适用场景 |
+|------|------|------|----------|
+| `lightweight`（默认） | `app/brain/agent_v2.py` Planner + Executor + Reflector + `app/brain/llm_client.py` | 0 额外依赖 | 离线 / 极简部署 / 完全可控 |
+| `standard` | `app/brain/langchain_agent.py` `langchain.agents.create_agent` + `langgraph.checkpoint.sqlite.SqliteSaver` | `langchain>=1.0` `langchain-openai` `langgraph-checkpoint-sqlite` | 生产 / 生态对接 / LangSmith 可观测 |
+
+**两种后端共用同一个事件协议**（与 `AgentLoopV2` 兼容）：
+
+```python
+("text", chunk)                  # 流式文字
+("tool", name, args, result)     # 工具调用
+("done", text)                   # 最终回复
+("error", exc)                   # 出错
+("plan", plan_dict)              # 仅 react 模式：规划
+("reflection", reflection_dict)  # 仅 react 模式：反思
+```
+
+ChatWindow 无需任何改动即可切换后端（在 `_kickoff_llm` 里根据 `self.backend` 选 Agent 实现）。这意味着同一份 UI 同时演示两套 Agent 架构，便于对比学习。
 
 ---
 
