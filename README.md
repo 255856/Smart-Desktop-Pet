@@ -20,16 +20,33 @@
 
 ```powershell
 cd E:\study\desktop-pet
-python -m pytest tests/ -q                        # 单元测试 152 个，应全过
-python scripts/verify_features.py                  # 功能验证 70 项，应全过
+python -m pytest tests/ -q                        # 单元测试 288 个，应全过
+python scripts/verify_features.py                  # 功能验证 85 项，应全过
 python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboard
 ```
 
 `verify_features.py` 输出类似：
 
 ```
-总计：70 OK, 0 FAIL, 70 项
+总计：85 OK, 0 FAIL, 85 项
 ```
+
+---
+
+## 🛡️ 抗幻觉机制（v3.1+）
+
+「主人说『帮我打开 QQ』但桌宠只回了文字、QQ 没真的打开」是国产 LLM 的常见坑。本项目有 **3 层防御纵深**：
+
+| 层级 | 位置 | 作用 |
+|------|------|------|
+| **第 1 层 · 意图驱动 force_tool_use** | `agent.py` + `llm_client.py` | 检测到「打开XX/提醒XX/记住XX/查询」类意图时，第一轮请求自动带 `tool_choice="required"`，强制模型必须调工具；服务端不支持时降级为 user-prompt 强制 |
+| **第 2 层 · 强制重试** | `agent.py` | 第一轮 force 后模型仍只回文字 → 注入强提示重试一次（force_retry meta 事件），给模型第二次机会 |
+| **第 3 层 · Plan/Reflect 兜底** | `agent_v2.py` + `executor.py` + `reflector.py` | 轻量 backend 默认走 `AgentLoopV2` react 模式：Planner 拆解 → Executor 跑 tool → Reflector 跨步检查「意图是工具但没调工具」= 幻觉 → 自动 replan |
+
+详见：`app/brain/llm_client.py`（force_tool_use + detect_action_intent）、
+`app/brain/agent.py`（第一层防御）、
+`app/brain/agent_v2.py` + `app/brain/executor.py`（第三层防御）、
+`tests/test_anti_hallucination*.py`（回归测试）。
 
 ---
 

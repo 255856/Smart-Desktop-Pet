@@ -61,15 +61,18 @@ class Message:
 class _AgentWorker(QThread):
     """Agent 循环 worker：流式正文 + 工具调用（Function Calling）。
 
-    agent.run 产出 ("text"|"tool"|"done", ...) 事件，这里转成 Qt 信号：
+    agent.run 产出 ("text"|"tool"|"done"|"meta"|"reflection"|"plan", ...) 事件，
+    这里转成 Qt 信号：
         chunk     —— 正文增量
         tool_used —— 一次工具执行完成 (name, args, result)
+        meta      —— 内部事件（force_retry / replan 等），仅 trace + 状态显示
         done      —— 完整文本（所有正文段拼接）
         failed    —— 出错
     """
 
     chunk = Signal(str)
     tool_used = Signal(str, str, str)
+    meta = Signal(str, dict)       # (kind, payload) —— 内部事件，给 Trace 用
     done = Signal(str)
     failed = Signal(str)
 
@@ -86,9 +89,14 @@ class _AgentWorker(QThread):
         """在 QThread 里跑 agent 循环。
 
         LangChainAgent 自带持久 loop（run_sync）；其他 agent 仍走 asyncio.run()。
+
+        修复：把 `done` 事件的 payload 也作为 final 文本的兜底（防御性）。
+        历史上某些 AgentLoop 变体（如 AgentLoopV2 的 Planner+Executor 模式）
+        不一定 yield text 事件就 yield done，导致 `chat reply ready: ''`。
         """
         try:
             full: list[str] = []
+            done_fallback: str = ""   # 防御：done 事件 payload 作为 last-resort
             # LangChainAgent 提供 run_sync（在持久 loop 里跑，跨调用不切换）
             if hasattr(self.agent, "run_sync"):
                 events = self.agent.run_sync(
@@ -100,9 +108,19 @@ class _AgentWorker(QThread):
                     elif kind == "tool":
                         # payload = (name, args, result)
                         self.tool_used.emit(*payload)
-                    # "done" 不需要额外处理
+                    elif kind == "meta":
+                        # payload = (dict)
+                        self.meta.emit("meta", payload[0] if payload else {})
+                    elif kind in ("plan", "reflection"):
+                        # 透传到 Trace
+                        self.meta.emit(kind, payload[0] if payload else {})
+                    elif kind == "done":
+                        # 防御：如果之前没收到任何 text，把 done payload 当兜底
+                        if payload and payload[0]:
+                            done_fallback = str(payload[0])
             else:
-                async def drive() -> None:
+                async def drive(done_box: list[str]) -> None:
+                    """驱动 agent.run 异步迭代；done_box 用于回传 done 兜底文本。"""
                     async for ev in self.agent.run(
                             self.messages, cancel_check=self.cancel_event.is_set):
                         kind = ev[0]
@@ -111,8 +129,23 @@ class _AgentWorker(QThread):
                             self.chunk.emit(ev[1])
                         elif kind == "tool":
                             self.tool_used.emit(ev[1], ev[2], ev[3])
-                asyncio.run(drive())
-            self.done.emit("".join(full))
+                        elif kind == "meta":
+                            # ev = ("meta", dict)
+                            self.meta.emit("meta", ev[1] if len(ev) > 1 else {})
+                        elif kind in ("plan", "reflection"):
+                            self.meta.emit(kind, ev[1] if len(ev) > 1 else {})
+                        elif kind == "done":
+                            # 防御：记录 done payload 作为兜底文本
+                            if len(ev) > 1 and ev[1]:
+                                done_box.append(str(ev[1]))
+
+                done_box: list[str] = []
+                asyncio.run(drive(done_box))
+                if done_box:
+                    done_fallback = done_box[-1]
+            # 拼接最终文本：如果累积的 full 为空且 done 有 payload，用 done 的
+            final_text = "".join(full) or done_fallback
+            self.done.emit(final_text)
         except LLMError as e:
             self.failed.emit(str(e))
         except Exception as e:  # noqa: BLE001
@@ -673,6 +706,59 @@ class ChatWindow(QWidget):
         """在聊天区追加一条系统消息（灰色提示）。"""
         self._render_message(Message(role="system", content=text))
 
+    # 【幻觉检测】匹配「已 XX」类断言性话术
+    _HALLUCINATION_PATTERNS = [
+        (r"已打开\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "open"),
+        (r"已经打开\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "open"),
+        (r"已启动\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "start"),
+        (r"已经启动\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "start"),
+        (r"已发送\s*(?:给|了)?\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "send"),
+        (r"已设置\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "set"),
+        (r"已复制\s*(?:到)?\s*剪贴板", "copy"),
+        (r"已截图", "screenshot"),
+        (r"已提醒", "remind"),
+        (r"已记住", "remember"),
+    ]
+
+    def _detect_hallucination(self, response_text: str, tools_used: list) -> None:
+        """检测模型幻觉：模型说「已打开 X」但本轮没有调用任何工具。
+
+        匹配到话术 + 本轮未调工具 → 在聊天区追加一条系统消息
+        （灰色，明显区分于正常消息），让主人一眼看出没有真的执行。
+
+        为什么不直接重试 / 再次调用 LLM：
+        - 重试可能再次幻觉
+        - 直接调用又需要解析用户意图（"打开 XX"→open_app 还是 open_website？）
+        - 让主人知道 + 提示重试，最稳
+
+        Args:
+            response_text: 模型最终回复的纯文本
+            tools_used: 本轮实际调用的工具 [(name, summary), ...]
+        """
+        if tools_used:
+            return    # 真有工具调用 → 不是幻觉
+
+        import re
+        for pattern, action in self._HALLUCINATION_PATTERNS:
+            m = re.search(pattern, response_text)
+            if m:
+                target = m.group(1) if m.groups() else ""
+                # 排除「已问好」之类误伤（target 必须是「应用/网址」才告警）
+                if not target or len(target) > 40:
+                    continue
+                self._append_system_msg(
+                    f"⚠️ 刚才「{target}」没真的{'打开' if action == 'open' else '启动' if action == 'start' else '操作'}："
+                    f"模型回了文字但没调用工具（可能 LLM 幻觉）。"
+                    f"请换种说法重试（如「帮我打开 {target}」）。"
+                )
+                log.warning(
+                    "Hallucination detected: model claims '%s' did %s, "
+                    "but no tool was called in this turn",
+                    target, action,
+                )
+                # 只告警一次（避免重复刷屏）
+                return
+
     def _append_system_welcome(self) -> None:
         self._render_message(Message(
             role="assistant",
@@ -899,9 +985,8 @@ class ChatWindow(QWidget):
             ))
             return
 
-        # 构造请求 messages（用 history）
-        msgs = [ChatMessage(role=m.role, content=m.content) for m in self.history
-                if m.role in ("user", "assistant")]
+        # 构造请求 messages（用 history，但**清洗幻觉痕迹**——见 _build_clean_messages_for_llm）
+        msgs = self._build_clean_messages_for_llm()
 
         # 动态 system 上下文：时间 / 桌宠状态 / 长期记忆
         system_prompt = self.char_cfg.persona
@@ -947,20 +1032,93 @@ class ChatWindow(QWidget):
                     [{"role": m.role, "content": m.content} for m in msgs])
                 self._worker.chunk.connect(self._on_chunk)
                 self._worker.tool_used.connect(self._on_tool)
+                self._worker.meta.connect(self._on_meta)
                 # 标准后端关闭在 _on_done / _on_failed 里做
                 self._lc_agent = lc_agent
             else:
+                # 轻量 backend：直接用 AgentLoop（真正的 ReAct 循环）。
+                # 这是与 LangChain create_agent 语义对齐的手写实现：
+                #   模型自主决定 → Thought: 调什么工具 → Action: 调工具 →
+                #   Observation: 工具结果作为 ToolMessage 回传 →
+                #   模型继续推理 → 直到模型给出 final answer（不再调工具）。
+                # 关键特性：
+                #   1. force_tool_use=True（首轮）+ 服务端降级（user-prompt 强制）
+                #   2. 第一轮没调工具 → 注入强提示 + force_retry 重试
+                #   3. 连续 N 轮纯调工具 → 强制进入 final 阶段让模型总结
+                # 这样比 AgentLoopV2（Planner→Executor 静态规划）更智能：
+                #   模型可以自己决定调几次工具、什么时候给 final answer。
                 self._worker = _AgentWorker(
                     AgentLoop(client, self.registry),
                     [{"role": m.role, "content": m.content} for m in msgs])
                 self._worker.chunk.connect(self._on_chunk)
                 self._worker.tool_used.connect(self._on_tool)
+                self._worker.meta.connect(self._on_meta)
         else:
             self._worker = _StreamWorker(client, msgs)
             self._worker.chunk.connect(self._on_chunk)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+
+    def _build_clean_messages_for_llm(self) -> list:
+        """构造发给 LLM 的 messages 列表。
+
+        关键：检测并改写「历史 assistant 消息里只说『已打开 XX』但**没有工具调用**」
+        的情况——这些是 LLM 幻觉的痕迹，会污染后续的对话。
+
+        清洗策略：
+            - 在 self.history 上找 assistant 消息：有幻觉模式 + tools 为空
+            - 在该消息**之前**插入一条 user 提示（以 user role 注入；
+              OpenAI 没有 role=system 之外的「system 提示」，用 user 模拟）：
+              「上文『已 XX』是 LLM 幻觉，实际并未打开。主人现在又问了 XX，
+                请**真正调用** open_app / open_website 工具！」
+
+        注意：必须从 self.history 取（保留 tools 字段），不能从 ChatMessage list 取
+        —— ChatMessage 只有 role/content，没有 tools。
+        """
+        import re
+        # 先在 self.history 上找幻觉索引（保留 tools）
+        history = [m for m in self.history if m.role in ("user", "assistant")]
+
+        hallucination_indices: list[int] = []
+        for i, m in enumerate(history):
+            if m.role != "assistant":
+                continue
+            tools_used = getattr(m, "tools", None) or []
+            if tools_used:
+                continue
+            for pattern, _ in self._HALLUCINATION_PATTERNS:
+                if re.search(pattern, m.content):
+                    hallucination_indices.append(i)
+                    break
+
+        if not hallucination_indices:
+            # 路径 1：没幻觉痕迹 → 直接转 ChatMessage list
+            return [ChatMessage(role=m.role, content=m.content) for m in history]
+
+        # 路径 2：有幻觉痕迹 → 在幻觉点之前插入 user 提示
+        cleaned: list = []
+        for i, m in enumerate(history):
+            if i in hallucination_indices:
+                # 找对应 user 消息（往前找最近一个 user）
+                prev_user = ""
+                for j in range(i - 1, -1, -1):
+                    if history[j].role == "user":
+                        prev_user = history[j].content
+                        break
+                # 插入「user 角色」的系统提示（OpenAI 兼容协议：tool 提示用 user 注入）
+                cleaned.append(ChatMessage(
+                    role="user",
+                    content=(
+                        f"[系统提醒] 上面那条回复是 LLM 幻觉——模型写了"
+                        f"「{m.content[:60]}...」但**没有真的调用工具**，"
+                        f"主人看不到任何效果。如果主人现在又问同类问题，"
+                        f"请**真正调用** open_app / open_website 工具再回话，"
+                        f"别再假装做了。"
+                    ),
+                ))
+            cleaned.append(ChatMessage(role=m.role, content=m.content))
+        return cleaned
 
     def _on_tool(self, name: str, args: str, result: str) -> None:
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""
@@ -980,6 +1138,30 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 pass
         self._refresh_streaming_message()
+
+    def _on_meta(self, kind: str, payload: dict) -> None:
+        """内部事件（plan / reflection / meta）。当前主要做两件事：
+            1. Trace 记录（Dashboard 可回放决策过程）
+            2. force_retry 时给主人一个轻提示（不打断流式输出）
+
+        Args:
+            kind: "plan" | "reflection" | "meta"
+            payload: 事件载荷
+        """
+        if self.trace is not None and self._trace_run_id:
+            try:
+                self.trace.record(self._trace_run_id, kind, payload or {})
+            except Exception:  # noqa: BLE001
+                pass
+        # force_retry 给一个小提示（避免主人误以为模型已经做完）
+        if kind == "meta" and isinstance(payload, dict):
+            ev = payload.get("event")
+            if ev == "force_retry":
+                # 在 chat 末尾追加一条灰色提示（小气泡，不抢戏）
+                self._append_system_msg(
+                    "⚙️ 模型刚才回了文字但没调用工具——自动重试一次，主人稍等~"
+                )
+                log.info("ChatWindow: force_retry meta 事件已提示用户")
 
     def _on_chunk(self, tok: str) -> None:
         if self._current_bot_msg is None:
@@ -1027,6 +1209,12 @@ class ChatWindow(QWidget):
             tools=tools_list,
         )
         self._refresh_streaming_message(finished=True, emotion=parsed.emotion.value)
+
+        # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
+        # —— 这是 LLM 的常见幻觉，主人看不到任何效果，体验崩溃。
+        # 在 chat_view 末尾追加一条系统消息明确告知主人「我没真的做」。
+        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
+
         # Trace：完成 run
         if self.trace is not None and self._trace_run_id:
             try:

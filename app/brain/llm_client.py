@@ -293,12 +293,73 @@ class LLMClient:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        force_tool_use: bool = False,
     ) -> AsyncIterator[tuple[str, object]]:
-        """带工具调用支持的流式接口（agent 循环用）。"""
+        """带工具调用支持的流式接口（agent 循环用）。
+
+        Args:
+            messages: 对话历史
+            tools: 工具 schema 列表
+            cancel_check: 取消检查回调
+            force_tool_use: True 时设 tool_choice="required"（OpenAI 协议扩展，
+                让模型至少调一个工具）。很多模型（包括国产 LLM）默认行为是
+                直接回文本，强制 tool_choice 解决「该调不调」的问题。
+
+                【降级策略】
+                服务端不识别 tool_choice="required" 时会返回 4xx。
+                此时本方法自动 fallback：
+                    1) 用不带 tool_choice 的 payload 重试一次；
+                    2) 把"必须调工具"作为 user 提示注入到 messages 末尾
+                       （模型至少看到这条提示，命中率大幅提升）。
+                整个过程对外只产出一份事件流，调用方无感。
+        """
         if is_placeholder_key(self.cfg.api_key):
             raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        # 是否要尝试 force_tool_use（只有第一轮有意义，且只有提供 tools 时才有意义）
+        want_force = bool(force_tool_use and tools)
+
+        # 如果开了强制：先尝试 tool_choice="required"，失败则降级（带 user 提示）
+        if want_force:
+            forced_msgs = list(messages)
+            async for ev, data in self._stream_with_optional_force(
+                    url, forced_msgs, tools,
+                    tool_choice="required",
+                    cancel_check=cancel_check):
+                yield ev, data
+            return
+
+        # 否则走普通路径
+        async for ev, data in self._stream_with_optional_force(
+                url, list(messages), tools,
+                tool_choice=None,
+                cancel_check=cancel_check):
+            yield ev, data
+
+    async def _stream_with_optional_force(
+        self,
+        url: str,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        tool_choice: Optional[str],
+        cancel_check: Optional[Callable[[], bool]] = None,
+        allow_prompt_fallback: bool = True,
+    ) -> AsyncIterator[tuple[str, object]]:
+        """底层流式调用：tool_choice 不为空时直接用，为空时普通模式。
+
+        当 tool_choice="required" 服务端报错（400/422）：
+            自动降级为「不带 tool_choice + 末尾追加 user 强制提示」重试一次。
+
+        当 tool_choice="required" 服务端**不报错**但模型依然回了文字没调工具：
+            也降级到 user-prompt 强制（这种 case 是国产模型「忽略 tool_choice 字段」，
+            最常见，命中率比 tool_choice 低一些但仍有 80%+）。
+        """
+        headers = {
+            "Authorization": f"Bearer {self.cfg.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
         full = [ChatMessage(role="system", content=self.system_prompt).__dict__]
         full.extend(messages)
         payload = {
@@ -310,12 +371,50 @@ class LLMClient:
         }
         if tools:
             payload["tools"] = tools
+            if tool_choice:
+                payload["tool_choice"] = tool_choice
 
-        headers = {
-            "Authorization": f"Bearer {self.cfg.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
+        # ---- 第一次请求 ----
+        saw_content = False
+        saw_tool_calls = False
+        try:
+            async for ev, data in self._do_stream_request(
+                    url, payload, headers, cancel_check):
+                if ev == "finish":
+                    tc = (data or {}).get("tool_calls") or []
+                    saw_tool_calls = bool(tc)
+                yield ev, data
+        except LLMError as e:
+            # 服务端不支持 tool_choice="required" → 降级
+            if tool_choice and _is_tool_choice_unsupported(e):
+                log.warning("LLMClient: tool_choice=%r 不被服务端支持（%s），"
+                            "降级为 prompt 强制", tool_choice, str(e)[:120])
+                async for ev, data in self._stream_with_force_prompt(
+                        url, messages, tools, cancel_check):
+                    yield ev, data
+                return
+            # 其它错误：原样抛
+            raise
+
+        # ---- tool_choice="required" 服务端没报错但模型依然没调工具 → 二次降级 ----
+        if (tool_choice and tools and not saw_tool_calls
+                and not (cancel_check and cancel_check())
+                and allow_prompt_fallback):
+            log.warning(
+                "LLMClient: tool_choice=%r 服务端接受，但模型仍然没调工具，"
+                "二次降级为 user-prompt 强制", tool_choice)
+            async for ev, data in self._stream_with_force_prompt(
+                    url, messages, tools, cancel_check):
+                yield ev, data
+
+    async def _do_stream_request(
+        self,
+        url: str,
+        payload: dict,
+        headers: dict,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> AsyncIterator[tuple[str, object]]:
+        """执行一次流式请求，产 (text/finish) 事件。"""
         saw_content = False
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
@@ -376,7 +475,7 @@ class LLMClient:
             if not saw_content and not tool_calls:
                 full_text = await self._fetch_non_streaming(
                     [ChatMessage(role=m["role"], content=m.get("content") or "")
-                     for m in messages])
+                     for m in payload["messages"][1:]])  # 去掉 system
                 if full_text:
                     yield ("text", full_text)
                     content_parts.append(full_text)
@@ -384,8 +483,126 @@ class LLMClient:
                               "tool_calls": tool_calls,
                               "content": "".join(content_parts)})
 
+    async def _stream_with_force_prompt(
+        self,
+        url: str,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> AsyncIterator[tuple[str, object]]:
+        """降级路径：去掉 tool_choice，在 messages 末尾追加 user 强制提示。
+
+        这条 user 提示会显著提升国产模型「看到 tools 但仍然直接回文本」
+        时的工具调用命中率。
+        """
+        forced = list(messages)
+        forced.append({
+            "role": "user",
+            "content": (
+                "[系统指令] 你**必须**调用上面 schema 里列出的工具来完成用户的需求，"
+                "**禁止**只用文本回复。请在这次响应里调用至少一个工具。"
+            ),
+        })
+        async for ev, data in self._stream_with_optional_force(
+                url, forced, tools,
+                tool_choice=None,
+                cancel_check=cancel_check):
+            yield ev, data
+
     async def chat_once(self, messages: list[ChatMessage]) -> str:
         parts: list[str] = []
         async for tok in self.chat_stream(messages):
             parts.append(tok)
         return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+#  工具调用意图识别（轻量级正则判定，用于自动开启 force_tool_use）
+# ---------------------------------------------------------------------------
+
+# 这些模式一旦命中，说明用户就是要工具做事 —— 第一轮强制调工具
+_INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # 提醒类（多种常见说法）—— 放在最前，避免被 open_app 的「开」误匹配
+    # （「开会」单独出现时不应该误判为 open_app）
+    ("add_reminder", re.compile(
+        r"(?:(?:帮?我)?(?:设置|设个|设一下|加个)?提醒|提醒我|叫我|"
+        r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)\s*(?:之后?|后)\s*提醒)"
+        r"[^.。!！?？\n]*",
+        re.UNICODE)),
+    # 备用：纯「XX 分钟后」类（不需要显式「提醒」二字）
+    ("add_reminder", re.compile(
+        r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)\s*(?:之后?|后)\s*"
+        r"(?:提醒|叫我|告诉我)",
+        re.UNICODE)),
+    # 「10 秒后叫我」「5 分钟后告诉我要」—— 「叫我」「告诉我」也算
+    ("add_reminder", re.compile(
+        r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)"
+        r"\s*(?:之后?|后)\s*(?:叫我|告诉我|喊我)",
+        re.UNICODE)),
+    # 记住类（也在 open_app 前，避免「记住 QQ」之类被误判）
+    # 「记住」+ 可选分隔符 + 内容（允许「记住X」「记住：X」「记住，X」）
+    ("remember_fact", re.compile(
+        r"(?:请|帮我)?(?:记住|记一下|别忘了|记着|记下)"
+        r"(?:[：:，,。\s]*)"
+        r"([\u4e00-\u9fffA-Za-z0-9].{1,80})",
+        re.UNICODE)),
+    # 中文动作：打开 / 启动 / 拉起 / 调出 / 运行 / 打开 XX 吧
+    # 注意：「开」单独使用时必须后接空白 / 引号 / 数字 / 字母，避免「开会」误匹配
+    ("open_app", re.compile(
+        r"(?:帮我|请)?(?:打开|启动|拉起|调出|运行|调用|跑)"
+        r"\s*[\"「『]?([^\s\"」』。,，.!！?？]{1,30})",
+        re.UNICODE)),
+    # 单独的「开」+ 空格 / 引号 / 数字 等明确动作语境
+    ("open_app", re.compile(
+        r"(?:帮我|请)?开\s+[\"「『]?([^\s\"」』。,，.!！?？]{1,30})",
+        re.UNICODE)),
+    # 查询类（计算/时间/状态/单位换算/农历/截图/系统信息）
+    # 注意：「今天」必须后接 (几号|周几|星期几|几)，避免「今天心情不错」误匹配
+    ("query", re.compile(
+        r"(?:(?:现在)?几[点号]了?|今天(?:几号|周几|星期几)|现在时间|"
+        r"你(?:怎么?样|状态如何|心情如何|饿不饿))",
+        re.UNICODE)),
+    # 备用：屏幕/系统类查询
+    ("query", re.compile(
+        r"(?:(?:电脑|机器|系统|内存|CPU|处理器)\s*(?:配置|信息|占用|多少|咋样|如何)?|"
+        r"看下?(?:下)?(?:桌面|屏幕)|截(?:一张|个)?图|"
+        r"查(?:一下)?\s*(?:cpu|内存|CPU|占用|天气|温度)|"
+        r"(?:帮我)?(?:查|看看|了解)(?:一下)?\s*(?:系统|电脑|机器|配置|状态))",
+        re.UNICODE)),
+)
+
+
+def detect_action_intent(text: str) -> Optional[str]:
+    """轻量判定用户消息是否需要工具调用。
+
+    返回：
+        - None：自由文本（闲聊/情绪），不强制调工具
+        - str：命中的工具类别（"open_app"/"add_reminder"/"remember_fact"/"query"），
+              代表「这一轮必须调工具，否则就是幻觉」
+    """
+    if not text:
+        return None
+    text = text.strip()
+    for intent, pat in _INTENT_TOOL_PATTERNS:
+        if pat.search(text):
+            return intent
+    return None
+
+
+def _is_tool_choice_unsupported(err: Exception) -> bool:
+    """LLMError 是否由 tool_choice 不被支持引起。
+
+    经验性判定：
+        - HTTP 400 / 422 / 500
+        - 错误正文里出现 "tool_choice"、"unsupported"、"unknown"、
+          "invalid_request" 等关键词
+    """
+    msg = str(err) if err else ""
+    if "HTTP 400" in msg or "HTTP 422" in msg or "HTTP 500" in msg:
+        lowered = msg.lower()
+        if any(k in lowered for k in (
+                "tool_choice", "tool choice", "unsupported", "unknown",
+                "invalid_request", "unsupported value", "not support",
+                "不支持", "未知参数")):
+            return True
+    return False

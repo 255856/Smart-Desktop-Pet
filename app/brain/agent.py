@@ -1,20 +1,35 @@
 """Agent 循环：让大模型通过工具调用真正「做事」。
 
-流程（单次用户消息）：
-    1. 流式请求 LLM（带 tools）；
-    2. 模型回正文 → 逐 chunk 透传给 UI；
-    3. 模型回 tool_calls → 并行执行 ToolRegistry 里的工具（asyncio.gather），
-       把结果以 role=tool 消息追加，回到第 1 步（最多 MAX_TURNS 轮）；
-    4. 没有工具调用的那轮正文即为最终回复。
+这是一个真正的 ReAct 循环（与 LangChain `create_agent` 语义对齐）：
+
+    1. 流式请求 LLM（带 tools schema）；
+    2. 模型可以决定：
+       a) 直接给文字回复（闲聊 / 总结）→ 循环结束，文字即为 final answer
+       b) 调用工具 → 工具结果作为 ToolMessage 回传，循环回到步骤 1
+    3. 重复 1-2 直到：
+       a) 模型给出 final answer（不调工具），或
+       b) 达到 max_turns 上限，或
+       c) 连续多轮纯调工具没给文字 → 强制进入 final 阶段（去掉 tools，让模型必须总结）
+
+这是「真正的智能体」—— 模型自主决定调什么工具、调几次、什么时候给 final answer。
+不像 Planner+Executor 模式那样：先规划后执行、模型不再回头参与决策。
 
 产出事件（yield）：
     ("text",  chunk)                       正文增量
     ("tool",  name, args_str, result_str)  一次工具执行完成
+    ("meta",  {...})                       内部事件（force_retry / force_final 等）
     ("done",  final_text)                  整个循环结束
 
 危险工具确认：
     对 DANGEROUS_TOOLS 中的工具（如 open_app / open_website），
     执行前会调用 confirm_tool 回调（由调用方注入），返回 False 则跳过执行。
+
+【抗幻觉】三层机制：
+    1. force_tool_use（首轮）→ 工具可解决的意图，第一轮带 tool_choice="required"
+       服务端不支持时降级为 user-prompt 强制（见 LLMClient）
+    2. force_retry（首轮）→ 首轮 force 后模型仍只回文字 → 注入强提示重试一次
+    3. force_final（连续多轮纯调工具）→ 去掉 tools，强制模型给出 final answer
+       避免「无限调工具不给最终回复」的退化行为
 """
 from __future__ import annotations
 
@@ -23,7 +38,7 @@ import json
 import logging
 from typing import AsyncIterator, Callable, Optional
 
-from app.brain.llm_client import LLMClient
+from app.brain.llm_client import LLMClient, detect_action_intent
 from app.engine.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -32,6 +47,9 @@ MAX_TURNS = 6
 
 # 需要用户确认的危险工具集合
 DANGEROUS_TOOLS = {"open_app", "open_website"}
+
+# 连续多少轮纯调工具（无文字）后强制进入 final 阶段
+MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3
 
 
 class AgentLoop:
@@ -50,6 +68,26 @@ class AgentLoop:
         self.registry = registry
         self.max_turns = max_turns
         self.confirm_tool = confirm_tool
+
+    @staticmethod
+    def _first_user_text(messages: list[dict]) -> str:
+        """取最后一条 user 消息的文本（用于意图判定）。"""
+        for m in reversed(messages):
+            if m.get("role") == "user" and m.get("content"):
+                return str(m["content"])
+        return ""
+
+    @staticmethod
+    def _format_tool_results(messages: list[dict]) -> str:
+        """把最近 N 条 ToolMessage 整理成文本片段，用于「强制 final」时的 user 提示。
+        让模型知道前面调过哪些工具、结果是什么，方便总结。
+        """
+        bits: list[str] = []
+        for m in messages[-10:]:
+            if m.get("role") == "tool":
+                content = (m.get("content") or "")[:200]
+                bits.append(f"  - {content}")
+        return "\n".join(bits) if bits else "（无）"
 
     async def _confirm_or_skip(self, name: str, args: str) -> Optional[str]:
         """对危险工具执行确认。返回 None 表示继续执行，返回字符串表示跳过（附带结果文本）。"""
@@ -110,17 +148,47 @@ class AgentLoop:
         messages: list[dict],
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[tuple]:
+        """真正的 ReAct 循环。
+
+        关键设计：
+        - 第 1 轮 force_tool_use（抗幻觉第 1 层）
+        - 第 1 轮没调工具 + 有工具意图 → 注入 user-prompt 强制重试（抗幻觉第 2 层）
+        - 连续多轮纯调工具无文字 → 去掉 tools 强制 final（抗幻觉第 3 层）
+        """
         tools = self.registry.to_openai() if self.registry.names() else None
         final_text = ""
+        # 累计「最近连续纯调工具、无文字」的轮数（用于抗幻觉第 3 层）
+        consecutive_tool_only = 0
 
-        for _turn in range(self.max_turns):
+        # 【抗幻觉】第 1 层：意图识别 → 第一轮 force_tool_use
+        intent = detect_action_intent(self._first_user_text(messages))
+        force_first_turn = intent is not None
+        if force_first_turn:
+            log.info("AgentLoop: 检测到动作意图 %s，第一轮开启 force_tool_use",
+                     intent)
+
+        for turn in range(self.max_turns):
             if cancel_check is not None and cancel_check():
                 break
             content_parts: list[str] = []
             tool_calls: list[dict] = []
 
+            # 【抗幻觉】第 3 层：连续多轮纯调工具 → 去掉 tools 强制 final
+            # 避免模型「调工具上瘾」一直不总结
+            force_final = consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_TURNS
+            if force_final:
+                log.warning(
+                    "AgentLoop: 已连续 %d 轮纯调工具无文字，强制进入 final 阶段（去掉 tools）",
+                    consecutive_tool_only)
+                yield ("meta", {"event": "force_final",
+                                "reason": f"连续 {consecutive_tool_only} 轮纯调工具无文字",
+                                "turn": turn})
+
             async for ev, data in self.client.chat_stream_events(
-                    messages, tools=tools, cancel_check=cancel_check):
+                    messages,
+                    tools=None if force_final else tools,  # final 阶段不带 tools
+                    cancel_check=cancel_check,
+                    force_tool_use=(force_first_turn and turn == 0)):
                 if ev == "text":
                     content_parts.append(data)
                     yield ev, data
@@ -133,6 +201,29 @@ class AgentLoop:
 
             final_text = "".join(content_parts)
 
+            # 【抗幻觉】第 2 层：第 1 轮 + 有工具意图 + 模型没调工具 →
+            # 注入强提示重试一次（重试时不再用 force_tool_use，让 user prompt 起作用）
+            if (turn == 0 and force_first_turn and not tool_calls
+                    and not (cancel_check and cancel_check())):
+                log.warning(
+                    "AgentLoop: 第一轮 force_tool_use 后模型仍未调工具，"
+                    "注入强提示重试一次（意图=%s）", intent)
+                yield ("meta", {"event": "force_retry",
+                                "reason": "第一轮未调用工具",
+                                "intent": intent})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[系统提醒] 你刚才只回了文字但**没有调用任何工具**。"
+                        f"主人要的是「{intent}」类操作（{self._first_user_text(messages)[:60]}），"
+                        "必须调用对应工具（看上面 schema）。请立刻调用，不要再回文字。"
+                    ),
+                })
+                # 重置连续计数（因为这一轮根本没调工具）
+                consecutive_tool_only = 0
+                continue   # 进入下一轮
+
+            # 没调工具 + 没文字 → 模型认为对话结束
             if not tool_calls:
                 break
 
@@ -151,9 +242,42 @@ class AgentLoop:
                 ],
             })
 
-            # 并行执行所有工具调用（yield 的是 4-tuple: ("tool", name, args, result)）
+            # 并行执行所有工具调用
             async for event in self._execute_tools_parallel(
                     tool_calls, messages, cancel_check=cancel_check):
                 yield event
-            # 带着工具结果进入下一轮流式请求
+
+            # 统计「纯调工具无文字」连续次数
+            if not final_text.strip():
+                consecutive_tool_only += 1
+            else:
+                consecutive_tool_only = 0
+
+            # 如果下一轮要强制 final，提前注入 user 总结指令
+            if consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_TURNS - 1:
+                # 还有一轮机会，先在 user 里给一个软提示
+                tool_summary = self._format_tool_results(messages)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[提示] 你已经调用了多个工具，结果如下：\n{tool_summary}\n"
+                        "**下一轮请不要再调任何工具**，直接用中文给主人一个完整、自然的总结回复。"
+                    ),
+                })
+
+        # 兜底：final_text 为空（极端情况，比如最后一轮纯调工具）
+        # → 不让 UI 看到空文本，而是从工具结果拼一个简短回复
+        if not final_text.strip() and tools:
+            tool_results = [
+                m.get("content", "") for m in messages
+                if m.get("role") == "tool"
+            ]
+            if tool_results:
+                # 取最后一条工具结果作为基础（避免给主人看一长串原始结果）
+                last_result = tool_results[-1].strip()
+                # 截断到合理长度
+                if len(last_result) > 300:
+                    last_result = last_result[:300] + "..."
+                final_text = last_result
+
         yield "done", final_text

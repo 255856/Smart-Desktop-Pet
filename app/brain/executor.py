@@ -114,8 +114,18 @@ class PlanExecutor:
 
         并行执行：相同 parallel_group 的 step 会用 asyncio.gather 并行执行
         （适合"读文件 + 查天气"等无依赖步骤）。
+
+        【抗幻觉】执行结束后用 HeuristicReflector.detect_plan_hallucination()
+        检查整个 plan 是否「用户意图是工具动作但没有成功调用工具」——
+        是的话强制触发 replan（额外次数），给模型第二次机会。
         """
         history = history or []
+        # 把 plan_goal 注入 reflector（如果它是 HeuristicReflector）
+        if hasattr(self.reflector, "set_plan_goal"):
+            try:
+                self.reflector.set_plan_goal(plan.goal)
+            except Exception:  # noqa: BLE001
+                pass
         yield "plan", plan.to_dict()
 
         replans = 0
@@ -179,11 +189,45 @@ class PlanExecutor:
                         break
                     replans += 1
                     plan = await self.planner.replan(plan, history=history)
+                    if hasattr(self.reflector, "set_plan_goal"):
+                        try:
+                            self.reflector.set_plan_goal(plan.goal)
+                        except Exception:  # noqa: BLE001
+                            pass
                     yield "plan", plan.to_dict()
                     break   # replan 后从新 plan 头开始
 
             # 推进 plan.current（跳过所有并行 step）
             plan.current += len(parallel_steps)
+
+        # ---- 【抗幻觉】plan 跑完后整体检查：意图是工具动作但没成功调工具 → 强制 replan ----
+        hallucination_refl: Optional[Reflection] = None
+        if hasattr(self.reflector, "detect_plan_hallucination"):
+            try:
+                hallucination_refl = self.reflector.detect_plan_hallucination(plan)
+            except Exception:  # noqa: BLE001
+                hallucination_refl = None
+        if (hallucination_refl is not None
+                and hallucination_refl.verdict == "replan"
+                and replans < self.max_replans):
+            replans += 1
+            log.warning("PlanExecutor: 触发抗幻觉 replan（第 %d 次）：%s",
+                        replans, hallucination_refl.comment)
+            yield "reflection", {
+                **hallucination_refl.to_dict(),
+                "reason": "anti_hallucination",
+            }
+            plan = await self.planner.replan(plan, history=history)
+            if hasattr(self.reflector, "set_plan_goal"):
+                try:
+                    self.reflector.set_plan_goal(plan.goal)
+                except Exception:  # noqa: BLE001
+                    pass
+            yield "plan", plan.to_dict()
+            # 跑新 plan（递归一次）
+            async for ev in self._run_inner_loop(
+                    plan, history, cancel_check, replans):
+                yield ev
 
         # 取最终答案
         if plan.final_answer is None:
@@ -194,9 +238,50 @@ class PlanExecutor:
             if last_final is not None:
                 plan.final_answer = last_final.result
             else:
+                # 兜底：拼所有 tool 步骤结果作为「工具执行总结」
                 bits = [f"{s.tool_name}: {s.result}"
                         for s in plan.steps
                         if s.kind == "tool" and s.status == "done" and s.result]
                 plan.final_answer = "\n".join(bits) if bits else "（未产出答案）"
+                # 同时作为 text 事件 yield 出去（让 UI 能显示）
+                if bits:
+                    log.info("PlanExecutor: plan 没有 final 步骤，"
+                             "工具结果作为 text 事件兜底")
+                    yield "text", plan.final_answer
 
         yield "done", plan.final_answer or ""
+
+    async def _run_inner_loop(
+        self,
+        plan: Plan,
+        history: list[dict],
+        cancel_check: Optional[Callable[[], bool]],
+        replans_used: int,
+    ) -> AsyncIterator[tuple]:
+        """抗幻觉 replan 后跑一次 plan（不再做二次抗幻觉检查避免死循环）。"""
+        while not plan.is_done:
+            if cancel_check is not None and cancel_check():
+                break
+            step = plan.current_step
+            if step is None:
+                break
+            parallel_steps: list[Step] = [step]
+            if step.parallel_group:
+                i = plan.current + 1
+                while i < len(plan.steps) and plan.steps[i].parallel_group == step.parallel_group:
+                    parallel_steps.append(plan.steps[i])
+                    i += 1
+            if len(parallel_steps) > 1:
+                reflections = await asyncio.gather(
+                    *[self._run_step(s) for s in parallel_steps])
+            else:
+                reflections = [await self._run_step(step)]
+            for s, reflection in zip(parallel_steps, reflections):
+                yield "reflection", reflection.to_dict()
+                if s.kind == "tool" and s.tool_name:
+                    yield "tool", s.tool_name, json.dumps(
+                        s.arguments, ensure_ascii=False), s.result or ""
+                if reflection.verdict == "replan" and replans_used < self.max_replans:
+                    plan.final_answer = "抱歉，多次重新规划仍未解决，请换个问法。"
+                    return
+            plan.current += len(parallel_steps)

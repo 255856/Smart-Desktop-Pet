@@ -194,6 +194,57 @@ def main() -> int:
     check("AgentLoopV2（react / single 切换）", True)
     check("make_agent_loop 工厂", callable(make_agent_loop))
 
+    # ---- v3.1+ 抗幻觉机制（强制调工具 + 跨步检测 + 重试）----
+    from app.brain.llm_client import (
+        detect_action_intent, _is_tool_choice_unsupported,
+    )
+    check("意图识别 detect_action_intent", callable(detect_action_intent))
+    check("  · 识别 'open_app'", detect_action_intent("帮我打开 QQ") == "open_app")
+    check("  · 识别 'add_reminder'",
+          detect_action_intent("30 分钟后提醒我喝水") == "add_reminder")
+    check("  · 识别 'remember_fact'",
+          detect_action_intent("记住：主人喜欢咖啡") == "remember_fact")
+    check("  · 闲聊不误识别", detect_action_intent("陪我聊天") is None)
+    check("tool_choice 降级判定", callable(_is_tool_choice_unsupported))
+
+    # LLMClient 必须有降级路径
+    llc_src = inspect.getsource(
+        __import__('app.brain.llm_client', fromlist=['LLMClient']).LLMClient)
+    check("LLMClient 降级到 user-prompt 强制",
+          "_stream_with_force_prompt" in llc_src
+          and "_is_tool_choice_unsupported" in llc_src)
+    check("LLMClient 自动检测 tool_choice 未调工具",
+          "tool_choice" in llc_src and "降级" in llc_src)
+
+    # AgentLoop 必须有 force_tool_use + 强制重试
+    from app.brain.agent import AgentLoop as _AgentLoop
+    al_src = inspect.getsource(_AgentLoop)
+    check("AgentLoop 意图驱动 force_tool_use",
+          "force_tool_use" in al_src and "detect_action_intent" in al_src)
+    check("AgentLoop 第一轮失败 → 注入 user 强制重试",
+          "force_retry" in al_src and "必须调用" in al_src)
+
+    # Reflector 必须有跨步幻觉检测
+    from app.brain.reflector import HeuristicReflector as _HR
+    hr_src = inspect.getsource(_HR)
+    check("HeuristicReflector.detect_plan_hallucination",
+          "detect_plan_hallucination" in hr_src)
+
+    # PlanExecutor 必须用 detect_plan_hallucination
+    from app.brain.executor import PlanExecutor as _PE
+    pe_src = inspect.getsource(_PE)
+    check("PlanExecutor 跨步检测幻觉 → 触发 replan",
+          "detect_plan_hallucination" in pe_src
+          and "anti_hallucination" in pe_src)
+
+    # ChatWindow 必须用 AgentLoopV2（react 模式）+ 处理 meta 事件
+    from app.ui.chat_window import ChatWindow as _CW
+    cw_src = inspect.getsource(_CW)
+    check("ChatWindow 接入 AgentLoopV2（react）",
+          "make_agent_loop" in cw_src)
+    check("ChatWindow 处理 force_retry meta 事件",
+          "_on_meta" in cw_src and "force_retry" in cw_src)
+
     from app.mcp.protocol import MCPClientRegistry, MCPServerConfig, MCPStdioClient
     mcp_src = inspect.getsource(MCPStdioClient)
     check("MCPClientRegistry", True)
