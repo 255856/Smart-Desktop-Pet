@@ -20,15 +20,15 @@
 
 ```powershell
 cd E:\study\desktop-pet
-python -m pytest tests/ -q                        # 单元测试 296 个，应全过
-python scripts/verify_features.py                  # 功能验证 88 项，应全过
+python -m pytest tests/ -q                        # 单元测试 304 个，应全过
+python scripts/verify_features.py                  # 功能验证 94 项，应全过
 python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboard
 ```
 
 `verify_features.py` 输出类似：
 
 ```
-总计：88 OK, 0 FAIL, 88 项
+总计：94 OK, 0 FAIL, 94 项
 ```
 
 ---
@@ -49,10 +49,15 @@ python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboar
 - `backend: lightweight`（默认）—— 手写 ReAct，零依赖，3 层抗幻觉
 - `backend: standard` —— LangChain 1.0+ `create_agent` + `langgraph-checkpoint-sqlite`（生产 / 生态对接）
 
+**抗推理污染**：推理模型（MiniMax-M3 / DeepSeek-R1 / Qwen3.5 等）的 SSE 流会在 `content` 字段之前先输出 `reasoning_content` 思考痕迹。LLMClient 严格区分：
+- `delta.content` → yield 为 `text` 事件（UI 显示）
+- `delta.reasoning_content` / `delta.reasoning` → yield 为 `meta{"event":"reasoning_delta"}`（仅 Trace 记录，UI 不显示）
+- 若 content 内含 `<think>...</think>` 标签，sanitize_text 会剥掉
+
 详见：`app/brain/agent.py`（真正的 ReAct + 3 层抗幻觉）、
-`app/brain/llm_client.py`（force_tool_use + detect_action_intent）、
+`app/brain/llm_client.py`（force_tool_use + 推理分离）、
 `app/brain/langchain_agent.py`（LangChain 后端）、
-`tests/test_react_loop.py` + `tests/test_anti_hallucination*.py`（回归测试）。
+`tests/test_react_loop.py` + `tests/test_anti_hallucination*.py` + `tests/test_reasoning_separation.py`（回归测试）。
 
 ---
 

@@ -93,10 +93,15 @@ class _AgentWorker(QThread):
         修复：把 `done` 事件的 payload 也作为 final 文本的兜底（防御性）。
         历史上某些 AgentLoop 变体（如 AgentLoopV2 的 Planner+Executor 模式）
         不一定 yield text 事件就 yield done，导致 `chat reply ready: ''`。
+
+        处理推理模型：text 事件里**不再**含 reasoning_content / reasoning 字段
+        （由 LLMClient._do_stream_request 区分）。reasoning 通过 meta 事件
+        {"event": "reasoning", "content": "..."} 转发给 Trace，UI 不显示。
         """
         try:
             full: list[str] = []
             done_fallback: str = ""   # 防御：done 事件 payload 作为 last-resort
+            reasoning_parts: list[str] = []   # 收集推理模型的思考内容（Trace 用）
             # LangChainAgent 提供 run_sync（在持久 loop 里跑，跨调用不切换）
             if hasattr(self.agent, "run_sync"):
                 events = self.agent.run_sync(
@@ -119,8 +124,13 @@ class _AgentWorker(QThread):
                         if payload and payload[0]:
                             done_fallback = str(payload[0])
             else:
-                async def drive(done_box: list[str]) -> None:
-                    """驱动 agent.run 异步迭代；done_box 用于回传 done 兜底文本。"""
+                async def drive(done_box: list[str],
+                                reasoning_box: list[str]) -> None:
+                    """驱动 agent.run 异步迭代。
+
+                    done_box: 用于回传 done 兜底文本（防御性）
+                    reasoning_box: 用于回传推理模型思考内容（Trace 用，不给 UI）
+                    """
                     async for ev in self.agent.run(
                             self.messages, cancel_check=self.cancel_event.is_set):
                         kind = ev[0]
@@ -131,7 +141,13 @@ class _AgentWorker(QThread):
                             self.tool_used.emit(ev[1], ev[2], ev[3])
                         elif kind == "meta":
                             # ev = ("meta", dict)
-                            self.meta.emit("meta", ev[1] if len(ev) > 1 else {})
+                            meta_payload = ev[1] if len(ev) > 1 else {}
+                            # 特殊：reasoning meta 累积到 reasoning_box（一次性 trace）
+                            if isinstance(meta_payload, dict) and \
+                                    meta_payload.get("event") == "reasoning_delta":
+                                reasoning_box.append(meta_payload.get("content", ""))
+                                # 不 emit 给 UI（meta 仍然 emit 给 Trace 记录）
+                            self.meta.emit("meta", meta_payload)
                         elif kind in ("plan", "reflection"):
                             self.meta.emit(kind, ev[1] if len(ev) > 1 else {})
                         elif kind == "done":
@@ -140,9 +156,16 @@ class _AgentWorker(QThread):
                                 done_box.append(str(ev[1]))
 
                 done_box: list[str] = []
-                asyncio.run(drive(done_box))
+                reasoning_box: list[str] = []
+                asyncio.run(drive(done_box, reasoning_box))
                 if done_box:
                     done_fallback = done_box[-1]
+                # 一次性把推理内容透传给 Trace（不发给 UI）
+                if reasoning_box:
+                    self.meta.emit("meta", {
+                        "event": "reasoning",
+                        "content": "".join(reasoning_box),
+                    })
             # 拼接最终文本：如果累积的 full 为空且 done 有 payload，用 done 的
             final_text = "".join(full) or done_fallback
             self.done.emit(final_text)

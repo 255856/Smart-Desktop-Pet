@@ -257,6 +257,30 @@ def main() -> int:
           and "工具结果作为" in al_src
           or "tool_results" in al_src)
 
+    # LLMClient 必须分离 reasoning_content 和 content
+    from app.brain.llm_client import _extract_text_chunk, _extract_reasoning_chunk
+    check("_extract_text_chunk 只返回 content（不含 reasoning）",
+          _extract_text_chunk({"content": "hi", "reasoning_content": "r"}) == "hi")
+    check("_extract_text_chunk reasoning 单独存在时返回空",
+          _extract_text_chunk({"reasoning_content": "r"}) == "")
+    check("_extract_reasoning_chunk 提取 reasoning_content / reasoning",
+          _extract_reasoning_chunk({"reasoning_content": "r"}) == "r"
+          and _extract_reasoning_chunk({"reasoning": "r"}) == "r")
+    # _do_stream_request 必须显式处理 reasoning_content 字段
+    dsr_src = inspect.getsource(
+        __import__('app.brain.llm_client', fromlist=['LLMClient']).LLMClient)
+    check("_do_stream_request 区分 reasoning_content（不 yield 给 UI）",
+          "reasoning_content" in dsr_src
+          and "reasoning_chunk" in dsr_src
+          and "reasoning_delta" in dsr_src)
+    check("_do_stream_request 显式 yield content_chunk 为 text 事件",
+          'yield ("text", clean)' in dsr_src)
+    # chat_stream 也必须分离（用于无工具调用路径）
+    cs_src = inspect.getsource(
+        __import__('app.brain.llm_client', fromlist=['LLMClient']).LLMClient)
+    check("chat_stream 跳过 reasoning_content 字段",
+          "_extract_reasoning_chunk" in cs_src)
+
     from app.mcp.protocol import MCPClientRegistry, MCPServerConfig, MCPStdioClient
     mcp_src = inspect.getsource(MCPStdioClient)
     check("MCPClientRegistry", True)

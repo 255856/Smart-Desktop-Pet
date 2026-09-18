@@ -121,10 +121,19 @@ class ChatMessage:
 
 
 def _extract_text_chunk(delta: dict) -> str:
-    """从 SSE delta 里拿正文（兼容三种字段）。"""
+    """从 SSE delta 里拿正文（只拿最终回复 content，不拿 reasoning）。
+
+    注意：**永远不**回退到 reasoning_content / reasoning。
+    推理模型的思考内容不应该作为正文 yield 给用户。
+    如果 content 为空但 reasoning 有内容，返回空字符串。
+    """
+    return delta.get("content") or ""
+
+
+def _extract_reasoning_chunk(delta: dict) -> str:
+    """从 SSE delta 里拿推理模型的思考内容（reasoning_content / reasoning）。"""
     return (
-        delta.get("content")
-        or delta.get("reasoning_content")
+        delta.get("reasoning_content")
         or delta.get("reasoning")
         or ""
     )
@@ -207,7 +216,16 @@ class LLMClient:
         messages: list[ChatMessage],
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[str]:
-        """异步流式调用，逐 token 产出 content（自动清洗 emoji）。"""
+        """异步流式调用，逐 token 产出 content（自动清洗 emoji）。
+
+        关键：区分「思考内容」和「最终回复」——
+        - delta.content → 最终回复（yield 给 UI 显示）
+        - delta.reasoning_content / delta.reasoning → 推理模型的思考痕迹
+          （直接丢弃，绝不 yield 给 UI）
+
+        还会处理 `` / `` 这种内嵌标签（DeepSeek-r1 早期格式）——
+        如果 content 字段里塞了 `` 标签，剥掉标签内的内容，只 yield 正文。
+        """
         if is_placeholder_key(self.cfg.api_key):
             raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
@@ -225,8 +243,9 @@ class LLMClient:
                 body = await resp.aread()
                 raise LLMError(f"HTTP {resp.status_code}: {body[:300].decode('utf-8', errors='ignore')}")
             try:
-                buffer = ""
-                thinking_seen = None
+                # 处理 `` 标签（DeepSeek-r1 原生标签格式）
+                in_think = False
+                think_buf = ""
                 async for line in resp.aiter_lines():
                     if cancel_check is not None and cancel_check():
                         break
@@ -243,38 +262,44 @@ class LLMClient:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
-                    if delta.get("content"):
-                        saw_content = True
-                    chunk = _extract_text_chunk(delta)
-                    if not chunk:
-                        continue
-                    is_reasoning = bool(
-                        delta.get("reasoning") or delta.get("reasoning_content"))
 
-                    if thinking_seen is None:
-                        if chunk.startswith(THINK_TAG_START):
-                            thinking_seen = True
-                            chunk = chunk[len(THINK_TAG_START):]
-                            buffer = chunk
-                            continue
-                        thinking_seen = False
-                        if not is_reasoning:
-                            yield sanitize_text(chunk)
-                        continue
+                    # 跳过思考内容（reasoning_content / reasoning 字段）
+                    if _extract_reasoning_chunk(delta):
+                        continue   # 直接丢弃，不 yield
 
-                    if thinking_seen:
-                        buffer += chunk
-                        marker = buffer.find(THINK_TAG_END)
+                    # 取 content（只取最终回复）
+                    content_chunk = _extract_text_chunk(delta)
+                    if not content_chunk:
+                        continue
+                    saw_content = True
+
+                    # 处理 `` 标签（如果模型把思考塞在 content 里）
+                    if in_think:
+                        think_buf += content_chunk
+                        marker = think_buf.find(THINK_TAG_END)
                         if marker >= 0:
-                            rest = buffer[marker + len(THINK_TAG_END):].lstrip("\n\r ")
+                            rest = think_buf[marker + len(THINK_TAG_END):].lstrip("\n\r ")
                             if rest:
                                 yield sanitize_text(rest)
-                            thinking_seen = False
-                            buffer = ""
+                            in_think = False
+                            think_buf = ""
                         continue
 
-                    if not is_reasoning:
-                        yield sanitize_text(chunk)
+                    # 第一次检测到 `` 起始
+                    if content_chunk.startswith(THINK_TAG_START):
+                        in_think = True
+                        think_buf = content_chunk[len(THINK_TAG_START):]
+                        # 检查是否在同一 chunk 内闭合
+                        marker = think_buf.find(THINK_TAG_END)
+                        if marker >= 0:
+                            rest = think_buf[marker + len(THINK_TAG_END):].lstrip("\n\r ")
+                            if rest:
+                                yield sanitize_text(rest)
+                            in_think = False
+                            think_buf = ""
+                        continue
+
+                    yield sanitize_text(content_chunk)
             finally:
                 try:
                     await resp.aclose()
@@ -414,8 +439,20 @@ class LLMClient:
         headers: dict,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[tuple[str, object]]:
-        """执行一次流式请求，产 (text/finish) 事件。"""
+        """执行一次流式请求，产 (text/finish) 事件。
+
+        关键：区分「思考内容」和「最终回复」——
+        - delta.content → 最终回复（yield 给 UI 显示）
+        - delta.reasoning_content / delta.reasoning → 推理模型的思考痕迹
+          （不 yield 给 UI，但累计到 reasoning_parts 给 Trace 调试用）
+
+        这是国产推理模型（MiniMax-M3 / DeepSeek-R1 / Qwen3.5 等）的常见坑：
+        SSE 流里 content 之前会先输出大量 reasoning_content，如果原样输出
+        聊天窗口就会显示「嗯，用户说晚上好，我应该友好回复...晚上好主人~」，
+        把思考痕迹当正文给主人看 = 体验崩溃。
+        """
         saw_content = False
+        reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -440,18 +477,29 @@ class LLMClient:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
-                    if delta.get("content"):
-                        saw_content = True
-                    chunk = (
-                        delta.get("content")
-                        or delta.get("reasoning_content")
+
+                    # 1) 思考内容（reasoning_content / reasoning）——
+                    #    不 yield 给 UI，但 yield 一个 meta 事件供 Trace 收集
+                    reasoning_chunk = (
+                        delta.get("reasoning_content")
                         or delta.get("reasoning")
                         or ""
                     )
-                    if chunk:
-                        clean = sanitize_text(chunk)
+                    if reasoning_chunk:
+                        reasoning_parts.append(reasoning_chunk)
+                        # 透传给 Trace（AgentLoopV2 / 上层收集）；UI 不会显示
+                        yield ("meta", {"event": "reasoning_delta",
+                                        "content": reasoning_chunk})
+
+                    # 2) 最终回复（content）—— 只 yield 给 UI
+                    content_chunk = delta.get("content") or ""
+                    if content_chunk:
+                        saw_content = True
+                        clean = sanitize_text(content_chunk)
                         content_parts.append(clean)
                         yield ("text", clean)
+
+                    # 3) tool_calls 增量
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         acc = tc_acc.setdefault(
@@ -473,15 +521,20 @@ class LLMClient:
 
             tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
             if not saw_content and not tool_calls:
+                # 模型没回任何 content（可能是流式丢包）→ fallback 到非流式
                 full_text = await self._fetch_non_streaming(
                     [ChatMessage(role=m["role"], content=m.get("content") or "")
                      for m in payload["messages"][1:]])  # 去掉 system
                 if full_text:
                     yield ("text", full_text)
                     content_parts.append(full_text)
-            yield ("finish", {"reason": finish_reason,
-                              "tool_calls": tool_calls,
-                              "content": "".join(content_parts)})
+            # finish 事件带上 reasoning（如果非空）→ 上层可选择写到 Trace
+            yield ("finish", {
+                "reason": finish_reason,
+                "tool_calls": tool_calls,
+                "content": "".join(content_parts),
+                "reasoning": "".join(reasoning_parts),   # 给 Trace 用，不给 UI
+            })
 
     async def _stream_with_force_prompt(
         self,
