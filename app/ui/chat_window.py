@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from app.core.qt_compat import (
-    QFont, QFrame, QHBoxLayout, QKeyEvent,
+    QApplication, QFont, QFrame, QHBoxLayout, QKeyEvent,
     QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QObject, QPixmap, QPlainTextEdit, QPoint, QPushButton,
     QSplitter, Qt, QTextBrowser, QTextCursor, QToolButton, QVBoxLayout,
@@ -173,6 +173,23 @@ class _StreamWorker(QThread):
 # ============================================================================
 #  / 命令补全（QPlainTextEdit 没有 setCompleter，自己写一个轻量版）
 # ============================================================================
+
+
+def _html_escape(text: str) -> str:
+    """HTML 字符转义（防 XSS + 让浏览器不解析）。"""
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;"))
+
+
+def _format_time_short(ts: float) -> str:
+    """把时间戳格式化成 HH:MM（用于气泡上方 meta）。"""
+    import datetime
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
+    except Exception:
+        return ""
 
 
 class _CommandCompleter(QObject):
@@ -508,7 +525,8 @@ class ChatWindow(QWidget):
         il.setSpacing(4)
 
         self.input_edit = QPlainTextEdit()
-        self.input_edit.setPlaceholderText("输入消息，回车发送（Shift+回车 换行）")
+        self.input_edit.setPlaceholderText(
+            "输入消息，回车发送（Shift+回车 或 Ctrl+回车 换行）")
         self.input_edit.setMaximumHeight(110)
         self.input_edit.setStyleSheet("""
             QPlainTextEdit {
@@ -606,10 +624,22 @@ class ChatWindow(QWidget):
         return "  ·  ".join(parts)
 
     def _input_key_press(self, event: QKeyEvent) -> None:
-        """Enter 发送，Shift+Enter 换行（重写自 QPlainTextEdit.keyPressEvent）。"""
+        """Enter 发送，Shift+Enter / Ctrl+Enter 换行（重写自 QPlainTextEdit.keyPressEvent）。
+
+        为什么也支持 Ctrl+Enter：
+            - 大量 IDE / 聊天工具（Slack、Discord、VS Code）把 Ctrl+Enter 作为换行
+            - 用户从这些工具迁移过来会下意识按 Ctrl+Enter，单独只支持 Shift 会让他们
+              错误地连发多条消息
+            - Shift 兼容老用户习惯，Ctrl 兼容现代用户习惯，两者并存零成本
+        """
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                # Shift+Enter：插入换行
+            mods = event.modifiers()
+            newline_mod = (
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.ControlModifier
+            )
+            if mods & newline_mod:
+                # Shift+Enter 或 Ctrl+Enter：插入换行
                 cursor = self.input_edit.textCursor()
                 cursor.insertText("\n")
             else:
@@ -980,8 +1010,10 @@ class ChatWindow(QWidget):
         # 最终清洗（每个 chunk 内 sanitize 过，但跨 chunk 的长括号段要等全文）
         from app.brain.llm_client import sanitize_text
         parsed.text = sanitize_text(parsed.text)
-        if parsed.emotion == Emotion.HAPPY and parsed.text == self._current_bot_msg.content:
-            # 模型没标情绪，按关键词兜底
+        # 仅在模型真的没标情绪（tag_found=False）时才按关键词兜底；
+        # 之前用「parse 后文本 == 流式累积文本」判断，sanitize_text 跨 chunk 的差异
+        # 会让 [happy] 被错误地当成「没标」而覆盖。
+        if not parsed.tag_found:
             parsed.emotion = guess_emotion(parsed.text)
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
@@ -1048,14 +1080,14 @@ class ChatWindow(QWidget):
 
     # ---------------- 渲染 ----------------
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
-        """按已完成的 Message 渲染成 HTML 字符串（控制台风格单行聊天）。
+        """按已完成的 Message 渲染成 HTML 字符串（气泡式聊天）。
 
         设计：
             - 系统消息：居中灰条
-            - 用户消息：左对齐，单行（默认色）
-            - 桌宠消息：左对齐，单行（浅蓝色 #7eb6ff）
-            - 工具调用：在 bot 消息下方一行一行显示（小灰字）
-            - 不显示角色名 / 时间戳
+            - 用户消息：右对齐 + 蓝色头像 + 微信风绿白色气泡
+            - 桌宠消息：左对齐 + 粉色头像 + 白色气泡（带名字 + 时间）
+            - 工具调用：在桌宠气泡下方用一个紧凑浅紫卡片显示（div.tools）
+            - 流式输出中：bot 气泡末尾追加一个 ⏳ 提示
         """
         # ---- 系统消息：居中灰色条 ----
         if msg.role == "system":
@@ -1080,24 +1112,63 @@ class ChatWindow(QWidget):
         else:
             safe = self._render_markdown(raw)
 
-        # 工具调用（bot 消息专用，灰色小字，紧凑）
+        # 流式输出中：bot 气泡末尾追加 typing 提示
+        if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
+            safe = safe + f' <span style="color:#a78bfa;">⏳</span>'
+
+        # 工具调用（bot 消息专用，浅紫小卡片，紧凑）
         tools_html = "".join(
-            f'<div style="color:#888;font-size:9pt;margin:2px 0;">↳ {name} → {summary}</div>'
+            f'<div class="tools">↳ <b>{name}</b> → {summary}</div>'
             for name, summary in msg.tools
         )
 
-        # 消息体：每个 <p> 独立 block，margin-bottom:10px 视觉分段
-        # 关键：Qt QTextBrowser 用 QTextDocument 解析，cursor.insertHtml() 会把多个 <p> 合并成一个块。
-        # 必须在 HTML 末尾追加 "\n\n"（纯文本换行）才能真正分段——QTextDocument 把 \n 当段落分隔。
-        # 用户：默认色；桌宠：浅蓝色
-        color = "#2c2c38" if is_user else "#4a90e2"
-        msg_p = (
-            f'<p style="margin:0 0 10px 0;color:{color};">'
-            f'{safe}</p>'
-            f'\n\n'   # 强制 QTextDocument 新段落（关键！）
-        )
+        # 头像字符（首字 / 表情）
+        avatar_text = "我" if is_user else (self.char_cfg.name or "桌宠")[:1]
 
-        return f'{msg_p}{tools_html}'
+        # meta 行（桌宠气泡上方：名字 + 时间；用户气泡上方：时间靠右）
+        if is_user:
+            meta_html = (
+                '<span class="meta right">'
+                f'<span class="time">{_format_time_short(msg.ts)}</span>'
+                '</span>'
+            )
+            layout = (
+                f'{meta_html}'
+                f'<span class="avatar-col user">{_html_escape(avatar_text)}</span>'
+                f'<span class="bubble user">{safe}</span>'
+            )
+        else:
+            meta_html = (
+                '<span class="meta left">'
+                f'<span class="name">{_html_escape(self.char_cfg.name or "桌宠")}</span>'
+                f'<span class="time">{_format_time_short(msg.ts)}</span>'
+                '</span>'
+            )
+            layout = (
+                f'{meta_html}'
+                f'<span class="avatar-col bot">{_html_escape(avatar_text)}</span>'
+                f'<span class="bubble bot">{safe}</span>'
+            )
+            if tools_html:
+                layout += tools_html
+
+        # 整段放在一个 table 里以便：头像与气泡顶部对齐；用户气泡靠右、桌宠气泡靠左
+        # Qt 的 QTextBrowser 支持 <table>，是表格化对齐气泡最稳的方式。
+        if is_user:
+            return (
+                '<table width="100%" cellspacing="0" cellpadding="0" '
+                'style="margin:8px 0;border-collapse:collapse;">'
+                '<tr><td align="right" style="vertical-align:top;">'
+                f'{layout}'
+                '</td></tr></table>'
+            )
+        return (
+            '<table width="100%" cellspacing="0" cellpadding="0" '
+            'style="margin:8px 0;border-collapse:collapse;">'
+            '<tr><td align="left" style="vertical-align:top;">'
+            f'{layout}'
+            '</td></tr></table>'
+        )
 
     def _clean_content(self, text: str) -> str:
         """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行。"""
@@ -1132,15 +1203,19 @@ class ChatWindow(QWidget):
         # 斜体
         text = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', text)
 
-        # 无序列表（每行以 - 开头）
-        text = re.sub(r'^- (.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
-        text = re.sub(r'(<li>.*</li>)', r'<ul>\1</ul>', text, flags=re.DOTALL)
+        # 无序列表（每行以 - 开头）— 整段连续 - 行包成一个 <ul>，避免 <br/> 串进列表
+        def _wrap_ul(m: "re.Match[str]") -> str:
+            items = re.findall(r'^- (.+)$', m.group(0), flags=re.MULTILINE)
+            return '<ul>' + ''.join(f'<li>{it}</li>' for it in items) + '</ul>'
+        text = re.sub(r'(?:^- .+\n?)+', _wrap_ul, text, flags=re.MULTILINE)
 
-        # 有序列表（数字. 开头）
-        text = re.sub(r'^(\d+)\. (.+)$', r'<li>\1. \2</li>', text, flags=re.MULTILINE)
-        text = re.sub(r'(<li>\d+\..*</li>)', r'<ol>\1</ol>', text, flags=re.DOTALL)
+        # 有序列表（数字. 开头）— 同上
+        def _wrap_ol(m: "re.Match[str]") -> str:
+            items = re.findall(r'^\d+\. (.+)$', m.group(0), flags=re.MULTILINE)
+            return '<ol>' + ''.join(f'<li>{it}</li>' for it in items) + '</ol>'
+        text = re.sub(r'(?:^\d+\. .+\n?)+', _wrap_ol, text, flags=re.MULTILINE)
 
-        # 换行
+        # 剩余段落里的换行 → <br/>
         text = text.replace("\n", "<br/>")
 
         return text

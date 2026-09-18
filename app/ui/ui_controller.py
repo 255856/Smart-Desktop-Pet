@@ -52,7 +52,7 @@ class UIController(QObject):
         self._last_food_warn = 0.0
 
         # --- 设置窗口 ---
-        self.settings_window = SettingsWindow()
+        self.settings_window = SettingsWindow(char_cfg=self.cfg.character)
         self.settings_window.attach_state(self.state)
 
         # --- 托盘 ---

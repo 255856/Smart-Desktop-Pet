@@ -31,13 +31,29 @@ class ReminderItem:
 
 
 # 简单从中文里解析「N 秒/分钟/小时后做 X」
+# 顺序敏感：更具体的模式放前面（"一个半小时后" 必须在 "X个半小时后" 之前，
+# 否则 "一个半小时" 会被当成 "1 个半小时" = 30 min）。
 _PATTERNS = [
     (re.compile(r"(\d+)\s*秒后"), 1),
     (re.compile(r"(\d+)\s*分钟后"), 60),
     (re.compile(r"(\d+)\s*小时后"), 3600),
+    # 「一个半小时后」= 1.5 小时 = 90 分钟（口语里 "一个半" 就是 "1.5"）
+    (re.compile(r"一个半小时后"), 5400),
+    # 「X 个半小时后」= X × 30 分钟（如 "5个半小时后" = 2.5 小时 = 9000 秒）
     (re.compile(r"(\d+)\s*个半小时后"), 1800),
-    (re.compile(r"[一二三四五六七八九十]+\s*个半小时后"), 1800),
+    # 中文数字 X 个半小时（如 "五个半小时后"）→ X × 30 分钟
+    (re.compile(r"([一二三四五六七八九十]+)\s*个半小时后"), 1800),
 ]
+
+
+def _cn_digit_to_int(s: str) -> int:
+    """把一位中文数字（一二三四五六七八九十）转成阿拉伯数字；超出一位返回 None。"""
+    table = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    if len(s) == 1:
+        return table.get(s)
+    # 多位（十一、二十三 等）暂不展开——用户场景下常见的是单个 X（5个半小时）
+    return None
 
 
 def parse_quick_reminder(text: str) -> Optional[tuple[int, str]]:
@@ -48,19 +64,26 @@ def parse_quick_reminder(text: str) -> Optional[tuple[int, str]]:
     for pat, factor in _PATTERNS:
         m = pat.search(text)
         if m:
-            if m.lastindex:  # 有捕获组（阿拉伯数字）
-                delay = int(m.group(1)) * factor
+            if m.lastindex:
+                g = m.group(1)
+                # 中文数字模式：用 _cn_digit_to_int 解析；解析失败回退 factor
+                if g and any('\u4e00' <= ch <= '\u9fff' for ch in g):
+                    n = _cn_digit_to_int(g)
+                    delay = (n * factor) if n is not None else factor
+                else:
+                    delay = int(g) * factor
             else:  # 无捕获组（中文数字），直接用 factor
                 delay = factor
             break
     if delay is None:
         return None
-    # 抽出提醒内容
+    # 抽出提醒内容（保留时间模式，方便后续清洗时连同时间一起剥掉）
     content = text
     for kw in ["帮我", "请", "麻烦", "记得"]:
         content = content.replace(kw, "")
     content = re.sub(r"^(设置)?(一个)?提醒(我)?[:：]?\s*", "", content)
-    content = re.sub(r"[\d一二三四五六七八九十]+\s*(秒|分钟|小时|个半小时)后", "", content)
+    # 时间模式：阿拉伯数字 + 单位 / 中文数字 + 单位 / "一个半小时"
+    content = re.sub(r"(\d+|[一二三四五六七八九十]+|一个半)\s*(秒|分钟|小时|个半小时)后", "", content)
     content = content.replace("提醒我", "").replace("提醒", "")
     content = content.strip(" ，,。.!?！？")
     if not content:

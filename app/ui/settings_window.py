@@ -26,6 +26,9 @@ from app.core.qt_compat import (
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from app.core.config import CharacterConfig
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +59,8 @@ class SettingsWindow(QWidget):
     # --- TTS 语音变更 ---
     voice_changed = Signal(str)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None,
+                 char_cfg: Optional["CharacterConfig"] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -67,6 +71,8 @@ class SettingsWindow(QWidget):
             self.setWindowIcon(QIcon(str(_ico)))
         self.setMinimumSize(QSize(520, 760))
         self.setStyleSheet(ui_style.SETTINGS_QSS)
+        # 角色配置（用于「试听」按钮显示角色名 + 后续扩展）；允许为 None 以保留向后兼容
+        self.char_cfg = char_cfg
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -913,7 +919,11 @@ class SettingsWindow(QWidget):
         """试听当前选中的语音。"""
         from app.voice.voice import TTS
         voice = self.cmb_voice.currentText()
-        preview_text = f"你好呀，我是{self.cfg.character.name}，很高兴见到你。"
+        # 角色名：优先 char_cfg，兜底「桌宠」，避免 None 触发 AttributeError
+        name = "桌宠"
+        if getattr(self, "char_cfg", None) is not None:
+            name = getattr(self.char_cfg, "name", None) or name
+        preview_text = f"你好呀，我是{name}，很高兴见到你。"
         try:
             tts = TTS(voice=voice)
             tts.speak(preview_text)

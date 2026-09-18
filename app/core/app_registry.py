@@ -20,7 +20,7 @@ JSON 文件格式（data/app_registry.json）：
 
     - 值为字符串：单一路径
     - 值为列表：按顺序尝试，找到第一个存在的即用
-"""
+"""  # noqa: W605
 from __future__ import annotations
 
 import json
@@ -189,12 +189,17 @@ _BUILTIN_MAP: dict[str, list[str]] = {
     ],
 
     # ===== 开发工具 =====
+    # 注意：VS Code 默认装到 %LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe
+    # （即 C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code\Code.exe）
+    # 之前用相对路径 "AppData\Local\..." 在 _expand_path 里找不到，因为基路径只有
+    # C:\、%PROGRAMFILES%、%LOCALAPPDATA%，拼出来就成了 %LOCALAPPDATA%\AppData\...
+    # 用 %LOCALAPPDATA%\Programs\... 一步到位。
     "code": [
-        r"AppData\Local\Programs\Microsoft VS Code\Code.exe",
+        r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
         r"%PROGRAMFILES%\Microsoft VS Code\Code.exe",
     ],
     "vscode": [
-        r"AppData\Local\Programs\Microsoft VS Code\Code.exe",
+        r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
         r"%PROGRAMFILES%\Microsoft VS Code\Code.exe",
     ],
     "notepad++": [
@@ -400,9 +405,11 @@ class AppRegistry:
         """根据名称查找可执行文件路径。
 
         查找顺序：
-            1. 归一化 key 精确匹配 → 按列表顺序尝试每个路径
-            2. 模糊匹配（归一化后包含关系）→ 取第一个
-            3. 未找到返回 None
+            1. 归一化 key 精确匹配 → 按列表顺序尝试每个路径，找到存在的就返回
+            2. 内置映射的模糊匹配（SequenceMatcher.ratio ≥ 0.7）
+            3. **已安装应用相似度搜索**（兜底）—— 扫描系统开始菜单 / 桌面 /
+               App Paths / Uninstall 注册表 / Program Files，按相似度排序
+            4. 都找不到 → 返回 None
         """
         name = app_name.strip()
         if not name:
@@ -410,23 +417,91 @@ class AppRegistry:
 
         key = _normalize_key(name)
 
-        # 1) 精确匹配
+        # 1) 内置精确匹配
         paths = self._all.get(key)
         if paths:
             for p in paths:
                 full = _expand_path(p)
                 if full and Path(full).is_file():
                     return full
+            # 精确 key 存在但所有路径都失效 → 不再走内置模糊匹配
+            # 但仍走「已安装应用扫描」，说不定用户自己装了
+            return self._resolve_from_installed_apps(name)
 
-        # 2) 模糊匹配：归一化后互相包含
+        # 2) 内置模糊匹配
+        from difflib import SequenceMatcher
+        best_match: tuple[float, str] | None = None
         for k, plist in self._all.items():
-            if key in k or k in key:
-                for p in plist:
-                    full = _expand_path(p)
-                    if full and Path(full).is_file():
-                        return full
+            if k == key:
+                continue
+            ratio = SequenceMatcher(None, key, k).ratio()
+            if ratio < 0.7:
+                continue
+            for p in plist:
+                full = _expand_path(p)
+                if full and Path(full).is_file():
+                    if best_match is None or ratio > best_match[0]:
+                        best_match = (ratio, full)
+                    break
+        if best_match:
+            return best_match[1]
 
+        # 3) 已安装应用扫描（兜底）
+        return self._resolve_from_installed_apps(name)
+
+    def _resolve_from_installed_apps(self, name: str) -> Optional[str]:
+        """扫描系统已装应用，按相似度匹配第一个相似度 ≥ 0.85 的。
+
+        用 0.85 阈值（比内置映射的 0.7 高）—— 扫描结果噪声大，宁缺勿滥：
+        用户说「vscode」时，宁可返回 None 让上层报告「找不到 + 推荐 top 5」，
+        也不要错开别的 IDE。
+        """
+        try:
+            from app.core.installed_apps import find_similar_apps
+        except ImportError:
+            return None
+        candidates = find_similar_apps(name, limit=3, min_ratio=0.85)
+        for app, score in candidates:
+            if score >= 0.85 and Path(app.path).is_file():
+                return app.path
         return None
+
+    def find_similar_in_registry(
+        self, query: str, limit: int = 5,
+    ) -> list[tuple[str, float]]:
+        """在**内置**映射（已安装 + 内置 key）里找相似候选。
+
+        用于上层工具列出「没找到时给你 top 5 推荐」。
+
+        Returns: [(候选显示名, 相似度), ...]
+        """
+        from difflib import SequenceMatcher
+        key = _normalize_key(query)
+        scored: list[tuple[str, float]] = []
+        for k in self._all.keys():
+            if k == key:
+                continue
+            score = SequenceMatcher(None, key, k).ratio()
+            if score >= 0.5:
+                # 把归一化 key 反向转成原始显示名（取 _BUILTIN_MAP 中第一个匹配的）
+                display = self._key_to_display(k)
+                scored.append((display, score))
+        # 去重（同 display 多个 key）
+        seen: dict[str, float] = {}
+        for display, score in scored:
+            if display not in seen or score > seen[display]:
+                seen[display] = score
+        out = list(seen.items())
+        out.sort(key=lambda x: -x[1])
+        return out[:limit]
+
+    def _key_to_display(self, key: str) -> str:
+        """归一化 key → 用户能看懂的显示名（用内置映射里第一个匹配的）。"""
+        # 内置映射里找
+        for original_name, paths in _BUILTIN_MAP.items():
+            if _normalize_key(original_name) == key:
+                return original_name
+        return key
 
     def add_custom(self, name: str, path_or_paths: str | list[str]) -> None:
         """添加或覆盖一个自定义映射。"""

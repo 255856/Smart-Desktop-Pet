@@ -16,6 +16,18 @@ class TestCharacter:
     def test_parse_no_tag(self):
         result = parse_reply("你好")
         assert result.emotion == Emotion.HAPPY  # 默认
+        assert result.tag_found is False   # 没标默认情绪时 tag_found=False
+
+    def test_parse_happy_tag_found(self):
+        """[happy] 显式标签时 tag_found=True，避免被兜底覆盖。"""
+        result = parse_reply("你好呀~ [happy]")
+        assert result.emotion == Emotion.HAPPY
+        assert result.tag_found is True
+
+    def test_parse_sad_tag_found(self):
+        result = parse_reply("呜呜~ [sad]")
+        assert result.emotion == Emotion.SAD
+        assert result.tag_found is True
 
     def test_parse_middle_tag_not_stripped(self):
         result = parse_reply("I feel happy today")
