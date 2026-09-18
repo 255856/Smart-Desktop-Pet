@@ -2,12 +2,12 @@
 
 新设计：把「帧时长 → 显示 FPS 调试」的整条链路完整搬到设置面板，
 按语义分成 4 个 Tab：
-    📊 状态    状态条（体力/饱食/口渴/心情/健康/好感 + 摘要）
-    🎬 帧数    FPS 预设按钮 + 帧时长滑块 + 实时改帧率 + FPS 气泡调试
-    👀 视觉    缩放预设 + 滑块 + 透明度 + crossfade + lock idle
-    🎮 控制    表情 / 睡觉 / 醒来 / 聊天 / 自主行为节拍
+     状态    状态条（体力/饱食/口渴/心情/健康/好感 + 摘要）
+     帧数    FPS 预设按钮 + 帧时长滑块 + 实时改帧率 + FPS 气泡调试
+     视觉    缩放预设 + 滑块 + 透明度 + crossfade + lock idle
+     控制    表情 / 睡觉 / 醒来 / 聊天 / 自主行为节拍
 
-打开方式：托盘菜单「⚙️ 设置」 / 桌宠右键菜单「打开设置面板」。
+打开方式：托盘菜单「设置」 / 桌宠右键菜单「打开设置面板」。
 
 所有控件**实时生效**（不再需要「应用帧时长」重命名文件的方式，改的是内存里
 frame.duration_ms；只有用户想把帧时长持久化到 PNG 文件名时才用持久化按钮）。
@@ -59,7 +59,7 @@ class SettingsWindow(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
-        self.setWindowTitle("⚙️ 桌宠设置")
+        self.setWindowTitle("桌宠设置")
         # 设置窗口图标
         _ico = Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
@@ -118,7 +118,7 @@ class SettingsWindow(QWidget):
         root.addWidget(self.lbl_status)
 
         row = QHBoxLayout()
-        self.btn_reset = QPushButton("🔄 重置默认值")
+        self.btn_reset = QPushButton("重置默认值")
         self.btn_close = QPushButton("关闭")
         row.addWidget(self.btn_reset)
         row.addStretch(1)
@@ -131,7 +131,7 @@ class SettingsWindow(QWidget):
         v = QVBoxLayout(page)
         v.setSpacing(6)
 
-        g = QGroupBox("📊 桌宠状态")
+        g = QGroupBox("桌宠状态")
         gv = QVBoxLayout(g)
         self.bar_strength = QProgressBar(); self.bar_food = QProgressBar()
         self.bar_drink = QProgressBar();   self.bar_feeling = QProgressBar()
@@ -144,12 +144,12 @@ class SettingsWindow(QWidget):
             bar.setFixedHeight(14)
             bar.setStyleSheet(ui_style.stat_bar_qss(ui_style.STAT_BAR_COLORS[key]))
         labels_and_bars = [
-            ("💪 体力", self.bar_strength),
-            ("🍚 饱食", self.bar_food),
-            ("💧 口渴", self.bar_drink),
-            ("😊 心情", self.bar_feeling),
-            ("❤️ 健康", self.bar_health),
-            ("💕 好感", self.bar_likability),
+            ("体力", self.bar_strength),
+            ("饱食", self.bar_food),
+            ("口渴", self.bar_drink),
+            ("心情", self.bar_feeling),
+            ("健康", self.bar_health),
+            ("好感", self.bar_likability),
         ]
         for text, bar in labels_and_bars:
             row = QHBoxLayout()
@@ -170,7 +170,7 @@ class SettingsWindow(QWidget):
         v.setSpacing(10)
 
         # —— FPS 预设按钮 ——
-        g_fps = QGroupBox("🎯 帧率预设")
+        g_fps = QGroupBox("帧率预设")
         gv = QVBoxLayout(g_fps)
         row = QHBoxLayout()
         self.fps_presets: list[tuple[QPushButton, int, int]] = []  # (btn, fps, ms)
@@ -187,7 +187,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_fps)
 
         # —— 帧时长滑块（细调）——
-        g_ms = QGroupBox("🧩 帧时长细调")
+        g_ms = QGroupBox("帧时长细调")
         gv = QVBoxLayout(g_ms)
         row = QHBoxLayout()
         self.frame_ms_slider = QSlider(Qt.Orientation.Horizontal)
@@ -208,13 +208,13 @@ class SettingsWindow(QWidget):
         v.addWidget(g_ms)
 
         # —— 持久化按钮（慎重：会改磁盘上 PNG 文件名）——
-        g_save = QGroupBox("💾 持久化")
+        g_save = QGroupBox("持久化")
         gv = QVBoxLayout(g_save)
-        warn = QLabel("⚠️ 仅在你想永久保存当前帧时长到素材文件时使用。改完后下次启动仍是该帧率。")
+        warn = QLabel("仅在你想永久保存当前帧时长到素材文件时使用。改完后下次启动仍是该帧率。")
         warn.setStyleSheet(f"color: #b45309; font-size: 11px;")
         gv.addWidget(warn)
         row = QHBoxLayout()
-        self.btn_persist_frames = QPushButton("💾 把帧时长写入 PNG 文件名")
+        self.btn_persist_frames = QPushButton("把帧时长写入 PNG 文件名")
         self.btn_persist_frames.setObjectName("persist_btn")
         row.addWidget(self.btn_persist_frames)
         row.addStretch(1)
@@ -222,7 +222,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_save)
 
         # —— FPS 气泡调试 ——
-        g_debug = QGroupBox("📊 调试：桌宠头顶 FPS 气泡")
+        g_debug = QGroupBox("调试：桌宠头顶 FPS 气泡")
         gv = QVBoxLayout(g_debug)
         row = QHBoxLayout()
         self.cb_fps_monitor = QCheckBox("开启 FPS 实时监测")
@@ -243,7 +243,7 @@ class SettingsWindow(QWidget):
         v.setSpacing(10)
 
         # —— 缩放：预设按钮 + 滑块 ——
-        g_scale = QGroupBox("📐 桌宠缩放")
+        g_scale = QGroupBox("桌宠缩放")
         gv = QVBoxLayout(g_scale)
         row = QHBoxLayout()
         self.scale_presets: list[tuple[QPushButton, float]] = []
@@ -267,7 +267,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_scale)
 
         # —— 透明度 ——
-        g_op = QGroupBox("🪟 窗口透明度")
+        g_op = QGroupBox("窗口透明度")
         gv = QVBoxLayout(g_op)
         row = QHBoxLayout()
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -282,7 +282,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_op)
 
         # —— 动画切换优化（豆包生成图不连贯时用）——
-        g_anim = QGroupBox("🌫 动画切换优化")
+        g_anim = QGroupBox("动画切换优化")
         gv = QVBoxLayout(g_anim)
         row = QHBoxLayout()
         self.cb_crossfade = QCheckBox("切换动画时淡入淡出")
@@ -300,7 +300,7 @@ class SettingsWindow(QWidget):
         gv.addLayout(row)
 
         row = QHBoxLayout()
-        self.cb_lock_first_idle = QCheckBox("🔒 永远用第一张 idle")
+        self.cb_lock_first_idle = QCheckBox("永远用第一张 idle")
         row.addWidget(self.cb_lock_first_idle, 1)
         gv.addLayout(row)
         v.addWidget(g_anim)
@@ -315,21 +315,21 @@ class SettingsWindow(QWidget):
         v.setSpacing(10)
 
         # —— 快捷入口：聊天 / 睡觉 / 醒来 ——
-        g_short = QGroupBox("⚡ 快捷入口")
+        g_short = QGroupBox("快捷入口")
         gv = QHBoxLayout(g_short)
-        self.btn_chat  = QPushButton("💬 和她聊聊")
+        self.btn_chat  = QPushButton("和她聊聊")
         self.btn_chat.setObjectName("accent_btn")
-        self.btn_sleep = QPushButton("💤 睡觉")
-        self.btn_wake  = QPushButton("🐾 醒来")
+        self.btn_sleep = QPushButton("睡觉")
+        self.btn_wake  = QPushButton("醒来")
         gv.addWidget(self.btn_chat); gv.addWidget(self.btn_sleep); gv.addWidget(self.btn_wake)
         v.addWidget(g_short)
 
         # —— 表情 ——
-        g_emo = QGroupBox("😊 切换表情")
+        g_emo = QGroupBox("切换表情")
         gv = QGridLayout(g_emo)
         self.emo_btns: list[tuple[QPushButton, str]] = []
-        emo_list = [('😊 开心', 'happy'), ('😢 悲伤', 'sad'), ('😡 生气', 'angry'),
-                    ('☺️ 害羞', 'shy'), ('🤔 思考', 'think')]
+        emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
+                    ('害羞', 'shy'), ('思考', 'think')]
         for i, (text, key) in enumerate(emo_list):
             btn = QPushButton(text)
             btn.setCheckable(True)
@@ -339,7 +339,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_emo)
 
         # —— 自主行为节拍 ——
-        g_motion = QGroupBox("🚶 自主行为")
+        g_motion = QGroupBox("自主行为")
         gv = QVBoxLayout(g_motion)
         pairs = [
             ("IDLE 持续（秒）",   10, 180, 45, "idle_s"),
@@ -365,13 +365,13 @@ class SettingsWindow(QWidget):
 
     # ---------- Tab: 模型配置 ----------
     def _build_tab_model(self) -> QWidget:
-        """🤖 模型配置：LLM API 地址、密钥、模型名、参数。"""
+        """模型配置：LLM API 地址、密钥、模型名、参数。"""
         page = QWidget()
         v = QVBoxLayout(page)
         v.setSpacing(10)
 
         # —— API 连接 ——
-        g_api = QGroupBox("🔗 API 连接")
+        g_api = QGroupBox("API 连接")
         gv = QVBoxLayout(g_api)
         form = QFormLayout()
         form.setSpacing(8)
@@ -385,7 +385,7 @@ class SettingsWindow(QWidget):
         self.edt_api_key.setPlaceholderText("sk-xxxxxxx")
         self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.edt_api_key.textChanged.connect(self._on_model_config_changed)
-        self.btn_toggle_key = QPushButton("👁")
+        self.btn_toggle_key = QPushButton("")
         self.btn_toggle_key.setFixedWidth(32)
         self.btn_toggle_key.setToolTip("显示/隐藏密钥")
         self.btn_toggle_key.clicked.connect(self._toggle_api_key_visibility)
@@ -415,7 +415,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_api)
 
         # —— 生成参数 ——
-        g_param = QGroupBox("⚙️ 生成参数")
+        g_param = QGroupBox("生成参数")
         gv = QVBoxLayout(g_param)
         pform = QFormLayout()
         pform.setSpacing(8)
@@ -441,7 +441,7 @@ class SettingsWindow(QWidget):
 
         self.spin_timeout = QSpinBox()
         self.spin_timeout.setRange(10, 300)
-        self.spin_timeout.setSuffix(" s")
+        self.spin_timeout.setSuffix("s")
         self.spin_timeout.valueChanged.connect(lambda _: self._on_model_config_changed())
         pform.addRow("超时时间：", self.spin_timeout)
 
@@ -454,7 +454,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_param)
 
         # —— 常用 API 预设 ——
-        g_preset = QGroupBox("📌 常用 API 预设")
+        g_preset = QGroupBox("常用 API 预设")
         gv = QVBoxLayout(g_preset)
         row = QHBoxLayout()
         self.preset_btns: list[tuple[QPushButton, dict]] = []
@@ -473,7 +473,7 @@ class SettingsWindow(QWidget):
         v.addWidget(g_preset)
 
         # —— TTS 语音设置 ——
-        g_voice = QGroupBox("🎙️ TTS 语音")
+        g_voice = QGroupBox("TTS 语音")
         gv = QVBoxLayout(g_voice)
         vform = QFormLayout()
         vform.setSpacing(8)
@@ -501,7 +501,7 @@ class SettingsWindow(QWidget):
         self.cb_tts_enabled.toggled.connect(self._on_tts_enabled_changed)
         vform.addRow("", self.cb_tts_enabled)
 
-        self.btn_preview_voice = QPushButton("🔊 试听")
+        self.btn_preview_voice = QPushButton("试听")
         self.btn_preview_voice.setFixedWidth(80)
         self.btn_preview_voice.clicked.connect(self._on_preview_voice)
         vform.addRow("试听：", self.btn_preview_voice)
@@ -620,7 +620,7 @@ class SettingsWindow(QWidget):
         self.cb_stream.blockSignals(True)
         self.cb_stream.setChecked(True)
         self.cb_stream.blockSignals(False)
-        self.lbl_model_status.setText("⚠️ 状态：未配置 API Key")
+        self.lbl_model_status.setText("状态：未配置 API Key")
         # 预设按钮：setChecked 会触发 clicked（因为是 checkable）→ 导致重复 emit，所以也要 block
         for btn, _, _ in getattr(self, 'fps_presets', []):
             btn.blockSignals(True)
@@ -741,8 +741,7 @@ class SettingsWindow(QWidget):
         PR-fix-stack-overrun: checkable QPushButton.setChecked 会触发 clicked/toggled，
         如果在互斥循环里不 blockSignals → 递归 → Python stack overrun
         （exit -1073740791，用户看到的"设置面板打不开一启动就崩"）。
-        """
-        # 互斥：其它预设按钮取消勾选（必须 blockSignals 避免递归）
+        """# 互斥：其它预设按钮取消勾选（必须 blockSignals 避免递归）
         for b, _, _ in self.fps_presets:
             b.blockSignals(True)
             b.setChecked(b is btn)
@@ -755,7 +754,7 @@ class SettingsWindow(QWidget):
         self.lbl_fps_apply.setText(
             f"当前：{fps} fps（{ms} ms / 帧）· 已立即应用")
         self.override_frame_ms_requested.emit(ms)
-        self._set_status(f"🎯 立即切换到 {fps} fps（内存中所有帧改为 {ms} ms / 帧）")
+        self._set_status(f"立即切换到 {fps} fps（内存中所有帧改为 {ms} ms / 帧）")
 
     def _on_frame_ms_changed(self, v: int) -> None:
         fps = 1000.0 / v if v > 0 else 0
@@ -797,9 +796,9 @@ class SettingsWindow(QWidget):
         self.settings_store.set("fps_monitor", on)
         self.fps_monitor_toggled.emit(on)
         if on:
-            self._set_status("📊 FPS 气泡监测已开启，桌宠头顶每秒会显示一次实时 FPS")
+            self._set_status("FPS 气泡监测已开启，桌宠头顶每秒会显示一次实时 FPS")
         else:
-            self._set_status("📊 FPS 气泡监测已关闭")
+            self._set_status("FPS 气泡监测已关闭")
 
     # ---- 视觉 ----
     def _on_scale_preset_clicked(self, btn, sc: float) -> None:
@@ -852,7 +851,7 @@ class SettingsWindow(QWidget):
         self.emotion_requested.emit(key)
         names = {'happy': '开心', 'sad': '悲伤', 'angry': '生气',
                  'shy': '害羞', 'think': '思考'}
-        self._set_status(f"😊 切换到表情：{names.get(key, key)}")
+        self._set_status(f"切换到表情：{names.get(key, key)}")
 
     def _on_motion_changed(self, key: str, v: int) -> None:
         if key in self.motion_sliders:
@@ -874,7 +873,7 @@ class SettingsWindow(QWidget):
         self.settings_store.set("model_stream", cfg["stream"])
         # 发信号
         self.model_config_changed.emit(cfg)
-        self._set_status(f"🤖 模型配置已更新：{cfg['model']} @ {cfg['base_url'][:40]}...")
+        self._set_status(f"模型配置已更新：{cfg['model']} @ {cfg['base_url'][:40]}...")
 
     def _on_temperature_changed(self, v: int) -> None:
         self.lbl_temperature.setText(f"{v / 100:.2f}")
@@ -883,10 +882,10 @@ class SettingsWindow(QWidget):
     def _toggle_api_key_visibility(self) -> None:
         if self.edt_api_key.echoMode() == QLineEdit.EchoMode.Password:
             self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_toggle_key.setText("🙈")
+            self.btn_toggle_key.setText("")
         else:
             self.edt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_toggle_key.setText("👁")
+            self.btn_toggle_key.setText("")
 
     def _on_preset_clicked(self, btn, cfg: dict) -> None:
         """点击预设按钮，自动填充对应 API 地址和模型名。"""
@@ -897,13 +896,13 @@ class SettingsWindow(QWidget):
         self.cmb_model.setEditText(cfg["model"])
         self.cmb_model.blockSignals(False)
         self._on_model_config_changed()
-        self._set_status(f"📌 已应用预设：{btn.text()}")
+        self._set_status(f"已应用预设：{btn.text()}")
 
     def _on_voice_changed(self, voice: str) -> None:
         """用户修改了 TTS 语音，发出信号并持久化。"""
         self.settings_store.set("tts_voice", voice)
         self.voice_changed.emit(voice)
-        self._set_status(f"🎙️ 语音已切换：{voice}")
+        self._set_status(f"语音已切换：{voice}")
 
     def _on_tts_enabled_changed(self, enabled: bool) -> None:
         """用户切换了 TTS 开关，持久化。"""
@@ -918,9 +917,9 @@ class SettingsWindow(QWidget):
         try:
             tts = TTS(voice=voice)
             tts.speak(preview_text)
-            self._set_status(f"🔊 正在试听：{voice}")
+            self._set_status(f"正在试听：{voice}")
         except Exception as e:  # noqa: BLE001
-            self._set_status(f"⚠️ 试听失败：{e}")
+            self._set_status(f"试听失败：{e}")
 
     def get_model_config(self) -> dict:
         """获取当前模型配置（供主程序读取）。"""
@@ -977,10 +976,10 @@ class SettingsWindow(QWidget):
         self.cb_tts_enabled.blockSignals(False)
         # 检测 API 状态
         if cfg.get("api_key"):
-            self.lbl_model_status.setText("✅ 状态：已配置 API Key")
+            self.lbl_model_status.setText("状态：已配置 API Key")
             self.lbl_model_status.setStyleSheet("color: #16a34a; font-size: 11px;")
         else:
-            self.lbl_model_status.setText("⚠️ 状态：未配置 API Key")
+            self.lbl_model_status.setText("状态：未配置 API Key")
             self.lbl_model_status.setStyleSheet("color: #b45309; font-size: 11px;")
 
     def _set_status(self, msg: str) -> None:

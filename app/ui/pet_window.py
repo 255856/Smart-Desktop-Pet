@@ -114,7 +114,7 @@ class TouchArea:
     美术改 sprite 尺寸后，只要调整这里的比例即可，**不用改业务逻辑**。
     locate 和 size 都是 0.0-1.0 的相对比例，基于 SPRITE_SIZE 转换。
     """
-    name: str                                  # 'head' / 'body' / 'raise' / 自定义
+    name: str                                  # 'head'/ 'body'/ 'raise'/ 自定义
     locate: tuple[float, float] = (0.0, 0.0)   # (x, y) 左上角，相对比例
     size: tuple[float, float] = (1.0, 1.0)     # (w, h) 矩形，相对比例
     on_click: Optional[Callable[[], None]] = None    # 单击 / 双击 触发的回调
@@ -139,11 +139,8 @@ class HitZone:
     HEAD = "head"
     BODY = "body"
     RAISE = "raise"
-
-
 class PetWindow(QWidget):
     """桌宠本体。"""
-
     chat_requested = Signal()
     quit_requested = Signal()
     reaction_requested = Signal(str)   # 触摸了 head / body
@@ -202,10 +199,7 @@ class PetWindow(QWidget):
         # 气泡 label（替代 _draw_bubble）
         self._bubble_label = QLabel(self)
         self._bubble_label.setStyleSheet(
-            "QLabel { background-color: rgba(255,255,255,235); color: #28283c; "
-            "border-radius: 10px; padding: 5px 10px; font-weight: bold; "
-            "font-family: 'Microsoft YaHei', sans-serif; font-size: 12px; }"
-        )
+            "QLabel { background-color: rgba(255,255,255,235); color: #28283c; ""border-radius: 10px; padding: 5px 10px; font-weight: bold; ""font-family: 'Microsoft YaHei', sans-serif; font-size: 12px; }")
         self._bubble_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._bubble_label.hide()
 
@@ -343,7 +337,7 @@ class PetWindow(QWidget):
         """流式输出气泡：展示模型正在生成的文本（最多 120 字），不自动隐藏。"""
         self._streaming_bubble = True
         # 折叠换行和多余空白，避免气泡里出现大段空白
-        display = re.sub(r'\s+', ' ', text).strip()
+        display = re.sub(r'\s+', '', text).strip()
         if len(display) > 120:
             display = display[:117] + "…"
         self._bubble_text = display
@@ -367,24 +361,19 @@ class PetWindow(QWidget):
             return
         self._status_bar = QWidget(self)
         self._status_bar.setStyleSheet(
-            "QWidget { background-color: rgba(0,0,0,100); border-radius: 4px; }"
-        )
+            "QWidget { background-color: rgba(0,0,0,100); border-radius: 4px; }")
         layout = QVBoxLayout(self._status_bar)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(2)
 
         bar_style = (
-            "QProgressBar {{ background: rgba(255,255,255,30); border: none; "
-            "border-radius: 2px; height: 6px; }}"
-            "QProgressBar::chunk {{ border-radius: 2px; background: {color}; }}"
-        )
+            "QProgressBar {{ background: rgba(255,255,255,30); border: none; ""border-radius: 2px; height: 6px; }}""QProgressBar::chunk {{ border-radius: 2px; background: {color}; }}")
         label_style = "color: rgba(255,255,255,180); font-size: 10px; font-family: 'Microsoft YaHei', sans-serif;"
-
         rows = [
-            ("💪 体力", "strength", "rgba(100,200,150,160)"),
-            ("🍚 饱食", "food",     "rgba(200,180,80,160)"),
-            ("💧 口渴", "drink",    "rgba(80,160,220,160)"),
-            ("😊 心情", "feeling",  "rgba(200,120,80,160)"),
+            ("体力", "strength", "rgba(100,200,150,160)"),
+            ("饱食", "food",     "rgba(200,180,80,160)"),
+            ("口渴", "drink",    "rgba(80,160,220,160)"),
+            ("心情", "feeling",  "rgba(200,120,80,160)"),
         ]
         for text, key, color in rows:
             row = QHBoxLayout()
@@ -458,9 +447,7 @@ class PetWindow(QWidget):
         self._chat_input = QLineEdit(self)
         self._chat_input.setPlaceholderText("输入消息...")
         self._chat_input.setStyleSheet(
-            "QLineEdit { background-color: rgba(255,255,255,200); border: 1px solid "
-            "rgba(0,0,0,50); border-radius: 4px; padding: 4px 8px; font-size: 11px; }"
-        )
+            "QLineEdit { background-color: rgba(255,255,255,200); border: 1px solid ""rgba(0,0,0,50); border-radius: 4px; padding: 4px 8px; font-size: 11px; }")
         self._chat_input.returnPressed.connect(self._on_chat_input_sent)
         # 定位到窗口底部
         self._chat_input.setFixedHeight(28)
@@ -526,8 +513,7 @@ class PetWindow(QWidget):
         self._frame_timer.start(duration_ms)
 
     def _on_frame_timeout(self) -> None:
-        """单触发：advance 到下一帧 + 重新调度显示。"""
-        # PR-right-click-fps: 累计帧数
+        """单触发：advance 到下一帧 + 重新调度显示。"""# PR-right-click-fps: 累计帧数
         self._fps_count += 1
         self.player._advance()
         if self._fps_enabled:
@@ -540,7 +526,7 @@ class PetWindow(QWidget):
                 self._fps_window_start = now
                 # 每秒刷一次气泡显示
                 if now - self._last_fps_report >= 1.0:
-                    self.show_bubble(f"⚡ {fps:.1f} FPS")
+                    self.show_bubble(f"{fps:.1f} FPS")
                     self._last_fps_report = now
         self._start_frame_timer()
 
@@ -707,19 +693,19 @@ class PetWindow(QWidget):
             # 吃掉：移到回收站 + 播放 file 动画
             if send_to_recycle_bin(path):
                 self.animator.play_file()
-                self.show_bubble(f"📄 吃掉了 {path.name}！", duration_ms=3000)
+                self.show_bubble(f"吃掉了 {path.name}！", duration_ms=3000)
                 self.eat_requested.emit()
                 log.info("文件被吃掉（已回收站）：%s", path)
             else:
                 self.show_bubble("吃不了这个…", duration_ms=2000)
                 QMessageBox.warning(self, "错误", "无法将文件移到回收站")
 
-        elif action == "convert" and convert_suffix:
+        elif action == "convert"and convert_suffix:
             # 转换格式
             dest = convert_file(path, convert_suffix)
             if dest:
                 self.animator.play_file()
-                self.show_bubble(f"🔄 转换成功：{dest.name}", duration_ms=3000)
+                self.show_bubble(f"转换成功：{dest.name}", duration_ms=3000)
                 log.info("文件转换成功：%s -> %s", path, dest)
             else:
                 self.show_bubble("转换失败了…", duration_ms=2000)
@@ -757,19 +743,19 @@ class PetWindow(QWidget):
         menu = QMenu(self)
 
         # === 聊天入口 ===
-        a1 = QAction("💬  和鲸鱼娘聊聊", self)
+        a1 = QAction("和鲸鱼娘聊聊", self)
         a1.triggered.connect(self.chat_requested.emit)
         menu.addAction(a1)
         menu.addSeparator()
 
         # === 完整设置面板 ===
-        act_settings = QAction("⚙️  设置面板", self)
+        act_settings = QAction("设置面板", self)
         act_settings.triggered.connect(self._emit_open_settings)
         menu.addAction(act_settings)
         menu.addSeparator()
 
         # === 切换表情 ===
-        emo_menu = menu.addMenu("😊  切换表情")
+        emo_menu = menu.addMenu("切换表情")
         for name, label in [
             ('happy', '开心'), ('sad', '悲伤'), ('angry', '生气'),
             ('shy', '害羞'), ('think', '思考'),
@@ -780,38 +766,38 @@ class PetWindow(QWidget):
         menu.addSeparator()
 
         # === 睡觉 / 醒来 ===
-        act_sleep = QAction("💤  睡觉", self)
+        act_sleep = QAction("睡觉", self)
         act_sleep.triggered.connect(self.animator.set_sleep)
         menu.addAction(act_sleep)
-        act_wake = QAction("🐾  醒来", self)
+        act_wake = QAction("醒来", self)
         act_wake.triggered.connect(self.animator.set_wake)
         menu.addAction(act_wake)
         menu.addSeparator()
 
         # === 吃饭 ===
-        act_eat = QAction("🍚  吃饭", self)
+        act_eat = QAction("吃饭", self)
         act_eat.triggered.connect(self._on_eat_menu)
         menu.addAction(act_eat)
         menu.addSeparator()
 
         # === 玩耍 (spin/游泳) ===
-        play_menu = menu.addMenu("🎮  玩耍")
-        act_spin = QAction("🏃  转圈圈", self)
+        play_menu = menu.addMenu("玩耍")
+        act_spin = QAction("转圈圈", self)
         act_spin.triggered.connect(self.animator.play_spin)
         play_menu.addAction(act_spin)
-        act_swim = QAction("🏊  游泳", self)
+        act_swim = QAction("游泳", self)
         act_swim.triggered.connect(self._on_swim_menu)
         play_menu.addAction(act_swim)
         menu.addSeparator()
 
         # === 状态栏显示/隐藏 ===
-        act_status = QAction("📊 显示状态栏" if not self._status_visible else "📊 隐藏状态栏", self)
+        act_status = QAction("显示状态栏"if not self._status_visible else "隐藏状态栏", self)
         act_status.triggered.connect(lambda _: self.toggle_status_bar(not self._status_visible))
         menu.addAction(act_status)
 
         # === 快捷聊天输入 ===
         quick_chat_visible = getattr(self, '_chat_input_visible', False)
-        act_quick_chat = QAction(f"{'💬 快速输入' if not quick_chat_visible else '💬 隐藏输入'}", self)
+        act_quick_chat = QAction(f"{'快速输入'if not quick_chat_visible else '隐藏输入'}", self)
         act_quick_chat.triggered.connect(self._toggle_quick_chat_menu)
         menu.addAction(act_quick_chat)
 

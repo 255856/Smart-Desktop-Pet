@@ -68,6 +68,39 @@ def parse_absolute_time(at_time: str) -> Optional[float]:
             target += timedelta(days=1)
         return target.timestamp()
 
+    # 格式5: 无分钟简写 —— "早上8点" / "晚上9点半" / "明天8点" / "8点" / "10点半"
+    m = re.match(
+        r"^((?:明天|后天)\s*)?((?:早上|上午|中午|下午|晚上|凌晨)\s*)?(\d{1,2})\s*(?:点(\d{1,2})?分?)?(?:半)?$",
+        at_time,
+    )
+    if m:
+        prefix = (m.group(1) or "").strip()  # "明天"/"后天"/""
+        period = (m.group(2) or "").strip()  # "早上"/"晚上"/""
+        h = int(m.group(3))
+        # "点半" → minutes=30
+        mi = 0
+        if m.group(4):
+            mi = int(m.group(4))
+        elif at_time.endswith("半"):
+            mi = 30
+        # 时段修正（晚上 1-11 → +12；凌晨保持原值）
+        if period == "晚上" and 1 <= h <= 11:
+            h += 12
+        if period == "中午":
+            h = 12 if h == 0 else h  # "中午12点" = 12:00
+        # 日期修正
+        if prefix == "明天":
+            days = 1
+        elif prefix == "后天":
+            days = 2
+        else:
+            days = 0
+        target = (now + timedelta(days=days)).replace(hour=h, minute=mi, second=0, microsecond=0)
+        # 已过 → 推一天（仅适用"今天"的情况）
+        if days == 0 and target <= now:
+            target += timedelta(days=1)
+        return target.timestamp()
+
     return None
 
 

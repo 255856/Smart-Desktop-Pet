@@ -83,25 +83,35 @@ class _AgentWorker(QThread):
         self.cancel_event.set()
 
     def run(self) -> None:
+        """在 QThread 里跑 agent 循环。
+
+        LangChainAgent 自带持久 loop（run_sync）；其他 agent 仍走 asyncio.run()。
+        """
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             full: list[str] = []
-
-            async def drive() -> None:
-                async for ev in self.agent.run(
-                        self.messages, cancel_check=self.cancel_event.is_set):
-                    kind = ev[0]
+            # LangChainAgent 提供 run_sync（在持久 loop 里跑，跨调用不切换）
+            if hasattr(self.agent, "run_sync"):
+                events = self.agent.run_sync(
+                    self.messages, cancel_check=self.cancel_event.is_set)
+                for kind, *payload in events:
                     if kind == "text":
-                        full.append(ev[1])
-                        self.chunk.emit(ev[1])
+                        full.append(payload[0])
+                        self.chunk.emit(payload[0])
                     elif kind == "tool":
-                        self.tool_used.emit(ev[1], ev[2], ev[3])
-                    # "done" 不需要额外处理（文本已通过 chunk 累计）
-
-            loop.run_until_complete(drive())
-            loop.run_until_complete(asyncio.sleep(0))
-            loop.close()
+                        # payload = (name, args, result)
+                        self.tool_used.emit(*payload)
+                    # "done" 不需要额外处理
+            else:
+                async def drive() -> None:
+                    async for ev in self.agent.run(
+                            self.messages, cancel_check=self.cancel_event.is_set):
+                        kind = ev[0]
+                        if kind == "text":
+                            full.append(ev[1])
+                            self.chunk.emit(ev[1])
+                        elif kind == "tool":
+                            self.tool_used.emit(ev[1], ev[2], ev[3])
+                asyncio.run(drive())
             self.done.emit("".join(full))
         except LLMError as e:
             self.failed.emit(str(e))
@@ -1038,11 +1048,14 @@ class ChatWindow(QWidget):
 
     # ---------------- 渲染 ----------------
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
-        """按已完成的 Message 渲染成 HTML 字符串（纯文字左右聊天）。
+        """按已完成的 Message 渲染成 HTML 字符串（控制台风格单行聊天）。
 
-        设计：每条消息 = meta 行（名字+时间）+ 消息体。
-        不用头像、不用气泡框，纯文字 + 左右对齐 + 名字颜色区分。
-        视觉上像控制台聊天，但比控制台更精致。
+        设计：
+            - 系统消息：居中灰条
+            - 用户消息：左对齐，单行（默认色）
+            - 桌宠消息：左对齐，单行（浅蓝色 #7eb6ff）
+            - 工具调用：在 bot 消息下方一行一行显示（小灰字）
+            - 不显示角色名 / 时间戳
         """
         # ---- 系统消息：居中灰色条 ----
         if msg.role == "system":
@@ -1054,42 +1067,37 @@ class ChatWindow(QWidget):
             )
 
         is_user = msg.role == "user"
-        cls = "user" if is_user else "bot"
-        who = "你" if is_user else self.char_cfg.name
-        align = "right" if is_user else "left"
 
         # 清理内容
         raw = msg.content or ""
         raw = self._clean_content(raw)
 
+        # HTML 转义 + 换行转 <br/>
+        # 用户消息不做 markdown 处理（避免 weird 行为），bot 消息做简单 markdown
         if is_user:
-            body = raw.replace("&", "&amp;").replace("<", "&lt;").replace(
-                ">", "&gt;").replace("\n", "<br/>")
+            safe = (raw.replace("&", "&amp;").replace("<", "&lt;").replace(
+                ">", "&gt;").replace("\n", "<br/>"))
         else:
-            body = self._render_markdown(raw)
+            safe = self._render_markdown(raw)
 
-        # 工具调用（bot 消息专用）
+        # 工具调用（bot 消息专用，灰色小字，紧凑）
         tools_html = "".join(
-            f'<div class="msg-row {align}"><span class="tools-line">{name} → {summary}</span></div>'
+            f'<div style="color:#888;font-size:9pt;margin:2px 0;">↳ {name} → {summary}</div>'
             for name, summary in msg.tools
         )
 
-        if streaming_meta is not None:
-            meta_text = f'⏳ {streaming_meta}'
-        else:
-            meta_text = time.strftime("%H:%M:%S", time.localtime(msg.ts))
-
-        # meta 行（名字 + 时间），名字按角色带颜色
-        meta_line = (
-            f'<div class="meta-line {align}">'
-            f'<span class="name {cls}">{who}</span>'
-            f'<span class="time">{meta_text}</span></div>'
+        # 消息体：每个 <p> 独立 block，margin-bottom:10px 视觉分段
+        # 关键：Qt QTextBrowser 用 QTextDocument 解析，cursor.insertHtml() 会把多个 <p> 合并成一个块。
+        # 必须在 HTML 末尾追加 "\n\n"（纯文本换行）才能真正分段——QTextDocument 把 \n 当段落分隔。
+        # 用户：默认色；桌宠：浅蓝色
+        color = "#2c2c38" if is_user else "#4a90e2"
+        msg_p = (
+            f'<p style="margin:0 0 10px 0;color:{color};">'
+            f'{safe}</p>'
+            f'\n\n'   # 强制 QTextDocument 新段落（关键！）
         )
 
-        # 消息体
-        body_line = f'<div class="msg-row {align} body {cls}">{body}</div>'
-
-        return f'{meta_line}{tools_html}{body_line}'
+        return f'{msg_p}{tools_html}'
 
     def _clean_content(self, text: str) -> str:
         """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行。"""
@@ -1138,22 +1146,29 @@ class ChatWindow(QWidget):
         return text
 
     def _insert_placeholder(self, msg: Message) -> int:
-        """在 chat_view 文档末尾插入占位 div，返回该 div 起始的字符位置（作为 patch anchor）。"""
+        """在 chat_view 文档末尾插入占位 div，返回该 div 起始的字符位置（作为 patch anchor）。
+
+        PR-fix-line-breaks: cursor.insertHtml() 不会自动创建新 <p>，必须 insertBlock()
+        强制开始新段落，否则消息会全部挤在同一个 <p> 里。
+        """
         html = self._msg_html(msg, streaming_meta="typing…")
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         # 记录 anchor（插入前的位置），后续 refresh 从 anchor 到末尾删除旧内容
         anchor = cursor.position()
         cursor.insertHtml(html)
+        cursor.insertBlock()  # 强制新段落：下一条消息会从新 <p> 开始
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
         return anchor
 
     def _render_message(self, msg: Message, streaming: bool = False) -> None:
+        """渲染一条消息到 chat_view 末尾，强制独立段落。"""
         html = self._msg_html(msg)
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertHtml(html)
+        cursor.insertBlock()  # PR-fix-line-breaks: 让下一条消息从新 <p> 开始
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 

@@ -46,6 +46,19 @@ CHINESE_SYSTEM_SUFFIX = (
 )
 
 
+# 全部占位符 key —— 没填真 key 时 LLMClient 直接抛「未配置」而不是发请求被 401
+PLACEHOLDER_KEYS: frozenset[str] = frozenset({
+    "",
+    "PUT-YOUR-API-KEY-HERE",
+    "PUT-YOUR-MINIMAX-API-KEY-HERE",
+    "PUT-YOUR-MINIMAX-KEY-HERE",
+})
+
+
+def is_placeholder_key(k: str) -> bool:
+    return not k or k in PLACEHOLDER_KEYS
+
+
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001F300-\U0001F5FF"
@@ -79,6 +92,10 @@ def sanitize_text(text: str) -> str:
     """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白。"""
     if not text:
         return text
+    # 去掉 <think>...</think> 段（DeepSeek-r1 / MiniMax-M3 等推理模型原生标签）
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # 去掉未闭合的 <think> 起始标签（流式末端被截断的情况）
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
     text = _EMOJI_PATTERN.sub("", text)
     for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫", "★", "☆"]:
         text = text.replace(sym, "")
@@ -191,8 +208,8 @@ class LLMClient:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[str]:
         """异步流式调用，逐 token 产出 content（自动清洗 emoji）。"""
-        if not self.cfg.api_key or self.cfg.api_key == "PUT-YOUR-API-KEY-HERE":
-            raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key")
+        if is_placeholder_key(self.cfg.api_key):
+            raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         payload = self._build_payload(messages)
@@ -278,8 +295,8 @@ class LLMClient:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[tuple[str, object]]:
         """带工具调用支持的流式接口（agent 循环用）。"""
-        if not self.cfg.api_key or self.cfg.api_key == "PUT-YOUR-API-KEY-HERE":
-            raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key")
+        if is_placeholder_key(self.cfg.api_key):
+            raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         full = [ChatMessage(role="system", content=self.system_prompt).__dict__]

@@ -1,4 +1,5 @@
 """系统托盘菜单：右键托盘图标 → 显示/隐藏桌宠 / 打开聊天 / 退出。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,14 +21,14 @@ class TrayController(QObject):
 
         menu = QMenu()
 
-        self.act_show = QAction("🐾 显示桌宠", menu)
-        self.act_hide = QAction("🙈 隐藏桌宠", menu)
-        self.act_chat = QAction("💬 打开聊天", menu)
-        self.act_settings = QAction("⚙️ 设置...", menu)
-        self.act_dashboard = QAction("📊 调试面板 (Dashboard)", menu)
+        self.act_show = QAction("显示桌宠", menu)
+        self.act_hide = QAction("隐藏桌宠", menu)
+        self.act_chat = QAction("打开聊天", menu)
+        self.act_settings = QAction("设置...", menu)
+        self.act_dashboard = QAction("调试面板 (Dashboard)", menu)
         self.act_dashboard.setToolTip("浏览器打开 http://127.0.0.1:8765")
-        self.act_memory = QAction("🧠 查看长期记忆", menu)
-        self.act_quit = QAction("❌ 退出", menu)
+        self.act_memory = QAction("查看长期记忆", menu)
+        self.act_quit = QAction("退出", menu)
         menu.addAction(self.act_show)
         menu.addAction(self.act_hide)
         menu.addSeparator()

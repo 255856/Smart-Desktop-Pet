@@ -31,7 +31,7 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
             3. Program Files 目录搜索
             4. cmd /c start 兜底
         """
-        from app.engine.app_registry import get_registry
+        from app.core.app_registry import get_registry
         name = app_name.strip()
         p = Path(name)
         if p.is_file():
