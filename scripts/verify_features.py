@@ -237,13 +237,25 @@ def main() -> int:
           "detect_plan_hallucination" in pe_src
           and "anti_hallucination" in pe_src)
 
-    # ChatWindow 必须用 AgentLoopV2（react 模式）+ 处理 meta 事件
+    # ChatWindow 必须用真正的 ReAct 循环（不再用 Planner+Executor）+ 处理 meta 事件
     from app.ui.chat_window import ChatWindow as _CW
     cw_src = inspect.getsource(_CW)
-    check("ChatWindow 接入 AgentLoopV2（react）",
-          "make_agent_loop" in cw_src)
+    check("ChatWindow 接入真正的 ReAct 循环（AgentLoop）",
+          "AgentLoop(client" in cw_src)
+    check("ChatWindow 不再用 Planner+Executor（已移除）",
+          "make_agent_loop" not in cw_src)
     check("ChatWindow 处理 force_retry meta 事件",
           "_on_meta" in cw_src and "force_retry" in cw_src)
+
+    # AgentLoop 必须有 force_final 机制
+    from app.brain.agent import AgentLoop as _AL, MAX_CONSECUTIVE_TOOL_ONLY_TURNS
+    al_src = inspect.getsource(_AL)
+    check("AgentLoop force_final（连续纯调工具 → 强制 final 阶段）",
+          "force_final" in al_src and "MAX_CONSECUTIVE_TOOL_ONLY_TURNS" in al_src)
+    check("AgentLoop final_text 兜底（不为空）",
+          'final_text = "".join(content_parts)' in al_src
+          and "工具结果作为" in al_src
+          or "tool_results" in al_src)
 
     from app.mcp.protocol import MCPClientRegistry, MCPServerConfig, MCPStdioClient
     mcp_src = inspect.getsource(MCPStdioClient)

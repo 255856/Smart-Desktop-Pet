@@ -20,33 +20,39 @@
 
 ```powershell
 cd E:\study\desktop-pet
-python -m pytest tests/ -q                        # 单元测试 288 个，应全过
-python scripts/verify_features.py                  # 功能验证 85 项，应全过
+python -m pytest tests/ -q                        # 单元测试 296 个，应全过
+python scripts/verify_features.py                  # 功能验证 88 项，应全过
 python main.py --with-dashboard --no-banner        # 启动 + 自动开 Dashboard
 ```
 
 `verify_features.py` 输出类似：
 
 ```
-总计：85 OK, 0 FAIL, 85 项
+总计：88 OK, 0 FAIL, 88 项
 ```
 
 ---
 
-## 🛡️ 抗幻觉机制（v3.1+）
+## 🛡️ 抗幻觉机制（v3.2+）
 
-「主人说『帮我打开 QQ』但桌宠只回了文字、QQ 没真的打开」是国产 LLM 的常见坑。本项目有 **3 层防御纵深**：
+「主人说『帮我打开 QQ』但桌宠只回了文字、QQ 没真的打开」是国产 LLM 的常见坑。本项目有 **3 层防御纵深 + 真正的 ReAct 智能体**：
 
 | 层级 | 位置 | 作用 |
 |------|------|------|
 | **第 1 层 · 意图驱动 force_tool_use** | `agent.py` + `llm_client.py` | 检测到「打开XX/提醒XX/记住XX/查询」类意图时，第一轮请求自动带 `tool_choice="required"`，强制模型必须调工具；服务端不支持时降级为 user-prompt 强制 |
 | **第 2 层 · 强制重试** | `agent.py` | 第一轮 force 后模型仍只回文字 → 注入强提示重试一次（force_retry meta 事件），给模型第二次机会 |
-| **第 3 层 · Plan/Reflect 兜底** | `agent_v2.py` + `executor.py` + `reflector.py` | 轻量 backend 默认走 `AgentLoopV2` react 模式：Planner 拆解 → Executor 跑 tool → Reflector 跨步检查「意图是工具但没调工具」= 幻觉 → 自动 replan |
+| **第 3 层 · 强制 final 阶段** | `agent.py` | 连续多轮纯调工具无文字 → 去掉 tools 强制模型给出 final answer（避免「调工具上瘾」） |
 
-详见：`app/brain/llm_client.py`（force_tool_use + detect_action_intent）、
-`app/brain/agent.py`（第一层防御）、
-`app/brain/agent_v2.py` + `app/brain/executor.py`（第三层防御）、
-`tests/test_anti_hallucination*.py`（回归测试）。
+**真正的智能体**：lightweight backend 直接用 `AgentLoop`（手写 ReAct 循环）—— 模型自主决定调什么工具、调几次、什么时候给 final answer。这与 LangChain `create_agent` 语义一致，零依赖。
+
+**两种后端**：
+- `backend: lightweight`（默认）—— 手写 ReAct，零依赖，3 层抗幻觉
+- `backend: standard` —— LangChain 1.0+ `create_agent` + `langgraph-checkpoint-sqlite`（生产 / 生态对接）
+
+详见：`app/brain/agent.py`（真正的 ReAct + 3 层抗幻觉）、
+`app/brain/llm_client.py`（force_tool_use + detect_action_intent）、
+`app/brain/langchain_agent.py`（LangChain 后端）、
+`tests/test_react_loop.py` + `tests/test_anti_hallucination*.py`（回归测试）。
 
 ---
 

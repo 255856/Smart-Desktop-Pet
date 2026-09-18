@@ -43,9 +43,12 @@
 |------|------|------|
 | **第 1 层 · 意图驱动 force_tool_use** | `detect_action_intent` 正则判定用户意图（打开/提醒/记住/查询）→ 第一轮请求自动带 `tool_choice="required"`；服务端不支持时降级为 user-prompt 强制 | `app/brain/llm_client.py:detect_action_intent` + `chat_stream_events` |
 | **第 2 层 · 强制重试** | 第 1 层 force 后模型仍只回文字 → 注入 `[系统提醒]` user 消息重试一次（yield `force_retry` meta 事件） | `app/brain/agent.py` |
-| **第 3 层 · Plan/Reflect 兜底** | 轻量 backend 默认走 `AgentLoopV2` react 模式：`HeuristicReflector.detect_plan_hallucination()` 跨步检查「意图是工具但没调工具」= 幻觉 → 自动 replan | `app/brain/agent_v2.py` + `app/brain/executor.py` + `app/brain/reflector.py` |
+| **第 3 层 · 强制 final 阶段** | 连续多轮纯调工具无文字 → 去掉 tools 强制模型给出 final answer（避免「调工具上瘾」） | `app/brain/agent.py` |
 
-**回归测试**：`tests/test_anti_hallucination.py`（18 个）+ `tests/test_anti_hallucination_plan.py`（3 个）共 21 个新测试。
+**回归测试**：`tests/test_anti_hallucination.py`（18 个）+ `tests/test_anti_hallucination_plan.py`（3 个）+ `tests/test_react_loop.py`（8 个）共 29 个新测试。
+
+**真正的智能体（ReAct 循环）**：
+lightweight backend 直接用 `AgentLoop`（手写 ReAct 循环）—— 模型自主决定调什么工具、调几次、什么时候给 final answer。这与 LangChain `create_agent` 语义一致，零依赖。**不再用 Planner+Executor 两段式**——后者是过时的规划-执行分离设计，不适合 LLM 智能体。
 
 ### v3.1 新增：双 Agent 后端
 
