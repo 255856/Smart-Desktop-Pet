@@ -23,7 +23,7 @@ from app.core.qt_compat import (
     QDragMoveEvent, QDropEvent, QEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
     QRegion, QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QTransform,
     event_global_pos, event_local_pos,
 )
 from app.animation.animations import Animation, Frame
@@ -1238,16 +1238,36 @@ class PetWindow(QWidget):
                 size, size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
+            # 向右倾斜 45°（Qt 屏幕 y 轴向下，正角度即视觉上的顺时针）
+            pix = pix.transformed(QTransform().rotate(45),
+                                  Qt.TransformationMode.SmoothTransformation)
             self._sticker_cache[path] = pix
 
         self._sticker_label.setPixmap(pix)
         self._sticker_label.adjustSize()
-        # 右上角（贴着窗口右上角内边缘）
-        self._sticker_label.move(max(0, self.width() - pix.width() - 6), 6)
+        # 定位到「模型」右上方：按当前渲染剪影的包围盒（而非窗口角落），
+        # 这样放大/缩小桌宠时贴纸始终贴着角色头顶右侧
+        right, top = self._model_top_right()
+        sw, sh = pix.width(), pix.height()
+        x = int(min(max(2, right - sw * 0.55), self.width() - sw - 2))
+        y = int(max(2, min(top - sh * 0.45 + 24, self.height() - sh - 2)))
+        self._sticker_label.move(x, y)
         self._sticker_label.show()
         self._sticker_label.raise_()
         QTimer.singleShot(self._sticker_duration_ms, self._sticker_label.hide)
         self._arm_sticker_timer()
+
+    def _model_top_right(self) -> tuple[int, int]:
+        """当前模型剪影的右上角（窗口坐标）；取不到时退化为窗口右上角。"""
+        try:
+            import numpy as np
+            cur = self._grab_opaque()
+            if cur is not None and cur.any():
+                ys, xs = np.where(cur)
+                return int(xs.max()), int(ys.min())
+        except Exception:  # noqa: BLE001
+            pass
+        return self.width(), 0
 
     # ---------------- 右键菜单（精简版） ----------------
     def _show_context_menu(self, global_pos: QPoint) -> None:
