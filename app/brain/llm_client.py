@@ -38,11 +38,15 @@ THINK_TAG_END = "</think>"
 
 # 中文约束片段：每次请求 system prompt 末尾追加
 CHINESE_SYSTEM_SUFFIX = (
-    "\n\n【输出规范】\n"
-    "1. 必须用简体中文回复，禁止英文/日文/韩文等其他语言。\n"
-    "2. 禁止使用任何 emoji 表情、图标符号（如表情、动物、符号等）和装饰性符号（如 ★♥♪ 等）。\n"
-    "3. 回复末尾可以保留一个情绪标签（如 [happy]、[sad]、[thinking]），但不要任何表情符号。\n"
-    "4. 简短自然，像跟主人面对面说话。"
+    "\n\n【输出规范（必须严格遵守）】\n"
+    "1. 唯一允许的输出语言是简体中文。禁止出现英文/日文/韩文整段、"
+    "禁止英文工具独白（禁止出现 user is saying、Let me respond、"
+    "I should、The user wants、as the whale girl、brief、particleslike 等）。\n"
+    "2. 禁止使用任何 emoji 表情、图标符号（表情、动物、符号）和装饰性符号（如 ★♥♪ 等）。\n"
+    "3. 回复末尾保留一个情绪标签：[happy]/[shy]/[thinking]/[sad]/[surprised]/[angry]/[love] 之一。\n"
+    "4. 简短自然（1~3 句），像跟主人面对面说话，不要解释你在做什么、"
+    "不要列 bullet、不要 markdown 标题。\n"
+    "5. 工具调用只能通过工具 schema 完成，不要在文字里描述要做什么工具。"
 )
 
 
@@ -109,6 +113,8 @@ def sanitize_text(text: str) -> str:
     text = re.sub(r"\n[ \t]+", "\n", text)
     # 剥离开头的低中文占比段落（推理模型英文 CoT 以纯文本漏进正文的兜底）
     text = _drop_leading_low_cjk_paragraphs(text)
+    # 兜底：任何英文主导（占比 ≤ 30%）的非开头段也剥离（工具独白常出现在末尾）
+    text = _drop_low_cjk_paragraphs(text)
     return text.strip()
 
 
@@ -141,6 +147,20 @@ def _drop_leading_low_cjk_paragraphs(text: str) -> str:
     while i < len(paras) and ratios[i] < 0.15:
         i += 1
     return "\n\n".join(paras[i:]).strip()
+
+
+def _drop_low_cjk_paragraphs(text: str, threshold: float = 0.3) -> str:
+    """剥离任何占比低于 threshold 的段落（尾部工具独白兜底）。
+
+    开头段已在 _drop_leading_low_cjk_paragraphs 中剥离；本函数处理
+    夹在中文段落之间或结尾的低中文占比段（Ollama/MiniMax 等推理模型常把工具
+    名称、URL 等英文夹杂在尾部）。
+    """
+    paras = text.split("\n\n")
+    if len(paras) < 2:
+        return text
+    kept = [p for p in paras if _cjk_ratio(p) >= threshold]
+    return "\n\n".join(kept).strip()
 
 
 class LLMError(RuntimeError):

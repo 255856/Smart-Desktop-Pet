@@ -1325,10 +1325,11 @@ class ChatWindow(QWidget):
                 "delta": tok,
                 "accumulated": self._current_bot_msg.content[:500],
             })
-        # 同步到桌宠头顶气泡（只同步纯文本，跳过空内容）
-        text = self._current_bot_msg.content.strip()
-        if text:
-            self.streaming_chunk.emit(text)
+        # 同步到桌宠头顶气泡（先 sanitize 剥离推理/英文段，再发；口型同步用同一份清洗后文本）
+        from app.brain.llm_client import sanitize_text
+        sanitized = sanitize_text(self._current_bot_msg.content).strip()
+        if sanitized:
+            self.streaming_chunk.emit(sanitized)
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
