@@ -19,6 +19,12 @@ character:
     回答末尾用 [happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking] 之一标注你当下的情绪。
   tts_enabled: true
   tts_voice: "zh-CN-XiaoxiaoNeural"
+  # 语音引擎：edge | minimax（声音克隆）
+  # minimax 用法：python tools/clone_voice.py 克隆，或配 minimax_samples 自动克隆
+  tts_engine: edge
+  # minimax_voice_id: my_pet_voice
+  # minimax_samples: "样本目录"
+  # minimax_api_key: ""   # 留空复用 llm.api_key
 
 window:
   start_x: 200

@@ -52,6 +52,9 @@ class CharacterConfig(BaseModel):
     minimax_api_key: str = ""      # 留空则复用 llm.api_key（同账号）
     minimax_model: str = "speech-01-turbo"
     minimax_group_id: str = ""     # MiniMax 控制台里的 GroupId（部分账号需要）
+    # 克隆样本来源：目录（自动取其中音频文件）或逗号分隔的文件列表。
+    # 配置后启动时自动克隆（样本指纹未变则跳过，不会重复执行）
+    minimax_samples: str = ""
 
 
 # ---------------- Window ----------------
