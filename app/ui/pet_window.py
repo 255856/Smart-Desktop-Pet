@@ -1003,57 +1003,127 @@ class PetWindow(QWidget):
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
+        # 尺寸变化后旧遮罩坐标失效：清掉重建（模型重新 fit 需要一点时间）
+        self._mask_base = None
+        self._mask_prev_region = None
+        self.clearMask()
+        QTimer.singleShot(800, self._sample_base_mask)
 
     # ---------------- 点击穿透（live2d：透明区域不让它挡住后面的窗口） ----------------
     def _setup_click_mask(self) -> None:
         """live2d 模式下窗口是方形画布，模型四周大量透明像素会挡住点击。
-        每秒从当前渲染帧的 alpha 通道生成窗口遮罩（setMask）：遮罩外既不显示
-        也不接收鼠标 → 透明处直接点到后面的窗口。"""
+        周期性从渲染帧的 alpha 通道生成窗口遮罩（setMask）：遮罩外既不显示
+        也不接收鼠标 → 透明处直接点到后面的窗口。
+
+        遮罩宁大勿小（偏大只是少一块穿透区，偏小会当场裁掉角色）：
+            * 就绪后采样「头转到左右极限」的剪影并集作为下限（头发甩出的范围）；
+            * 与上一帧遮罩求并（物理甩动是连续的，相邻两帧不会跳很远）。
+        """
         rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
         if rtype != "live2d":
             return
+        self._mask_base = None        # 极限姿势剪影并集（bool 数组）
+        self._mask_prev_region: QRegion | None = None
         self._mask_timer = QTimer(self)
         self._mask_timer.timeout.connect(self._update_click_mask)
-        self._mask_timer.start(2500)
+        self._mask_timer.start(1000)
+        # 模型 ready 后（约 2s）采样极限姿势
+        QTimer.singleShot(2000, self._sample_base_mask)
+
+    def _grab_opaque(self):
+        """抓当前显示帧的 alpha>16 布尔阵列；失败返回 None。"""
+        import numpy as np
+        from PyQt5.QtGui import QImage
+        w = self._sprite_label
+        if w is None:
+            return None
+        img = w.grab().toImage().convertToFormat(QImage.Format_ARGB32)
+        h, line = img.height(), img.bytesPerLine() // 4
+        # PyQt5 的 constBits() 是无尺寸 sip 指针，需 asstring 显式取字节
+        buf = img.constBits().asstring(img.sizeInBytes())
+        alpha = np.frombuffer(buf, dtype=np.uint8).reshape(h, line, 4)[:, :, 3]
+        return alpha > 16
+
+    def _region_from_mask(self, m) -> QRegion:
+        """bool 剪影阵列 → QRegion（膨胀 12px，细微摆动不被裁）。"""
+        import numpy as np
+        m = m.copy()
+        for _ in range(3):
+            m = (m | np.roll(m, 4, 0) | np.roll(m, -4, 0)
+                 | np.roll(m, 4, 1) | np.roll(m, -4, 1))
+        region = QRegion()
+        edges = np.diff(np.pad(m.astype(np.int8), ((0, 0), (1, 1))))
+        for y in range(m.shape[0]):
+            row = edges[y]
+            starts = np.flatnonzero(row == 1)
+            ends = np.flatnonzero(row == -1)
+            for s, e in zip(starts, ends):
+                region += QRegion(int(s), y, int(e - s), 1)
+        return region
+
+    def _sample_base_mask(self) -> None:
+        """采样头转向左右极限（+俯仰）时的剪影并集 → 遮罩下限。"""
+        if self.renderer is None or self.renderer.get_renderer_type() != "live2d":
+            return
+        self._base_poses = [(-0.95, 0.0), (0.95, 0.0),
+                            (-0.9, 0.7), (0.9, 0.7), (0.0, 0.0)]
+        self._base_samples: list = []
+        self._sample_base_step()
+
+    def _sample_base_step(self) -> None:
+        if not getattr(self, "_base_poses", None):
+            if self._base_samples:
+                acc = self._base_samples[0]
+                for s in self._base_samples[1:]:
+                    acc = acc | s
+                self._mask_base = acc
+                self._update_click_mask()
+            return
+        dx, dy = self._base_poses.pop(0)
+        look = getattr(self.renderer, "look_at", None)
+        if callable(look):
+            look(dx, dy)
+
+        def grab():
+            try:
+                if self.isVisible() and self.renderer is not None \
+                        and getattr(self.renderer, "is_ready", lambda: False)():
+                    cur = self._grab_opaque()
+                    if cur is not None:
+                        self._base_samples.append(cur)
+            except Exception:  # noqa: BLE001
+                pass
+            self._sample_base_step()
+
+        QTimer.singleShot(450, grab)
 
     def _update_click_mask(self) -> None:
         if not self.isVisible():
             return
         try:
-            import numpy as np
-            from PyQt5.QtGui import QImage
             w = self._sprite_label
             if w is None or self.renderer is None \
                     or not getattr(self.renderer, "is_ready", lambda: False)():
                 return
-            img = w.grab().toImage().convertToFormat(QImage.Format_ARGB32)
-            h, line = img.height(), img.bytesPerLine() // 4
-            # PyQt5 的 constBits() 是无尺寸 sip 指针，需 asstring 显式取字节
-            buf = img.constBits().asstring(img.sizeInBytes())
-            alpha = np.frombuffer(buf, dtype=np.uint8).reshape(h, line, 4)[:, :, 3]
-            opaque = alpha > 16
-            if not opaque.any():
+            cur = self._grab_opaque()
+            if cur is None:
+                return
+            if not cur.any() and self._mask_base is None:
                 self.clearMask()
                 return
-            # 膨胀 ~8px：待机摆动/物理回复时不至于把发梢裁掉
-            m = opaque.copy()
-            for _ in range(2):
-                m = (m | np.roll(m, 4, 0) | np.roll(m, -4, 0)
-                     | np.roll(m, 4, 1) | np.roll(m, -4, 1))
-            region = QRegion()
-            edges = np.diff(np.pad(m.astype(np.int8), ((0, 0), (1, 1))))
-            for y in range(h):
-                row = edges[y]
-                starts = np.flatnonzero(row == 1)
-                ends = np.flatnonzero(row == -1)
-                for s, e in zip(starts, ends):
-                    region += QRegion(int(s), y, int(e - s), 1)
+            # 当前帧 ∪ 极限姿势下限
+            m = cur if self._mask_base is None else (cur | self._mask_base)
+            region = self._region_from_mask(m)
+            # 与上一帧遮罩求并：视线甩动/物理摆动期间不会被当场裁掉
+            if self._mask_prev_region is not None:
+                region = region.united(self._mask_prev_region)
             # 可见子控件（状态栏/输入框/气泡/贴纸）不被遮罩裁掉
             for child in self.children():
                 if isinstance(child, QWidget) and child is not w \
                         and child.isVisible() and not child.isHidden():
                     region += QRegion(child.geometry())
             self.setMask(region)
+            self._mask_prev_region = QRegion(region)
         except Exception:  # noqa: BLE001
             pass
 
