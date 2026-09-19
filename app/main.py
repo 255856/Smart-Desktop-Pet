@@ -208,7 +208,17 @@ def _ensure_config(root: Path) -> None:
 def _build_tts(cfg, root: Path) -> TTS:
     tts_cache = root / "assets" / "tts_cache"
     engine = getattr(cfg.character, "tts_engine", "edge")
-    if engine == "minimax":
+    if engine == "gptsovits":
+        # 方案 B：本地 GPT-SoVITS（完全免费，需先启动本地 api_v2 服务）
+        from app.voice.gptsovits_tts import GPTSoVITSTTS
+        tts = GPTSoVITSTTS(
+            url=getattr(cfg.character, "gptsovits_url", "http://127.0.0.1:9880"),
+            ref_audio=getattr(cfg.character, "gptsovits_ref_audio", ""),
+            prompt_text=getattr(cfg.character, "gptsovits_prompt_text", ""),
+            cache_dir=tts_cache,
+        )
+        log.info("TTS 引擎：GPT-SoVITS 本地（%s）", tts.url)
+    elif engine == "minimax":
         # 方案 A：MiniMax 声音克隆（样本目录配置后启动时自动克隆，
         # 样本指纹未变则跳过；失败自动回退 edge-tts，不影响启动）
         from app.voice import minimax_tts as _mm

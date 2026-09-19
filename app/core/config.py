@@ -55,6 +55,10 @@ class CharacterConfig(BaseModel):
     # 克隆样本来源：目录（自动取其中音频文件）或逗号分隔的文件列表。
     # 配置后启动时自动克隆（样本指纹未变则跳过，不会重复执行）
     minimax_samples: str = ""
+    # GPT-SoVITS 本地引擎（免费自定义音色，方案 B）：需先启动本地 api_v2 服务
+    gptsovits_url: str = "http://127.0.0.1:9880"
+    gptsovits_ref_audio: str = ""    # 参考音频路径（服务端本地可访问）
+    gptsovits_prompt_text: str = ""  # 参考音频对应的文本
 
 
 # ---------------- Window ----------------
