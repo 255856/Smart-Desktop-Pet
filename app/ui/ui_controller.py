@@ -221,9 +221,12 @@ class UIController(QObject):
 
     def _on_streaming_chunk(self, text: str) -> None:
         """流式输出增量：同步显示到桌宠头顶气泡。"""
-        self._stream_talking = True
-        self._update_talking()
         self.pet.show_streaming_bubble(text)
+        # 流式文本阶段不张嘴——此时 TTS 还没开始朗读，先动嘴会「对不上口型」。
+        # TTS 关闭（纯气泡聊天）时才退化为按文字节奏张嘴。
+        if not getattr(self.tts, "enabled", True):
+            self._stream_talking = True
+            self._update_talking()
 
     def _on_streaming_done(self) -> None:
         """流式输出结束：隐藏或延迟隐藏桌宠气泡。"""

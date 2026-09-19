@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import AsyncIterator, Callable, Optional
 
 from app.brain.llm_client import LLMClient, detect_action_intent
@@ -50,6 +51,23 @@ DANGEROUS_TOOLS = {"open_app", "open_website"}
 
 # 连续多少轮纯调工具（无文字）后强制进入 final 阶段
 MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3
+
+# 回复清洗：<think> 推理块 / 残留标记不进 UI 与 TTS
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+_THINK_TAG_RE = re.compile(r"</?(?:think|reasoning)>", re.I)
+
+# 防工具独白泄漏的 system 附加铁律（幂等标记）
+_STYLE_RULE = (
+    "\n【回复风格铁律】给主人的回复里严禁出现：工具名称（如 open_website/open_app）、"
+    "对内部操作的描述（如「我应该使用XX工具」「这是一个URL类型的请求」）、"
+    "推理过程、<think> 标记。只输出符合角色人设的一句自然中文回复。"
+)
+
+
+def _sanitize_reply(text: str) -> str:
+    t = _THINK_BLOCK_RE.sub("", text or "")
+    t = _THINK_TAG_RE.sub("", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
 class AgentLoop:
@@ -167,6 +185,12 @@ class AgentLoop:
             log.info("AgentLoop: 检测到动作意图 %s，第一轮开启 force_tool_use",
                      intent)
 
+        # 防工具独白泄漏：给 system 追加回复风格铁律（幂等）
+        if messages and messages[0].get("role") == "system":
+            base = str(messages[0].get("content") or "")
+            if "回复风格铁律" not in base:
+                messages[0]["content"] = base + _STYLE_RULE
+
         for turn in range(self.max_turns):
             if cancel_check is not None and cancel_check():
                 break
@@ -190,16 +214,18 @@ class AgentLoop:
                     cancel_check=cancel_check,
                     force_tool_use=(force_first_turn and turn == 0)):
                 if ev == "text":
+                    # 只缓存、不上屏：带工具意图的轮次里模型常先输出工具独白
+                    # （「我应该使用XX工具…」），这类文本绝不能进聊天窗口/TTS，
+                    # 否则多轮独白会拼成一条精神污染回复。确认本轮是最终回复后
+                    # 在轮末一次性发出。
                     content_parts.append(data)
-                    yield ev, data
                 elif ev == "finish":
                     if data.get("content") and not content_parts:
                         # 模型没走流式正文（罕见），兜底拿 finish 里的完整 content
                         content_parts.append(data["content"])
-                        yield "text", data["content"]
                     tool_calls = data.get("tool_calls") or []
 
-            final_text = "".join(content_parts)
+            final_text = _sanitize_reply("".join(content_parts))
 
             # 【抗幻觉】第 2 层：第 1 轮 + 有工具意图 + 模型没调工具 →
             # 注入强提示重试一次（重试时不再用 force_tool_use，让 user prompt 起作用）
@@ -223,8 +249,10 @@ class AgentLoop:
                 consecutive_tool_only = 0
                 continue   # 进入下一轮
 
-            # 没调工具 + 没文字 → 模型认为对话结束
+            # 没调工具 → 本轮即最终回复：清洗后一次性发 UI / TTS
             if not tool_calls:
+                if final_text:
+                    yield "text", final_text
                 break
 
             # 追加 assistant 的工具调用消息（OpenAI 格式）
@@ -278,6 +306,6 @@ class AgentLoop:
                 # 截断到合理长度
                 if len(last_result) > 300:
                     last_result = last_result[:300] + "..."
-                final_text = last_result
+                final_text = _sanitize_reply(last_result)
 
         yield "done", final_text
