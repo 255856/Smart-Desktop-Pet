@@ -22,11 +22,15 @@ log = logging.getLogger(__name__)
 
 
 def asr_available() -> bool:
-    """sounddevice / faster-whisper 是否可用（做 UI 降级判断）。"""
+    """sounddevice / faster-whisper 是否已安装（做 UI 降级判断）。
+
+    用 find_spec 只查存在性、不执行模块——faster_whisper 的 import 会连带
+    加载 ctranslate2 等重组件，在聊天窗口构造时执行会把 UI 卡住一两秒。
+    """
+    from importlib.util import find_spec
     try:
-        import sounddevice  # noqa: F401
-        import faster_whisper  # noqa: F401
-        return True
+        return (find_spec("sounddevice") is not None
+                and find_spec("faster_whisper") is not None)
     except Exception:  # noqa: BLE001
         return False
 

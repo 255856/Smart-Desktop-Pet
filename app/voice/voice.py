@@ -163,7 +163,10 @@ class TTS:
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
+            # 友好提示：edge-tts 联网失败、minimax 鉴权/网络、gptsovits 服务未起等
             log.warning("TTS 失败：%s", e)
+            log.warning("  ▸ 当前引擎=%s；可在设置面板切换或参考 docs/资源下载说明.md",
+                        type(self).__name__)
 
     async def _synthesize(self, text: str, out_path: Path) -> None:
         # 延迟 import，避免启动时无 pygame/edge-tts 也能跑程序

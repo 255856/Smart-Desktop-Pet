@@ -63,11 +63,30 @@ class GPTSoVITSTTS(TTS):
             "text_split_method": "cut5",
             "speed_factor": 1.0,
         }
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{self.url}/tts", json=payload)
-            resp.raise_for_status()
-            audio = resp.content
-        if len(audio) < 100:
-            raise RuntimeError(f"GPT-SoVITS 返回异常（{len(audio)} 字节），"
-                               "请确认 api_v2 已启动且模型加载成功")
-        out_path.write_bytes(audio)
+        # 第一次连接失败：尝试自愈（拉起 api_v2）+ 重试一次
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(f"{self.url}/tts", json=payload)
+                    resp.raise_for_status()
+                    audio = resp.content
+                if len(audio) < 100:
+                    raise RuntimeError(f"GPT-SoVITS 返回异常（{len(audio)} 字节），"
+                                       "请确认 api_v2 已启动且模型加载成功")
+                out_path.write_bytes(audio)
+                return
+            except (httpx.ConnectError, httpx.ReadError, OSError) as e:
+                if attempt == 0:
+                    log.warning("GPT-SoVITS 连接失败（%s），尝试自动重启 api_v2…", e)
+                    try:
+                        from app.main import start_tts_api_subprocess
+                        from pathlib import Path
+                        start_tts_api_subprocess(
+                            Path(__file__).resolve().parent.parent.parent,
+                            port=9880)
+                        import asyncio
+                        await asyncio.sleep(8)
+                        continue
+                    except Exception as e2:  # noqa: BLE001
+                        raise RuntimeError(f"GPT-SoVITS 自愈失败: {e2}") from e
+                raise

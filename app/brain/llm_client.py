@@ -107,7 +107,40 @@ def sanitize_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
+    # 剥离开头的低中文占比段落（推理模型英文 CoT 以纯文本漏进正文的兜底）
+    text = _drop_leading_low_cjk_paragraphs(text)
     return text.strip()
+
+
+def _cjk_ratio(text: str) -> float:
+    """文本段里中日韩字符的占比（区分英文 CoT 与中文正文）。"""
+    if not text:
+        return 0.0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff"
+              or "\u3040" <= ch <= "\u30ff")
+    return cjk / len(text)
+
+
+def _drop_leading_low_cjk_paragraphs(text: str) -> str:
+    """剥离开头的低中文占比段落。
+
+    推理模型的英文 CoT 会以纯文本漏进正文，且常不带 <think> 标签，
+    正则无法匹配，只能按段落中文占比判定：
+    首段 CJK 占比 < 15% 且后续存在占比 ≥ 30% 的段落时，
+    连续剥离开头的低占比段。中文正文（占比通常 > 60%）与纯英文回复均不受影响。
+    """
+    paras = text.split("\n\n")
+    if len(paras) < 2:
+        return text
+    ratios = [_cjk_ratio(p) for p in paras]
+    if ratios[0] >= 0.15:
+        return text
+    if not any(r >= 0.3 for r in ratios[1:]):
+        return text
+    i = 0
+    while i < len(paras) and ratios[i] < 0.15:
+        i += 1
+    return "\n\n".join(paras[i:]).strip()
 
 
 class LLMError(RuntimeError):

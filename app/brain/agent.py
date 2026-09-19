@@ -65,9 +65,9 @@ _STYLE_RULE = (
 
 
 def _sanitize_reply(text: str) -> str:
-    t = _THINK_BLOCK_RE.sub("", text or "")
-    t = _THINK_TAG_RE.sub("", t)
-    return re.sub(r"\n{3,}", "\n\n", t).strip()
+    """ReAct 回复清洗：复用 LLMClient 的清洗（think/emoji/空白/英文 CoT 剥离）。"""
+    from app.brain.llm_client import sanitize_text
+    return sanitize_text(text or "")
 
 
 class AgentLoop:
