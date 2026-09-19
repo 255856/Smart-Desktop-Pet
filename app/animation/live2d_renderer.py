@@ -510,6 +510,10 @@ class Live2DRenderer(PetRenderer):
                 pool = self.profile.random_pool_items()
                 if pool:
                     name = random.choice(pool)
+                    # 避免和上一次相同（不重样才显得"在变"）
+                    if name == getattr(self, "_last_random", None) and len(pool) > 1:
+                        name = random.choice([p for p in pool if p != name])
+                    self._last_random = name
                     item = self.profile.find_item(name)
                     if item is not None:
                         cat = self.profile.category(item.category)
@@ -525,6 +529,16 @@ class Live2DRenderer(PetRenderer):
                             # 手势/动作：持久生效（保持到下次随机/手动切换）
                             self.activate_menu_item(item.category, item.name,
                                                     toggle_off=False)
+                            # 概率叠加一个随机表情（姿势+表情同时变化，更生动）
+                            faces = [n for n in pool
+                                     if (it := self.profile.find_item(n)) is not None
+                                     and (c := self.profile.category(it.category))
+                                     is not None and c.emotion]
+                            if faces and random.random() < 0.5:
+                                face = self.profile.find_item(random.choice(faces))
+                                if face is not None:
+                                    self._play_item_expr(
+                                        face, hold_ms=_RANDOM_HOLD_MS + 1500)
             self._arm_random_timer()
 
     def note_activity(self) -> None:
@@ -734,6 +748,16 @@ class Live2DRenderer(PetRenderer):
         self._js(
             f"window.live2d.setParam({json.dumps(name)}, {value}, {duration_ms});"
         )
+
+    def look_at(self, dx: float, dy: float) -> None:
+        """头部/眼睛看向某个方向（dx/dy ∈ [-1,1]，相对画面中心的归一化偏移）。
+
+        持续调用（如鼠标跟踪定时器）会驱动物理链（头发/手臂摆动），
+        是 Live2D 角色"生动"的主要输入。
+        """
+        dx = max(-1.0, min(1.0, float(dx)))
+        dy = max(-1.0, min(1.0, float(dy)))
+        self._js(f"window.live2d.focus({dx:.3f}, {dy:.3f});")
 
     def set_expression(self, name: str) -> None:
         """兼容旧接口：已知表情走条目外观，未知名字交给 ExpressionManager。"""

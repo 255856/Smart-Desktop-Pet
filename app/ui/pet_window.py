@@ -207,6 +207,9 @@ class PetWindow(QWidget):
         self._sticker_cache: dict[str, QPixmap] = {}
         self._setup_sticker_overlay()
 
+        # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
+        self._setup_look_at()
+
         # 把渲染器的 widget 嵌入到 PetWindow
         display_widget = self.renderer.get_widget()
         if display_widget.parent() is None:
@@ -979,6 +982,31 @@ class PetWindow(QWidget):
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
+
+    # ---------------- 视线跟随（live2d：头/眼追鼠标，驱动物理） ----------------
+    def _setup_look_at(self) -> None:
+        rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
+        if rtype != "live2d":
+            return
+        self._look_timer = QTimer(self)
+        self._look_timer.timeout.connect(self._look_at_cursor)
+        self._look_timer.start(120)
+
+    def _look_at_cursor(self) -> None:
+        """把鼠标位置换算成归一化偏移，让模型头部/眼睛看过去。"""
+        look = getattr(self.renderer, "look_at", None)
+        if not callable(look):
+            return
+        try:
+            cur = QCursor.pos()
+            center = self.mapToGlobal(
+                QPoint(self.width() // 2, self.height() // 2))
+            # 灵敏度：1.2 倍窗口距离内从正中偏到边缘
+            nx = (cur.x() - center.x()) / max(1.0, self.width() * 1.2)
+            ny = (cur.y() - center.y()) / max(1.0, self.height() * 1.2)
+            look(nx, ny)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
     def _setup_sticker_overlay(self) -> None:

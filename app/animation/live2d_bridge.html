@@ -498,9 +498,15 @@ window.live2d = {
         } catch (e) { /* ignore */ }
     },
 
-    focus(x, y) {
+    focus(nx, ny) {
         if (!this.model) return;
-        try { this.model.focus(x, y); } catch (e) { /* 旧版 API 无 focus */ }
+        try {
+            // nx/ny 为 -1~1 的归一化偏移（相对画面中心），映射到画布坐标
+            const w = this.app ? this.app.screen.width : 0;
+            const h = this.app ? this.app.screen.height : 0;
+            this.model.focus(w / 2 + (nx || 0) * w / 2,
+                             h / 2 + (ny || 0) * h / 2);
+        } catch (e) { /* 旧版 API 无 focus */ }
     },
 
     resize(w, h) {
