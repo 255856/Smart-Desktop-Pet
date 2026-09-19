@@ -199,15 +199,10 @@ class UIController(QObject):
     def _apply_visual_settings(self) -> None:
         """应用视觉设置（缩放、透明度、行为节拍）。"""
         sw = self.settings_window
-        # scale：实时 resize 桌宠窗
+        # scale：实时 resize 桌宠窗（sprite 重缩放帧图 / live2d 重 fit 模型）
         new_scale = sw.get_scale()
         if abs(new_scale - self.pet._scale) > 0.001:
-            self.pet._scale = new_scale
-            self.pet._window_size = QSize(
-                int(self.pet.SPRITE_SIZE.width() * new_scale),
-                int(self.pet.SPRITE_SIZE.height() * new_scale),
-            )
-            self.pet.setFixedSize(self.pet._window_size)
+            self.pet.apply_display_size(new_scale)
         # 透明度：70% - 100% → setWindowOpacity
         op = sw.get_opacity()
         self.pet.setWindowOpacity(op)
@@ -268,15 +263,10 @@ class UIController(QObject):
         self.pet._start_frame_timer()
 
     def _on_pet_scale_changed(self, new_scale: float) -> None:
-        """右键菜单改了缩放 → 实时 resize pet 窗 + 重新缩放图片。"""
+        """右键菜单改了缩放 → 实时 resize pet 窗 + 重新缩放显示。"""
         if abs(new_scale - self.pet._scale) < 0.001:
             return
-        self.pet._scale = new_scale
-        self.pet._window_size = QSize(
-            int(self.pet.SPRITE_SIZE.width() * new_scale),
-            int(self.pet.SPRITE_SIZE.height() * new_scale),
-        )
-        self.pet.setFixedSize(self.pet._window_size)
+        self.pet.apply_display_size(new_scale)
         self._rescale_sprite_pixmaps()
         # 同步 settings_window 滑块
         self.settings_window.scale_slider.blockSignals(True)

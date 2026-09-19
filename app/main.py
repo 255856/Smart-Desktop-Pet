@@ -380,6 +380,8 @@ class App:
             animator=self.pet.animator,
             is_user_interacting=lambda: bool(
                 self.pet._user_inside or self.pet._dragging),
+            # live2d 不做自主移动（不走动/溜达），sprite 保持原行为
+            movement_enabled=(getattr(cfg.pet, "renderer", "sprite") != "live2d"),
         )
 
         banner.section("⑥ 智能中枢")

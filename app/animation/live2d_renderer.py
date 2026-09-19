@@ -512,12 +512,19 @@ class Live2DRenderer(PetRenderer):
                     name = random.choice(pool)
                     item = self.profile.find_item(name)
                     if item is not None:
-                        log.debug("Live2D 随机表情: %s", name)
-                        self._random_busy = True
-                        self._play_item_expr(item, hold_ms=_RANDOM_HOLD_MS)
-                        QTimer.singleShot(
-                            _RANDOM_HOLD_MS + 500,
-                            lambda: setattr(self, "_random_busy", False))
+                        cat = self.profile.category(item.category)
+                        log.debug("Live2D 随机播放: %s", name)
+                        if cat is not None and cat.emotion:
+                            # 表情：展示几秒后恢复当前情绪
+                            self._random_busy = True
+                            self._play_item_expr(item, hold_ms=_RANDOM_HOLD_MS)
+                            QTimer.singleShot(
+                                _RANDOM_HOLD_MS + 500,
+                                lambda: setattr(self, "_random_busy", False))
+                        else:
+                            # 手势/动作：持久生效（保持到下次随机/手动切换）
+                            self.activate_menu_item(item.category, item.name,
+                                                    toggle_off=False)
             self._arm_random_timer()
 
     def note_activity(self) -> None:
@@ -738,6 +745,14 @@ class Live2DRenderer(PetRenderer):
 
     def get_widget(self):
         return self.view
+
+    def set_size(self, w: int, h: int) -> None:
+        """调整渲染区尺寸（设置面板改角色大小时），模型按新画布重新 fit。"""
+        self.widget_size = (int(w), int(h))
+        if self.view is not None:
+            self.view.setFixedSize(*self.widget_size)
+        # 页面未 ready 时只记尺寸，_on_model_ready 会按 widget_size resize
+        self._js(f"window.live2d.resize({int(w)}, {int(h)});")
 
     def shutdown(self) -> None:
         self._random_timer.stop()

@@ -961,8 +961,26 @@ class PetWindow(QWidget):
         self.renderer.set_random_expressions(
             not self.renderer.is_random_expressions_enabled())
 
-    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
-    def _setup_sticker_overlay(self) -> None:
+    def apply_display_size(self, scale: float) -> None:
+        """按缩放系数调整窗口与显示控件尺寸（sprite / live2d 通用）。
+
+        live2d 的显示控件是固定尺寸的 QWebEngineView，只改窗口大小没用，
+        必须同步调 renderer.set_size 让模型按新画布重新 fit。
+        """
+        self._scale = float(scale)
+        self._window_size = QSize(
+            int(self.SPRITE_SIZE.width() * self._scale),
+            int(self.SPRITE_SIZE.height() * self._scale),
+        )
+        self.setFixedSize(self._window_size)
+        if self._sprite_label is not None:
+            self._sprite_label.setGeometry(
+                0, 0, self._window_size.width(), self._window_size.height())
+        resize = getattr(self.renderer, "set_size", None)
+        if callable(resize):
+            resize(self._window_size.width(), self._window_size.height())
+
+    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------    def _setup_sticker_overlay(self) -> None:
         """模型目录带表情包（profile stickers 配置）时启用随机贴纸弹窗。"""
         cfg = None
         if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):

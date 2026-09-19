@@ -107,10 +107,13 @@ class MotionController:
 
     def __init__(self, get_window, screen_geometry_getter, animator,
                  cursor_pos_getter: Optional[Callable[[], QPoint]] = None,
-                 is_user_interacting: Optional[Callable[[], bool]] = None):
+                 is_user_interacting: Optional[Callable[[], bool]] = None,
+                 movement_enabled: bool = True):
         self.get_window = get_window
         self.screen_geometry_getter = screen_geometry_getter
         self.animator = animator
+        # live2d 渲染器不做自主移动（不走动/溜达），只保持原地待机
+        self.movement_enabled = bool(movement_enabled)
         self.cursor_pos_getter = cursor_pos_getter or self._default_cursor_pos
         # 用户是否在关注桌宠（鼠标位于桌面 / enter / drag 时为 True）。
         # PR-mute-motion：进入此状态后强制 IDLE 15-30 s。
@@ -175,6 +178,16 @@ class MotionController:
             return
         scr = self.screen_geometry_getter()
         if not scr or scr.width() <= 0:
+            return
+
+        # live2d：禁用自主移动，永远待机（不抽走动/溜达）
+        if not self.movement_enabled:
+            self.current = MoveDecision(
+                MoveMode.IDLE,
+                random.randint(self.idle_min_ms, self.idle_max_ms),
+                0, None,
+            )
+            self._decision_at = time.time()
             return
 
         # PR-mute-motion guard：如果当前还是 IDLE 且还没到 duration 末尾，
