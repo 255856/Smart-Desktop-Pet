@@ -254,6 +254,8 @@ def _build_tts(cfg, root: Path) -> TTS:
             or cfg.character.tts_voice)
         base_url = getattr(cfg.llm, "base_url", "https://api.minimaxi.com/v1")
         samples_src = getattr(cfg.character, "minimax_samples", "")
+        if samples_src and not Path(samples_src).is_absolute():
+            samples_src = str(root / samples_src)
         if samples_src and voice_id:
             try:
                 if _mm.ensure_voice_cloned(

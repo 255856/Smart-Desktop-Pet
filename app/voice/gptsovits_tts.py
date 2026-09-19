@@ -37,6 +37,16 @@ class GPTSoVITSTTS(TTS):
         self.text_lang = text_lang
         self.prompt_lang = prompt_lang
 
+    def _resolve_ref(self, ref: str) -> str:
+        """参考音频相对路径 → 绝对路径（服务端按其自身工作目录解析，须给绝对路径）。"""
+        if not ref:
+            return ref
+        p = Path(ref)
+        if p.is_absolute():
+            return str(p)
+        root = Path(__file__).resolve().parent.parent.parent
+        return str((root / ref).resolve())
+
     async def _synthesize(self, text: str, out_path: Path) -> None:
         import httpx
         clean = _strip_emojis(text)
@@ -47,7 +57,7 @@ class GPTSoVITSTTS(TTS):
         payload = {
             "text": clean,
             "text_lang": self.text_lang,
-            "ref_audio_path": self.ref_audio,
+            "ref_audio_path": self._resolve_ref(self.ref_audio),
             "prompt_text": self.prompt_text,
             "prompt_lang": self.prompt_lang,
             "text_split_method": "cut5",

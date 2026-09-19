@@ -77,9 +77,21 @@ data/
 .agents/plans/
 # 日志与预览截图产物
 *.log
-tools/preview*/
+tools/
 
 # Live2D 模型（版权模型，禁止二次传播，不入库；配置模板在 assets/live2d_profiles/）
 assets/live2d/
+assets/live2d_profiles/
 tools/shot_log.txt
 tools/*_log.txt
+
+# 语音数据集（版权音频不入库；目录骨架保留，下载链接见 docs/资源下载说明.md）
+voice/**
+!voice/
+!voice/**/
+!voice/**/.gitkeep
+
+# GPT-SoVITS 整合包（自带 runtime 与模型，体积巨大不入库；下载链接见 docs/资源下载说明.md）
+GPT-SoVITS-v2pro-20250604-nvidia50/**
+!GPT-SoVITS-v2pro-20250604-nvidia50/
+!GPT-SoVITS-v2pro-20250604-nvidia50/.gitkeep
