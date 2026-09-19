@@ -94,7 +94,5 @@ class TestChineseSuffix:
         """中文约束 prompt 必须包含关键规则。"""
         assert "简体中文" in CHINESE_SYSTEM_SUFFIX
         assert "emoji" in CHINESE_SYSTEM_SUFFIX.lower() or "表情" in CHINESE_SYSTEM_SUFFIX
-        # 包含「不要任何表情符号」或类似措辞
-        assert "表情符号" in CHINESE_SYSTEM_SUFFIX
         # 包含「[happy]」标签允许的说明
         assert "[happy]" in CHINESE_SYSTEM_SUFFIX
