@@ -26,6 +26,7 @@ def create_renderer(
     live2d_model_dir: Optional[Path] = None,
     live2d_hide_watermark: bool = True,
     live2d_random_exp_cfg: Optional[dict] = None,
+    live2d_max_fps: int = 30,
 ) -> PetRenderer:
     """根据 cfg 创建对应渲染器。
 
@@ -51,6 +52,7 @@ def create_renderer(
             live2d_model_dir=live2d_model_dir,
             live2d_hide_watermark=live2d_hide_watermark,
             live2d_random_exp_cfg=live2d_random_exp_cfg,
+            live2d_max_fps=live2d_max_fps,
         )
     # 默认 / 显式 sprite
     return _create_sprite(
@@ -74,7 +76,7 @@ def _create_sprite(*, sprite_dir, fallback_image, window_size, scale) -> PetRend
 
 def _try_create_live2d(*, sprite_dir, fallback_image, window_size, scale,
                        live2d_model_dir, live2d_hide_watermark=True,
-                       live2d_random_exp_cfg=None) -> PetRenderer:
+                       live2d_random_exp_cfg=None, live2d_max_fps=30) -> PetRenderer:
     """尝试创建 Live2D 渲染器；失败 fallback 到 sprite。"""
     if not live2d_model_dir:
         log.warning("renderer=live2d 但未配置 pet.live2d.model_dir；fallback 到 sprite")
@@ -111,6 +113,7 @@ def _try_create_live2d(*, sprite_dir, fallback_image, window_size, scale,
             scale=scale,
             hide_watermark=live2d_hide_watermark,
             random_exp_cfg=live2d_random_exp_cfg,
+            max_fps=live2d_max_fps,
         )
         log.info("Live2DRenderer 已创建: %s", live2d_model_dir)
         return renderer

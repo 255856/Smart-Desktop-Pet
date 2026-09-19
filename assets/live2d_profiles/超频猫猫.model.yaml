@@ -88,7 +88,7 @@ random:
 # 表情包贴纸：随机间隔在桌宠右上角弹出一张（dir 相对本模型目录）
 stickers:
   dir: "../超频猫猫表情包"
-  min_s: 40
-  max_s: 120
+  min_s: 30
+  max_s: 60
   duration_s: 4
   size: 120

@@ -271,7 +271,8 @@ class Live2DRenderer(PetRenderer):
 
     def __init__(self, model_dir: str | Path, widget_size: tuple[int, int] = (800, 800),
                  scale: float = 0.5, hide_watermark: bool = True,
-                 random_exp_cfg: Optional[dict] = None):
+                 random_exp_cfg: Optional[dict] = None,
+                 max_fps: int = 30):
         if not _WEB_ENGINE_AVAILABLE:
             raise ImportError(
                 "Live2DRenderer 需要 PyQtWebEngine。"
@@ -282,6 +283,8 @@ class Live2DRenderer(PetRenderer):
         self.widget_size = widget_size
         self.scale = scale
         self.hide_watermark = hide_watermark
+        # 渲染帧率上限（性能）：桌宠待机 30fps 足够顺滑
+        self.max_fps = max(5, int(max_fps))
         self._ready = False
         self._sleeping = False
         self._thinking = False
@@ -376,10 +379,19 @@ class Live2DRenderer(PetRenderer):
         js = (
             f"window.live2d.loadModel("
             f"{json.dumps(self._http_base)}, "
-            f"{json.dumps(self._settings_name)}, {fit}, {hide_wm});"
+            f"{json.dumps(self._settings_name)}, {fit}, {hide_wm}, "
+            f"{int(self.max_fps)});"
         )
         self._page.runJavaScript(js)
         QTimer.singleShot(10000, self._check_ready_timeout)
+
+    def pause(self) -> None:
+        """暂停渲染循环（桌宠隐藏时零 GPU/CPU 开销）。"""
+        self._js("window.live2d.pause();")
+
+    def resume(self) -> None:
+        """恢复渲染循环（桌宠重新显示）。"""
+        self._js("window.live2d.resume();")
 
     def _check_ready_timeout(self) -> None:
         if not self._ready and not self._error:

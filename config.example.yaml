@@ -93,3 +93,5 @@ pet:
     random_expression: true
     random_expression_min_s: 25
     random_expression_max_s: 70
+    # 渲染帧率上限（性能）：30fps 待机足够顺滑；隐藏到托盘时渲染完全暂停
+    max_fps: 30

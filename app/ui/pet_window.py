@@ -177,7 +177,8 @@ class PetWindow(QWidget):
                  renderer_type: str = "sprite",
                  live2d_model_dir: str | Path | None = None,
                  live2d_hide_watermark: bool = True,
-                 live2d_random_exp_cfg: dict | None = None):
+                 live2d_random_exp_cfg: dict | None = None,
+                 live2d_max_fps: int = 30):
         super().__init__()
         # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
         self._window_size = QSize(
@@ -197,6 +198,7 @@ class PetWindow(QWidget):
             live2d_model_dir=Path(live2d_model_dir) if live2d_model_dir else None,
             live2d_hide_watermark=live2d_hide_watermark,
             live2d_random_exp_cfg=live2d_random_exp_cfg,
+            live2d_max_fps=live2d_max_fps,
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
@@ -689,6 +691,20 @@ class PetWindow(QWidget):
                 self.move(event_global_pos(evt) - self._drag_start)
             evt.accept()
 
+    def hideEvent(self, evt) -> None:
+        """隐藏（托盘）时暂停 live2d 渲染循环：零 GPU/CPU 开销。"""
+        pause = getattr(self.renderer, "pause", None)
+        if callable(pause):
+            pause()
+        super().hideEvent(evt)
+
+    def showEvent(self, evt) -> None:
+        """重新显示时恢复渲染循环。"""
+        resume = getattr(self.renderer, "resume", None)
+        if callable(resume):
+            resume()
+        super().showEvent(evt)
+
     def enterEvent(self, evt) -> None:
         """鼠标进入桌宠窗：进入「在看」模式（PR-mute-motion 配合用）。"""
         self._user_inside = True
@@ -998,9 +1014,11 @@ class PetWindow(QWidget):
             return
         self._mask_timer = QTimer(self)
         self._mask_timer.timeout.connect(self._update_click_mask)
-        self._mask_timer.start(1000)
+        self._mask_timer.start(2500)
 
     def _update_click_mask(self) -> None:
+        if not self.isVisible():
+            return
         try:
             import numpy as np
             from PyQt5.QtGui import QImage
@@ -1055,6 +1073,8 @@ class PetWindow(QWidget):
 
     def _look_at_cursor(self) -> None:
         """把鼠标位置换算成归一化偏移，让模型头部/眼睛看过去。"""
+        if not self.isVisible():
+            return
         look = getattr(self.renderer, "look_at", None)
         if not callable(look):
             return

@@ -164,7 +164,8 @@ class MotionController:
     def start(self) -> None:
         if not self._started:
             self._started = True
-            self._move_timer.start()
+            if self.movement_enabled:
+                self._move_timer.start()
             self._decide_next()
 
     def stop(self) -> None:

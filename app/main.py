@@ -366,6 +366,7 @@ class App:
                 "min_s": int(getattr(cfg.pet.live2d, "random_expression_min_s", 25)),
                 "max_s": int(getattr(cfg.pet.live2d, "random_expression_max_s", 70)),
             },
+            live2d_max_fps=int(getattr(cfg.pet.live2d, "max_fps", 30)),
         )
         self.pet.move(cfg.window.start_x, cfg.window.start_y)
         self.pet.attach_state(self.state_mgr.state)

@@ -127,6 +127,9 @@ class Live2DConfig(BaseModel):
     random_expression: bool = True
     random_expression_min_s: int = 25
     random_expression_max_s: int = 70
+    # 渲染帧率上限（性能）：桌宠待机 30fps 足够顺滑，满帧只会让风扇狂转。
+    # 桌宠隐藏到托盘时渲染会完全暂停（零开销）。
+    max_fps: int = 30
 
 
 class PetConfig(BaseModel):

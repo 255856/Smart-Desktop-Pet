@@ -74,7 +74,7 @@ window.live2d = {
     // settingsName: *.model3.json 的文件名（Python 端 glob 得到，避免硬编码）
     // fitFactor: 0~1，模型在画布中的占比
     // hideWm: 是否隐藏模型自带的 WaterMark 水印图层（默认 true）
-    async loadModel(httpBase, settingsName, fitFactor, hideWm) {
+    async loadModel(httpBase, settingsName, fitFactor, hideWm, maxFps) {
         const base = String(httpBase).replace(/\/+$/, "");
         const settingsUrl = base + "/model/" +
             encodeURIComponent(settingsName).replace(/%2F/g, "/");
@@ -88,7 +88,9 @@ window.live2d = {
                 backgroundAlpha: 0,
                 antialias: true,
                 autoDensity: true,
-                resolution: window.devicePixelRatio || 1,
+                // 分辨率封顶 1.5：高分屏（DPR≥2）全分辨率渲染 GPU/CPU 翻倍，
+                // 桌宠小窗肉眼几乎无差，风扇差别很大
+                resolution: Math.min(window.devicePixelRatio || 1, 1.5),
                 autoStart: true,
                 width: stage.clientWidth || 800,
                 height: stage.clientHeight || 800,
@@ -188,6 +190,12 @@ window.live2d = {
 
             this.fit();
             this.ready = true;
+            // 渲染帧率封顶（性能）：Live2D 待机 30fps 足够顺滑，rAF 满帧（60/144）
+            // 只会让 GPU/CPU 空转、风扇狂转
+            try {
+                this.app.ticker.maxFPS = (maxFps === undefined || maxFps === null)
+                    ? 30 : Math.max(5, Number(maxFps));
+            } catch (err) { /* 旧版 ticker 无 maxFPS */ }
             console.log("Live2D model loaded, expressions:", this.expressions);
             this._py("onReady", JSON.stringify(this.expressions));
         } catch (err) {
@@ -514,6 +522,14 @@ window.live2d = {
             this.app.renderer.resize(w, h);
             this.fit();
         }
+    },
+
+    // 暂停/恢复渲染（桌宠隐藏时完全停掉 ticker：零 GPU/CPU）
+    pause() {
+        try { if (this.app) this.app.ticker.stop(); } catch (e) { /* ignore */ }
+    },
+    resume() {
+        try { if (this.app) this.app.ticker.start(); } catch (e) { /* ignore */ }
     },
 
     shutdown() {
