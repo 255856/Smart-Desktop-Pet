@@ -122,6 +122,11 @@ class Live2DConfig(BaseModel):
     # 实现上在渲染层 drawMesh 跳过这些 drawable，不改动模型文件与贴图。
     # 仅建议个人桌面自用；公开使用或再分发请保留水印或联系模型作者授权。
     hide_watermark: bool = True
+    # 挂机随机表情（空闲时从模型表情池随机切换，互动即暂停）。
+    # 表情池与默认节奏在模型目录的 *.model.yaml 里配置，这里只做开关与节奏覆盖。
+    random_expression: bool = True
+    random_expression_min_s: int = 25
+    random_expression_max_s: int = 70
 
 
 class PetConfig(BaseModel):

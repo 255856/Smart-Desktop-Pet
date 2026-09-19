@@ -354,6 +354,12 @@ class App:
             renderer_type=getattr(cfg.pet, "renderer", "sprite"),
             live2d_model_dir=Path(getattr(cfg.pet.live2d, "model_dir", "")) if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None) else None,
             live2d_hide_watermark=bool(getattr(cfg.pet.live2d, "hide_watermark", True)),
+            # 挂机随机表情（Live2D 专属，池子在模型目录 *.model.yaml）
+            live2d_random_exp_cfg={
+                "enabled": bool(getattr(cfg.pet.live2d, "random_expression", True)),
+                "min_s": int(getattr(cfg.pet.live2d, "random_expression_min_s", 25)),
+                "max_s": int(getattr(cfg.pet.live2d, "random_expression_max_s", 70)),
+            },
         )
         self.pet.move(cfg.window.start_x, cfg.window.start_y)
         self.pet.attach_state(self.state_mgr.state)

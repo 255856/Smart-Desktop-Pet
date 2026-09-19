@@ -69,3 +69,12 @@ Thumbs.db
 assets/sprites/
 # TTS 缓存（运行时生成）
 assets/tts_cache/
+
+# 运行时数据目录整体忽略（memory/reminders/注册表/缓存等本机数据）
+data/
+# ZCode 本地会话配置
+.zcode/
+.agents/plans/
+# 日志与预览截图产物
+*.log
+tools/preview*/

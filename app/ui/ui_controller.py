@@ -51,8 +51,11 @@ class UIController(QObject):
         self._chat_window = None
         self._last_food_warn = 0.0
 
-        # --- 设置窗口 ---
-        self.settings_window = SettingsWindow(char_cfg=self.cfg.character)
+        # --- 设置窗口（传入渲染器引用：live2d 时生成「Live2D」Tab）---
+        self.settings_window = SettingsWindow(
+            char_cfg=self.cfg.character,
+            renderer=getattr(self.pet, "renderer", None),
+        )
         self.settings_window.attach_state(self.state)
 
         # --- 托盘 ---
@@ -95,6 +98,11 @@ class UIController(QObject):
         sw.reset_to_defaults_requested.connect(self._reset_to_default_settings)
         sw.model_config_changed.connect(self._on_model_config_changed)
         sw.voice_changed.connect(self._on_voice_changed)
+        # --- Live2D 专属信号（设置窗口没有该 Tab 时不存在）---
+        if hasattr(sw, "live2d_item_activated"):
+            sw.live2d_item_activated.connect(self._on_live2d_item_activated)
+            sw.live2d_reset_requested.connect(self._on_live2d_reset)
+            sw.random_exp_changed.connect(self._on_random_exp_changed)
 
         # --- 托盘信号 ---
         self.pet.quit_requested.connect(self._quit)
@@ -210,6 +218,11 @@ class UIController(QObject):
             decide_seconds=sw.get_decide_seconds(),
         )
 
+    def _is_sprite(self) -> bool:
+        """当前渲染器是否 sprite（帧图专属的设置只对它生效）。"""
+        r = getattr(self.pet, "renderer", None)
+        return r is None or r.get_renderer_type() == "sprite"
+
     def _apply_visual_settings_with_rescale(self) -> None:
         """_apply_visual_settings 的增强版：如果缩放变了就重新 prescale 图片。"""
         old_scale = self.pet._scale
@@ -219,6 +232,8 @@ class UIController(QObject):
 
     def _rescale_sprite_pixmaps(self) -> None:
         """缩放窗口尺寸变化后，重新预缩放 atlas 中所有帧的 pixmap。"""
+        if not self._is_sprite():
+            return  # live2d 没有 atlas，窗口尺寸由 PetWindow 自己 resize
         from app.ui.pet_window import _scale_pixmap_keep_alpha, _clear_pixmap_cache
         _clear_pixmap_cache()
         atlas = self.pet.atlas
@@ -270,10 +285,14 @@ class UIController(QObject):
 
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
+        if not self._is_sprite():
+            return  # sprite 专属（帧切换淡入淡出）
         self.pet.player.set_crossfade_ms(ms if enabled else 0)
 
     def _override_frame_ms_now(self, ms: int) -> None:
         """立刻改内存里所有帧的 duration_ms，不动磁盘。"""
+        if not self._is_sprite():
+            return  # sprite 专属
         self.pet.atlas.override_frame_duration_ms(ms)
         self.pet._start_frame_timer()
         # 同步 settings_window UI
@@ -304,9 +323,10 @@ class UIController(QObject):
         """重置所有设置为默认值。"""
         self.settings_window._load_defaults()
         self._apply_visual_settings_with_rescale()
-        self._override_frame_ms_now(50)
         self.pet.animator.set_lock_first_idle(False)
-        self.pet.player.set_crossfade_ms(0)
+        if self._is_sprite():
+            self.pet.player.set_crossfade_ms(0)
+            self._override_frame_ms_now(50)
         self.pet._fps_enabled = False
         self.settings_window._set_status("已重置默认值")
 
@@ -315,6 +335,9 @@ class UIController(QObject):
     # ============================================================
     def _do_retune_frames(self, ms: int) -> None:
         """用户点了「应用帧时长」按钮 —— 重命名所有 PNG + 重新加载 atlas。"""
+        if not self._is_sprite():
+            self.settings_window._set_status("帧时长仅 sprite 模式可用（Live2D 无帧图）")
+            return
         import subprocess
         from pathlib import Path as _P
         try:
@@ -474,6 +497,34 @@ class UIController(QObject):
             self.cfg.character.tts_enabled = False
             self.tts.set_enabled(False)
             log.info("TTS 已关闭")
+
+    # ============================================================
+    #  Live2D 专属（设置窗口「Live2D」Tab）
+    # ============================================================
+    def _live2d_renderer(self):
+        r = getattr(self.pet, "renderer", None)
+        return r if r is not None and hasattr(r, "activate_menu_item") else None
+
+    def _on_live2d_item_activated(self, group_id: str, item_id: str) -> None:
+        """Live2D Tab：应用一个分类条目（特殊/发型/配件/手势/表情）。"""
+        r = self._live2d_renderer()
+        if r is not None:
+            r.activate_menu_item(group_id, item_id)
+            self.settings_window._set_status(f"Live2D 外观已切换：{item_id}")
+
+    def _on_live2d_reset(self) -> None:
+        """Live2D Tab：复位全部外观。"""
+        r = self._live2d_renderer()
+        if r is not None:
+            r.reset_all_appearance()
+            self.settings_window._set_status("Live2D 外观已全部复位")
+
+    def _on_random_exp_changed(self, enabled: bool) -> None:
+        """Live2D Tab：挂机随机表情开关。"""
+        r = self._live2d_renderer()
+        if r is not None:
+            r.set_random_expressions(bool(enabled))
+            log.info("挂机随机表情：%s", "开" if enabled else "关")
 
     def _init_model_config_ui(self) -> None:
         """启动时把 cfg.llm 的值加载到设置面板 UI。"""

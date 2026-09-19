@@ -90,9 +90,14 @@ class SettingsWindow(QWidget):
     model_config_changed = Signal(dict)
     # --- TTS 语音变更 ---
     voice_changed = Signal(str)
+    # --- Live2D 专属（仅 live2d 渲染器时显示该 Tab）---
+    live2d_item_activated = Signal(str, str)   # (group_id, item_id)
+    live2d_reset_requested = Signal()
+    random_exp_changed = Signal(bool)          # 挂机随机表情开关
 
     def __init__(self, parent: Optional[QWidget] = None,
-                 char_cfg: Optional["CharacterConfig"] = None) -> None:
+                 char_cfg: Optional["CharacterConfig"] = None,
+                 renderer: Optional[object] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -109,6 +114,8 @@ class SettingsWindow(QWidget):
         self.setStyleSheet(ui_style.SETTINGS_QSS)
         # 角色配置（用于「试听」按钮显示角色名 + 后续扩展）；允许为 None 以保留向后兼容
         self.char_cfg = char_cfg
+        # 渲染器引用（可选）：live2d 时用于生成「Live2D」Tab 与 renderer-aware 表情按钮
+        self._renderer = renderer
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -201,6 +208,13 @@ class SettingsWindow(QWidget):
         tabs.addTab(self._build_tab_visual(),  "视觉")
         tabs.addTab(self._build_tab_control(), "控制")
         tabs.addTab(self._build_tab_model(),   "模型配置")
+        # Live2D 专属 Tab：模型有分类外观（menu groups）时才显示
+        if self._renderer is not None:
+            try:
+                if self._renderer.get_menu_groups():
+                    tabs.addTab(self._build_tab_live2d(), "Live2D")
+            except Exception:  # noqa: BLE001
+                pass
         cl.addWidget(tabs, 1)
 
         # —— 底部状态栏 + 按钮 ——
@@ -415,12 +429,20 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.btn_chat); gv.addWidget(self.btn_sleep); gv.addWidget(self.btn_wake)
         v.addWidget(g_short)
 
-        # —— 表情 ——
+        # —— 表情（renderer-aware：live2d 用模型自带表情，sprite 用固定 5 个）——
         g_emo = QGroupBox("切换表情")
         gv = QGridLayout(g_emo)
         self.emo_btns: list[tuple[QPushButton, str]] = []
-        emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
-                    ('害羞', 'shy'), ('思考', 'think')]
+        emo_list: list[tuple[str, str]] = []
+        if self._renderer is not None:
+            try:
+                emo_list = [(label, key) for key, label in
+                            self._renderer.get_emotion_options()]
+            except Exception:  # noqa: BLE001
+                emo_list = []
+        if not emo_list:
+            emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
+                        ('害羞', 'shy'), ('思考', 'think')]
         for i, (text, key) in enumerate(emo_list):
             btn = QPushButton(text)
             btn.setCheckable(True)
@@ -450,6 +472,70 @@ class SettingsWindow(QWidget):
             gv.addWidget(lbl_cap); gv.addLayout(row)
             self.motion_sliders[key] = (slider, val)
         v.addWidget(g_motion)
+
+        v.addStretch(1)
+        return page
+
+    # ---------- Tab: Live2D（模型专属外观 / 随机表情） ----------
+    def _build_tab_live2d(self) -> QWidget:
+        """Live2D 专属设置：按键说明五大类分类条目 + 复位 + 挂机随机表情。
+
+        条目来自渲染器 profile（每模型一份 *.model.yaml），换模型自动跟随。
+        """
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setSpacing(10)
+        renderer = self._renderer
+
+        # —— 模型名 ——
+        model_name = ""
+        try:
+            model_name = getattr(renderer.profile, "name", "") or ""
+        except Exception:  # noqa: BLE001
+            pass
+        if model_name:
+            lbl = QLabel(f"当前模型：{model_name}")
+            f = lbl.font(); f.setBold(True); lbl.setFont(f)
+            v.addWidget(lbl)
+
+        # —— 分类条目（下拉 + 应用）——
+        self.live2d_combos: list[tuple[str, QComboBox]] = []
+        try:
+            groups = renderer.get_menu_groups()
+        except Exception:  # noqa: BLE001
+            groups = []
+        for g in groups:
+            box = QGroupBox(g["label"])
+            h = QHBoxLayout(box)
+            cmb = QComboBox()
+            for item_id, label in g["items"]:
+                cmb.addItem(label, item_id)
+            btn = QPushButton("应用")
+            btn.clicked.connect(
+                lambda _=False, gid=g["id"], c=cmb:
+                self.live2d_item_activated.emit(gid, str(c.currentData())))
+            h.addWidget(cmb, 1)
+            h.addWidget(btn)
+            v.addWidget(box)
+            self.live2d_combos.append((g["id"], cmb))
+
+        # —— 复位 + 挂机随机表情 ——
+        g_misc = QGroupBox("外观 / 挂机")
+        gm = QVBoxLayout(g_misc)
+        self.btn_live2d_reset = QPushButton("复位全部外观")
+        self.btn_live2d_reset.clicked.connect(self.live2d_reset_requested.emit)
+        gm.addWidget(self.btn_live2d_reset)
+
+        rnd_on = False
+        try:
+            rnd_on = bool(renderer.is_random_expressions_enabled())
+        except Exception:  # noqa: BLE001
+            pass
+        self.cb_random_exp = QCheckBox("挂机随机表情（空闲时随机切换表情，互动即暂停）")
+        self.cb_random_exp.setChecked(rnd_on)
+        self.cb_random_exp.toggled.connect(self.random_exp_changed.emit)
+        gm.addWidget(self.cb_random_exp)
+        v.addWidget(g_misc)
 
         v.addStretch(1)
         return page

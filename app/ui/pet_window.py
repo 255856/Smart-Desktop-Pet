@@ -176,7 +176,8 @@ class PetWindow(QWidget):
                  always_on_top: bool = True,
                  renderer_type: str = "sprite",
                  live2d_model_dir: str | Path | None = None,
-                 live2d_hide_watermark: bool = True):
+                 live2d_hide_watermark: bool = True,
+                 live2d_random_exp_cfg: dict | None = None):
         super().__init__()
         # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
         self._window_size = QSize(
@@ -195,6 +196,7 @@ class PetWindow(QWidget):
             scale=scale,
             live2d_model_dir=Path(live2d_model_dir) if live2d_model_dir else None,
             live2d_hide_watermark=live2d_hide_watermark,
+            live2d_random_exp_cfg=live2d_random_exp_cfg,
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
@@ -926,6 +928,13 @@ class PetWindow(QWidget):
         self._chat_input_visible = not getattr(self, '_chat_input_visible', False)
         self.toggle_chat_input(self._chat_input_visible)
 
+    def _toggle_random_expressions(self) -> None:
+        """开关挂机随机表情（仅 Live2D 渲染器支持）。"""
+        if self.renderer is None or not hasattr(self.renderer, "set_random_expressions"):
+            return
+        self.renderer.set_random_expressions(
+            not self.renderer.is_random_expressions_enabled())
+
     # ---------------- 右键菜单（精简版） ----------------
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
@@ -975,6 +984,36 @@ class PetWindow(QWidget):
                     a.triggered.connect(
                         lambda _=False, n=name: self.animator.set_hairstyle(n))
                     hair_menu.addAction(a)
+        # === Live2D 分类外观子菜单（按键说明五大类：特殊/配件/手势等）===
+        # 表情/发型已由上面两个子菜单覆盖，这里渲染其余分类；sprite 无此部分。
+        menu_groups: list[dict] = []
+        try:
+            menu_groups = self.renderer.get_menu_groups() if self.renderer else []
+        except Exception:  # noqa: BLE001
+            menu_groups = []
+        for g in menu_groups:
+            if g.get("kind") in ("emotion", "hairstyle"):
+                continue
+            sub = menu.addMenu(g["label"])
+            for item_id, label in g["items"]:
+                a = QAction(label, self)
+                a.triggered.connect(
+                    lambda _=False, gid=g["id"], iid=item_id:
+                    self.renderer.activate_menu_item(gid, iid))
+                sub.addAction(a)
+        if menu_groups:
+            act_reset = QAction("复位全部外观", self)
+            act_reset.triggered.connect(
+                lambda _=False: self.renderer.reset_all_appearance())
+            menu.addAction(act_reset)
+            rnd_on = False
+            try:
+                rnd_on = self.renderer.is_random_expressions_enabled()
+            except Exception:  # noqa: BLE001
+                pass
+            act_rnd = QAction("随机表情：开" if rnd_on else "随机表情：关", self)
+            act_rnd.triggered.connect(lambda _: self._toggle_random_expressions())
+            menu.addAction(act_rnd)
         menu.addSeparator()
 
         # === 睡觉 / 醒来 ===
@@ -988,13 +1027,18 @@ class PetWindow(QWidget):
 
         # === 一次性动作（按渲染器能力）===
         # sprite：转圈 / 伸懒腰 / 起跳 / 游泳（真帧动画）。
-        # Live2D：本模型没有注册 Motions，上面那些帧动画无法播放，改用模型原生趣味
-        # 表情（吐舌 / 鼓腮），避免把 sprite 的动作生硬套到 Live2D 上。
+        # Live2D：按模型 profile 的动作映射动态生成（引用模型手势/特殊条目）。
         play_menu = menu.addMenu("玩一下")
         if rtype == "live2d":
+            try:
+                play_options = self.renderer.get_play_options()
+            except Exception:  # noqa: BLE001
+                play_options = []
+            if not play_options:
+                play_options = [('tongue', '吐舌头')]
             play_actions = [
-                ('吐舌头', lambda: self.animator.play_animation('tongue')),
-                ('鼓腮帮', lambda: self.animator.play_animation('cheek')),
+                (label, lambda _=False, n=name: self.animator.play_animation(n))
+                for name, label in play_options
             ]
         else:
             play_actions = [

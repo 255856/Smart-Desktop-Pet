@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Live2D Bridge</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: transparent;
+    overflow: hidden; width: 100%; height: 100%;
+  }
+  #stage { width: 100vw; height: 100vh; }
+  #stage canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<!--
+  本页面由 Live2DRenderer 内置的本地 HTTP 服务提供（与模型资源同源，
+  彻底规避 Chromium 的 file:// 跨域限制）。
+
+  加载顺序很重要：
+  1. Cubism 4 Core（官方 Live2D 运行时，提供全局 Live2DCubismCore）
+  2. pixi.js v7（全局 PIXI）
+  3. pixi-live2d-display cubism4 插件（只支持 Cubism 4，不再要求 Cubism 2 core）
+-->
+<!-- 浏览器环境 polyfill：pixi-live2d-display 的 UMD 包直接引用了 Node 的 process.env.NODE_ENV -->
+<script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
+<script src="cubism-sdk/live2dcubismcore.min.js"></script>
+<script src="cubism-sdk/pixi.min.js"></script>
+<script src="cubism-sdk/cubism4.min.js"></script>
+<!-- Qt 内置的 WebChannel 桥（PyQt5 自带该 qrc 资源） -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+<script>
+"use strict";
+
+window.live2d = {
+    app: null,
+    model: null,
+    ready: false,
+    expressions: [],
+    bridge: null,
+    fitFactor: 0.94,   // 模型占画布比例（留一点边距）
+    hiddenWatermarkDrawables: [],  // 被隐藏的水印图层 index
+
+    // ---------- QWebChannel ----------
+    initBridge() {
+        return new Promise((resolve) => {
+            if (window.qt && qt.webChannelTransport && window.QWebChannel) {
+                new QWebChannel(qt.webChannelTransport, (channel) => {
+                    this.bridge = channel.objects.petBridge || null;
+                    resolve(this.bridge);
+                });
+            } else {
+                console.warn("QWebChannel transport unavailable; Python callbacks disabled");
+                resolve(null);
+            }
+        });
+    },
+
+    _py(method, payload) {
+        try {
+            if (this.bridge && typeof this.bridge[method] === "function") {
+                this.bridge[method](payload);
+            }
+        } catch (e) {
+            console.warn("bridge callback failed:", method, e);
+        }
+    },
+
+    // ---------- 加载模型 ----------
+    // httpBase: 本地 HTTP 服务根地址（如 http://127.0.0.1:54321）
+    // settingsName: *.model3.json 的文件名（Python 端 glob 得到，避免硬编码）
+    // fitFactor: 0~1，模型在画布中的占比
+    // hideWm: 是否隐藏模型自带的 WaterMark 水印图层（默认 true）
+    async loadModel(httpBase, settingsName, fitFactor, hideWm) {
+        const base = String(httpBase).replace(/\/+$/, "");
+        const settingsUrl = base + "/model/" +
+            encodeURIComponent(settingsName).replace(/%2F/g, "/");
+        if (fitFactor) this.fitFactor = fitFactor;
+
+        if (!this.app) {
+            const stage = document.getElementById("stage");
+            // PIXI v7：不要把 div 传给 view（会导致 getContext is not a function），
+            // 让 Application 自己创建 canvas，再 append 到容器。
+            this.app = new PIXI.Application({
+                backgroundAlpha: 0,
+                antialias: true,
+                autoDensity: true,
+                resolution: window.devicePixelRatio || 1,
+                autoStart: true,
+                width: stage.clientWidth || 800,
+                height: stage.clientHeight || 800,
+            });
+            stage.appendChild(this.app.view);
+            if (PIXI.live2d && PIXI.live2d.Live2DModel &&
+                PIXI.live2d.Live2DModel.registerTicker) {
+                PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
+            }
+        }
+
+        if (!PIXI.live2d || !PIXI.live2d.Live2DModel) {
+            throw new Error("PIXI.live2d.Live2DModel 未注册（cubism 插件加载失败）");
+        }
+        if (typeof Live2DCubismCore === "undefined") {
+            throw new Error("Live2DCubismCore 未加载（live2dcubismcore.min.js 缺失）");
+        }
+
+        try {
+            console.log("loading model from:", settingsUrl);
+            // from() 直接吃 model3.json 的 URL，内部自动解析 moc3/textures/physics
+            this.model = await PIXI.live2d.Live2DModel.from(settingsUrl, {
+                autoHitTest: false,
+                autoFocus: false,
+            });
+            this.app.stage.addChild(this.model);
+
+            // 参数/部件保持器：播放动作时 pixi-live2d-display 每帧结尾会
+            // loadParameters()，把直接写 core 的参数全部回滚（发型/配件/睡眠
+            // 开关因此被待机动作周期性清掉）。监听 beforeModelUpdate（每帧
+            // core.update() 之前）重写被保持的参数/部件透明度，动作与外观共存。
+            if (!this.__keptHooked) {
+                this._keptParams = {};
+                this._keptParts = {};
+                this.__keptHooked = true;
+            }
+            const imK = this.model.internalModel;
+            imK.on("beforeModelUpdate", () => {
+                const core = this.model && this.model.internalModel.coreModel;
+                if (!core) return;
+                if (this._keptParams) {
+                    for (const id in this._keptParams) {
+                        core.setParameterValueById(id, this._keptParams[id]);
+                    }
+                }
+                if (this._keptParts) {
+                    for (const id in this._keptParts) {
+                        try { core.setPartOpacityById(id, this._keptParts[id]); }
+                        catch (e) { /* 无此部件 */ }
+                    }
+                }
+            });
+
+            // 修复 mask 组数超限：Cubism WebGL 渲染器默认 1 张 mask 渲染纹理
+            //（最多 36 个裁剪组）。部分模型（如超频猫猫）裁剪组超过上限，超出
+            // 的裁剪失效 → 本应被裁掉的防盗水印/说明卡整片显示。这里按使用
+            // mask 的 drawable 数量估算所需纹理数并重新初始化渲染器。
+            try {
+                const im0 = this.model.internalModel;
+                const core0 = im0.coreModel;
+                if (core0.isUsingMasking && core0.isUsingMasking()) {
+                    const counts = core0.getDrawableMaskCounts();
+                    const using = counts.reduce((a, c) => a + (c > 0 ? 1 : 0), 0);
+                    const need = Math.max(1, Math.ceil(using / 32));
+                    const cur = im0.renderer.getRenderTextureCount ?
+                        im0.renderer.getRenderTextureCount() : 1;
+                    if (need > cur) {
+                        im0.renderer.initialize(core0, need);
+                        console.log("re-init renderer: renderTextureCount", cur, "->", need);
+                    }
+                }
+            } catch (err) {
+                console.warn("re-init renderer (mask count) failed:", err);
+            }
+
+            // 枚举表情
+            this.expressions = [];
+            try {
+                const defs = (this.model.internalModel.settings.expressions) || [];
+                for (const e of defs) {
+                    const name = e.Name !== undefined ? e.Name : e.name;
+                    if (name) this.expressions.push(name);
+                }
+            } catch (err) {
+                console.warn("enumerate expressions failed:", err);
+            }
+
+            // 隐藏免费模型自带的 WaterMark 水印图层（可由 hideWm=false 关闭）
+            if (hideWm !== false) {
+                try {
+                    const n = this.hideWatermark();
+                    console.log("hidden watermark drawables:", n);
+                } catch (err) {
+                    console.warn("hideWatermark failed:", err);
+                }
+            }
+
+            this.fit();
+            this.ready = true;
+            console.log("Live2D model loaded, expressions:", this.expressions);
+            this._py("onReady", JSON.stringify(this.expressions));
+        } catch (err) {
+            console.error("loadModel failed:", err);
+            this._py("onError", String(err && (err.stack || err.message || err)));
+            throw err;
+        }
+    },
+
+    // ---------- 缩放 / 居中 ----------
+    fit() {
+        if (!this.model || !this.app) return;
+        const im = this.model.internalModel;
+        const origW = im.originalWidth || this.model.width;
+        const origH = im.originalHeight || this.model.height;
+        const w = this.app.screen.width;
+        const h = this.app.screen.height;
+        const scale = Math.min(w / origW, h / origH) * this.fitFactor;
+        this.model.scale.set(scale);
+        try {
+            this.model.anchor.set(0.5, 0.5);
+        } catch (e) { /* anchor 可选 */ }
+        this.model.x = w / 2;
+        this.model.y = h / 2;
+    },
+
+    // ---------- 隐藏模型自带版权/防盗水印图层 ----------
+    // 免费模型（冰糖）在角色身上烘焙了两类水印，且默认强制显示、无法通过参数关闭：
+    //   (A) 名字含 WaterMark 的独立图层（“禁止二传 / Bilibili ONLY”版权卡片）；
+    //   (B) 伪装成普通 ArtMesh 的全屏文字条（FREE MODEL / 神宫凉子 / UID 等）。
+    // 该渲染器不经过 PIXI 显示树（model.children 为空、无 mesh 对象），
+    // 因此在 renderer.drawMesh 的“主绘制 pass”直接跳过这些 drawable，
+    // 不改动模型文件与贴图，只在渲染层生效。
+    hideWatermark() {
+        if (!this.model) return 0;
+        const im = this.model.internalModel;
+        const core = im && im.coreModel;
+        const rd = im && im.renderer;
+        if (!core || !core.getDrawableIds || !rd || !rd.drawMesh) return 0;
+
+        const ids = core.getDrawableIds();
+        const hidden = new Set();
+
+        // (A) 通用：所有名字含 WaterMark 的独立水印图层
+        for (let i = 0; i < ids.length; i++) {
+            if (/watermark/i.test(String(ids[i]))) hidden.add(i);
+        }
+
+        // (B) 冰糖模型特定的文字 overlay（伪装成 ArtMesh*）。
+        // 通过 drawMesh 二分定位得到的固定 index，仅在“模型指纹”（drawable 数量 +
+        // 关键 id）完全匹配时启用，换用其它模型不会误杀正常部件。
+        const BT = {
+            count: 694,
+            indices: [682, 683, 688, 691, 692, 693],
+            expect: {
+                682: "ArtMesh2", 683: "ArtMesh23", 684: "WaterMark5",
+                688: "ArtMesh18", 691: "ArtMesh24", 692: "ArtMesh25",
+                693: "ArtMesh",
+            },
+        };
+        let fingerprint = false;
+        if (ids.length === BT.count) {
+            fingerprint = true;
+            for (const k of Object.keys(BT.expect)) {
+                if (String(ids[k]) !== BT.expect[k]) { fingerprint = false; break; }
+            }
+        }
+        if (fingerprint) {
+            for (const i of BT.indices) hidden.add(i);
+        } else {
+            console.warn("[Live2D] watermark fingerprint mismatch; only name-based WaterMark layers hidden");
+        }
+        this.hiddenWatermarkDrawables = Array.from(hidden).sort((a, b) => a - b);
+
+        // 已包装过：仅更新隐藏集合（同一 renderer 上重复调用的情况）
+        if (rd.__wmHidden) {
+            rd.__wmHidden = hidden;
+            return hidden.size;
+        }
+        if (hidden.size === 0) return 0;
+
+        rd.__wmHidden = hidden;
+        const visibleList = [];
+        // 每个 renderer 只包装一次；模型重新加载会产生新 renderer，无需还原。
+        const origDoDraw = rd.doDrawModel.bind(rd);
+        rd.doDrawModel = function () {
+            visibleList.length = 0;
+            try {
+                const sorted = rd._sortedDrawableIndexList;
+                const isVisible = core.getDrawableDynamicFlagIsVisible.bind(core);
+                if (sorted) {
+                    for (let i = 0; i < sorted.length; i++) {
+                        const idx = sorted[i];
+                        if (isVisible(idx)) visibleList.push(idx);
+                    }
+                }
+            } catch (e) { /* 计数失败时退化为不拦截，保证角色正常渲染 */ }
+            rd.__wmMainCount = 0;
+            return origDoDraw();
+        };
+        const origDraw = rd.drawMesh.bind(rd);
+        rd.drawMesh = function () {
+            // 仅在“主绘制 pass”（非离屏蒙版 pass，即 getClippingContextBufferForMask()==null）
+            // 按本帧可见序列映射到 drawable index；蒙版 pass 照常绘制，不破坏其它部件的裁剪。
+            if (rd.getClippingContextBufferForMask &&
+                rd.getClippingContextBufferForMask() == null) {
+                const idx = visibleList[rd.__wmMainCount || 0];
+                rd.__wmMainCount = (rd.__wmMainCount || 0) + 1;
+                if (idx != null && rd.__wmHidden.has(idx)) {
+                    return;  // 跳过水印 drawable
+                }
+            }
+            return origDraw.apply(rd, arguments);
+        };
+        return hidden.size;
+    },
+
+    // ---------- 表情 / 动作 ----------
+    // 播放模型 model3.json 已注册的内置表情（*.exp3.json），走官方 ExpressionManager。
+    setExpression(name) {
+        if (!this.model) return false;
+        try {
+            this.model.expression(name);
+            return true;
+        } catch (e) {
+            console.warn("setExpression failed:", name, e);
+            return false;
+        }
+    },
+
+    // 统一获取 ExpressionManager（Cubism4 标准路径：internalModel.motionManager.expressionManager）
+    _expressionManager() {
+        try {
+            const im = this.model && this.model.internalModel;
+            return im && im.motionManager && im.motionManager.expressionManager;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    // 播放“模型 exp3 之外”的自定义表情（吐舌/鼓腮/吃饭/思考/触摸等模型本就支持、
+    // 但没有注册成表情文件的参数）。按 name 缓存，只在首次注册一次。
+    //   params : [{Id, Value, Blend}](Blend 取 Add/Multiply/Overwrite，默认 Add)
+    //   fadeIn/fadeOut : 淡入淡出秒数
+    // 返回 Promise<true/false>。
+    async playCustomExpression(name, params, fadeIn, fadeOut) {
+        const em = this._expressionManager();
+        if (!em || !em.createExpression) return false;
+        if (!this._customIndex) this._customIndex = {};
+        try {
+            let idx = this._customIndex[name];
+            if (idx === undefined) {
+                const payload = {
+                    Type: "Live2D Expression",
+                    FadeInTime: (fadeIn === undefined || fadeIn === null) ? 0.12 : fadeIn,
+                    FadeOutTime: (fadeOut === undefined || fadeOut === null) ? 0.3 : fadeOut,
+                    Parameters: (params || []).map((p) => ({
+                        Id: String(p.Id),
+                        Value: Number(p.Value),
+                        Blend: p.Blend || "Add",
+                    })),
+                };
+                const expr = em.createExpression(payload);
+                idx = em.definitions.length;
+                em.definitions.push({ Name: name, File: name });
+                // 注意：expressions 是按 index 对齐的稀疏数组，必须用下标直接赋值，
+                // 不能 push（push 会从 index 0 放，导致之后 setExpression 按旧下标
+                // 去网络加载一个不存在的文件而 404）。
+                em.expressions[idx] = expr;
+                this._customIndex[name] = idx;
+            }
+            return await em.setExpression(idx);
+        } catch (e) {
+            console.warn("playCustomExpression failed:", name, e);
+            return false;
+        }
+    },
+
+    // 恢复自然表情（ExpressionManager 回到空的 defaultExpression）。
+    // 不影响发型之类用 applyParams 直接写的开关参数。
+    resetExpressionState() {
+        const em = this._expressionManager();
+        if (em && typeof em.resetExpression === "function") {
+            try {
+                em.resetExpression();
+                // resetExpression 只是把 default 放进播放队列，并不会更新
+                // currentExpression 引用（它仍指向上一个情绪）。若不同步，
+                // 之后再点回“上一个情绪”时，会被 setExpression 里
+                // `t===indexOf(currentExpression)` 的去重判断拦截、点了没反应。
+                if (em.defaultExpression) em.currentExpression = em.defaultExpression;
+                return true;
+            } catch (e) { /* ignore */ }
+        }
+        return false;
+    },
+
+    setParam(name, value, durationMs) {
+        if (!this.model) return;
+        durationMs = durationMs || 0;
+        const core = this.model.internalModel && this.model.internalModel.coreModel;
+        if (!core) return;
+        try {
+            if (durationMs <= 0) {
+                core.setParameterValueById(name, value);
+            } else {
+                const startVal = core.getParameterValueById(name);
+                const startTime = performance.now();
+                const tick = () => {
+                    if (!this.model) return;
+                    const t = Math.min(1, (performance.now() - startTime) / durationMs);
+                    core.setParameterValueById(name, startVal + (value - startVal) * t);
+                    if (t < 1) requestAnimationFrame(tick);
+                };
+                requestAnimationFrame(tick);
+            }
+        } catch (e) {
+            console.warn("setParam failed:", name, e);
+        }
+    },
+
+    // 直接、立即、持久地应用一组"外观参数"（发型 / 头饰 / 表情开关 / 睡眠开关）。
+    // 与 setExpression 不同：它绕过 ExpressionManager，直接写 core 参数。
+    // 有动作播放时每帧结尾 loadParameters() 会回滚直接写入，因此写入的参数
+    // 同时记入 _keptParams，由 beforeModelUpdate 钩子每帧重写（见 loadModel）。
+    //   resetIds : 这些参数先归零（清掉上一组外观，如换发型前的旧发型开关）
+    //   paramMap : 再设置成 {参数Id: 值}
+    applyParams(resetIds, paramMap) {
+        if (!this.model) return false;
+        const core = this.model.internalModel && this.model.internalModel.coreModel;
+        if (!core) return false;
+        if (!this._keptParams) this._keptParams = {};
+        try {
+            (resetIds || []).forEach((id) => {
+                try { core.setParameterValueById(String(id), 0); } catch (e) { /* 无此参数 */ }
+                delete this._keptParams[String(id)];
+            });
+            Object.keys(paramMap || {}).forEach((id) => {
+                const v = Number(paramMap[id]);
+                try { core.setParameterValueById(String(id), v); }
+                catch (e) { /* 无此参数 */ }
+                this._keptParams[String(id)] = v;
+            });
+            return true;
+        } catch (e) {
+            console.warn("applyParams failed:", e);
+            return false;
+        }
+    },
+
+    // 按部件 ID 设置透明度并持久保持（如隐藏水印部件 Part14）。
+    // 与参数同理：部件透明度也会被动作每帧回滚，记入 _keptParts 每帧重写。
+    //   ids : 部件 ID 数组（cdi3.json Parts[].Id）
+    //   opacity : 目标透明度（0=隐藏，1=显示）
+    hideParts(ids, opacity) {
+        if (!this.model) return false;
+        const core = this.model.internalModel && this.model.internalModel.coreModel;
+        if (!core) return false;
+        if (!this._keptParts) this._keptParts = {};
+        const v = (opacity === undefined || opacity === null) ? 0 : Number(opacity);
+        (ids || []).forEach((id) => {
+            try { core.setPartOpacityById(String(id), v); } catch (e) { /* 无此部件 */ }
+            this._keptParts[String(id)] = v;
+        });
+        return true;
+    },
+
+    // 恢复自然表情：走官方 ExpressionManager.resetExpression()。
+    // 可选 extraResetIds：额外把这些直接写参数的临时开关归零（如需要）。
+    resetExpression(extraResetIds) {
+        if (!this.model) return false;
+        const ok = this.resetExpressionState();
+        const core = this.model.internalModel && this.model.internalModel.coreModel;
+        (extraResetIds || []).forEach((id) => {
+            try { core && core.setParameterValueById(String(id), 0); } catch (e) { /* ignore */ }
+        });
+        return ok;
+    },
+
+    playMotion(group, index) {
+        if (!this.model) return;
+        try {
+            if (!this.model.motion) return;
+            // index 未指定时随机选一个（model.motion(group) 本身支持随机）
+            if (index === undefined || index === null) {
+                this.model.motion(group);
+            } else {
+                this.model.motion(group, index);
+            }
+        } catch (e) {
+            console.warn("playMotion failed:", group, e);
+        }
+    },
+
+    // 停止全部动作（睡觉时先停待机动作，防止每帧覆写睡眠参数）
+    stopMotions() {
+        if (!this.model) return;
+        try {
+            const mm = this.model.internalModel && this.model.internalModel.motionManager;
+            if (mm && mm.stopAllMotions) mm.stopAllMotions();
+        } catch (e) { /* ignore */ }
+    },
+
+    startDrag(x, y) {
+        if (!this.model) return;
+        try {
+            const dm = this.model.internalModel.dragManager;
+            if (dm) dm.set(x * this.app.screen.width, y * this.app.screen.height);
+        } catch (e) { /* ignore */ }
+    },
+
+    focus(x, y) {
+        if (!this.model) return;
+        try { this.model.focus(x, y); } catch (e) { /* 旧版 API 无 focus */ }
+    },
+
+    resize(w, h) {
+        if (this.app) {
+            this.app.renderer.resize(w, h);
+            this.fit();
+        }
+    },
+
+    shutdown() {
+        if (this.model) {
+            try {
+                this.app.stage.removeChild(this.model);
+                this.model.destroy();
+            } catch (e) { /* ignore */ }
+            this.model = null;
+        }
+        if (this.app) {
+            try { this.app.destroy(true, { children: true, texture: true }); }
+            catch (e) { this.app.destroy(true); }
+            this.app = null;
+        }
+        this.ready = false;
+    }
+};
+
+// 页面加载后立即建立桥，然后等待 Python 调用 loadModel
+window.addEventListener("DOMContentLoaded", () => {
+    window.live2d.initBridge().then(() => {
+        console.log("live2d bridge ready; pixi:",
+            typeof PIXI !== "undefined" ? PIXI.VERSION : "missing",
+            "core:", typeof Live2DCubismCore !== "undefined",
+            "plugin:", !!(PIXI.live2d && PIXI.live2d.Live2DModel));
+    });
+});
+</script>
+</body>
+</html>

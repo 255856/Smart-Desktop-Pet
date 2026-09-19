@@ -1,0 +1,4 @@
+name: desktop-pet-tool-usage
+description: When and how to call each of the 31 available tools (open_app / open_website / add_reminder / remember_fact / system_info etc). Model MUST consult this skill before responding to action requests — without it, MiniMax-M3 hallucinates success without actually calling tools.
+disable-model-invocation: false
+user-invocable: false
