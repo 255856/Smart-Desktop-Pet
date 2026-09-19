@@ -434,8 +434,21 @@ class SettingsWindow(QWidget):
 
     # ---------- Tab: 控制 ----------
     def _build_tab_control(self) -> QWidget:
+        # 外层包 QScrollArea，防止内容过多时按钮被压缩、文字糊成黑条
         page = QWidget()
-        v = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
         # —— 快捷入口：聊天 / 睡觉 / 醒来 ——
@@ -448,26 +461,42 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.btn_chat); gv.addWidget(self.btn_sleep); gv.addWidget(self.btn_wake)
         v.addWidget(g_short)
 
-        # —— 表情（renderer-aware：live2d 用模型自带表情，sprite 用固定 5 个）——
+        # —— 表情 ——
+        # live2d 模型在 Live2D 页已有完整表情/外观，这里只给引导，不重复铺一长串按钮；
+        # sprite 渲染器则保留 5 个基础情绪。
         g_emo = QGroupBox("切换表情")
-        gv = QGridLayout(g_emo)
         self.emo_btns: list[tuple[QPushButton, str]] = []
-        emo_list: list[tuple[str, str]] = []
+        has_live2d_menu = False
         if self._renderer is not None:
             try:
-                emo_list = [(label, key) for key, label in
-                            self._renderer.get_emotion_options()]
+                has_live2d_menu = bool(self._renderer.get_menu_groups())
             except Exception:  # noqa: BLE001
-                emo_list = []
-        if not emo_list:
-            emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
-                        ('害羞', 'shy'), ('思考', 'think')]
-        for i, (text, key) in enumerate(emo_list):
-            btn = QPushButton(text)
-            btn.setCheckable(True)
-            self.emo_btns.append((btn, key))
-            r, c = divmod(i, 3)
-            gv.addWidget(btn, r, c)
+                has_live2d_menu = False
+        if has_live2d_menu:
+            gv = QVBoxLayout(g_emo)
+            tip = QLabel("完整的表情、发型、配件、手势请到「Live2D」标签页切换。")
+            tip.setWordWrap(True)
+            tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+            gv.addWidget(tip)
+        else:
+            gv = QGridLayout(g_emo)
+            emo_list: list[tuple[str, str]] = []
+            if self._renderer is not None:
+                try:
+                    emo_list = [(label, key) for key, label in
+                                self._renderer.get_emotion_options()]
+                except Exception:  # noqa: BLE001
+                    emo_list = []
+            if not emo_list:
+                emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
+                            ('害羞', 'shy'), ('思考', 'think')]
+            for i, (text, key) in enumerate(emo_list):
+                btn = QPushButton(text)
+                btn.setCheckable(True)
+                btn.setMinimumHeight(32)
+                self.emo_btns.append((btn, key))
+                r, c = divmod(i, 3)
+                gv.addWidget(btn, r, c)
         v.addWidget(g_emo)
 
         # —— 自主行为节拍 ——
@@ -496,10 +525,14 @@ class SettingsWindow(QWidget):
         return page
 
     # ---------- Tab: Live2D（模型专属外观 / 随机表情） ----------
+    # 每个分类卡片默认直接展示的 chip 数
+    _LIVE2D_PREVIEW_CHIPS = 3
+
     def _build_tab_live2d(self) -> QWidget:
-        """Live2D 专属设置：五大类以可点选 chip 网格呈现 + 复位 + 挂机随机。
+        """Live2D 专属设置：外观/挂机置顶，五大类以可点选 chip 网格呈现。
 
         条目来自渲染器 profile（每模型一份 *.model.yaml），换模型自动跟随。
+        - 每个分类默认只露前 3 个 chip，其余点「更多 ▾」展开；
         - toggle 组（特殊/配件/手势）：chip 可多选叠加，再点取消；
         - exclusive 组（发型/表情）：chip 单选，首项为「默认 / 自然」。
         整页在 QScrollArea 内，条目再多也不会被裁切。
@@ -527,6 +560,9 @@ class SettingsWindow(QWidget):
         # chip 状态：(group_id, item_id) -> 按钮；group_id -> [按钮…]
         self.live2d_chips: dict[tuple[str, str], QPushButton] = {}
         self._live2d_group_chips: dict[str, list[QPushButton]] = {}
+        # 每个分类被「更多」收起的 chip（第 4 个起）与展开状态
+        self._live2d_extra_chips: dict[str, list[QPushButton]] = {}
+        self._live2d_more_state: dict[str, bool] = {}
 
         # —— 模型名卡片 ——
         model_name = ""
@@ -547,22 +583,7 @@ class SettingsWindow(QWidget):
         hl.addWidget(nm)
         v.addWidget(head)
 
-        # 当前激活项（用于初始化 chip 选中态）
-        active: set = set()
-        try:
-            active = renderer.get_active_items()
-        except Exception:  # noqa: BLE001
-            active = set()
-
-        # —— 五大分类 chip 卡片 ——
-        try:
-            groups = renderer.get_menu_groups()
-        except Exception:  # noqa: BLE001
-            groups = []
-        for g in groups:
-            v.addWidget(self._build_live2d_group_card(g, active))
-
-        # —— 外观 / 挂机 ——
+        # —— 外观 / 挂机（置顶，最常用的复位与随机开关）——
         g_misc = QGroupBox("外观 / 挂机")
         gm = QVBoxLayout(g_misc)
         gm.setSpacing(8)
@@ -588,23 +609,41 @@ class SettingsWindow(QWidget):
         gm.addWidget(self.cb_random_sticker)
         v.addWidget(g_misc)
 
+        # 当前激活项（用于初始化 chip 选中态）
+        active: set = set()
+        try:
+            active = renderer.get_active_items()
+        except Exception:  # noqa: BLE001
+            active = set()
+
+        # —— 五大分类 chip 卡片（每张默认只露前 3 个）——
+        try:
+            groups = renderer.get_menu_groups()
+        except Exception:  # noqa: BLE001
+            groups = []
+        for g in groups:
+            v.addWidget(self._build_live2d_group_card(g, active))
+
         v.addStretch(1)
         return page
 
     def _build_live2d_group_card(self, g: dict, active: set) -> QGroupBox:
-        """单个分类卡片：标题 + 3 列 chip 网格。"""
+        """单个分类卡片：标题 + 前 3 个 chip；超过 3 个用「更多 ▾」展开。"""
         gid = g["id"]
         kind = g.get("kind", "category")
         exclusive = g.get("mode") == "exclusive"
+        preview = self._LIVE2D_PREVIEW_CHIPS
         box = QGroupBox(g["label"])
         box.setObjectName("live2d_card")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(12, 20, 12, 12)
+        vl = QVBoxLayout(box)
+        vl.setContentsMargins(12, 20, 12, 12)
+        vl.setSpacing(8)
+        grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        vl.addLayout(grid)
 
         items = list(g["items"])
         # 情绪组首项补「自然表情」（发型组 get_menu_groups 已带「默认发型」）
@@ -612,6 +651,7 @@ class SettingsWindow(QWidget):
             items.insert(0, ("__default__", "自然表情"))
 
         self._live2d_group_chips[gid] = []
+        self._live2d_extra_chips[gid] = []
         cols = 3
         for idx, (item_id, label) in enumerate(items):
             chip = QPushButton(label)
@@ -627,6 +667,9 @@ class SettingsWindow(QWidget):
             grid.addWidget(chip, idx // cols, idx % cols)
             self.live2d_chips[(gid, item_id)] = chip
             self._live2d_group_chips[gid].append(chip)
+            if idx >= preview:
+                chip.hide()
+                self._live2d_extra_chips[gid].append(chip)
 
         # 互斥组（发型/表情）必须有一个选中：没有命中项时落在「默认 / 自然」
         if exclusive:
@@ -636,7 +679,26 @@ class SettingsWindow(QWidget):
                     default_chip.blockSignals(True)
                     default_chip.setChecked(True)
                     default_chip.blockSignals(False)
+
+        # 超过 3 个：加「更多 ▾」展开 / 收起
+        if len(items) > preview:
+            more = QPushButton(f"更多 ▾  {len(items) - preview} 项")
+            more.setObjectName("more_btn")
+            more.setCursor(Qt.CursorShape.PointingHandCursor)
+            more.clicked.connect(
+                lambda _=False, g_=gid, b=more, n=len(items) - preview:
+                self._toggle_live2d_more(g_, b, n))
+            vl.addWidget(more)
         return box
+
+    def _toggle_live2d_more(self, gid: str, btn: QPushButton,
+                            extra_count: int) -> None:
+        """展开 / 收起某分类卡片第 4 个起的 chip。"""
+        expanded = not self._live2d_more_state.get(gid, False)
+        self._live2d_more_state[gid] = expanded
+        for chip in self._live2d_extra_chips.get(gid, []):
+            chip.setVisible(expanded)
+        btn.setText("收起 ▴" if expanded else f"更多 ▾  {extra_count} 项")
 
     def _on_live2d_chip(self, gid: str, item_id: str,
                         chip: QPushButton, exclusive: bool) -> None:

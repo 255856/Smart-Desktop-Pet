@@ -571,10 +571,48 @@ def _crash_handler(exc_type, exc, tb) -> None:
 #  入口
 # ============================================================================
 
+# faulthandler 的输出文件句柄（模块级引用，防 GC 关闭文件）
+_crash_log_fh = None
+
+
+def _enable_crash_diagnostics() -> None:
+    """让"不走 Python 钩子"的死亡也能留下现场：
+
+    * faulthandler → crash.log：Qt/Chromium 原生层段错误（access violation）
+      会带全部线程栈落盘——这类崩溃此前静默退出、无任何日志；
+    * threading.excepthook → 子线程异常写 crash.log：静默启动
+      （start_silent.vbs）时 stderr 丢失，子线程崩溃同样死得无声无息。
+    """
+    global _crash_log_fh
+    import faulthandler
+    import threading
+    import traceback
+    try:
+        crash_path = _resolve_root() / "crash.log"
+        _crash_log_fh = crash_path.open("a", encoding="utf-8")
+        _crash_log_fh.write("\n" + "=" * 60 + "\n[session start]\n")
+        _crash_log_fh.flush()
+        faulthandler.enable(_crash_log_fh)
+
+        def _thread_hook(args):
+            msg = "".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback))
+            try:
+                _crash_log_fh.write(f"\n[THREAD {args.thread.name}] {msg}")
+                _crash_log_fh.flush()
+            except Exception:
+                pass
+            logging.getLogger(__name__).error(
+                "子线程异常 [%s]: %s", args.thread.name, msg)
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass
+
 
 def main() -> int:
     import sys as _sys
     _sys.excepthook = _crash_handler
+    _enable_crash_diagnostics()
     try:
         return _main_inner()
     except Exception:
@@ -587,10 +625,26 @@ def _main_inner() -> int:
 
     # 配置日志级别
     import logging as _logging
+    from logging.handlers import RotatingFileHandler
+    fmt = _logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     _logging.basicConfig(
         level=_logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # 文件日志（轮转 2MB×3）：比控制台重定向可靠，也方便回看
+    try:
+        log_dir = _resolve_root() / "logs"
+        log_dir.mkdir(exist_ok=True)
+        fh = RotatingFileHandler(log_dir / "pet.log", maxBytes=2_000_000,
+                                 backupCount=3, encoding="utf-8")
+        fh.setFormatter(fmt)
+        fh.setLevel(_logging.INFO)
+        _logging.getLogger().addHandler(fh)
+    except Exception:
+        pass
+    # 降噪：第三方库的常规噪音不进控制台/文件（保留 WARNING+）
+    for noisy in ("urllib3", "httpx", "httpcore", "asyncio", "websockets"):
+        _logging.getLogger(noisy).setLevel(_logging.WARNING)
     cfg_path = (_resolve_root() / args.config) if not Path(args.config).is_absolute() else Path(args.config)
     log_level = "INFO"
     if cfg_path.is_file():

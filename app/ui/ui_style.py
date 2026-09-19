@@ -332,6 +332,18 @@ QLabel#model_name {{
 }}
 QWidget#live2d_page {{ background: transparent; }}
 
+/* —— Live2D 分类「更多」展开按钮 —— */
+QPushButton#more_btn {{
+    background: transparent;
+    border: 1px solid #e7e4f5;
+    border-radius: 12px;
+    color: #7c6cf0;
+    font-weight: 600;
+    padding: 6px 12px;
+}}
+QPushButton#more_btn:hover {{ background: #f4f1fe; border-color: {ACCENT_LT}; color: {ACCENT_DK}; }}
+QPushButton#more_btn:pressed {{ background: #ece7fd; }}
+
 QPushButton#accent_btn {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 #a78bfa, stop:1 #7c6cf0);

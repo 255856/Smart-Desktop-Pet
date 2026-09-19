@@ -113,13 +113,15 @@ class _ConsolePage(QWebEnginePage):
     """把 JS console 消息转发到 Python logging。"""
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
-        lvl_name = {
-            QWebEnginePage.InfoMessageLevel: "INFO",
-            QWebEnginePage.WarningMessageLevel: "WARN",
-            QWebEnginePage.ErrorMessageLevel: "ERROR",
-        }.get(level, "LOG")
         src = Path(str(sourceId)).name
-        log.info("[Live2D JS %s] %s (%s:%s)", lvl_name, message, src, lineNumber)
+        # JS 的常规 INFO（模型加载进度/Cubism 启动横幅）是纯噪音 → DEBUG；
+        # WARN/ERROR 保留（真问题时才有日志可看）
+        if level == QWebEnginePage.InfoMessageLevel:
+            log.debug("[Live2D JS INFO] %s (%s:%s)", message, src, lineNumber)
+        elif level == QWebEnginePage.WarningMessageLevel:
+            log.warning("[Live2D JS WARN] %s (%s:%s)", message, src, lineNumber)
+        else:
+            log.error("[Live2D JS ERROR] %s (%s:%s)", message, src, lineNumber)
 
 
 def _motion_file(model_dir: Path, motions_cfg: dict, key: str) -> Optional[str]:
@@ -312,7 +314,21 @@ class Live2DRenderer(PetRenderer):
         # 本地同源 HTTP 服务：bridge.html / SDK / 模型都从这里走
         handler = _make_handler(self.model_dir, self._settings_name,
                                 self._settings_payload)
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        # 静默连接重置：WebView 取消资源加载时 socket 会被强行断开，
+        # socketserver 默认把 ConnectionResetError 整段 traceback 打到
+        # stderr（纯噪音，静默启动时甚至可能触发写已关闭管道）
+        class _QuietHTTPServer(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                import sys
+                exc = sys.exc_info()[1]
+                if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                                    BrokenPipeError, TimeoutError)):
+                    log.debug("[Live2D HTTP] 连接中断 %s: %s", client_address, exc)
+                    return
+                log.warning("[Live2D HTTP] 请求处理异常 %s: %r",
+                            client_address, exc)
+
+        self._httpd = _QuietHTTPServer(("127.0.0.1", 0), handler)
         self._httpd.daemon_threads = True
         self._http_port = self._httpd.server_address[1]
         self._http_base = f"http://127.0.0.1:{self._http_port}"
