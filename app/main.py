@@ -207,8 +207,25 @@ def _ensure_config(root: Path) -> None:
 
 def _build_tts(cfg, root: Path) -> TTS:
     tts_cache = root / "assets" / "tts_cache"
-    tts = TTS(voice=cfg.character.tts_voice or "zh-CN-XiaoxiaoNeural",
-              cache_dir=tts_cache)
+    engine = getattr(cfg.character, "tts_engine", "edge")
+    if engine == "minimax":
+        # 方案 A：MiniMax 声音克隆（tools/clone_voice.py 生成 voice_id）
+        from app.voice.minimax_tts import MiniMaxTTS
+        api_key = (getattr(cfg.character, "minimax_api_key", "")
+                   or getattr(cfg.llm, "api_key", ""))
+        tts = MiniMaxTTS(
+            api_key=api_key,
+            voice_id=getattr(cfg.character, "minimax_voice_id", "")
+            or cfg.character.tts_voice,
+            base_url=getattr(cfg.llm, "base_url", "https://api.minimaxi.com/v1"),
+            model=getattr(cfg.character, "minimax_model", "speech-01-turbo"),
+            group_id=getattr(cfg.character, "minimax_group_id", ""),
+            cache_dir=tts_cache,
+        )
+        log.info("TTS 引擎：MiniMax 声音克隆 voice_id=%s", tts.voice)
+    else:
+        tts = TTS(voice=cfg.character.tts_voice or "zh-CN-XiaoxiaoNeural",
+                  cache_dir=tts_cache)
     tts.set_enabled(cfg.character.tts_enabled)
     return tts
 

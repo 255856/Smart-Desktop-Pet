@@ -798,6 +798,15 @@ class Live2DRenderer(PetRenderer):
         dy = max(-1.0, min(1.0, float(dy)))
         self._js(f"window.live2d.focus({dx:.3f}, {dy:.3f});")
 
+    def set_talking(self, on: bool) -> None:
+        """口型同步：说话期间开合嘴巴（profile.lipsync_param 驱动）。"""
+        if on:
+            param = getattr(self.profile, "lipsync_param", "ParamMouthOpenY") \
+                or "ParamMouthOpenY"
+            self._js(f"window.live2d.startTalk({json.dumps(param)});")
+        else:
+            self._js("window.live2d.stopTalk();")
+
     def set_expression(self, name: str) -> None:
         """兼容旧接口：已知表情走条目外观，未知名字交给 ExpressionManager。"""
         key = self._resolve_emotion(name)

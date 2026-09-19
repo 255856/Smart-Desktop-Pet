@@ -135,6 +135,8 @@ class Live2DModelProfile:
     stickers_max_s: int = 90
     stickers_duration_s: int = 4
     stickers_size: int = 180
+    # 口型同步驱动参数（说话时嘴开合；模型 cdi3 里的标准嘴参数）
+    lipsync_param: str = "ParamMouthOpenY"
     # 头身姿态角度参数（走路/拖拽偏转，回待机回正）
     pose_angle_params: list[str] = field(default_factory=lambda: [
         "ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleY"])
@@ -453,6 +455,9 @@ def load_model_profile(model_dir: str | Path,
     profile.sleep_motion_group = str(mo.get("sleep_group") or "")
     profile.idle_motion_group = str(mo.get("idle_group") or "")
 
+    profile.lipsync_param = str((cfg.get("lipsync") or {}).get("param")
+                                or cfg.get("lipsync_param")
+                                or profile.lipsync_param)
     pp = cfg.get("pose_angle_params")
     if pp:
         profile.pose_angle_params = [str(x) for x in pp]

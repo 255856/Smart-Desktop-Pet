@@ -108,6 +108,9 @@ class PetRenderer(ABC):
     def note_activity(self) -> None:
         """外部交互后通知渲染器（随机表情计时重置）。默认 no-op。"""
 
+    def set_talking(self, on: bool) -> None:
+        """口型同步开关（说话时嘴开合）。sprite 默认 no-op。"""
+
     def get_renderer_type(self) -> str:
         """当前渲染器类型（'sprite' | 'live2d'）——给菜单显示。"""
         return type(self).__name__.replace('Renderer', '').lower()

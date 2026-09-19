@@ -92,3 +92,7 @@ stickers:
   max_s: 30
   duration_s: 4
   size: 120
+
+# 口型同步：说话时嘴开合驱动的参数
+lipsync:
+  param: ParamMouthOpenY

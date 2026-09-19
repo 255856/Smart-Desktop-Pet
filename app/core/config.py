@@ -45,6 +45,13 @@ class CharacterConfig(BaseModel):
     persona: str = ""
     tts_enabled: bool = True
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
+    # 语音引擎：edge=Microsoft edge-tts（免费）| minimax=MiniMax 声音克隆
+    tts_engine: str = "edge"
+    # MiniMax 声音克隆（方案 A）：tools/clone_voice.py 生成的自定义 voice_id
+    minimax_voice_id: str = ""
+    minimax_api_key: str = ""      # 留空则复用 llm.api_key（同账号）
+    minimax_model: str = "speech-01-turbo"
+    minimax_group_id: str = ""     # MiniMax 控制台里的 GroupId（部分账号需要）
 
 
 # ---------------- Window ----------------

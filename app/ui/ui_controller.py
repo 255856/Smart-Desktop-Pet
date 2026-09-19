@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from app.core.qt_compat import QObject, QSize, Qt, Signal
+from app.core.qt_compat import QObject, QTimer, QSize, Qt, Signal
 from .chat_window import ChatWindow
 from app.ui.pet_window import PetWindow
 from .settings_window import SettingsWindow
@@ -110,6 +110,7 @@ class UIController(QObject):
 
         # --- 模型配置初始化（从 cfg.llm 加载到 UI） ---
         self._init_model_config_ui()
+        self._setup_lipsync()
         # 启动时应用 settings.json 里保存的窗口类设置（缩放/透明度/置顶/随机开关）
         self._apply_stored_window_settings()
 
@@ -220,11 +221,37 @@ class UIController(QObject):
 
     def _on_streaming_chunk(self, text: str) -> None:
         """流式输出增量：同步显示到桌宠头顶气泡。"""
+        self._stream_talking = True
+        self._update_talking()
         self.pet.show_streaming_bubble(text)
 
     def _on_streaming_done(self) -> None:
         """流式输出结束：隐藏或延迟隐藏桌宠气泡。"""
+        self._stream_talking = False
+        self._update_talking()
         self.pet.stop_streaming_bubble()
+
+    # ---------------- 口型同步（TTS 播放 / 流式气泡 任一进行中即张嘴） ----------------
+    def _setup_lipsync(self) -> None:
+        self._tts_talking = False
+        self._stream_talking = False
+        # TTS 播放钩子（引擎工作线程回调 → Qt 主线程）
+        if hasattr(self.tts, "on_speak_start"):
+            self.tts.on_speak_start = lambda: QTimer.singleShot(
+                0, lambda: self._set_tts_talking(True))
+            self.tts.on_speak_end = lambda: QTimer.singleShot(
+                0, lambda: self._set_tts_talking(False))
+
+    def _set_tts_talking(self, on: bool) -> None:
+        self._tts_talking = bool(on)
+        self._update_talking()
+
+    def _update_talking(self) -> None:
+        on = getattr(self, "_tts_talking", False) or \
+            getattr(self, "_stream_talking", False)
+        set_talking = getattr(self.pet.animator, "set_talking", None)
+        if callable(set_talking):
+            set_talking(bool(on))
 
     def _on_thinking_started(self) -> None:
         """模型开始思考：桌宠播放 think/think_2 动画。"""

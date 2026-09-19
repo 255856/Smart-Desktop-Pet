@@ -142,6 +142,17 @@ window.live2d = {
                         catch (e) { /* 无此部件 */ }
                     }
                 }
+                // 口型同步：说话时按时间正弦+随机抖动开合嘴巴
+                // （此钩子在每帧 core.update 前，写入必定被渲染）
+                if (this._talking && this._talkParam) {
+                    const t = performance.now();
+                    const v = Math.max(0, Math.sin(t / 80)) *
+                              (0.3 + 0.6 * Math.abs(Math.sin(t / 620)));
+                    try {
+                        core.setParameterValueById(this._talkParam, v);
+                        this._lastMouth = v;
+                    } catch (e) { /* 无此参数 */ }
+                }
             });
 
             // 修复 mask 组数超限：Cubism WebGL 渲染器默认 1 张 mask 渲染纹理
@@ -536,6 +547,21 @@ window.live2d = {
     setMaxFps(fps) {
         try {
             if (this.app) this.app.ticker.maxFPS = Math.max(5, Number(fps) || 30);
+        } catch (e) { /* ignore */ }
+    },
+
+    // 口型同步：说话期间每帧开合嘴巴（param 如 ParamMouthOpenY）
+    startTalk(param) {
+        this._talkParam = String(param || "ParamMouthOpenY");
+        this._talking = true;
+    },
+    stopTalk() {
+        this._talking = false;
+        try {
+            if (this.model && this._talkParam) {
+                this.model.internalModel.coreModel
+                    .setParameterValueById(this._talkParam, 0);
+            }
         } catch (e) { /* ignore */ }
     },
 

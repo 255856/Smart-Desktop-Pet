@@ -85,3 +85,7 @@ triggers:
 
 random:
   enabled: false
+
+# 口型同步：说话时嘴开合驱动的参数
+lipsync:
+  param: ParamMouthOpenY

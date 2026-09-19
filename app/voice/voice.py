@@ -99,6 +99,9 @@ class TTS:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._enabled = True
+        # 口型同步钩子：播放开始/结束时被调用（UIController 接到桌宠嘴巴）
+        self.on_speak_start = None
+        self.on_speak_end = None
         # 串行化：不要并发调用 speak() 抢同一个 mixer channel
         self._play_lock = threading.Lock()
         # 启动时清理过期缓存（7 天前的 mp3）
@@ -145,9 +148,20 @@ class TTS:
                 asyncio.run(self._synthesize(text, mp3_path))
             if not mp3_path.is_file():
                 return
+            # 口型同步：播放开始（工作线程回调，UI 层自行保证线程安全）
+            if self.on_speak_start:
+                try:
+                    self.on_speak_start()
+                except Exception:  # noqa: BLE001
+                    pass
             # 串行排队，避免和上一段语音抢 mixer
             with self._play_lock:
                 self._play(mp3_path)
+            if self.on_speak_end:
+                try:
+                    self.on_speak_end()
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as e:  # noqa: BLE001
             log.warning("TTS 失败：%s", e)
 
