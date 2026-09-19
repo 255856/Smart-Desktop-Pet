@@ -316,6 +316,49 @@ def start_dashboard_subprocess(root: Path, port: int = 8765) -> int | None:
         return None
 
 
+def _port_listening(port: int) -> bool:
+    """端口是否已有服务监听。"""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def start_tts_api_subprocess(root: Path, port: int = 9880) -> int | None:
+    """后台启动 GPT-SoVITS TTS 服务（api_v2），返回 PID 或 None。
+
+    整合包目录不存在 → None；端口已有服务（含本函数或手动启动）→ -1。
+    服务与桌宠进程解耦：桌宠退出后服务保留，下次启动秒就绪。
+    """
+    import subprocess
+    pkg_dir = root / "GPT-SoVITS-v2pro-20250604-nvidia50"
+    runtime_py = pkg_dir / "runtime" / "python.exe"
+    if not runtime_py.is_file():
+        log.info("GPT-SoVITS 整合包不存在（%s），跳过 TTS 服务启动", pkg_dir)
+        return None
+    if _port_listening(port):
+        return -1
+    log_file = root / "data" / "tts_api.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            [str(runtime_py), "api_v2.py", "-a", "127.0.0.1", "-p", str(port),
+             "-c", "GPT_SoVITS/configs/tts_infer.yaml"],
+            cwd=str(pkg_dir),
+            stdout=open(log_file, "ab"),
+            stderr=subprocess.STDOUT,
+            creationflags=(subprocess.DETACHED_PROCESS
+                           | subprocess.CREATE_NO_WINDOW
+                           if os.name == "nt" else 0),
+        )
+        return proc.pid
+    except Exception as e:  # noqa: BLE001
+        log.warning("TTS 服务启动失败：%s", e)
+        return None
+
+
 def wait_dashboard_ready(port: int = 8765, timeout: float = 8.0) -> bool:
     """等待 Dashboard 在 :port 监听起来。"""
     import socket
@@ -397,6 +440,16 @@ class App:
 
         banner.section("③ 初始化 TTS")
         self.tts = _build_tts(cfg, root)
+        # gptsovits 引擎需要本地 api_v2 服务：自动拉起（端口已占用则复用）
+        if getattr(cfg.character, "tts_engine", "edge") == "gptsovits":
+            tts_pid = start_tts_api_subprocess(root, port=9880)
+            if tts_pid == -1:
+                banner.ok("TTS 服务", "已在运行（端口 9880 复用）")
+            elif tts_pid is None:
+                banner.info("TTS 服务", "未找到整合包目录，语音合成不可用")
+            else:
+                self._tts_api_pid = tts_pid
+                banner.ok("TTS 服务", f"启动中 pid={tts_pid} · 模型加载约 30 秒")
         if cfg.character.tts_enabled:
             banner.ok("TTS", f"voice={cfg.character.tts_voice}")
         else:
