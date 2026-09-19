@@ -346,13 +346,19 @@ class App:
             fallback_image = self._asset_root / fb_sub
         else:
             fallback_image = root / fallback_rel
+        # live2d 模型目录：支持相对路径（相对项目根解析）
+        _l2d_dir = None
+        if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None):
+            _l2d_dir = Path(getattr(cfg.pet.live2d, "model_dir", "") or "")
+            if _l2d_dir and not _l2d_dir.is_absolute():
+                _l2d_dir = root / _l2d_dir
         self.pet = PetWindow(
             sprite_dir, fallback_image=fallback_image,
             scale=cfg.window.scale,
             always_on_top=cfg.window.always_on_top,
             # Live2D 渲染器（v3.1+）：从 cfg.pet 读取
             renderer_type=getattr(cfg.pet, "renderer", "sprite"),
-            live2d_model_dir=Path(getattr(cfg.pet.live2d, "model_dir", "")) if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None) else None,
+            live2d_model_dir=_l2d_dir,
             live2d_hide_watermark=bool(getattr(cfg.pet.live2d, "hide_watermark", True)),
             # 挂机随机表情（Live2D 专属，池子在模型目录 *.model.yaml）
             live2d_random_exp_cfg={

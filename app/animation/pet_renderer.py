@@ -86,6 +86,10 @@ class PetRenderer(ABC):
     def activate_menu_item(self, group_id: str, item_id: str) -> None:
         """菜单/设置页点击一个分类条目（sprite 默认 no-op）。"""
 
+    def get_active_items(self) -> set:
+        """当前激活的分类条目名集合（供设置页 chip 初始化选中态）。sprite 默认空。"""
+        return set()
+
     def reset_all_appearance(self) -> None:
         """复位全部外观（sprite 默认等价于 reset_emotion）。"""
         self.reset_emotion()

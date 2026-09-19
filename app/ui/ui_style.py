@@ -290,6 +290,48 @@ QPushButton:hover {{ border-color: {ACCENT_LT}; color: {ACCENT_DK}; background: 
 QPushButton:checked {{ background: {ACCENT}; color: #fff; border-color: {ACCENT}; }}
 QPushButton:disabled {{ color: {TEXT_SUB}; background: #f1f1f5; }}
 
+/* —— Live2D 外观 chip 标签 —— */
+QPushButton#chip {{
+    background: #ffffff;
+    border: 1.5px solid #e7e4f5;
+    border-radius: 14px;
+    padding: 7px 10px;
+    font-weight: 500;
+    color: #4b4b60;
+}}
+QPushButton#chip:hover {{
+    border-color: {ACCENT_LT};
+    color: {ACCENT_DK};
+    background: #f4f1fe;
+}}
+QPushButton#chip:checked {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #a78bfa, stop:1 #7c6cf0);
+    color: #fff;
+    border-color: #7c6cf0;
+    font-weight: 600;
+}}
+QPushButton#chip:checked:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #9a7ef8, stop:1 #6a58e0);
+}}
+
+/* —— Live2D 模型名卡片 —— */
+QFrame#live2d_model_head {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #f3f0fe, stop:1 #e9e3fd);
+    border: 1px solid #e0d9fb;
+    border-radius: 14px;
+}}
+QLabel#model_caption {{
+    color: #8a78f0; font-size: 9pt; font-weight: 700;
+    letter-spacing: 2px; background: transparent;
+}}
+QLabel#model_name {{
+    color: #2f2b45; font-size: 15pt; font-weight: 700; background: transparent;
+}}
+QWidget#live2d_page {{ background: transparent; }}
+
 QPushButton#accent_btn {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 #a78bfa, stop:1 #7c6cf0);

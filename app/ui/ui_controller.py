@@ -63,6 +63,7 @@ class UIController(QObject):
             char_cfg=self.cfg.character,
             renderer=getattr(_pet, "renderer", None),
             sticker_enabled=_sticker_on,
+            always_on_top=bool(getattr(self.cfg.window, "always_on_top", True)),
         )
         self.settings_window.attach_state(self.state)
 
@@ -85,6 +86,8 @@ class UIController(QObject):
 
         # --- 模型配置初始化（从 cfg.llm 加载到 UI） ---
         self._init_model_config_ui()
+        # 启动时应用 settings.json 里保存的窗口类设置（缩放/透明度/置顶/随机开关）
+        self._apply_stored_window_settings()
 
     # ============================================================
     #  信号连接
@@ -112,6 +115,9 @@ class UIController(QObject):
             sw.live2d_reset_requested.connect(self._on_live2d_reset)
             sw.random_exp_changed.connect(self._on_random_exp_changed)
             sw.random_sticker_changed.connect(self._on_random_sticker_changed)
+        # --- 窗口 / 持久化 ---
+        sw.always_on_top_changed.connect(self._on_always_on_top_changed)
+        sw.save_settings_requested.connect(self._on_save_settings)
 
         # --- 托盘信号 ---
         self.pet.quit_requested.connect(self._quit)
@@ -523,6 +529,8 @@ class UIController(QObject):
         r = self._live2d_renderer()
         if r is not None:
             r.set_random_expressions(bool(enabled))
+            self.settings_window.settings_store.set(
+                "random_exp_enabled", bool(enabled))
             log.info("挂机随机表情：%s", "开" if enabled else "关")
 
     def _on_random_sticker_changed(self, enabled: bool) -> None:
@@ -530,7 +538,64 @@ class UIController(QObject):
         fn = getattr(self.pet, "set_random_stickers", None)
         if callable(fn):
             fn(bool(enabled))
+            self.settings_window.settings_store.set(
+                "random_sticker_enabled", bool(enabled))
             log.info("随机表情包贴纸：%s", "开" if enabled else "关")
+
+    def _on_always_on_top_changed(self, enabled: bool) -> None:
+        """视觉 Tab：窗口置顶开关（立即生效并持久化）。"""
+        fn = getattr(self.pet, "set_always_on_top", None)
+        if callable(fn):
+            fn(bool(enabled))
+        self.settings_window.settings_store.set("always_on_top", bool(enabled))
+        log.info("窗口置顶：%s", "开" if enabled else "关")
+
+    def _on_save_settings(self) -> None:
+        """「保存设置」按钮：把当前配置快照写入 settings.json（重启后自动应用）。"""
+        sw = self.settings_window
+        store = sw.settings_store
+        try:
+            store.set("scale", sw.get_scale())
+            store.set("opacity", sw.get_opacity())
+            store.set("always_on_top", sw.is_always_on_top())
+            r = self._live2d_renderer()
+            if r is not None:
+                store.set("random_exp_enabled",
+                          bool(r.is_random_expressions_enabled()))
+            if hasattr(self.pet, "is_random_stickers_enabled"):
+                store.set("random_sticker_enabled",
+                          bool(self.pet.is_random_stickers_enabled()))
+            sw._set_status("✅ 设置已保存，重启后自动生效")
+            log.info("设置已手动保存")
+        except Exception:  # noqa: BLE001
+            log.exception("保存设置失败")
+            sw._set_status("❌ 保存失败，详见日志")
+
+    def _apply_stored_window_settings(self) -> None:
+        """启动时应用 settings.json 里保存的窗口类设置（保存按钮/自动保存写入）。"""
+        store = self.settings_window.settings_store
+        try:
+            aot = store.get("always_on_top", None)
+            if aot is not None:
+                fn = getattr(self.pet, "set_always_on_top", None)
+                if callable(fn):
+                    fn(bool(aot))
+            scale = store.get("scale", None)
+            if scale is not None:
+                self.pet.apply_display_size(float(scale))
+            opacity = store.get("opacity", None)
+            if opacity is not None:
+                self.pet.setWindowOpacity(float(opacity))
+            r = self._live2d_renderer()
+            if r is not None:
+                re_en = store.get("random_exp_enabled", None)
+                if re_en is not None:
+                    r.set_random_expressions(bool(re_en))
+            rs = store.get("random_sticker_enabled", None)
+            if rs is not None and hasattr(self.pet, "set_random_stickers"):
+                self.pet.set_random_stickers(bool(rs))
+        except Exception:  # noqa: BLE001
+            log.exception("启动应用已保存设置失败")
 
     def _init_model_config_ui(self) -> None:
         """启动时把 cfg.llm 的值加载到设置面板 UI。"""

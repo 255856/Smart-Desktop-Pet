@@ -95,11 +95,15 @@ class SettingsWindow(QWidget):
     live2d_reset_requested = Signal()
     random_exp_changed = Signal(bool)          # 挂机随机表情开关
     random_sticker_changed = Signal(bool)      # 随机表情包贴纸开关
+    # --- 窗口 / 持久化 ---
+    always_on_top_changed = Signal(bool)       # 窗口置顶开关
+    save_settings_requested = Signal()         # 点了「保存设置」按钮
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
                  renderer: Optional[object] = None,
-                 sticker_enabled: bool = True) -> None:
+                 sticker_enabled: bool = True,
+                 always_on_top: bool = True) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -120,6 +124,8 @@ class SettingsWindow(QWidget):
         self._renderer = renderer
         # 随机表情包贴纸初始开关状态（来自 PetWindow）
         self._sticker_enabled = bool(sticker_enabled)
+        # 窗口置顶初始状态（来自 cfg.window.always_on_top）
+        self._always_on_top = bool(always_on_top)
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -227,8 +233,13 @@ class SettingsWindow(QWidget):
         cl.addWidget(self.lbl_status)
 
         row = QHBoxLayout()
+        self.btn_save = QPushButton("保存设置")
+        self.btn_save.setObjectName("accent_btn")
+        self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_save.clicked.connect(self.save_settings_requested.emit)
         self.btn_reset = QPushButton("重置默认值")
         self.btn_close = QPushButton("关闭")
+        row.addWidget(self.btn_save)
         row.addWidget(self.btn_reset)
         row.addStretch(1)
         row.addWidget(self.btn_close)
@@ -388,6 +399,10 @@ class SettingsWindow(QWidget):
         row.addWidget(self.opacity_slider, 1)
         row.addWidget(self.opacity_label)
         gv.addLayout(row)
+        self.cb_always_on_top = QCheckBox("窗口置顶（始终保持在其他窗口上方）")
+        self.cb_always_on_top.setChecked(self._always_on_top)
+        self.cb_always_on_top.toggled.connect(self.always_on_top_changed.emit)
+        gv.addWidget(self.cb_always_on_top)
         v.addWidget(g_op)
 
         # —— 动画切换优化（豆包生成图不连贯时用）——
@@ -482,52 +497,79 @@ class SettingsWindow(QWidget):
 
     # ---------- Tab: Live2D（模型专属外观 / 随机表情） ----------
     def _build_tab_live2d(self) -> QWidget:
-        """Live2D 专属设置：按键说明五大类分类条目 + 复位 + 挂机随机表情。
+        """Live2D 专属设置：五大类以可点选 chip 网格呈现 + 复位 + 挂机随机。
 
         条目来自渲染器 profile（每模型一份 *.model.yaml），换模型自动跟随。
+        - toggle 组（特殊/配件/手势）：chip 可多选叠加，再点取消；
+        - exclusive 组（发型/表情）：chip 单选，首项为「默认 / 自然」。
+        整页在 QScrollArea 内，条目再多也不会被裁切。
         """
         page = QWidget()
-        v = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        inner.setObjectName("live2d_page")
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(8, 10, 8, 12)
         v.setSpacing(10)
         renderer = self._renderer
 
-        # —— 模型名 ——
+        # chip 状态：(group_id, item_id) -> 按钮；group_id -> [按钮…]
+        self.live2d_chips: dict[tuple[str, str], QPushButton] = {}
+        self._live2d_group_chips: dict[str, list[QPushButton]] = {}
+
+        # —— 模型名卡片 ——
         model_name = ""
         try:
             model_name = getattr(renderer.profile, "name", "") or ""
         except Exception:  # noqa: BLE001
             pass
-        if model_name:
-            lbl = QLabel(f"当前模型：{model_name}")
-            f = lbl.font(); f.setBold(True); lbl.setFont(f)
-            v.addWidget(lbl)
+        head = QFrame()
+        head.setObjectName("live2d_model_head")
+        hl = QVBoxLayout(head)
+        hl.setContentsMargins(16, 11, 16, 11)
+        hl.setSpacing(2)
+        cap = QLabel("LIVE2D 模型")
+        cap.setObjectName("model_caption")
+        nm = QLabel(model_name or "未命名模型")
+        nm.setObjectName("model_name")
+        hl.addWidget(cap)
+        hl.addWidget(nm)
+        v.addWidget(head)
 
-        # —— 分类条目（下拉 + 应用）——
-        self.live2d_combos: list[tuple[str, QComboBox]] = []
+        # 当前激活项（用于初始化 chip 选中态）
+        active: set = set()
+        try:
+            active = renderer.get_active_items()
+        except Exception:  # noqa: BLE001
+            active = set()
+
+        # —— 五大分类 chip 卡片 ——
         try:
             groups = renderer.get_menu_groups()
         except Exception:  # noqa: BLE001
             groups = []
         for g in groups:
-            box = QGroupBox(g["label"])
-            h = QHBoxLayout(box)
-            cmb = QComboBox()
-            for item_id, label in g["items"]:
-                cmb.addItem(label, item_id)
-            btn = QPushButton("应用")
-            btn.clicked.connect(
-                lambda _=False, gid=g["id"], c=cmb:
-                self.live2d_item_activated.emit(gid, str(c.currentData())))
-            h.addWidget(cmb, 1)
-            h.addWidget(btn)
-            v.addWidget(box)
-            self.live2d_combos.append((g["id"], cmb))
+            v.addWidget(self._build_live2d_group_card(g, active))
 
-        # —— 复位 + 挂机随机表情/表情包 ——
+        # —— 外观 / 挂机 ——
         g_misc = QGroupBox("外观 / 挂机")
         gm = QVBoxLayout(g_misc)
+        gm.setSpacing(8)
         self.btn_live2d_reset = QPushButton("复位全部外观")
-        self.btn_live2d_reset.clicked.connect(self.live2d_reset_requested.emit)
+        self.btn_live2d_reset.setObjectName("accent_btn")
+        self.btn_live2d_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_live2d_reset.clicked.connect(self._on_live2d_reset)
         gm.addWidget(self.btn_live2d_reset)
 
         rnd_on = False
@@ -548,6 +590,76 @@ class SettingsWindow(QWidget):
 
         v.addStretch(1)
         return page
+
+    def _build_live2d_group_card(self, g: dict, active: set) -> QGroupBox:
+        """单个分类卡片：标题 + 3 列 chip 网格。"""
+        gid = g["id"]
+        kind = g.get("kind", "category")
+        exclusive = g.get("mode") == "exclusive"
+        box = QGroupBox(g["label"])
+        box.setObjectName("live2d_card")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(12, 20, 12, 12)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+
+        items = list(g["items"])
+        # 情绪组首项补「自然表情」（发型组 get_menu_groups 已带「默认发型」）
+        if kind == "emotion":
+            items.insert(0, ("__default__", "自然表情"))
+
+        self._live2d_group_chips[gid] = []
+        cols = 3
+        for idx, (item_id, label) in enumerate(items):
+            chip = QPushButton(label)
+            chip.setObjectName("chip")
+            chip.setCheckable(True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.blockSignals(True)
+            chip.setChecked(item_id in active)
+            chip.blockSignals(False)
+            chip.clicked.connect(
+                lambda _=False, g_=gid, iid=item_id, c=chip, ex=exclusive:
+                self._on_live2d_chip(g_, iid, c, ex))
+            grid.addWidget(chip, idx // cols, idx % cols)
+            self.live2d_chips[(gid, item_id)] = chip
+            self._live2d_group_chips[gid].append(chip)
+
+        # 互斥组（发型/表情）必须有一个选中：没有命中项时落在「默认 / 自然」
+        if exclusive:
+            if not any(c.isChecked() for c in self._live2d_group_chips[gid]):
+                default_chip = self.live2d_chips.get((gid, "__default__"))
+                if default_chip is not None:
+                    default_chip.blockSignals(True)
+                    default_chip.setChecked(True)
+                    default_chip.blockSignals(False)
+        return box
+
+    def _on_live2d_chip(self, gid: str, item_id: str,
+                        chip: QPushButton, exclusive: bool) -> None:
+        """chip 点击：互斥组保证单选（blockSignals 防递归），再通知 renderer。"""
+        if exclusive:
+            for other in self._live2d_group_chips.get(gid, []):
+                if other is not chip:
+                    other.blockSignals(True)
+                    other.setChecked(False)
+                    other.blockSignals(False)
+            chip.blockSignals(True)
+            chip.setChecked(True)
+            chip.blockSignals(False)
+        self.live2d_item_activated.emit(gid, item_id)
+
+    def _on_live2d_reset(self) -> None:
+        """复位全部外观：UI 回到「默认/自然」并清空叠加项，再通知 renderer。"""
+        for (_gid, iid), chip in self.live2d_chips.items():
+            chip.blockSignals(True)
+            chip.setChecked(iid == "__default__")
+            chip.blockSignals(False)
+        self.live2d_reset_requested.emit()
+
 
     # ---------- Tab: 模型配置 ----------
     def _build_tab_model(self) -> QWidget:
@@ -1198,6 +1310,10 @@ class SettingsWindow(QWidget):
     # ============================================================
     def get_scale(self) -> float:
         return self.scale_slider.value() / 100.0
+
+    def is_always_on_top(self) -> bool:
+        """窗口置顶开关当前状态。"""
+        return self.cb_always_on_top.isChecked()
 
     def get_opacity(self) -> float:
         return self.opacity_slider.value() / 100.0

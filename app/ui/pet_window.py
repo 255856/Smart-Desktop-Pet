@@ -22,7 +22,7 @@ from app.core.qt_compat import (
     QAction, QApplication, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
     QDragMoveEvent, QDropEvent, QEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
-    QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
+    QRegion, QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
     QGraphicsDropShadowEffect,
     event_global_pos, event_local_pos,
 )
@@ -210,6 +210,10 @@ class PetWindow(QWidget):
 
         # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
         self._setup_look_at()
+
+        # live2d：透明区域点击穿透（按渲染 alpha 定时生成窗口遮罩）
+        self._setup_click_mask()
+        self._mask_timer = None
 
         # 把渲染器的 widget 嵌入到 PetWindow
         display_widget = self.renderer.get_widget()
@@ -983,6 +987,62 @@ class PetWindow(QWidget):
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
+
+    # ---------------- 点击穿透（live2d：透明区域不让它挡住后面的窗口） ----------------
+    def _setup_click_mask(self) -> None:
+        """live2d 模式下窗口是方形画布，模型四周大量透明像素会挡住点击。
+        每秒从当前渲染帧的 alpha 通道生成窗口遮罩（setMask）：遮罩外既不显示
+        也不接收鼠标 → 透明处直接点到后面的窗口。"""
+        rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
+        if rtype != "live2d":
+            return
+        self._mask_timer = QTimer(self)
+        self._mask_timer.timeout.connect(self._update_click_mask)
+        self._mask_timer.start(1000)
+
+    def _update_click_mask(self) -> None:
+        try:
+            import numpy as np
+            from PyQt5.QtGui import QImage
+            w = self._sprite_label
+            if w is None or self.renderer is None \
+                    or not getattr(self.renderer, "is_ready", lambda: False)():
+                return
+            img = w.grab().toImage().convertToFormat(QImage.Format_ARGB32)
+            h, line = img.height(), img.bytesPerLine() // 4
+            # PyQt5 的 constBits() 是无尺寸 sip 指针，需 asstring 显式取字节
+            buf = img.constBits().asstring(img.sizeInBytes())
+            alpha = np.frombuffer(buf, dtype=np.uint8).reshape(h, line, 4)[:, :, 3]
+            opaque = alpha > 16
+            if not opaque.any():
+                self.clearMask()
+                return
+            # 膨胀 ~8px：待机摆动/物理回复时不至于把发梢裁掉
+            m = opaque.copy()
+            for _ in range(2):
+                m = (m | np.roll(m, 4, 0) | np.roll(m, -4, 0)
+                     | np.roll(m, 4, 1) | np.roll(m, -4, 1))
+            region = QRegion()
+            edges = np.diff(np.pad(m.astype(np.int8), ((0, 0), (1, 1))))
+            for y in range(h):
+                row = edges[y]
+                starts = np.flatnonzero(row == 1)
+                ends = np.flatnonzero(row == -1)
+                for s, e in zip(starts, ends):
+                    region += QRegion(int(s), y, int(e - s), 1)
+            # 可见子控件（状态栏/输入框/气泡/贴纸）不被遮罩裁掉
+            for child in self.children():
+                if isinstance(child, QWidget) and child is not w \
+                        and child.isVisible() and not child.isHidden():
+                    region += QRegion(child.geometry())
+            self.setMask(region)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def set_always_on_top(self, on: bool) -> None:
+        """运行时切换窗口置顶（设置面板「视觉」页）。"""
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(on))
+        self.show()   # setWindowFlag 会把可见窗口隐藏，需要重新 show
 
     # ---------------- 视线跟随（live2d：头/眼追鼠标，驱动物理） ----------------
     def _setup_look_at(self) -> None:

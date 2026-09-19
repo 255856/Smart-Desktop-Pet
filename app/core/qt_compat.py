@@ -41,7 +41,7 @@ try:
         QColor, QCursor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent,
         QDropEvent, QFont, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence,
         QMouseEvent, QPainter, QPainterPath, QLinearGradient, QPaintEvent, QPixmap,
-        QTextCursor, QTextDocument, QTransform,
+        QRegion, QTextCursor, QTextDocument, QTransform,
     )
     from PyQt5.QtWidgets import QAction
     from PyQt5.QtWidgets import (
@@ -65,7 +65,7 @@ except ImportError:
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
         QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QLinearGradient,
-        QPaintEvent, QPixmap, QMimeData, QTextCursor, QTextDocument, QTransform,
+        QPaintEvent, QPixmap, QMimeData, QRegion, QTextCursor, QTextDocument, QTransform,
     )
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
@@ -116,7 +116,7 @@ __all__ = [
     "QFrame", "QGridLayout", "QGroupBox",
     "QHBoxLayout", "QLabel", "QLineEdit", "QDialog", "QDialogButtonBox", "QFileDialog",
     "QInputDialog", "QListWidget", "QListWidgetItem",
-    "QMenu", "QMessageBox", "QPlainTextEdit", "QProgressBar", "QPushButton", "QSizePolicy",
+    "QMenu", "QMessageBox", "QPlainTextEdit", "QProgressBar", "QPushButton", "QRegion", "QSizePolicy",
     "QSlider", "QSpinBox", "QSplitter", "QStringListModel", "QSystemTrayIcon", "QTabWidget",
     "QTextBrowser", "QToolButton", "QVBoxLayout", "QWidget", "QGraphicsDropShadowEffect",
     "QScrollArea",

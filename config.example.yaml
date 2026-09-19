@@ -86,7 +86,7 @@ pet:
     # Cubism 4 模型根目录（含 *.model3.json）
     # 每个模型目录可放一份 *.model.yaml 映射配置（表情分类/触发映射/睡眠/
     # 水印/随机表情），见 app/animation/live2d_model_profile.py
-    model_dir: "E:/study/live2d/免费型冰糖/免费模型冰糖"
+    model_dir: "assets/live2d/bingtang/bingtang"
     # 显示缩放（PIXI 模型内部用 0.5；桌面窗口显示放大倍数）
     scale: 0.5
     # 挂机随机表情（Live2D 专属）

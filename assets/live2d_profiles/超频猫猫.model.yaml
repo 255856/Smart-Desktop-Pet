@@ -1,0 +1,94 @@
+# 超频猫猫 模型映射配置（Live2D profile）
+# 说明见 app/animation/live2d_model_profile.py；条目自动从
+# Expressions/类别 名称.exp3.json 扫描分类，本文件声明分组顺序与行为。
+
+name: 超频猫猫
+expressions_from: auto
+
+categories:
+  - {id: special, label: 特殊, source: 特殊, mode: toggle}
+  - {id: hair,    label: 发型, source: 发型, mode: exclusive, hairstyle: true}
+  - {id: gear,    label: 配件, source: 配件, mode: toggle}
+  - {id: gesture, label: 手势, source: 手势, mode: toggle}
+  - {id: face,    label: 表情, source: 表情, mode: exclusive, emotion: true}
+
+# 水印是一个独立部件（cdi3.json：Part14 = "0000 星雾语企划水印002.psd"），
+# 把该部件透明度置 0 即干净隐藏；不用 drawable 指纹拦截（那是冰糖专属方案）。
+watermark:
+  mode: part
+  part_ids: [Part14]
+  exclude_names: [水印]   # 不进任何菜单（防误开）
+
+# 装饰部件隐藏：Part10 = gz235.png（粉色翅膀/星星背景框，默认常显）
+hide_parts: [Part10]
+
+# 待机/睡眠动作（由渲染器注入 model3.json，原模型文件不动）
+motions:
+  idle_group: Idle        # pixi-live2d-display 自动循环播放该组
+  idle_file: idle.motion3.json
+  sleep_group: Sleep      # 被追踪丢失时的 Zzz 动作，睡觉时播放
+  sleep_file: motions/Zzz.motion3.json
+
+# 睡觉：模型自带"睡睡/睡觉ON"开关参数（cdi3：Param216 睡睡 / Param218 睡觉ON）
+sleep:
+  params: {Param216: 1, Param218: 1}
+  off_params: {Param216: 0, Param218: 0}
+
+triggers:
+  # 聊天情绪 / 工具情绪 → 表情条目名
+  emotions:
+    happy: 心心眼
+    smile: 心心眼
+    joy: 心心眼
+    proud: 星星眼
+    angry: 生气脸
+    mad: 生气脸
+    shy: 脸红
+    blush: 脸红
+    sad: 哭哭眼
+    grief: 哭哭眼
+    cry: 哭哭眼
+    fear: 晕晕眼
+    doubt: 问号
+    puzzle: 问号
+    think: 问号
+    thinking: 问号
+    surprise: 四周星星
+    shock: 四周星星
+    gloomy: 黑脸
+    black: 黑脸
+  # AI 思考中：问号脸 + 思考手势（回复后恢复当前情绪并收起手势）
+  thinking:
+    expr: 问号
+    items: [思考]
+  # 触摸反应：短暂高光眼 + 歪头
+  touch:
+    expr: 高光
+    hold_ms: 700
+  # 工具动作 → 手势/特殊条目（一次性，播完恢复）
+  actions:
+    jump:    {use: 右打招呼, hold_ms: 1600}
+    stretch: {use: 前倾, hold_ms: 1200}
+    spin:    {use: 右喵喵拳, hold_ms: 1600}
+    swim:    {use: 左喵喵拳, hold_ms: 1600}
+    eat:     {use: 右嗷呜, hold_ms: 1800}
+    file:    {use: 画板（开工）, hold_ms: 2000}
+    think:   {use: 思考, hold_ms: 1500}
+    tongue:  {use: 右嗷呜, hold_ms: 1600}
+    cheek:   {use: 右比耶, hold_ms: 1600}
+
+# 挂机随机自动播放（表情 + 手势动作；聊天/交互时自动暂停）
+random:
+  enabled: true
+  min_s: 20
+  max_s: 50
+  pool: [心心眼, 星星眼, 圈圈眼, 晕晕眼, 脸红, 问号, 钱钱眼, 四周星星, 流汗,
+         右嗷呜, 右喵喵拳, 左喵喵拳, 比心, 右比耶, 右打招呼, 唱歌手, 思考, 拿手机]
+
+# 表情包贴纸：随机间隔在桌宠右上角弹出一张（dir 相对本模型目录）
+stickers:
+  dir: "../超频猫猫表情包"
+  min_s: 40
+  max_s: 120
+  duration_s: 4
+  size: 120

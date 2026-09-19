@@ -1,0 +1,87 @@
+# 冰糖 模型映射配置（Live2D profile）
+# 原先硬编码在 live2d_renderer.py 的模型专属知识迁移至此。
+
+name: 冰糖
+expressions_from: model3   # 表情注册表在 model3.json（根目录平铺，无类别前缀）
+
+categories:
+  - id: hair
+    label: 发型
+    mode: exclusive
+    hairstyle: true
+    items: [HAIR11, HAIR22, HAIR33, hairR1, HAIR2, HAIR3, Rhair, danhair, danhairL]
+  - id: face
+    label: 表情
+    mode: exclusive
+    emotion: true
+    items: [hah, angery, black, red, meimao1, meimao2, "O O"]
+
+emotion_labels:
+  hah: 开心
+  angery: 生气
+  black: 黑脸
+  red: 害羞
+  meimao1: 委屈
+  meimao2: 思考
+  "O O": 惊讶
+
+# 冰糖水印：烘焙在贴图里的版权卡片 + 文字条，须按 drawable 指纹在渲染层拦截
+# （bridge 端会校验模型指纹，只在冰糖本体上生效）。
+# Paramheadxy* 是水印触发参数，任何表情解析/写入时一律剔除。
+watermark:
+  mode: drawable
+  exclude_params: [Paramheadxy, Paramheadxy2, Paramheadxy3, Paramheadxy4, Paramheadxy5, Paramheadxy6]
+  exclude_names: [expression1, expression2, shuiyin1, shuiyin2]
+
+# 冰糖没有动作文件（无 Motions），不注入 idle/sleep 动作
+motions: {}
+
+# 睡觉：闭眼合嘴（默认值 1，必须 Overwrite 才能 off）
+sleep:
+  expr_params:
+    - {Id: ParamEyeLOpen, Value: 0.0, Blend: Overwrite}
+    - {Id: ParamEyeROpen, Value: 0.0, Blend: Overwrite}
+    - {Id: ParamMouthOpenY, Value: 0.0, Blend: Overwrite}
+
+triggers:
+  emotions:
+    happy: hah
+    smile: hah
+    joy: hah
+    angry: angery
+    mad: angery
+    shy: red
+    blush: red
+    sad: meimao1
+    grief: meimao1
+    fear: meimao1
+    think: meimao2
+    thinking: meimao2
+    doubt: meimao2
+    puzzle: meimao2
+    surprise: "O O"
+    shock: "O O"
+    gloomy: black
+    black: black
+  thinking:
+    params:
+      - {Id: ParamBrowLY, Value: 1.0}
+      - {Id: ParamBrowRY, Value: 1.0}
+      - {Id: ParamEyeBallY, Value: -1.0}
+  touch:
+    params:
+      - {Id: Paramlove3, Value: 0.966}
+    hold_ms: 700
+  actions:
+    jump:    {param: ParamBodyAngleY, value: 0.6, duration_ms: 600}
+    stretch: {param: ParamBodyStretch, value: 1.0, duration_ms: 800}
+    spin:    {param: ParamAngleZ, value: 0.8, duration_ms: 500}
+    swim:    {param: ParamAngleX, value: 0.5, duration_ms: 800}
+    eat:     {duration_ms: 1500, params: [{Id: ParamMouthOpenY, Value: 0.9}, {Id: Paramlove3, Value: 0.6}]}
+    file:    {duration_ms: 800, params: [{Id: ParamBrowLY, Value: 0.8}]}
+    think:   {duration_ms: 1500, params: [{Id: ParamBrowLY, Value: 1.0}, {Id: ParamBrowRY, Value: 1.0}, {Id: ParamEyeBallY, Value: -1.0}]}
+    tongue:  {duration_ms: 1600, params: [{Id: Paramtongueout, Value: 1.0}]}
+    cheek:   {duration_ms: 1600, params: [{Id: ParamCheeckPuff, Value: 1.0}]}
+
+random:
+  enabled: false

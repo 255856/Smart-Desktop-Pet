@@ -862,8 +862,11 @@ class Live2DRenderer(PetRenderer):
             return
         self.note_activity()
         if item_id == "__default__":
-            # 互斥组复位：整组参数归零（发型恢复默认）
-            self._apply_params(cat.params(), {})
+            # 组复位：情绪组回自然表情（走 ExpressionManager），其余整组参数归零（发型默认）
+            if cat.emotion:
+                self.reset_emotion()
+            else:
+                self._apply_params(cat.params(), {})
             return
         item = cat.item(item_id)
         if item is None:
@@ -901,6 +904,17 @@ class Live2DRenderer(PetRenderer):
                 self._apply_params([], {self.profile.watermark_param:
                                         self.profile.watermark_safe_value})
         self._js("window.live2d.resetExpressionState();")
+
+    def get_active_items(self) -> set:
+        """当前激活的分类条目名集合（供设置面板 chip 初始化选中态）。
+
+        包含 toggle 组（配件/手势/特殊）叠加项 + 当前情绪；发型为互斥组、
+        不做持久选中追踪（与右键菜单一致）。
+        """
+        active = set(self._active_toggles.keys())
+        if self._current_emotion and self._current_emotion != "natural":
+            active.add(self._current_emotion)
+        return active
 
     # ---------- 玩一下（一次性动作菜单） ----------
     def get_play_options(self) -> list[tuple[str, str]]:

@@ -78,3 +78,6 @@ data/
 # 日志与预览截图产物
 *.log
 tools/preview*/
+
+# Live2D 模型（版权模型，禁止二次传播，不入库；配置模板在 assets/live2d_profiles/）
+assets/live2d/

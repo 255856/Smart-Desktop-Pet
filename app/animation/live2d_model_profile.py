@@ -205,12 +205,30 @@ class Live2DModelProfile:
 # ---------- 解析 ----------
 
 def _load_yaml(model_dir: Path) -> dict:
-    """在模型目录找 *.model.yaml（找不到返回空 dict）。"""
+    """查找并加载模型映射配置。
+
+    优先级：
+        1. 模型目录内的 *.model.yaml（模型作者/用户放的自定义配置）；
+        2. 仓库 ``assets/live2d_profiles/<模型目录名>.model.yaml``（随项目分发的
+           官方模板 —— 模型目录本身不入库时配置仍有份）。
+    """
+    # 1) 模型目录内任意 *.model.yaml
     for p in sorted(model_dir.glob("*.model.yaml")):
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             if isinstance(data, dict):
-                log.info("Live2D profile: 使用 %s", p.name)
+                log.info("Live2D profile: 使用 %s", p)
+                return data
+        except Exception as e:  # noqa: BLE001
+            log.warning("Live2D profile 解析失败 %s: %s", p, e)
+    # 2) 仓库内置模板（按模型目录名匹配）
+    repo_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "live2d_profiles"
+    p = repo_dir / f"{model_dir.name}.model.yaml"
+    if p.is_file():
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            if isinstance(data, dict):
+                log.info("Live2D profile: 使用仓库模板 %s", p.name)
                 return data
         except Exception as e:  # noqa: BLE001
             log.warning("Live2D profile 解析失败 %s: %s", p, e)
