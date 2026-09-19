@@ -980,7 +980,8 @@ class PetWindow(QWidget):
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
 
-    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------    def _setup_sticker_overlay(self) -> None:
+    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
+    def _setup_sticker_overlay(self) -> None:
         """模型目录带表情包（profile stickers 配置）时启用随机贴纸弹窗。"""
         cfg = None
         if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
