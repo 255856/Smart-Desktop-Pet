@@ -156,7 +156,7 @@ QPushButton#send_btn {{
         stop:0 #a78bfa, stop:1 #7c6cf0);
     color: #fff;
     border: none;
-    padding: 10px 28px;
+    padding: 2px 28px;
     font-size: 10pt;
     font-weight: 700;
     border-radius: 14px;
@@ -168,6 +168,7 @@ QPushButton#send_btn:disabled {{ background: #d4c8f7; color: #fff; }}
 
 QPushButton#stop_btn {{
     color: #f43f5e; border-color: #fecdd3; background: #fff1f3;
+    padding: 2px 18px;
 }}
 QPushButton#stop_btn:hover {{ background: #ffe4e6; border-color: #f43f5e; }}
 
@@ -176,7 +177,7 @@ QPushButton#ghost_btn {{
     background: transparent;
     border: 1px solid #e3e1f0;
     border-radius: 9px;
-    padding: 6px 12px;
+    padding: 3px 12px;
     font-size: 9pt;
     color: #5b4f9c;
 }}

@@ -26,8 +26,7 @@ from app.core.qt_compat import (
     QGraphicsDropShadowEffect,
     event_global_pos, event_local_pos,
 )
-from app.animation.animations import Animation, AnimationPlayer, Frame
-from app.animation.sprite_atlas import PetAnimator, SpriteAtlas
+from app.animation.animations import Animation, Frame
 from app.ui import ui_style
 
 log = logging.getLogger(__name__)

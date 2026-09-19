@@ -370,15 +370,19 @@ class App:
         )
         self.pet.move(cfg.window.start_x, cfg.window.start_y)
         self.pet.attach_state(self.state_mgr.state)
-        # 统计动画目录
-        sprite_count = sum(
-            1 for p in sprite_dir.rglob("*.png")
-            if not p.name.startswith("body_front"))
-        if sprite_count > 0:
-            banner.ok(f"动画帧", f"{sprite_count} 张")
+        # 统计动画目录（仅 sprite 模式；live2d 不加载帧图，扫描 2550 个 PNG
+        # 纯属浪费，之前的「动画帧 · 2550 张」横幅有误导性——那只是数文件数）
+        if getattr(cfg.pet, "renderer", "sprite") == "live2d":
+            banner.info("动画帧", "sprite 模式未启用，跳过（不占内存）")
         else:
-            banner.info("未找到动画帧",
-                        "用静态 fallback 显示（不影响聊天/工具）")
+            sprite_count = sum(
+                1 for p in sprite_dir.rglob("*.png")
+                if not p.name.startswith("body_front"))
+            if sprite_count > 0:
+                banner.ok(f"动画帧", f"{sprite_count} 张")
+            else:
+                banner.info("未找到动画帧",
+                            "用静态 fallback 显示（不影响聊天/工具）")
 
         banner.section("⑤ 运动控制器")
         self.motion = MotionController(
