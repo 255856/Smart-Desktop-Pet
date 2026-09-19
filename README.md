@@ -1,4 +1,4 @@
-# 🐳 桌面宠物 (Desktop Pet) — DeepSeek 主题多智能体桌宠
+# 🐳 桌面宠物 (Desktop Pet) — 多智能体桌宠
 
 一个 **本地多智能体 (Multi-Agent) 桌面助理**，不只是聊天桌宠：
 
