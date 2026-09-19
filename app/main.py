@@ -22,10 +22,20 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# PR-fix-WebEngine-OpenGL: 在 import Qt 任何东西之前先 setAttribute
+# 否则 PyQtWebEngine 在 headless 下会警告 "Please set Qt::AA_ShareOpenGLContexts"
+try:
+    from PyQt5.QtCore import Qt as _Qt
+    from PyQt5.QtCore import QCoreApplication as _QCA
+    _QCA.setAttribute(_Qt.AA_ShareOpenGLContexts, True)
+except Exception:  # noqa: BLE001
+    pass
+
 try:
     import faster_whisper  # noqa: F401
 except Exception:  # noqa: BLE001
     pass
+
 
 from .core.qt_compat import QApplication, QIcon, QTimer
 from .core.config import load_config
@@ -340,6 +350,10 @@ class App:
             sprite_dir, fallback_image=fallback_image,
             scale=cfg.window.scale,
             always_on_top=cfg.window.always_on_top,
+            # Live2D 渲染器（v3.1+）：从 cfg.pet 读取
+            renderer_type=getattr(cfg.pet, "renderer", "sprite"),
+            live2d_model_dir=Path(getattr(cfg.pet.live2d, "model_dir", "")) if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None) else None,
+            live2d_hide_watermark=bool(getattr(cfg.pet.live2d, "hide_watermark", True)),
         )
         self.pet.move(cfg.window.start_x, cfg.window.start_y)
         self.pet.attach_state(self.state_mgr.state)

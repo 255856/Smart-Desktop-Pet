@@ -296,14 +296,21 @@ class MotionController:
         self._decision_at = time.time()
         self._reschedule_decide_timer()
         # 一次性触发动画后回 idle（如果 walk/crawl 动画缺）
+        # 注意：Live2D 渲染器没有 atlas/player，这里用 getattr 防护，
+        # 无 sprite 资源时跳过（set_edge_hide 已在渲染器侧退化为待机）。
         if chosen in (MoveMode.SIDEHIDE_LEFT, MoveMode.SIDEHIDE_RIGHT):
-            hide_anim = self.animator.atlas.sidehide_left \
-                if chosen == MoveMode.SIDEHIDE_LEFT \
-                else self.animator.atlas.sidehide_right
-            picked = self.animator.atlas.any(hide_anim)
-            if picked is not None:
-                self.animator.player.play(picked)
-                self.animator._notify_anim_changed()
+            atlas = getattr(self.animator, "atlas", None)
+            player = getattr(self.animator, "player", None)
+            if atlas is not None and player is not None:
+                hide_anim = atlas.sidehide_left \
+                    if chosen == MoveMode.SIDEHIDE_LEFT \
+                    else atlas.sidehide_right
+                picked = atlas.any(hide_anim)
+                if picked is not None:
+                    player.play(picked)
+                    notify = getattr(self.animator, "_notify_anim_changed", None)
+                    if callable(notify):
+                        notify()
 
     def _step_move(self) -> None:
         if self.current.mode == MoveMode.IDLE or not self.current.target:

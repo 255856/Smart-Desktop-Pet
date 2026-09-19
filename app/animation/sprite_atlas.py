@@ -31,6 +31,7 @@ from app.animation.animations import (
     Animation, AnimationPlayer, Frame,
     load_animation_from_dir, load_animation_set,
 )
+from app.animation.pet_renderer import PetRenderer
 from app.core.qt_compat import QTimer
 
 log = logging.getLogger(__name__)
@@ -228,16 +229,23 @@ class SpriteAtlas:
                 frame.duration_ms = ms
 
 
-class PetAnimator:
-    """更高层的"我现在想做什么"语义封装。"""
+class PetAnimator(PetRenderer):
+    """Sprite 渲染器：高层"我想做什么"语义 + QLabel 显示。
+
+    实现 PetRenderer 接口（sprite 版本）。Live2DRenderer 是另一份实现。
+    """
 
     # 特殊待机触发间隔：60 秒（每分钟随机触发一次）
     SPECIAL_IDLE_INTERVAL_S = 60
 
     def __init__(self, atlas: SpriteAtlas, player: AnimationPlayer,
+                 display_widget: Optional["QLabel"] = None,
                  on_animation_changed: Optional[Callable] = None):
+        # PetRenderer.__init__ 不需要，但保持 isinstance(pet_renderer.PetRenderer) 可用
+        # 通过 metaclass 自动；这里不需要显式 super().__init__()（ABCMeta 不要求）
         self.atlas = atlas
         self.player = player
+        self.display_widget = display_widget  # QLabel（PetWindow 传入）
         self._on_animation_changed = on_animation_changed
         self._last_group_getter: Optional[Callable[[], Optional[Animation]]] = None
         self._last_idle_set_at: float = 0.0
@@ -521,3 +529,32 @@ class PetAnimator:
         else:
             self.player.back_to_idle()
             self._notify_anim_changed()
+
+    # ---------- PetRenderer 接口实现 ----------
+
+    def play_animation(self, anim_name: str) -> None:
+        """通用一次性动作（按名字分发到对应方法）。"""
+        m = {
+            'jump': self.play_jump,
+            'stretch': self.play_stretch,
+            'spin': self.play_spin,
+            'swim': self.play_swim,
+            'eat': self.play_eat,
+            'file': self.play_file,
+            'jump': self.play_jump,
+        }.get(anim_name.lower())
+        if m:
+            m()
+        else:
+            log.warning("play_animation: 未知动作 '%s'", anim_name)
+
+    def get_widget(self):
+        """返回用于显示的 QLabel。"""
+        return self.display_widget
+
+    def shutdown(self) -> None:
+        """清理资源。"""
+        if self._special_idle_timer is not None:
+            self._special_idle_timer.stop()
+            self._special_idle_timer = None
+        # 注意：AnimationPlayer 是无状态的（QTimer 在 PetWindow 里），不需要 stop

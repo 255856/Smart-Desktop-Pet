@@ -140,6 +140,26 @@ python main.py
 - 配置加载状态（角色名、模型）
 - **Ollama 本地模型探测结果**（如果 11434 端口在跑）
 - 数据文件落盘路径
+
+### 切换 Live2D 模型（可选，v3.1+）
+
+默认用 PNG 帧动画（sprite）。如果你装了 Live2D 模型（如 Cubism 4 `.model3.json`），可以在 `config.yaml` 切换：
+
+```yaml
+pet:
+  renderer: live2d              # sprite | live2d
+  live2d:
+    model_dir: "E:/your/path/to/live2d_model"
+    scale: 0.5
+```
+
+**依赖**：Live2D 模式需要在系统 Python 装 `PyQtWebEngine`：
+
+```powershell
+pip install PyQtWebEngine
+```
+
+装好后 `pip install` 后重启桌宠就生效。如果没装或模型目录缺 `model3.json`，**自动 fallback 到 sprite 渲染**（不会崩）。
 - 自动启动 Dashboard（如果 `--with-dashboard`）
 
 ### 3. 启动 Dashboard（3 种方式）

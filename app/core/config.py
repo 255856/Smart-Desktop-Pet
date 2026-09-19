@@ -114,6 +114,22 @@ class BrainConfig(BaseModel):
     langchain: LangChainConfig = LangChainConfig()
 
 
+class Live2DConfig(BaseModel):
+    """Live2D 渲染器配置（v3.1+）。"""
+    model_dir: str = ""      # Cubism 4 模型根目录（含 *.model3.json）
+    # 是否隐藏模型自带的水印（免费模型的版权/防盗声明：含 WaterMark 版权卡片，
+    # 以及伪装成 ArtMesh 叠加在角色身上的 FREE MODEL / 作者署名等文字层）。
+    # 实现上在渲染层 drawMesh 跳过这些 drawable，不改动模型文件与贴图。
+    # 仅建议个人桌面自用；公开使用或再分发请保留水印或联系模型作者授权。
+    hide_watermark: bool = True
+
+
+class PetConfig(BaseModel):
+    """桌宠渲染器配置（v3.1+）。"""
+    renderer: Literal["sprite", "live2d"] = "sprite"   # sprite=PNG帧动画（默认）；live2d=Cubism模型
+    live2d: Live2DConfig = Live2DConfig()
+
+
 # ---------------- 顶层 Config（BaseSettings，自动读 .env）----------------
 class Config(BaseSettings):
     """桌宠总配置。
@@ -137,6 +153,7 @@ class Config(BaseSettings):
     sprite: SpriteConfig = SpriteConfig()
     asr: ASRConfig = ASRConfig()
     brain: BrainConfig = BrainConfig()
+    pet: PetConfig = PetConfig()
 
     @property
     def name(self) -> str:
@@ -159,7 +176,7 @@ def _merge_yaml(target: Config, raw: dict[str, Any]) -> Config:
 
     # 逐个 section 深拷贝后用 model_validate 重建
     sections = ("llm", "character", "window", "reminder", "app",
-                "sprite", "asr", "brain")
+                "sprite", "asr", "brain", "pet")
     new_data = target.model_dump()
     for sec in sections:
         if sec in raw and isinstance(raw[sec], dict):
@@ -176,6 +193,15 @@ def _merge_yaml(target: Config, raw: dict[str, Any]) -> Config:
                 cur.update(raw["brain"][sub])
                 b[sub] = cur
         new_data["brain"] = b
+
+    # pet 内嵌的 live2d 也要递归
+    if "pet" in raw and isinstance(raw["pet"], dict):
+        p = dict(new_data["pet"])
+        if "live2d" in raw["pet"] and isinstance(raw["pet"]["live2d"], dict):
+            cur = dict(p.get("live2d", {}))
+            cur.update(raw["pet"]["live2d"])
+            p["live2d"] = cur
+        new_data["pet"] = p
 
     return Config.model_validate(new_data)
 

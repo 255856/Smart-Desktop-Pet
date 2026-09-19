@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from app.core.qt_compat import (
     QAction, QApplication, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
-    QDragMoveEvent, QDropEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
+    QDragMoveEvent, QDropEvent, QEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
     QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
     QGraphicsDropShadowEffect,
@@ -173,7 +173,10 @@ class PetWindow(QWidget):
     def __init__(self, sprite_dir: str | Path,
                  fallback_image: str | Path | None = None,
                  scale: float = 0.4,
-                 always_on_top: bool = True):
+                 always_on_top: bool = True,
+                 renderer_type: str = "sprite",
+                 live2d_model_dir: str | Path | None = None,
+                 live2d_hide_watermark: bool = True):
         super().__init__()
         # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
         self._window_size = QSize(
@@ -182,20 +185,39 @@ class PetWindow(QWidget):
         )
         self._scale = scale
 
-        self.atlas = SpriteAtlas(sprite_dir, fallback_image=fallback_image)
-        # 预缩放所有帧到目标窗口尺寸
-        self.atlas.prescale(self._window_size, _scale_pixmap_keep_alpha)
-        _clear_pixmap_cache()
+        # 创建渲染器（sprite / live2d 由 cfg 决定，live2d 失败 fallback sprite）
+        from app.animation.renderer_factory import create_renderer
+        self.renderer = create_renderer(
+            renderer_type=renderer_type,
+            sprite_dir=Path(sprite_dir),
+            fallback_image=Path(fallback_image) if fallback_image else None,
+            window_size=self._window_size,
+            scale=scale,
+            live2d_model_dir=Path(live2d_model_dir) if live2d_model_dir else None,
+            live2d_hide_watermark=live2d_hide_watermark,
+        )
+        self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
-        self.player = AnimationPlayer()
-        self.animator = PetAnimator(self.atlas, self.player,
-                                     on_animation_changed=self._start_frame_timer)
-
-        # 使用 QLabel 显示精灵（替代 paintEvent，性能更好）
-        self._sprite_label = QLabel(self)
+        # 把渲染器的 widget 嵌入到 PetWindow
+        display_widget = self.renderer.get_widget()
+        if display_widget.parent() is None:
+            display_widget.setParent(self)
+        self._sprite_label = display_widget
         self._sprite_label.setGeometry(0, 0, self._window_size.width(), self._window_size.height())
-        self._sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sprite_label.setStyleSheet("background-color: transparent;")
+        if hasattr(self._sprite_label, 'setAlignment'):
+            self._sprite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if hasattr(self._sprite_label, 'setStyleSheet'):
+            self._sprite_label.setStyleSheet("background-color: transparent;")
+
+        # PR-fix-drag-menu (live2d): QWebEngineView 在 PetWindow 内会拦截鼠标事件。
+        # 实测真实鼠标事件落在 QWebEngineView 内部一个全屏覆盖的 Chromium delegate
+        # 子 QWidget 上（不冒泡到 view），只给 view 本身装过滤器会漏掉拖动、点击、
+        # 右键菜单和文件拖拽。这里递归覆盖 view 及其所有后代；eventFilter 里还会
+        # 通过 ChildAdded 为页面加载后动态创建的子控件补装。
+        self._install_display_input_filters(self._sprite_label)
+        # sprite 模式保存旧引用以便像素路径不破
+        if hasattr(self, 'atlas'):
+            _clear_pixmap_cache()
 
         # 气泡 label（替代 _draw_bubble）—— v2 美化：白底大圆角 + 淡紫描边 + 柔和阴影 + 尖角
         self._bubble_label = QLabel(self)
@@ -265,6 +287,14 @@ class PetWindow(QWidget):
         if always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
+        # PR-fix-window-invisible:
+        # 之前用 WA_NoSystemBackground + WA_TranslucentBackground + Frameless 三件套让桌宠
+        # 在某些 Windows 系统（DWM 未启用 / 多显示器 / 远程桌面 / 高 DPI 缩放）下渲染成
+        # 100% 透明完全看不到。这里：
+        #   - 去掉 WA_NoSystemBackground（让 Qt 自己绘制窗口背景）
+        #   - 保留 WA_TranslucentBackground（让 PNG / WebView 的透明区域能透出桌面）
+        #   - 配合 setStyleSheet 设背景色：sprite 用 windowBackground role；live2d 用纯白
+        # 这样 PetWindow 永远有一层可见背景，绝不会再"看不见"。
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -346,7 +376,9 @@ class PetWindow(QWidget):
             frames=[Frame(pixmap=pixmap, duration_ms=duration_ms)],
             mode=Animation.ONCE,
         )
-        self.animator.player.play_one_shot(anim, on_finished=self.animator.set_idle)
+        player = getattr(self.renderer, 'player', None)
+        if player is not None:
+            player.play_one_shot(anim, on_finished=self.animator.set_idle)
         self._start_frame_timer()  # 重启帧计时器
         log.info("拖拽图已切换显示")
 
@@ -520,16 +552,21 @@ class PetWindow(QWidget):
                同时 pending → _on_frame_timeout 被多次触发 → advance 频率
                倍增 → 动画加速 N 倍。
                现在先 stop 旧 timer 再 start 新 timer，保证同时只有 1 个 timer。
+
+        Live2D 模式下不做任何事（由 JS 内部 requestAnimationFrame 驱动）。
         """
-        anim = self.player.current_animation()
+        player = getattr(self.renderer, 'player', None)
+        if player is None:
+            return
+        anim = player.current_animation()
         if not anim or not anim.frames:
             return
         # 显示当前帧
-        pix = self.player.current_pixmap()
+        pix = player.current_pixmap()
         if pix and not pix.isNull():
             self._sprite_label.setPixmap(pix)
         # 当前帧停留时长（advance 前的帧）
-        frame_idx = self.player._frame_idx
+        frame_idx = player._frame_idx
         if frame_idx < 0 or frame_idx >= len(anim.frames):
             return
         duration_ms = max(1, anim.frames[frame_idx].duration_ms)
@@ -550,9 +587,12 @@ class PetWindow(QWidget):
         self._frame_timer.start(duration_ms)
 
     def _on_frame_timeout(self) -> None:
-        """单触发：advance 到下一帧 + 重新调度显示。"""# PR-right-click-fps: 累计帧数
+        """单触发：advance 到下一帧 + 重新调度显示。"""
+        player = getattr(self.renderer, 'player', None)
+        if player is None:
+            return
         self._fps_count += 1
-        self.player._advance()
+        player._advance()
         if self._fps_enabled:
             now = time.monotonic()
             if self._fps_window_start == 0.0:
@@ -629,6 +669,107 @@ class PetWindow(QWidget):
         self.mouse_left.emit()
         super().leaveEvent(evt)
 
+    def _install_display_input_filters(self, widget: QWidget) -> None:
+        """给显示控件本身及其所有后代控件装上事件过滤器。
+
+        QWebEngineView 内有一个全屏覆盖的 Chromium delegate 子 QWidget，
+        真实鼠标/拖拽事件直接发给它且不冒泡；只给 view 装过滤器会漏掉。
+        配合 eventFilter 里的 ChildAdded 分支，delegate 在页面加载后才
+        创建也能被补上，sprite 的 QLabel 走同一条路径，无副作用。
+        """
+        widget.installEventFilter(self)
+        if hasattr(widget, "setAcceptDrops"):
+            widget.setAcceptDrops(True)
+        for child in widget.findChildren(QWidget):
+            child.installEventFilter(self)
+            if hasattr(child, "setAcceptDrops"):
+                child.setAcceptDrops(True)
+
+    def _is_display_widget(self, obj) -> bool:
+        """obj 是否是显示控件（view/label）或其内部后代（Chromium delegate）。"""
+        display = getattr(self, "_sprite_label", None)
+        if display is None or not isinstance(obj, QWidget):
+            return False
+        return obj is display or display.isAncestorOf(obj)
+
+    def eventFilter(self, obj, evt):
+        """PR-fix-drag-menu (live2d): 把显示控件（含 QWebEngineView 内部 delegate）
+        的鼠标/拖拽事件转发给 PetWindow 自己处理。
+
+        默认 Qt 先把事件发给最内层 child，QWebEngineView 的内部 delegate 会吞掉
+        事件且不冒泡。安装过滤器后，press/move/release/dblclick 先到本方法，
+        我们用 mapToGlobal + self.mapFromGlobal 转成 PetWindow 坐标，再调自己的
+        handler；拖拽文件（dragEnter/dragMove/drop）也一并转发，否则拖到网页
+        上会被 Chromium 拦截而不是「喂文件」。
+        """
+        if not self._is_display_widget(obj):
+            return super().eventFilter(obj, evt)
+
+        # 内部 delegate 是页面加载后动态创建的：一旦出现就给它（及其子）补装
+        if evt.type() == QEvent.Type.ChildAdded:
+            child = getattr(evt, "child", None)
+            if isinstance(child, QWidget):
+                child.installEventFilter(self)
+                for sub in child.findChildren(QWidget):
+                    sub.installEventFilter(self)
+            return False
+
+        # 鼠标进入/离开：delegate 全屏覆盖，顶层 enterEvent/leaveEvent 收不到，
+        # 这里代为维护 _user_inside（自主运动据此暂停）。
+        if evt.type() == QEvent.Type.Enter:
+            self._user_inside = True
+            self._last_user_interaction_ts = time.time()
+            self.mouse_entered.emit()
+            return False
+        if evt.type() == QEvent.Type.Leave:
+            self._user_inside = False
+            self.mouse_left.emit()
+            return False
+
+        if isinstance(evt, QMouseEvent):
+            # 把 child 局部坐标转成 PetWindow 坐标（delegate/view/PetWindow 都从
+            # (0,0) 起、同尺寸，但保险起见统一走全局坐标转换）
+            local_pt = QPoint(evt.pos())
+            global_pt = obj.mapToGlobal(local_pt)
+            mapped = QMouseEvent(
+                evt.type(),
+                self.mapFromGlobal(global_pt),
+                obj.mapToParent(local_pt) if obj.parent() is self else local_pt,
+                evt.button(),
+                evt.buttons(),
+                evt.modifiers(),
+            )
+            if evt.type() == QEvent.Type.MouseButtonPress:
+                self.mousePressEvent(mapped)
+                return True
+            if evt.type() == QEvent.Type.MouseMove:
+                self.mouseMoveEvent(mapped)
+                return True
+            if evt.type() == QEvent.Type.MouseButtonRelease:
+                self.mouseReleaseEvent(mapped)
+                return True
+            if evt.type() == QEvent.Type.MouseButtonDblClick:
+                self.mouseDoubleClickEvent(mapped)
+                return True
+            return False
+
+        # 文件拖拽：dragEnter/drop 只用 mimeData；dragMove 用坐标决定光标，
+        # delegate/view/PetWindow 坐标完全重合，可直接转发原事件。
+        if isinstance(evt, QDragEnterEvent):
+            self.dragEnterEvent(evt)
+            return True
+        if isinstance(evt, QDragMoveEvent):
+            self.dragMoveEvent(evt)
+            return True
+        if isinstance(evt, QDragLeaveEvent):
+            self.dragLeaveEvent(evt)
+            return True
+        if isinstance(evt, QDropEvent):
+            self.dropEvent(evt)
+            return True
+
+        return super().eventFilter(obj, evt)
+
     def mouseReleaseEvent(self, evt: QMouseEvent) -> None:
         if evt.button() == Qt.MouseButton.LeftButton:
             was_dragging = self._drag_animation_started
@@ -648,9 +789,13 @@ class PetWindow(QWidget):
             evt.accept()
 
     def mouseDoubleClickEvent(self, evt: QMouseEvent) -> None:
-        # 双击播放转圈圈动画（一次性）
+        # 双击：sprite 播转圈圈；live2d 模型无转圈 motion，改做模型原生吐舌表情
         if evt.button() == Qt.MouseButton.LeftButton:
-            self.animator.play_spin()
+            rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
+            if rtype == "live2d":
+                self.animator.play_animation('tongue')
+            else:
+                self.animator.play_spin()
             evt.accept()
 
     # ---------------- 拖拽文件接收 ----------------
@@ -759,16 +904,22 @@ class PetWindow(QWidget):
 
     def _on_swim_menu(self) -> None:
         """右键菜单「游泳」：播放游泳动画（once）→ 回到 idle。"""
+        # live2d 不支持 atlas，sprite 模式才走老路径
+        atlas = getattr(self.renderer, 'atlas', None)
+        player = getattr(self.renderer, 'player', None)
+        if atlas is None or player is None:
+            self.animator.play_swim()
+            return
         from app.animation.animations import Animation as AnimCls
-        self.atlas.ensure_loaded('playing_water')
-        grp = self.atlas.playing_water
+        atlas.ensure_loaded('playing_water')
+        grp = atlas.playing_water
         if not grp:
             return
         from random import choice
         a = choice(grp)
         if a:
             once_anim = AnimCls(a.name, a.frames, AnimCls.ONCE)
-            self.animator.player.play_one_shot(once_anim, on_finished=self.animator.set_idle)
+            player.play_one_shot(once_anim, on_finished=self.animator.set_idle)
 
     def _toggle_quick_chat_menu(self) -> None:
         """切换底部快捷输入框显示/隐藏。"""
@@ -778,6 +929,13 @@ class PetWindow(QWidget):
     # ---------------- 右键菜单（精简版） ----------------
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
+
+        # === 标题：显示当前渲染器类型 ===
+        rtype = self.renderer.get_renderer_type() if self.renderer else "?"
+        title = QAction(f"🐳 桌宠 ({rtype})", self)
+        title.setEnabled(False)
+        menu.addAction(title)
+        menu.addSeparator()
 
         # === 聊天入口 ===
         a1 = QAction("和鲸鱼娘聊聊", self)
@@ -791,15 +949,32 @@ class PetWindow(QWidget):
         menu.addAction(act_settings)
         menu.addSeparator()
 
-        # === 切换表情 ===
+        # === 切换表情（自动适配渲染器：sprite 固定 5 个 / live2d 用模型自带情绪 + 自然）===
         emo_menu = menu.addMenu("切换表情")
-        for name, label in [
+        emotions = self.renderer.get_emotion_options() if self.renderer else [
             ('happy', '开心'), ('sad', '悲伤'), ('angry', '生气'),
             ('shy', '害羞'), ('think', '思考'),
-        ]:
+        ]
+        for name, label in emotions:
             a = QAction(label, self)
             a.triggered.connect(lambda _=False, n=name: self.animator.set_emotion(n))
             emo_menu.addAction(a)
+        if not emotions:
+            no_emo = QAction("(当前模型无可用表情)", self)
+            no_emo.setEnabled(False)
+            emo_menu.addAction(no_emo)
+
+        # === 切换发型（仅模型自带发型开关时显示，如 Live2D 冰糖；sprite 无此菜单）===
+        if self.renderer is not None and getattr(self.renderer, "supports_hairstyles",
+                                                 lambda: False)():
+            hairstyles = self.renderer.get_hairstyle_options()
+            if hairstyles:
+                hair_menu = menu.addMenu("切换发型")
+                for name, label in hairstyles:
+                    a = QAction(label, self)
+                    a.triggered.connect(
+                        lambda _=False, n=name: self.animator.set_hairstyle(n))
+                    hair_menu.addAction(a)
         menu.addSeparator()
 
         # === 睡觉 / 醒来 ===
@@ -811,20 +986,33 @@ class PetWindow(QWidget):
         menu.addAction(act_wake)
         menu.addSeparator()
 
-        # === 吃饭 ===
+        # === 一次性动作（按渲染器能力）===
+        # sprite：转圈 / 伸懒腰 / 起跳 / 游泳（真帧动画）。
+        # Live2D：本模型没有注册 Motions，上面那些帧动画无法播放，改用模型原生趣味
+        # 表情（吐舌 / 鼓腮），避免把 sprite 的动作生硬套到 Live2D 上。
+        play_menu = menu.addMenu("玩一下")
+        if rtype == "live2d":
+            play_actions = [
+                ('吐舌头', lambda: self.animator.play_animation('tongue')),
+                ('鼓腮帮', lambda: self.animator.play_animation('cheek')),
+            ]
+        else:
+            play_actions = [
+                ('转圈圈', self.animator.play_spin),
+                ('伸懒腰', self.animator.play_stretch),
+                ('起跳', self.animator.play_jump),
+                ('游泳', self.animator.play_swim),
+            ]
+        for label, fn in play_actions:
+            a = QAction(label, self)
+            a.triggered.connect(fn)
+            play_menu.addAction(a)
+        menu.addSeparator()
+
+        # === 吃饭 / 文件（仅 sprite 模式有效；live2d 模式仍可调但效果是表情）===
         act_eat = QAction("吃饭", self)
         act_eat.triggered.connect(self._on_eat_menu)
         menu.addAction(act_eat)
-        menu.addSeparator()
-
-        # === 玩耍 (spin/游泳) ===
-        play_menu = menu.addMenu("玩耍")
-        act_spin = QAction("转圈圈", self)
-        act_spin.triggered.connect(self.animator.play_spin)
-        play_menu.addAction(act_spin)
-        act_swim = QAction("游泳", self)
-        act_swim.triggered.connect(self._on_swim_menu)
-        play_menu.addAction(act_swim)
         menu.addSeparator()
 
         # === 状态栏显示/隐藏 ===
@@ -838,5 +1026,5 @@ class PetWindow(QWidget):
         act_quick_chat.triggered.connect(self._toggle_quick_chat_menu)
         menu.addAction(act_quick_chat)
 
-        ui_style.style_menu(menu)   # 圆角卡片皮肤（含所有子菜单）
+        ui_style.style_menu(menu)   # 圆角卡片皮肤
         menu.exec(global_pos)
