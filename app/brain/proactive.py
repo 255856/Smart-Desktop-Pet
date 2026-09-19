@@ -111,6 +111,15 @@ class ProactiveBrain(QObject):
         if self._worker is not None:
             self._worker.request_stop()
 
+    def apply_interval(self, min_minutes: int, max_minutes: int) -> None:
+        """设置面板：调整主动发言间隔（分钟）并重新排程。"""
+        self.min_minutes = max(5, int(min_minutes))
+        self.max_minutes = max(self.min_minutes + 5, int(max_minutes))
+        if self._timer is not None:
+            self._timer.stop()
+        self._schedule()
+        log.info("ProactiveBrain: 间隔调整为 %d-%d 分钟", self.min_minutes, self.max_minutes)
+
     def update_llm_config(self, new_cfg) -> None:
         """用户修改了模型配置，更新 LLMClient 的配置。"""
         self.llm_cfg = new_cfg

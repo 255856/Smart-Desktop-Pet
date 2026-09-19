@@ -102,6 +102,12 @@ class SettingsWindow(QWidget):
     sticker_options_changed = Signal(dict)     # {size, rotation, min_s, max_s, duration_s}
     random_interval_changed = Signal(int, int)  # 挂机随机间隔（秒）
     max_fps_changed = Signal(int)              # 渲染帧率上限
+    # --- 全量面板化：TTS / 主动关心 / 渲染器 / 水印 / 角色 ---
+    tts_config_changed = Signal(dict)          # {tts_enabled, engine, minimax_voice_id, gptsovits_url, ref_audio, prompt_text}
+    proactive_changed = Signal(dict)           # {enabled, min_minutes, max_minutes}
+    renderer_changed = Signal(str)             # sprite / live2d（重启生效）
+    hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
+    character_changed = Signal(dict)           # {name, persona}
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
@@ -137,6 +143,14 @@ class SettingsWindow(QWidget):
             "sticker": st.get("sticker", {}),
             "random_interval": st.get("random_interval", (20, 50)),
             "max_fps": int(st.get("max_fps", 30)),
+        }
+        # 全量面板化初始值（TTS/主动关心/渲染器/水印/角色）
+        self._panel_state = {
+            "tts": st.get("tts", {}),
+            "proactive": st.get("proactive", {}),
+            "renderer": st.get("renderer", "sprite"),
+            "hide_watermark": bool(st.get("hide_watermark", True)),
+            "character": st.get("character", {}),
         }
         self._build_ui()
         self._wire_signals()
@@ -374,6 +388,25 @@ class SettingsWindow(QWidget):
         v = QVBoxLayout(page)
         v.setSpacing(10)
 
+        # —— 渲染器（切换需重启）——
+        g_renderer = QGroupBox("渲染器")
+        gr = QVBoxLayout(g_renderer)
+        rrow = QHBoxLayout()
+        rrow.addWidget(QLabel("渲染引擎"))
+        self.cmb_renderer = QComboBox()
+        self.cmb_renderer.addItem("Sprite 帧图（经典）", "sprite")
+        self.cmb_renderer.addItem("Live2D 模型", "live2d")
+        idx_r = self.cmb_renderer.findData(self._panel_state.get("renderer", "sprite"))
+        self.cmb_renderer.setCurrentIndex(idx_r if idx_r >= 0 else 0)
+        self.cmb_renderer.currentIndexChanged.connect(self._emit_renderer)
+        rrow.addWidget(self.cmb_renderer)
+        rrow.addStretch(1)
+        gr.addLayout(rrow)
+        tip_r = QLabel("切换渲染引擎需重启桌宠后生效。")
+        tip_r.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+        gr.addWidget(tip_r)
+        v.addWidget(g_renderer)
+
         # —— 缩放：预设按钮 + 滑块 ——
         g_scale = QGroupBox("桌宠缩放")
         gv = QVBoxLayout(g_scale)
@@ -533,6 +566,28 @@ class SettingsWindow(QWidget):
             self.motion_sliders[key] = (slider, val)
         v.addWidget(g_motion)
 
+        # —— 主动关心（空闲时主动找主人说话）——
+        st_p = self._panel_state.get("proactive", {})
+        g_pro = QGroupBox("主动关心")
+        gp = QGridLayout(g_pro)
+        self.cb_proactive = QCheckBox("启用（空闲时主动说一句话）")
+        self.cb_proactive.setChecked(bool(st_p.get("enabled", True)))
+        self.cb_proactive.toggled.connect(self._emit_proactive)
+        gp.addWidget(self.cb_proactive, 0, 0, 1, 3)
+        gp.addWidget(QLabel("间隔下限（分）"), 1, 0)
+        self.spin_proactive_min = QSpinBox()
+        self.spin_proactive_min.setRange(1, 720)
+        self.spin_proactive_min.setValue(int(st_p.get("min_minutes", 25)))
+        self.spin_proactive_min.valueChanged.connect(self._emit_proactive)
+        gp.addWidget(self.spin_proactive_min, 1, 1)
+        gp.addWidget(QLabel("上限（分）"), 2, 0)
+        self.spin_proactive_max = QSpinBox()
+        self.spin_proactive_max.setRange(5, 720)
+        self.spin_proactive_max.setValue(int(st_p.get("max_minutes", 45)))
+        self.spin_proactive_max.valueChanged.connect(self._emit_proactive)
+        gp.addWidget(self.spin_proactive_max, 2, 1)
+        v.addWidget(g_pro)
+
         v.addStretch(1)
         return page
 
@@ -619,6 +674,11 @@ class SettingsWindow(QWidget):
         self.cb_random_sticker.setChecked(self._sticker_enabled)
         self.cb_random_sticker.toggled.connect(self.random_sticker_changed.emit)
         gm.addWidget(self.cb_random_sticker)
+
+        self.cb_hide_watermark = QCheckBox("隐藏模型水印（重启生效）")
+        self.cb_hide_watermark.setChecked(self._panel_state.get("hide_watermark", True))
+        self.cb_hide_watermark.toggled.connect(self.hide_watermark_changed.emit)
+        gm.addWidget(self.cb_hide_watermark)
 
         # —— 挂机随机间隔 ——
         ri = self._live2d_state.get("random_interval", (20, 50))
@@ -980,6 +1040,64 @@ class SettingsWindow(QWidget):
 
         gv.addLayout(vform)
         v.addWidget(g_voice)
+
+        # —— 语音引擎与参数（全量面板化：改后即存即生效）——
+        st_tts = self._panel_state.get("tts", {})
+        g_tts_cfg = QGroupBox("语音引擎与参数")
+        gform = QFormLayout(g_tts_cfg)
+        gform.setSpacing(8)
+
+        self.cmb_tts_engine = QComboBox()
+        self.cmb_tts_engine.addItem("edge（免费在线 TTS）", "edge")
+        self.cmb_tts_engine.addItem("minimax（声音克隆，需账号开通）", "minimax")
+        self.cmb_tts_engine.addItem("gptsovits（本地 GPT-SoVITS，免费）", "gptsovits")
+        idx_e = self.cmb_tts_engine.findData(st_tts.get("engine", "edge"))
+        self.cmb_tts_engine.setCurrentIndex(idx_e if idx_e >= 0 else 0)
+        gform.addRow("引擎：", self.cmb_tts_engine)
+
+        self.edit_minimax_voice_id = QLineEdit(str(st_tts.get("minimax_voice_id", "")))
+        self.edit_minimax_voice_id.setPlaceholderText("tools/clone_voice.py 生成的 voice_id")
+        gform.addRow("MiniMax voice_id：", self.edit_minimax_voice_id)
+
+        self.edit_gptsovits_url = QLineEdit(str(st_tts.get("gptsovits_url", "http://127.0.0.1:9880")))
+        gform.addRow("GSV 服务地址：", self.edit_gptsovits_url)
+
+        self.edit_gptsovits_ref = QLineEdit(str(st_tts.get("ref_audio", "")))
+        self.edit_gptsovits_ref.setPlaceholderText("参考音频 wav 的完整路径（3~10 秒）")
+        gform.addRow("参考音频：", self.edit_gptsovits_ref)
+
+        self.edit_gptsovits_prompt = QLineEdit(str(st_tts.get("prompt_text", "")))
+        self.edit_gptsovits_prompt.setPlaceholderText("参考音频里说的那句话")
+        gform.addRow("参考文本：", self.edit_gptsovits_prompt)
+
+        self.tts_tip = QLabel("修改任一项立即保存并热切换引擎。minimax 需账号开通声音克隆；"
+                              "gptsovits 需先启动本地 api_v2 服务。")
+        self.tts_tip.setWordWrap(True)
+        self.tts_tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+        gform.addRow("", self.tts_tip)
+        v.addWidget(g_tts_cfg)
+
+        # —— 角色设定 ——
+        st_char = self._panel_state.get("character", {})
+        g_char = QGroupBox("角色设定")
+        cform = QFormLayout(g_char)
+        cform.setSpacing(8)
+        self.edit_char_name = QLineEdit(str(st_char.get("name", "")))
+        cform.addRow("角色名：", self.edit_char_name)
+        self.edit_char_persona = QLineEdit(str(st_char.get("persona", "")))
+        self.edit_char_persona.setPlaceholderText("角色人设一句话描述（聊天的系统人设会实时采用）")
+        cform.addRow("人设：", self.edit_char_persona)
+        v.addWidget(g_char)
+
+        # 新控件 → 统一发射（放在控件创建之后连接）
+        self.cmb_tts_engine.currentIndexChanged.connect(self._emit_tts_config)
+        self.edit_minimax_voice_id.editingFinished.connect(self._emit_tts_config)
+        self.edit_gptsovits_url.editingFinished.connect(self._emit_tts_config)
+        self.edit_gptsovits_ref.editingFinished.connect(self._emit_tts_config)
+        self.edit_gptsovits_prompt.editingFinished.connect(self._emit_tts_config)
+        self.cb_tts_enabled.toggled.connect(self._emit_tts_config)
+        self.edit_char_name.editingFinished.connect(self._emit_character)
+        self.edit_char_persona.editingFinished.connect(self._emit_character)
 
         v.addStretch(1)
         return page
@@ -1470,6 +1588,38 @@ class SettingsWindow(QWidget):
     def is_always_on_top(self) -> bool:
         """窗口置顶开关当前状态。"""
         return self.cb_always_on_top.isChecked()
+
+    # ---------- 全量面板化（TTS / 角色 / 主动关心 / 渲染器 / 水印） ----------
+    def _emit_tts_config(self) -> None:
+        """TTS 任意控件变化 → 打包当前配置发信号。"""
+        self.tts_config_changed.emit({
+            "tts_enabled": self.cb_tts_enabled.isChecked(),
+            "engine": str(self.cmb_tts_engine.currentData() or "edge"),
+            "minimax_voice_id": self.edit_minimax_voice_id.text().strip(),
+            "gptsovits_url": self.edit_gptsovits_url.text().strip(),
+            "ref_audio": self.edit_gptsovits_ref.text().strip(),
+            "prompt_text": self.edit_gptsovits_prompt.text().strip(),
+        })
+
+    def _emit_character(self) -> None:
+        self.character_changed.emit({
+            "name": self.edit_char_name.text().strip(),
+            "persona": self.edit_char_persona.text().strip(),
+        })
+
+    def _emit_proactive(self) -> None:
+        lo = min(self.spin_proactive_min.value(), self.spin_proactive_max.value())
+        hi = max(self.spin_proactive_min.value(), self.spin_proactive_max.value())
+        self.proactive_changed.emit({
+            "enabled": self.cb_proactive.isChecked(),
+            "min_minutes": lo,
+            "max_minutes": hi,
+        })
+
+    def _emit_renderer(self) -> None:
+        data = self.cmb_renderer.currentData()
+        if data:
+            self.renderer_changed.emit(str(data))
 
     # ---------- Live2D 参数（发射当前控件值） ----------
     def _emit_sticker_options(self) -> None:

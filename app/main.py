@@ -206,6 +206,30 @@ def _ensure_config(root: Path) -> None:
 
 
 def _build_tts(cfg, root: Path) -> TTS:
+    # 启动时应用设置面板保存的 TTS 配置（settings.json 优先于 config.yaml）
+    try:
+        from app.core.settings_store import SettingsStore
+        _store = SettingsStore()
+        _e = _store.get("tts_engine", None)
+        if _e:
+            cfg.character.tts_engine = str(_e)
+        _mv = _store.get("minimax_voice_id", None)
+        if _mv is not None:
+            cfg.character.minimax_voice_id = str(_mv)
+        _gu = _store.get("gptsovits_url", None)
+        if _gu:
+            cfg.character.gptsovits_url = str(_gu)
+        _gr = _store.get("gptsovits_ref_audio", None)
+        if _gr:
+            cfg.character.gptsovits_ref_audio = str(_gr)
+        _gp = _store.get("gptsovits_prompt_text", None)
+        if _gp is not None:
+            cfg.character.gptsovits_prompt_text = str(_gp)
+        _te = _store.get("tts_enabled", None)
+        if _te is not None:
+            cfg.character.tts_enabled = bool(_te)
+    except Exception:
+        pass
     tts_cache = root / "assets" / "tts_cache"
     engine = getattr(cfg.character, "tts_engine", "edge")
     if engine == "gptsovits":
@@ -395,6 +419,18 @@ class App:
         else:
             fallback_image = root / fallback_rel
         # live2d 模型目录：支持相对路径（相对项目根解析）
+        # 设置面板保存的 renderer / 水印开关优先于 config.yaml（重启生效项）
+        try:
+            from app.core.settings_store import SettingsStore as _SS
+            _sstore = _SS()
+            _saved_r = _sstore.get("renderer", None)
+            if _saved_r in ("sprite", "live2d"):
+                cfg.pet.renderer = _saved_r
+            _saved_hw = _sstore.get("hide_watermark", None)
+            if _saved_hw is not None:
+                cfg.pet.live2d.hide_watermark = bool(_saved_hw)
+        except Exception:
+            pass
         _l2d_dir = None
         if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None):
             _l2d_dir = Path(getattr(cfg.pet.live2d, "model_dir", "") or "")

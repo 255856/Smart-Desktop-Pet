@@ -78,6 +78,8 @@ class UIController(QObject):
         _ri_max = int(_store0.get("random_max_s", 50))
         _mf = int(_store0.get("max_fps",
                               getattr(_r0, "max_fps", 30) if _r0 else 30))
+        _renderer_cfg = getattr(self.cfg.pet, "renderer", "sprite")
+        _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
             renderer=getattr(_pet, "renderer", None),
@@ -87,6 +89,25 @@ class UIController(QObject):
                 "sticker": _st,
                 "random_interval": (_ri_min, _ri_max),
                 "max_fps": _mf,
+                # —— 全量面板化初始值（store 已存值覆盖 cfg 默认）——
+                "tts": {
+                    "engine": _store0.get("tts_engine", getattr(self.cfg.character, "tts_engine", "edge")),
+                    "minimax_voice_id": _store0.get("minimax_voice_id", getattr(self.cfg.character, "minimax_voice_id", "")),
+                    "gptsovits_url": _store0.get("gptsovits_url", getattr(self.cfg.character, "gptsovits_url", "http://127.0.0.1:9880")),
+                    "ref_audio": _store0.get("gptsovits_ref_audio", getattr(self.cfg.character, "gptsovits_ref_audio", "")),
+                    "prompt_text": _store0.get("gptsovits_prompt_text", getattr(self.cfg.character, "gptsovits_prompt_text", "")),
+                },
+                "proactive": {
+                    "enabled": _store0.get("proactive_enabled", getattr(self.cfg.brain, "proactive_enabled", True)),
+                    "min_minutes": _store0.get("proactive_min_minutes", getattr(self.cfg.brain, "proactive_min_minutes", 25)),
+                    "max_minutes": _store0.get("proactive_max_minutes", getattr(self.cfg.brain, "proactive_max_minutes", 45)),
+                },
+                "renderer": _store0.get("renderer", _renderer_cfg),
+                "hide_watermark": _store0.get("hide_watermark", _hw_cfg),
+                "character": {
+                    "name": _store0.get("character_name", self.cfg.character.name),
+                    "persona": _store0.get("persona", self.cfg.character.persona),
+                },
             },
         )
         self.settings_window.attach_state(self.state)
@@ -143,6 +164,11 @@ class UIController(QObject):
         sw.sticker_options_changed.connect(self._on_sticker_options_changed)
         sw.random_interval_changed.connect(self._on_random_interval_changed)
         sw.max_fps_changed.connect(self._on_max_fps_changed)
+        sw.tts_config_changed.connect(self._on_tts_config_changed)
+        sw.proactive_changed.connect(self._on_proactive_changed)
+        sw.renderer_changed.connect(self._on_renderer_changed)
+        sw.hide_watermark_changed.connect(self._on_hide_watermark_changed)
+        sw.character_changed.connect(self._on_character_changed)
         # --- 窗口 / 持久化 ---
         sw.always_on_top_changed.connect(self._on_always_on_top_changed)
         sw.save_settings_requested.connect(self._on_save_settings)
@@ -627,6 +653,97 @@ class UIController(QObject):
             r.set_max_fps(int(fps))
             self.settings_window.settings_store.set("max_fps", int(fps))
 
+    # ---------------- 全量面板化（TTS / 主动关心 / 渲染器 / 水印 / 角色） ----------------
+    def _on_tts_config_changed(self, cfgd: dict) -> None:
+        """TTS 引擎与参数：持久化 + 后台线程重建引擎（热切换）。"""
+        store = self.settings_window.settings_store
+        keymap = {"tts_enabled": "tts_enabled", "engine": "tts_engine",
+                  "minimax_voice_id": "minimax_voice_id",
+                  "gptsovits_url": "gptsovits_url",
+                  "ref_audio": "gptsovits_ref_audio",
+                  "prompt_text": "gptsovits_prompt_text"}
+        for k, skey in keymap.items():
+            if k in cfgd:
+                store.set(skey, cfgd[k])
+        c = self.cfg.character
+        c.tts_enabled = bool(cfgd.get("tts_enabled", c.tts_enabled))
+        c.tts_engine = str(cfgd.get("engine", c.tts_engine))
+        c.minimax_voice_id = str(cfgd.get("minimax_voice_id", c.minimax_voice_id))
+        c.gptsovits_url = str(cfgd.get("gptsovits_url", getattr(c, "gptsovits_url", "")))
+        c.gptsovits_ref_audio = str(cfgd.get("ref_audio", getattr(c, "gptsovits_ref_audio", "")))
+        c.gptsovits_prompt_text = str(cfgd.get("prompt_text", getattr(c, "gptsovits_prompt_text", "")))
+        import threading
+        threading.Thread(target=self._rebuild_tts_blocking, daemon=True,
+                         name="tts-rebuild").start()
+        self.settings_window._set_status("🔊 语音引擎配置已保存，正在切换…")
+
+    def _rebuild_tts_blocking(self) -> None:
+        """按 cfg 重建 TTS 引擎（后台线程；minimax 首次克隆可能耗时）。"""
+        try:
+            from app.main import _build_tts
+            from pathlib import Path as _P
+            root = _P(__file__).resolve().parent.parent
+            new_tts = _build_tts(self.cfg, root)
+            old_tts = self.tts
+            self.tts = new_tts
+            self._setup_lipsync()   # 重新挂口型同步钩子
+            log.info("TTS 引擎已热切换：%s", type(new_tts).__name__)
+        except Exception:  # noqa: BLE001
+            log.exception("TTS 引擎重建失败，保留原引擎")
+
+    def _on_proactive_changed(self, cfgd: dict) -> None:
+        """控制 Tab：主动关心开关与间隔。"""
+        store = self.settings_window.settings_store
+        store.set("proactive_enabled", bool(cfgd.get("enabled", True)))
+        store.set("proactive_min_minutes", int(cfgd.get("min_minutes", 25)))
+        store.set("proactive_max_minutes", int(cfgd.get("max_minutes", 45)))
+        p = getattr(self.brain, "proactive", None)
+        if p is not None:
+            if hasattr(p, "apply_interval"):
+                p.apply_interval(int(cfgd.get("min_minutes", 25)),
+                                 int(cfgd.get("max_minutes", 45)))
+            else:
+                p.min_minutes = max(1, int(cfgd.get("min_minutes", 25)))
+                p.max_minutes = max(p.min_minutes + 1, int(cfgd.get("max_minutes", 45)))
+                if hasattr(p, "_reschedule_decide_timer"):
+                    try:
+                        p._reschedule_decide_timer()
+                    except Exception:  # noqa: BLE001
+                        pass
+            enabled = bool(cfgd.get("enabled", True))
+            if enabled and hasattr(p, "start"):
+                p.start()
+            elif not enabled and hasattr(p, "stop"):
+                p.stop()
+        else:
+            self.settings_window._set_status("主动关心将在重启后生效（当前未启用）")
+        log.info("主动关心：%s", cfgd)
+
+    def _on_renderer_changed(self, renderer: str) -> None:
+        """视觉 Tab：渲染器切换（持久化，重启生效）。"""
+        self.settings_window.settings_store.set("renderer", str(renderer))
+        self.settings_window._set_status(f"渲染器已设为 {renderer}，重启桌宠后生效")
+
+    def _on_hide_watermark_changed(self, on: bool) -> None:
+        """Live2D Tab：隐藏水印开关（持久化，重启生效）。"""
+        self.settings_window.settings_store.set("hide_watermark", bool(on))
+        self.settings_window._set_status("水印设置已保存，重启桌宠后生效")
+
+    def _on_character_changed(self, cfgd: dict) -> None:
+        """模型配置 Tab：角色名 / 人设（即时更新 cfg + 持久化）。"""
+        if cfgd.get("name"):
+            self.cfg.character.name = str(cfgd["name"])
+        if cfgd.get("persona"):
+            self.cfg.character.persona = str(cfgd["persona"])
+        store = self.settings_window.settings_store
+        if cfgd.get("name"):
+            store.set("character_name", str(cfgd["name"]))
+        if cfgd.get("persona"):
+            store.set("persona", str(cfgd["persona"]))
+        p = getattr(self.brain, "proactive", None)
+        if p is not None and cfgd.get("persona"):
+            p.persona = str(cfgd["persona"])
+
     def _on_always_on_top_changed(self, enabled: bool) -> None:
         """视觉 Tab：窗口置顶开关（立即生效并持久化）。"""
         fn = getattr(self.pet, "set_always_on_top", None)
@@ -711,6 +828,22 @@ class UIController(QObject):
                 mf = store.get("max_fps", None)
                 if mf is not None and hasattr(r, "set_max_fps"):
                     r.set_max_fps(int(mf))
+            # 主动关心（间隔与开关）
+            pe = store.get("proactive_enabled", None)
+            if pe is not None and getattr(self.brain, "proactive", None) is not None:
+                if hasattr(self.brain.proactive, "apply_interval"):
+                    self.brain.proactive.apply_interval(
+                        int(store.get("proactive_min_minutes", 25)),
+                        int(store.get("proactive_max_minutes", 45)))
+                if not bool(pe) and hasattr(self.brain.proactive, "stop"):
+                    self.brain.proactive.stop()
+            # 角色名 / 人设
+            cn = store.get("character_name", None)
+            if cn:
+                self.cfg.character.name = str(cn)
+            ps = store.get("persona", None)
+            if ps:
+                self.cfg.character.persona = str(ps)
         except Exception:  # noqa: BLE001
             log.exception("启动应用已保存设置失败")
 
