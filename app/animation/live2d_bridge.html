@@ -532,6 +532,13 @@ window.live2d = {
         try { if (this.app) this.app.ticker.start(); } catch (e) { /* ignore */ }
     },
 
+    // 运行时调整渲染帧率上限（设置面板 Live2D 页）
+    setMaxFps(fps) {
+        try {
+            if (this.app) this.app.ticker.maxFPS = Math.max(5, Number(fps) || 30);
+        } catch (e) { /* ignore */ }
+    },
+
     shutdown() {
         if (this.model) {
             try {

@@ -98,12 +98,17 @@ class SettingsWindow(QWidget):
     # --- 窗口 / 持久化 ---
     always_on_top_changed = Signal(bool)       # 窗口置顶开关
     save_settings_requested = Signal()         # 点了「保存设置」按钮
+    # --- Live2D 参数细化 ---
+    sticker_options_changed = Signal(dict)     # {size, rotation, min_s, max_s, duration_s}
+    random_interval_changed = Signal(int, int)  # 挂机随机间隔（秒）
+    max_fps_changed = Signal(int)              # 渲染帧率上限
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
                  renderer: Optional[object] = None,
                  sticker_enabled: bool = True,
-                 always_on_top: bool = True) -> None:
+                 always_on_top: bool = True,
+                 live2d_state: Optional[dict] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -126,6 +131,13 @@ class SettingsWindow(QWidget):
         self._sticker_enabled = bool(sticker_enabled)
         # 窗口置顶初始状态（来自 cfg.window.always_on_top）
         self._always_on_top = bool(always_on_top)
+        # Live2D 参数初始值（贴纸/随机间隔/帧率；来自 ui_controller 合并 store 后）
+        st = live2d_state or {}
+        self._live2d_state = {
+            "sticker": st.get("sticker", {}),
+            "random_interval": st.get("random_interval", (20, 50)),
+            "max_fps": int(st.get("max_fps", 30)),
+        }
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -603,11 +615,93 @@ class SettingsWindow(QWidget):
         self.cb_random_exp.toggled.connect(self.random_exp_changed.emit)
         gm.addWidget(self.cb_random_exp)
 
-        self.cb_random_sticker = QCheckBox("随机表情包贴纸（右上角随机弹出）")
+        self.cb_random_sticker = QCheckBox("随机表情包贴纸（角色右上方弹出）")
         self.cb_random_sticker.setChecked(self._sticker_enabled)
         self.cb_random_sticker.toggled.connect(self.random_sticker_changed.emit)
         gm.addWidget(self.cb_random_sticker)
+
+        # —— 挂机随机间隔 ——
+        ri = self._live2d_state.get("random_interval", (20, 50))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("随机间隔（秒）"))
+        self.spin_random_min = QSpinBox()
+        self.spin_random_min.setRange(5, 600)
+        self.spin_random_min.setValue(int(ri[0]))
+        self.spin_random_max = QSpinBox()
+        self.spin_random_max.setRange(5, 600)
+        self.spin_random_max.setValue(int(ri[1]))
+        for w in (self.spin_random_min, self.spin_random_max):
+            w.valueChanged.connect(self._emit_random_interval)
+        dash = QLabel("–")
+        row.addWidget(self.spin_random_min)
+        row.addWidget(dash)
+        row.addWidget(self.spin_random_max)
+        row.addStretch(1)
+        gm.addLayout(row)
+
+        # —— 渲染帧率（性能） ——
+        row = QHBoxLayout()
+        row.addWidget(QLabel("渲染帧率"))
+        self.cmb_max_fps = QComboBox()
+        for fps in (15, 24, 30, 60):
+            self.cmb_max_fps.addItem(f"{fps} fps", fps)
+        cur_fps = self._live2d_state.get("max_fps", 30)
+        idx = self.cmb_max_fps.findData(int(cur_fps))
+        self.cmb_max_fps.setCurrentIndex(idx if idx >= 0 else 2)
+        self.cmb_max_fps.currentIndexChanged.connect(self._emit_max_fps)
+        row.addWidget(self.cmb_max_fps)
+        row.addStretch(1)
+        gm.addLayout(row)
         v.addWidget(g_misc)
+
+        # —— 表情包贴纸参数 ——
+        st_cfg = self._live2d_state.get("sticker", {})
+        g_st = QGroupBox("表情包贴纸")
+        gs = QGridLayout(g_st)
+        gs.setVerticalSpacing(6)
+
+        gs.addWidget(QLabel("大小"), 0, 0)
+        self.slider_sticker_size = QSlider(Qt.Orientation.Horizontal)
+        self.slider_sticker_size.setRange(60, 300)
+        self.slider_sticker_size.setValue(int(st_cfg.get("size", 120)))
+        self.lbl_sticker_size = QLabel(f"{self.slider_sticker_size.value()} px")
+        for w in (self.slider_sticker_size,):
+            w.valueChanged.connect(self._emit_sticker_options)
+        gs.addWidget(self.slider_sticker_size, 0, 1)
+        gs.addWidget(self.lbl_sticker_size, 0, 2)
+
+        gs.addWidget(QLabel("倾斜角度"), 1, 0)
+        self.slider_sticker_rot = QSlider(Qt.Orientation.Horizontal)
+        self.slider_sticker_rot.setRange(0, 90)
+        self.slider_sticker_rot.setValue(int(st_cfg.get("rotation", 45)))
+        self.lbl_sticker_rot = QLabel(f"{self.slider_sticker_rot.value()}°")
+        self.slider_sticker_rot.valueChanged.connect(self._emit_sticker_options)
+        gs.addWidget(self.slider_sticker_rot, 1, 1)
+        gs.addWidget(self.lbl_sticker_rot, 1, 2)
+
+        gs.addWidget(QLabel("弹出间隔（秒）"), 2, 0)
+        row = QHBoxLayout()
+        self.spin_sticker_min = QSpinBox()
+        self.spin_sticker_min.setRange(5, 600)
+        self.spin_sticker_min.setValue(int(st_cfg.get("min_s", 40)))
+        self.spin_sticker_max = QSpinBox()
+        self.spin_sticker_max.setRange(5, 600)
+        self.spin_sticker_max.setValue(int(st_cfg.get("max_s", 120)))
+        self.spin_sticker_min.valueChanged.connect(self._emit_sticker_options)
+        self.spin_sticker_max.valueChanged.connect(self._emit_sticker_options)
+        row.addWidget(self.spin_sticker_min)
+        row.addWidget(QLabel("–"))
+        row.addWidget(self.spin_sticker_max)
+        row.addStretch(1)
+        gs.addLayout(row, 2, 1)
+
+        gs.addWidget(QLabel("显示时长（秒）"), 3, 0)
+        self.spin_sticker_duration = QSpinBox()
+        self.spin_sticker_duration.setRange(1, 15)
+        self.spin_sticker_duration.setValue(int(st_cfg.get("duration_s", 4)))
+        self.spin_sticker_duration.valueChanged.connect(self._emit_sticker_options)
+        gs.addWidget(self.spin_sticker_duration, 3, 1)
+        v.addWidget(g_st)
 
         # 当前激活项（用于初始化 chip 选中态）
         active: set = set()
@@ -1376,6 +1470,29 @@ class SettingsWindow(QWidget):
     def is_always_on_top(self) -> bool:
         """窗口置顶开关当前状态。"""
         return self.cb_always_on_top.isChecked()
+
+    # ---------- Live2D 参数（发射当前控件值） ----------
+    def _emit_sticker_options(self) -> None:
+        # 同步滑条旁的数值标签
+        self.lbl_sticker_size.setText(f"{self.slider_sticker_size.value()} px")
+        self.lbl_sticker_rot.setText(f"{self.slider_sticker_rot.value()}°")
+        self.sticker_options_changed.emit({
+            "size": self.slider_sticker_size.value(),
+            "rotation": self.slider_sticker_rot.value(),
+            "min_s": self.spin_sticker_min.value(),
+            "max_s": self.spin_sticker_max.value(),
+            "duration_s": self.spin_sticker_duration.value(),
+        })
+
+    def _emit_random_interval(self) -> None:
+        lo = min(self.spin_random_min.value(), self.spin_random_max.value())
+        hi = max(self.spin_random_min.value(), self.spin_random_max.value())
+        self.random_interval_changed.emit(lo, hi)
+
+    def _emit_max_fps(self) -> None:
+        fps = self.cmb_max_fps.currentData()
+        if fps is not None:
+            self.max_fps_changed.emit(int(fps))
 
     def get_opacity(self) -> float:
         return self.opacity_slider.value() / 100.0

@@ -59,11 +59,35 @@ class UIController(QObject):
                 _sticker_on = _pet.is_random_stickers_enabled()
             except Exception:  # noqa: BLE001
                 _sticker_on = True
+        # Live2D 参数初始值：模型/渲染器默认 ← settings.json 已存值覆盖
+        from app.core.settings_store import SettingsStore as _Store
+        _store0 = _Store()
+        if _pet is not None and hasattr(_pet, "get_sticker_options"):
+            _st = _pet.get_sticker_options()
+        else:
+            _st = {"size": 120, "rotation": 45, "min_s": 40,
+                   "max_s": 120, "duration_s": 4}
+        for _k, _skey in (("size", "sticker_size"), ("rotation", "sticker_rotation"),
+                          ("min_s", "sticker_min_s"), ("max_s", "sticker_max_s"),
+                          ("duration_s", "sticker_duration_s")):
+            _v = _store0.get(_skey, None)
+            if _v is not None:
+                _st[_k] = int(_v)
+        _r0 = getattr(_pet, "renderer", None)
+        _ri_min = int(_store0.get("random_min_s", 20))
+        _ri_max = int(_store0.get("random_max_s", 50))
+        _mf = int(_store0.get("max_fps",
+                              getattr(_r0, "max_fps", 30) if _r0 else 30))
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
             renderer=getattr(_pet, "renderer", None),
             sticker_enabled=_sticker_on,
             always_on_top=bool(getattr(self.cfg.window, "always_on_top", True)),
+            live2d_state={
+                "sticker": _st,
+                "random_interval": (_ri_min, _ri_max),
+                "max_fps": _mf,
+            },
         )
         self.settings_window.attach_state(self.state)
 
@@ -115,6 +139,9 @@ class UIController(QObject):
             sw.live2d_reset_requested.connect(self._on_live2d_reset)
             sw.random_exp_changed.connect(self._on_random_exp_changed)
             sw.random_sticker_changed.connect(self._on_random_sticker_changed)
+        sw.sticker_options_changed.connect(self._on_sticker_options_changed)
+        sw.random_interval_changed.connect(self._on_random_interval_changed)
+        sw.max_fps_changed.connect(self._on_max_fps_changed)
         # --- 窗口 / 持久化 ---
         sw.always_on_top_changed.connect(self._on_always_on_top_changed)
         sw.save_settings_requested.connect(self._on_save_settings)
@@ -542,6 +569,34 @@ class UIController(QObject):
                 "random_sticker_enabled", bool(enabled))
             log.info("随机表情包贴纸：%s", "开" if enabled else "关")
 
+    def _on_sticker_options_changed(self, opts: dict) -> None:
+        """Live2D Tab：贴纸参数（大小/角度/间隔/时长），即时生效并持久化。"""
+        fn = getattr(self.pet, "set_sticker_options", None)
+        if callable(fn):
+            fn(**opts)
+            store = self.settings_window.settings_store
+            for key, skey in (("size", "sticker_size"), ("rotation", "sticker_rotation"),
+                              ("min_s", "sticker_min_s"), ("max_s", "sticker_max_s"),
+                              ("duration_s", "sticker_duration_s")):
+                if key in opts:
+                    store.set(skey, int(opts[key]))
+
+    def _on_random_interval_changed(self, lo: int, hi: int) -> None:
+        """Live2D Tab：挂机随机间隔。"""
+        r = self._live2d_renderer()
+        if r is not None and hasattr(r, "set_random_interval"):
+            r.set_random_interval(int(lo), int(hi))
+            store = self.settings_window.settings_store
+            store.set("random_min_s", int(lo))
+            store.set("random_max_s", int(hi))
+
+    def _on_max_fps_changed(self, fps: int) -> None:
+        """Live2D Tab：渲染帧率上限。"""
+        r = self._live2d_renderer()
+        if r is not None and hasattr(r, "set_max_fps"):
+            r.set_max_fps(int(fps))
+            self.settings_window.settings_store.set("max_fps", int(fps))
+
     def _on_always_on_top_changed(self, enabled: bool) -> None:
         """视觉 Tab：窗口置顶开关（立即生效并持久化）。"""
         fn = getattr(self.pet, "set_always_on_top", None)
@@ -562,9 +617,21 @@ class UIController(QObject):
             if r is not None:
                 store.set("random_exp_enabled",
                           bool(r.is_random_expressions_enabled()))
+                if hasattr(r, "profile"):
+                    store.set("random_min_s", int(r.profile.random_min_s))
+                    store.set("random_max_s", int(r.profile.random_max_s))
+                store.set("max_fps", int(getattr(r, "max_fps", 30)))
             if hasattr(self.pet, "is_random_stickers_enabled"):
                 store.set("random_sticker_enabled",
                           bool(self.pet.is_random_stickers_enabled()))
+            if hasattr(self.pet, "get_sticker_options"):
+                opts = self.pet.get_sticker_options()
+                for key, skey in (("size", "sticker_size"),
+                                  ("rotation", "sticker_rotation"),
+                                  ("min_s", "sticker_min_s"),
+                                  ("max_s", "sticker_max_s"),
+                                  ("duration_s", "sticker_duration_s")):
+                    store.set(skey, int(opts[key]))
             sw._set_status("✅ 设置已保存，重启后自动生效")
             log.info("设置已手动保存")
         except Exception:  # noqa: BLE001
@@ -594,6 +661,26 @@ class UIController(QObject):
             rs = store.get("random_sticker_enabled", None)
             if rs is not None and hasattr(self.pet, "set_random_stickers"):
                 self.pet.set_random_stickers(bool(rs))
+            # 贴纸参数 / 随机间隔 / 渲染帧率
+            kw = {}
+            for key, skey in (("size", "sticker_size"), ("rotation", "sticker_rotation"),
+                              ("min_s", "sticker_min_s"), ("max_s", "sticker_max_s"),
+                              ("duration_s", "sticker_duration_s")):
+                v = store.get(skey, None)
+                if v is not None:
+                    kw[key] = int(v)
+            if kw and hasattr(self.pet, "set_sticker_options"):
+                self.pet.set_sticker_options(**kw)
+            r = self._live2d_renderer()
+            if r is not None:
+                rmin = store.get("random_min_s", None)
+                rmax = store.get("random_max_s", None)
+                if rmin is not None and rmax is not None \
+                        and hasattr(r, "set_random_interval"):
+                    r.set_random_interval(int(rmin), int(rmax))
+                mf = store.get("max_fps", None)
+                if mf is not None and hasattr(r, "set_max_fps"):
+                    r.set_max_fps(int(mf))
         except Exception:  # noqa: BLE001
             log.exception("启动应用已保存设置失败")
 

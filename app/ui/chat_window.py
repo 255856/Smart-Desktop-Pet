@@ -745,7 +745,7 @@ class ChatWindow(QWidget):
         self.mic_btn.setObjectName("ghost_btn")
         self.mic_btn.setToolTip("按住说话，松开自动识别并发送" if self.asr
                                 else "未安装 faster-whisper / sounddevice")
-        self.mic_btn.setFixedHeight(28)
+        self.mic_btn.setMinimumHeight(28)
         self.mic_btn.setEnabled(self.asr is not None)
         if self.asr is not None:
             self.mic_btn.pressed.connect(self._on_mic_pressed)
@@ -764,7 +764,8 @@ class ChatWindow(QWidget):
         # 停止按钮
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("stop_btn")
-        self.stop_btn.setFixedHeight(30)
+        self.stop_btn.setMinimumHeight(32)
+        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
         bottom_row.addWidget(self.stop_btn)
@@ -772,7 +773,7 @@ class ChatWindow(QWidget):
         # 发送按钮（不再绑 Enter 快捷键，否则会和 input_edit.keyPressEvent 双发）
         self.send_btn = QPushButton("发送")
         self.send_btn.setObjectName("send_btn")
-        self.send_btn.setFixedHeight(30)
+        self.send_btn.setMinimumHeight(32)
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.clicked.connect(self._on_send)
         bottom_row.addWidget(self.send_btn)

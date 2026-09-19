@@ -582,6 +582,17 @@ class Live2DRenderer(PetRenderer):
         else:
             self._random_timer.stop()
 
+    def set_random_interval(self, min_s: int, max_s: int) -> None:
+        """调整挂机随机的触发间隔（秒），立即重新计时。"""
+        self.profile.random_min_s = max(5, int(min_s))
+        self.profile.random_max_s = max(self.profile.random_min_s, int(max_s))
+        self.note_activity()
+
+    def set_max_fps(self, fps: int) -> None:
+        """运行时调整渲染帧率上限。"""
+        self.max_fps = max(5, int(fps))
+        self._js(f"if(window.live2d){{window.live2d.setMaxFps({self.max_fps});}}")
+
     def is_random_expressions_enabled(self) -> bool:
         return self._random_enabled
 

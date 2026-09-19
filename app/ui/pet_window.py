@@ -201,12 +201,14 @@ class PetWindow(QWidget):
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
-        # 表情包贴纸（live2d 模型自带表情包时，随机弹在右上角）
+        # 表情包贴纸（live2d 模型自带表情包时，随机弹在角色右上角）
         self._sticker_label: QLabel | None = None
         self._sticker_files: list[str] = []
         self._sticker_timer: QTimer | None = None
         self._sticker_cache: dict[str, QPixmap] = {}
         self._stickers_enabled = True
+        self._sticker_rotation = 45            # 倾斜角度（顺时针）
+        self._sticker_overrides: dict = {}     # 设置面板运行时覆盖（大小/角度/间隔/时长）
         self._setup_sticker_overlay()
 
         # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
@@ -1197,6 +1199,41 @@ class PetWindow(QWidget):
         if self._sticker_timer is not None:
             self._sticker_timer.start(_random.randint(lo, hi) * 1000)
 
+    def set_sticker_options(self, size=None, rotation=None, min_s=None,
+                            max_s=None, duration_s=None) -> None:
+        """运行时调整贴纸参数（设置面板 Live2D 页；不传的项保持不变）。"""
+        ov = self._sticker_overrides
+        if size is not None:
+            ov["size"] = max(40, min(400, int(size)))
+        if rotation is not None:
+            ov["rotation"] = max(0, min(90, int(rotation)))
+        if min_s is not None:
+            ov["min_s"] = max(5, int(min_s))
+        if max_s is not None:
+            ov["max_s"] = max(5, int(max_s))
+        if duration_s is not None:
+            ov["duration_s"] = max(1, min(30, int(duration_s)))
+        if "min_s" in ov or "max_s" in ov:
+            self._sticker_min_s = ov.get("min_s", getattr(self, "_sticker_min_s", 40))
+            self._sticker_max_s = ov.get("max_s", getattr(self, "_sticker_max_s", 120))
+
+    def get_sticker_options(self) -> dict:
+        """贴纸当前生效参数（YAML 配置 + 面板覆盖合并），供设置页初始化。"""
+        cfg = {}
+        if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
+            try:
+                cfg = self.renderer.get_sticker_config() or {}
+            except Exception:  # noqa: BLE001
+                cfg = {}
+        ov = getattr(self, "_sticker_overrides", {})
+        return {
+            "size": int(ov.get("size", cfg.get("size", 120))),
+            "rotation": int(ov.get("rotation", getattr(self, "_sticker_rotation", 45))),
+            "min_s": int(ov.get("min_s", cfg.get("min_s", 40))),
+            "max_s": int(ov.get("max_s", cfg.get("max_s", 120))),
+            "duration_s": int(ov.get("duration_s", cfg.get("duration_s", 4))),
+        }
+
     def set_random_stickers(self, enabled: bool) -> None:
         """开关随机表情包贴纸（设置面板 Live2D 页）。"""
         self._stickers_enabled = bool(enabled)
@@ -1223,9 +1260,13 @@ class PetWindow(QWidget):
         if not cfg or self._sticker_label is None:
             return
         import random as _random
-        self._sticker_min_s = int(cfg.get("min_s", 30))
-        self._sticker_max_s = int(cfg.get("max_s", 90))
-        size = int(cfg.get("size", self._sticker_size))
+        ov = getattr(self, "_sticker_overrides", {})
+        self._sticker_min_s = int(ov.get("min_s", cfg.get("min_s", 40)))
+        self._sticker_max_s = int(ov.get("max_s", cfg.get("max_s", 120)))
+        size = int(ov.get("size", cfg.get("size", self._sticker_size)))
+        rotation = int(ov.get("rotation", getattr(self, "_sticker_rotation", 45)))
+        self._sticker_duration_ms = int(ov.get("duration_s",
+                                               cfg.get("duration_s", 4))) * 1000
         path = _random.choice(cfg["files"])
 
         pix = self._sticker_cache.get(path)
@@ -1238,8 +1279,8 @@ class PetWindow(QWidget):
                 size, size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
-            # 向右倾斜 45°（Qt 屏幕 y 轴向下，正角度即视觉上的顺时针）
-            pix = pix.transformed(QTransform().rotate(45),
+            # 倾斜显示（Qt 屏幕 y 轴向下，正角度 = 视觉顺时针 = 向右倒）
+            pix = pix.transformed(QTransform().rotate(rotation),
                                   Qt.TransformationMode.SmoothTransformation)
             self._sticker_cache[path] = pix
 
