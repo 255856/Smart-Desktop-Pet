@@ -1,4 +1,0 @@
-﻿[after] stop: actual=70x30 textW=30 fontH=19 needsW~54
-[after] send: actual=90x30 textW=34 fontH=24 needsW~58
-[after] mic: actual=56x28 textW=30 fontH=19 needsW~54
-save True
