@@ -205,6 +205,7 @@ class PetWindow(QWidget):
         self._sticker_files: list[str] = []
         self._sticker_timer: QTimer | None = None
         self._sticker_cache: dict[str, QPixmap] = {}
+        self._stickers_enabled = True
         self._setup_sticker_overlay()
 
         # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
@@ -958,7 +959,7 @@ class PetWindow(QWidget):
         self.toggle_chat_input(self._chat_input_visible)
 
     def _toggle_random_expressions(self) -> None:
-        """开关挂机随机表情（仅 Live2D 渲染器支持）。"""
+        """开关挂机随机表情（保留给程序化调用；菜单项已移入设置面板）。"""
         if self.renderer is None or not hasattr(self.renderer, "set_random_expressions"):
             return
         self.renderer.set_random_expressions(
@@ -1039,14 +1040,31 @@ class PetWindow(QWidget):
         self._arm_sticker_timer()
 
     def _arm_sticker_timer(self) -> None:
+        if not getattr(self, "_stickers_enabled", True):
+            return
         import random as _random
         lo = max(5, getattr(self, "_sticker_min_s", 30))
         hi = max(lo, getattr(self, "_sticker_max_s", 90))
         if self._sticker_timer is not None:
             self._sticker_timer.start(_random.randint(lo, hi) * 1000)
 
+    def set_random_stickers(self, enabled: bool) -> None:
+        """开关随机表情包贴纸（设置面板 Live2D 页）。"""
+        self._stickers_enabled = bool(enabled)
+        if enabled:
+            self._arm_sticker_timer()
+        elif self._sticker_timer is not None:
+            self._sticker_timer.stop()
+            if self._sticker_label is not None:
+                self._sticker_label.hide()
+
+    def is_random_stickers_enabled(self) -> bool:
+        return bool(getattr(self, "_stickers_enabled", True))
+
     def _show_random_sticker(self) -> None:
         """随机弹一张表情包到右上角，展示 duration_s 后消失并排下一次。"""
+        if not getattr(self, "_stickers_enabled", True):
+            return
         cfg = None
         if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
             try:
@@ -1148,28 +1166,16 @@ class PetWindow(QWidget):
                     lambda _=False, gid=g["id"], iid=item_id:
                     self.renderer.activate_menu_item(gid, iid))
                 sub.addAction(a)
-        if menu_groups:
-            act_reset = QAction("复位全部外观", self)
-            act_reset.triggered.connect(
-                lambda _=False: self.renderer.reset_all_appearance())
-            menu.addAction(act_reset)
-            rnd_on = False
-            try:
-                rnd_on = self.renderer.is_random_expressions_enabled()
-            except Exception:  # noqa: BLE001
-                pass
-            act_rnd = QAction("随机表情：开" if rnd_on else "随机表情：关", self)
-            act_rnd.triggered.connect(lambda _: self._toggle_random_expressions())
-            menu.addAction(act_rnd)
         menu.addSeparator()
 
-        # === 睡觉 / 醒来 ===
-        act_sleep = QAction("睡觉", self)
-        act_sleep.triggered.connect(self.animator.set_sleep)
-        menu.addAction(act_sleep)
-        act_wake = QAction("醒来", self)
-        act_wake.triggered.connect(self.animator.set_wake)
-        menu.addAction(act_wake)
+        # === 睡觉 / 醒来（仅 sprite；live2d 作息由睡眠触发规则/参数管理） ===
+        if rtype != "live2d":
+            act_sleep = QAction("睡觉", self)
+            act_sleep.triggered.connect(self.animator.set_sleep)
+            menu.addAction(act_sleep)
+            act_wake = QAction("醒来", self)
+            act_wake.triggered.connect(self.animator.set_wake)
+            menu.addAction(act_wake)
         menu.addSeparator()
 
         # === 一次性动作（按渲染器能力）===

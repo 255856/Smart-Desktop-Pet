@@ -52,9 +52,17 @@ class UIController(QObject):
         self._last_food_warn = 0.0
 
         # --- 设置窗口（传入渲染器引用：live2d 时生成「Live2D」Tab）---
+        _sticker_on = True
+        _pet = getattr(self, "pet", None)
+        if _pet is not None and hasattr(_pet, "is_random_stickers_enabled"):
+            try:
+                _sticker_on = _pet.is_random_stickers_enabled()
+            except Exception:  # noqa: BLE001
+                _sticker_on = True
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
-            renderer=getattr(self.pet, "renderer", None),
+            renderer=getattr(_pet, "renderer", None),
+            sticker_enabled=_sticker_on,
         )
         self.settings_window.attach_state(self.state)
 
@@ -103,6 +111,7 @@ class UIController(QObject):
             sw.live2d_item_activated.connect(self._on_live2d_item_activated)
             sw.live2d_reset_requested.connect(self._on_live2d_reset)
             sw.random_exp_changed.connect(self._on_random_exp_changed)
+            sw.random_sticker_changed.connect(self._on_random_sticker_changed)
 
         # --- 托盘信号 ---
         self.pet.quit_requested.connect(self._quit)
@@ -515,6 +524,13 @@ class UIController(QObject):
         if r is not None:
             r.set_random_expressions(bool(enabled))
             log.info("挂机随机表情：%s", "开" if enabled else "关")
+
+    def _on_random_sticker_changed(self, enabled: bool) -> None:
+        """Live2D Tab：随机表情包贴纸开关。"""
+        fn = getattr(self.pet, "set_random_stickers", None)
+        if callable(fn):
+            fn(bool(enabled))
+            log.info("随机表情包贴纸：%s", "开" if enabled else "关")
 
     def _init_model_config_ui(self) -> None:
         """启动时把 cfg.llm 的值加载到设置面板 UI。"""

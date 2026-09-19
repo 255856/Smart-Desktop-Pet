@@ -94,10 +94,12 @@ class SettingsWindow(QWidget):
     live2d_item_activated = Signal(str, str)   # (group_id, item_id)
     live2d_reset_requested = Signal()
     random_exp_changed = Signal(bool)          # 挂机随机表情开关
+    random_sticker_changed = Signal(bool)      # 随机表情包贴纸开关
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
-                 renderer: Optional[object] = None) -> None:
+                 renderer: Optional[object] = None,
+                 sticker_enabled: bool = True) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -116,6 +118,8 @@ class SettingsWindow(QWidget):
         self.char_cfg = char_cfg
         # 渲染器引用（可选）：live2d 时用于生成「Live2D」Tab 与 renderer-aware 表情按钮
         self._renderer = renderer
+        # 随机表情包贴纸初始开关状态（来自 PetWindow）
+        self._sticker_enabled = bool(sticker_enabled)
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -519,7 +523,7 @@ class SettingsWindow(QWidget):
             v.addWidget(box)
             self.live2d_combos.append((g["id"], cmb))
 
-        # —— 复位 + 挂机随机表情 ——
+        # —— 复位 + 挂机随机表情/表情包 ——
         g_misc = QGroupBox("外观 / 挂机")
         gm = QVBoxLayout(g_misc)
         self.btn_live2d_reset = QPushButton("复位全部外观")
@@ -531,10 +535,15 @@ class SettingsWindow(QWidget):
             rnd_on = bool(renderer.is_random_expressions_enabled())
         except Exception:  # noqa: BLE001
             pass
-        self.cb_random_exp = QCheckBox("挂机随机表情（空闲时随机切换表情，互动即暂停）")
+        self.cb_random_exp = QCheckBox("挂机随机表情/动作（空闲时随机切换，互动即暂停）")
         self.cb_random_exp.setChecked(rnd_on)
         self.cb_random_exp.toggled.connect(self.random_exp_changed.emit)
         gm.addWidget(self.cb_random_exp)
+
+        self.cb_random_sticker = QCheckBox("随机表情包贴纸（右上角随机弹出）")
+        self.cb_random_sticker.setChecked(self._sticker_enabled)
+        self.cb_random_sticker.toggled.connect(self.random_sticker_changed.emit)
+        gm.addWidget(self.cb_random_sticker)
         v.addWidget(g_misc)
 
         v.addStretch(1)
