@@ -200,6 +200,13 @@ class PetWindow(QWidget):
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
+        # 表情包贴纸（live2d 模型自带表情包时，随机弹在右上角）
+        self._sticker_label: QLabel | None = None
+        self._sticker_files: list[str] = []
+        self._sticker_timer: QTimer | None = None
+        self._sticker_cache: dict[str, QPixmap] = {}
+        self._setup_sticker_overlay()
+
         # 把渲染器的 widget 嵌入到 PetWindow
         display_widget = self.renderer.get_widget()
         if display_widget.parent() is None:
@@ -270,6 +277,7 @@ class PetWindow(QWidget):
 
         # 拖动
         self._dragging = False
+        self._system_moving = False
         self._drag_start = QPoint()
         # 用户交互时间戳（PR-mute-motion：press / drag / hover 都算）
         self._last_user_interaction_ts = 0.0
@@ -650,13 +658,27 @@ class PetWindow(QWidget):
     def mouseMoveEvent(self, evt: QMouseEvent) -> None:
         if self._dragging:
             self._last_user_interaction_ts = time.time()
-            self.move(event_global_pos(evt) - self._drag_start)
             # 真正移动时才开始播放拖动动画（移动距离 ≥5 像素才算拖动）
             if not self._drag_animation_started:
                 dist = (event_global_pos(evt) - self._press_pos).manhattanLength()
                 if dist >= 5:
                     self._drag_animation_started = True
                     self.animator.start_drag()
+                    # 交给系统拖动窗口：逐事件手动 move() 在带 WebGL 的透明窗口上
+                    # 会一卡一卡；startSystemMove 由 OS 完成窗口移动，全程平滑。
+                    # Qt 会在松开鼠标时结束系统拖动并回发 release 事件。
+                    handle = self.windowHandle()
+                    if handle is not None and hasattr(handle, "startSystemMove"):
+                        try:
+                            if handle.startSystemMove():
+                                self._system_moving = True
+                                evt.accept()
+                                return
+                        except Exception:  # noqa: BLE001
+                            pass
+            elif not getattr(self, "_system_moving", False):
+                # 系统拖动不可用时的兜底：手动移动
+                self.move(event_global_pos(evt) - self._drag_start)
             evt.accept()
 
     def enterEvent(self, evt) -> None:
@@ -730,13 +752,16 @@ class PetWindow(QWidget):
 
         if isinstance(evt, QMouseEvent):
             # 把 child 局部坐标转成 PetWindow 坐标（delegate/view/PetWindow 都从
-            # (0,0) 起、同尺寸，但保险起见统一走全局坐标转换）
+            # (0,0) 起、同尺寸，但保险起见统一走全局坐标转换）。
+            # 注意：必须同时带上全局坐标（QMouseEvent 只传局部坐标时 globalPos
+            # 会被 Qt 置成局部值），否则右键菜单的 event_global_pos() 拿到
+            # 窗口局部坐标 → 菜单永远弹在屏幕同一个固定位置。
             local_pt = QPoint(evt.pos())
             global_pt = obj.mapToGlobal(local_pt)
             mapped = QMouseEvent(
                 evt.type(),
                 self.mapFromGlobal(global_pt),
-                obj.mapToParent(local_pt) if obj.parent() is self else local_pt,
+                global_pt,
                 evt.button(),
                 evt.buttons(),
                 evt.modifiers(),
@@ -777,6 +802,7 @@ class PetWindow(QWidget):
             was_dragging = self._drag_animation_started
             self._dragging = False
             self._drag_animation_started = False
+            self._system_moving = False
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             if was_dragging:
                 # 拖动结束，回到待机
@@ -934,6 +960,80 @@ class PetWindow(QWidget):
             return
         self.renderer.set_random_expressions(
             not self.renderer.is_random_expressions_enabled())
+
+    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
+    def _setup_sticker_overlay(self) -> None:
+        """模型目录带表情包（profile stickers 配置）时启用随机贴纸弹窗。"""
+        cfg = None
+        if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
+            try:
+                cfg = self.renderer.get_sticker_config()
+            except Exception:  # noqa: BLE001
+                cfg = None
+        if not cfg:
+            return
+        import random as _random
+        self._sticker_random = _random
+        self._sticker_files = list(cfg["files"])
+        self._sticker_duration_ms = int(cfg.get("duration_s", 4) * 1000)
+        self._sticker_size = int(cfg.get("size", 180))
+        self._sticker_min_s = int(cfg.get("min_s", 30))
+        self._sticker_max_s = int(cfg.get("max_s", 90))
+
+        self._sticker_label = QLabel(self)
+        self._sticker_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._sticker_label.setStyleSheet("background: transparent;")
+        self._sticker_label.hide()
+
+        self._sticker_timer = QTimer(self)
+        self._sticker_timer.setSingleShot(True)
+        self._sticker_timer.timeout.connect(self._show_random_sticker)
+        self._arm_sticker_timer()
+
+    def _arm_sticker_timer(self) -> None:
+        import random as _random
+        lo = max(5, getattr(self, "_sticker_min_s", 30))
+        hi = max(lo, getattr(self, "_sticker_max_s", 90))
+        if self._sticker_timer is not None:
+            self._sticker_timer.start(_random.randint(lo, hi) * 1000)
+
+    def _show_random_sticker(self) -> None:
+        """随机弹一张表情包到右上角，展示 duration_s 后消失并排下一次。"""
+        cfg = None
+        if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
+            try:
+                cfg = self.renderer.get_sticker_config()
+            except Exception:  # noqa: BLE001
+                cfg = None
+        if not cfg or self._sticker_label is None:
+            return
+        import random as _random
+        self._sticker_min_s = int(cfg.get("min_s", 30))
+        self._sticker_max_s = int(cfg.get("max_s", 90))
+        size = int(cfg.get("size", self._sticker_size))
+        path = _random.choice(cfg["files"])
+
+        pix = self._sticker_cache.get(path)
+        if pix is None:
+            pix = QPixmap(path)
+            if pix.isNull():
+                self._arm_sticker_timer()
+                return
+            pix = pix.scaled(
+                size, size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            self._sticker_cache[path] = pix
+
+        self._sticker_label.setPixmap(pix)
+        self._sticker_label.adjustSize()
+        # 右上角（贴着窗口右上角内边缘）
+        self._sticker_label.move(max(0, self.width() - pix.width() - 6), 6)
+        self._sticker_label.show()
+        self._sticker_label.raise_()
+        QTimer.singleShot(self._sticker_duration_ms, self._sticker_label.hide)
+        self._arm_sticker_timer()
 
     # ---------------- 右键菜单（精简版） ----------------
     def _show_context_menu(self, global_pos: QPoint) -> None:

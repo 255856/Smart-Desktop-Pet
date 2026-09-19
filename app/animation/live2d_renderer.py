@@ -408,6 +408,10 @@ class Live2DRenderer(PetRenderer):
                     and self.profile.watermark_param:
                 self._apply_params([], {self.profile.watermark_param:
                                         self.profile.watermark_safe_value})
+        # 隐藏装饰部件（如超频猫猫 Part10 粉色翅膀/星星背景框）
+        if self.profile.hide_parts:
+            self._js("window.live2d.hideParts("
+                     f"{json.dumps(self.profile.hide_parts)}, 0);")
 
         # 启动挂机随机表情心跳
         if self._random_enabled:
@@ -532,6 +536,33 @@ class Live2DRenderer(PetRenderer):
     def is_random_expressions_enabled(self) -> bool:
         return self._random_enabled
 
+    # ---------- 表情包贴纸（桌宠右上角随机弹出） ----------
+    def get_sticker_config(self) -> Optional[dict]:
+        """模型表情包贴纸配置；无配置或目录不存在返回 None。
+
+        返回 {"files": [绝对路径], "min_s", "max_s", "duration_s", "size"}。
+        """
+        if not self.profile.stickers_dir:
+            return None
+        d = Path(self.profile.stickers_dir)
+        if not d.is_absolute():
+            d = self.model_dir / self.profile.stickers_dir
+        if not d.is_dir():
+            log.info("Live2D 表情包目录不存在: %s", d)
+            return None
+        files = sorted(
+            p for p in d.iterdir()
+            if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+        if not files:
+            return None
+        return {
+            "files": [str(p) for p in files],
+            "min_s": self.profile.stickers_min_s,
+            "max_s": self.profile.stickers_max_s,
+            "duration_s": self.profile.stickers_duration_s,
+            "size": self.profile.stickers_size,
+        }
+
     # ---------- PetRenderer 接口实现 ----------
     def set_idle(self) -> None:
         """待机：头身姿态回正、临时姿态参数复位，并恢复当前情绪（发型保持）。
@@ -637,16 +668,9 @@ class Live2DRenderer(PetRenderer):
             if item is None:
                 log.warning("Live2D: 动作引用的条目不存在: %s", spec.item)
                 return
-            cat = self.profile.category(item.category)
-            if cat is not None and cat.emotion:
-                # 情绪条目走 ExpressionManager（可淡入淡出、自动恢复）
-                self._play_item_expr(item, hold_ms=dur + 250)
-            else:
-                # 配件/手势类条目：直接写参数，播完复位该条目的参数
-                self._apply_params([], item.params)
-                QTimer.singleShot(
-                    dur, lambda: self._apply_params(list(item.params.keys()), {}))
-                QTimer.singleShot(dur + 300, self._idle_if_awake)
+            # 持久生效：动作/表情保持到下一次切换（聊天情绪/触发规则自动换、
+            # 或菜单手动换），而不是播一下就还原成呆立。待机动作在其下继续循环。
+            self.activate_menu_item(item.category, item.name, toggle_off=False)
             return
         if spec.kind == "expr":
             self._play_custom_expr(slot, spec.params, hold_ms=dur + 250)
@@ -787,8 +811,13 @@ class Live2DRenderer(PetRenderer):
                                "mode": cat.mode, "items": items})
         return groups
 
-    def activate_menu_item(self, group_id: str, item_id: str) -> None:
-        """菜单/设置页点击一个分类条目。"""
+    def activate_menu_item(self, group_id: str, item_id: str,
+                           toggle_off: bool = True) -> None:
+        """菜单/设置页点击一个分类条目。
+
+        toggle_off=False 时若条目已激活则保持激活（动作播放路径用：
+        「保持到下次切换」而不是再点一下取消）。
+        """
         cat = self.profile.category(group_id)
         if cat is None:
             return
@@ -806,10 +835,15 @@ class Live2DRenderer(PetRenderer):
         if cat.mode == "exclusive":
             self._apply_params(cat.params(), item.params)
             return
-        # toggle 组：再点一次取消
-        if item_id in self._active_toggles:
+        # toggle 组：再点一次取消（toggle_off=False 时保持）
+        if item_id in self._active_toggles and toggle_off:
             self._apply_params(self._active_toggles.pop(item_id), {})
         else:
+            if not toggle_off:
+                # 动作播放路径：同分类只保留最新一个手势（避免叠加出奇怪姿势）
+                for name in [n for n in self._active_toggles
+                             if n != item_id and cat.item(n) is not None]:
+                    self._apply_params(self._active_toggles.pop(name), {})
             self._active_toggles[item_id] = list(item.params.keys())
             self._apply_params([], item.params)
 

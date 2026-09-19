@@ -122,11 +122,19 @@ class Live2DModelProfile:
     watermark_part_ids: list[str] = field(default_factory=list)
     watermark_exclude_params: set[str] = field(default_factory=set)
     watermark_exclude_names: set[str] = field(default_factory=set)
+    # 需要隐藏的装饰部件（Part id，如超频猫猫 Part10=gz235.png 粉色翅膀背景框）
+    hide_parts: list[str] = field(default_factory=list)
     # 挂机随机表情
     random_enabled: bool = False
     random_min_s: int = 25
     random_max_s: int = 70
     random_pool: list[str] = field(default_factory=list)   # 表情名（默认=全部情绪组条目）
+    # 表情包（模型目录旁的贴纸 PNG，随机弹在桌宠右上角）
+    stickers_dir: str = ""
+    stickers_min_s: int = 30
+    stickers_max_s: int = 90
+    stickers_duration_s: int = 4
+    stickers_size: int = 180
     # 头身姿态角度参数（走路/拖拽偏转，回待机回正）
     pose_angle_params: list[str] = field(default_factory=lambda: [
         "ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleY"])
@@ -399,6 +407,7 @@ def load_model_profile(model_dir: str | Path,
     profile.watermark_exclude_params = set(wm.get("exclude_params") or [])
     profile.watermark_exclude_names = set(wm.get("exclude_names") or [])
     profile.watermark_part_ids = [str(x) for x in (wm.get("part_ids") or [])]
+    profile.hide_parts = [str(x) for x in (cfg.get("hide_parts") or [])]
 
     profile.name = str(cfg.get("name") or model_dir.name)
     profile.emotion_labels = {str(k): str(v) for k, v in (cfg.get("emotion_labels") or {}).items()}
@@ -440,6 +449,14 @@ def load_model_profile(model_dir: str | Path,
         profile.random_enabled = bool(random_cfg.get("enabled", profile.random_enabled))
         profile.random_min_s = int(random_cfg.get("min_s") or profile.random_min_s)
         profile.random_max_s = int(random_cfg.get("max_s") or profile.random_max_s)
+
+    # 表情包（贴纸）：相对 model_dir 解析
+    st = cfg.get("stickers") or {}
+    profile.stickers_dir = str(st.get("dir") or "")
+    profile.stickers_min_s = int(st.get("min_s") or 30)
+    profile.stickers_max_s = int(st.get("max_s") or 90)
+    profile.stickers_duration_s = int(st.get("duration_s") or 4)
+    profile.stickers_size = int(st.get("size") or 180)
 
     # 分类与条目（依赖 watermark 排除项，最后解析）
     scanned = _scan_expression_files(model_dir, "")
