@@ -90,6 +90,32 @@ _META_NARRATION_RE = re.compile(
 # 兜底：任何长得像「（中文思考 200+ 字）」的整段括号
 _LONG_PAREN_RE = re.compile(r"[（(][^)（）\n]{50,}[)）]")
 
+# 兜底：模型把"我要做什么工具"类元描述裸句塞进 final answer（即使本轮真的调了工具）
+# 整句（句号内）包含「工具」一词，且必须以主语（让/我/主人/LLM）+ 动作开头才剥。
+# 避免误伤正文中恰好出现"工具"一词但不是元描述的情况。
+# 例：「让我调用工具。」 「我应该用 open_website 工具。」 「让我调用工具查天气。」
+_META_TOOL_TALK_RE = re.compile(
+    r"(让我|我要|我来|我应该|我会|我将|先来|接下来|现在|"
+    r"我\s*(需要|想要|打算|准备)?)"
+    r"[^。.!?\n]*?"
+    r"(调用|使用|借助|执行|运行)?"
+    r"[^。.!?\n]*?"
+    r"工具"
+    r"[^。.!?\n]*"
+    r"[。.!?]?",
+    flags=re.UNICODE,
+)
+# 兜底：「这应该用XX工具来YY」类建议句（前一句结尾是句号/感叹号/问号或行首）
+_META_SHOULD_USE_TOOL_RE = re.compile(
+    r"(?<=[。.!?\n])这\s*(应该|需要|可以)?\s*"
+    r"(用|通过|借助|使用)\s*"
+    r"[^。.!?\n]*?"
+    r"工具"
+    r"[^。.!?\n]*"
+    r"[。.!?]?",
+    flags=re.UNICODE,
+)
+
 
 def sanitize_text(text: str, *, is_final: bool = True) -> str:
     """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
@@ -124,6 +150,11 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     text = _META_NARRATION_RE.sub("", text)
     # 兜底：去掉任何超过 50 字的纯括号段（Ollama 流式经常把整段 thinking 塞进括号）
     text = _LONG_PAREN_RE.sub("", text)
+    # 兜底（仅最终阶段）：剥离「让我调用工具」「这应该用 XX 工具」类元描述裸句——
+    # 模型即便真的调了工具，也常常把"我要做什么"塞进 final answer，污染 UI。
+    if is_final:
+        text = _META_TOOL_TALK_RE.sub("", text)
+        text = _META_SHOULD_USE_TOOL_RE.sub("", text)
     # 多余空白收紧
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)

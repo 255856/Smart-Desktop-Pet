@@ -434,10 +434,13 @@ class ChatWindow(QWidget):
                  context_provider: Optional[Callable[[], str]] = None,
                  trace_recorder: Optional[TraceRecorder] = None,
                  backend: str = "lightweight",
-                 langchain_cfg: Optional[LangChainAgentConfig] = None):
+                 langchain_cfg: Optional[LangChainAgentConfig] = None,
+                 tts: Optional[object] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
+        # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
+        self.tts = tts
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -1349,6 +1352,12 @@ class ChatWindow(QWidget):
         # 会让 [happy] 被错误地当成「没标」而覆盖。
         if not parsed.tag_found:
             parsed.emotion = guess_emotion(parsed.text)
+
+        # 同步：聊天窗最终回复与 TTS 音频同步显示
+        # - 流式气泡阶段：已逐字 emit streaming_chunk（用户看着文字冒出来）
+        # - 本步骤：先 commit 数据（history / chat_store / refresh）+ 幻觉检测
+        # - 然后：如果启用了 TTS，先在后台 QThread 把音频合成好，再 emit reply_ready
+        #   触发 UI 切表情 + speak 播放。避免"文字先显示完，6 秒后才出声"。
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
         self.history.append(self._current_bot_msg)
@@ -1383,13 +1392,58 @@ class ChatWindow(QWidget):
         self.stop_btn.setEnabled(False)
         # 通知桌宠：思考结束
         self.thinking_stopped.emit()
-        # 通知外部（pet 窗口）切表情 + 触发 TTS
-        self.reply_ready.emit(parsed.text, parsed.emotion, self.char_cfg.tts_enabled)
-        # 通知桌宠气泡：流式输出结束
+        # 通知桌宠气泡：流式输出结束（流式气泡停留，供后续切最终文本时对比）
         self.streaming_done.emit()
+
+        # 通知外部（pet 窗口）切表情 + 触发 TTS
+        # 若 TTS 启用，先在后台合成音频，合成好后再 emit（保证声音与文字一起出现）
+        tts_enabled = bool(self.char_cfg.tts_enabled)
+        text = parsed.text
+        emotion = parsed.emotion
+        if tts_enabled and self.tts is not None and text.strip():
+            self._prepare_tts_then_emit(text, emotion)
+        else:
+            self.reply_ready.emit(text, emotion, tts_enabled)
         # 清除当前消息状态，避免重复
         self._current_bot_msg = None
         self._streaming_anchor_pos = None
+
+    def _prepare_tts_then_emit(self, text: str, emotion) -> None:
+        """后台 QThread 同步合成音频，合成完才 emit reply_ready 触发 TTS 播放。
+
+        解决「聊天窗文字立即显示但 TTS 还在合成（~5 秒真空期）」问题：
+            - 启动 QThread → 调 self.tts.prepare(text) 同步阻塞在该线程
+            - QThread done → 主线程槽 → emit reply_ready(text, emotion, True)
+              → UI Controller 切表情 + 调 tts.speak(text) → 直接走缓存立即播放
+            - QThread failed → 直接 emit reply_ready（不强等，避免卡死）
+        """
+        from app.core.qt_compat import QThread
+
+        class _PrepareWorker(QThread):
+            done = Signal()
+            failed = Signal()
+
+            def __init__(self, tts_obj, txt):
+                super().__init__()
+                self.tts_obj = tts_obj
+                self.txt = txt
+
+            def run(self):
+                try:
+                    ok = bool(self.tts_obj.prepare(self.txt))
+                except Exception:  # noqa: BLE001
+                    ok = False
+                if ok:
+                    self.done.emit()
+                else:
+                    self.failed.emit()
+
+        self._tts_prepare_worker = _PrepareWorker(self.tts, text)
+        self._tts_prepare_worker.done.connect(
+            lambda: self.reply_ready.emit(text, emotion, True))
+        self._tts_prepare_worker.failed.connect(
+            lambda: self.reply_ready.emit(text, emotion, True))
+        self._tts_prepare_worker.start()
 
     def _on_failed(self, err: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接

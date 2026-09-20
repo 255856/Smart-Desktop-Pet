@@ -477,6 +477,7 @@ class UIController(QObject):
                     max_iterations=self.cfg.brain.langchain.max_iterations,
                     return_intermediate_steps=self.cfg.brain.langchain.return_intermediate_steps,
                 ),
+                tts=self.tts,
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)

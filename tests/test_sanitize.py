@@ -88,6 +88,20 @@ class TestSanitize:
         assert "主人辛苦了" in result
         assert "我帮你倒杯水" in result
 
+    def test_strip_meta_tool_talk(self):
+        """元描述「让我调用工具 / 这应该用XX工具 / 我应该用open_website工具」应被剥掉。"""
+        # 典型漏网：模型即便真的调了工具，也会把"我要做什么"塞进 final answer
+        text = "打开哔哩哔哩（B站），让主人看动漫。这应该用open_website工具来打开B站的网址。让我调用工具。"
+        result = sanitize_text(text)
+        assert "工具" not in result
+        assert "调用" not in result
+        assert "打开哔哩哔哩" in result
+
+    def test_preserves_normal_sentences(self):
+        """不包含「工具」一词的正常中文不应受影响。"""
+        assert sanitize_text("天气真好，主人今天过得怎么样？") == "天气真好，主人今天过得怎么样？"
+        assert sanitize_text("好的主人，记住了") == "好的主人，记住了"
+
 
 class TestChineseSuffix:
     def test_suffix_contains_required_constraints(self):

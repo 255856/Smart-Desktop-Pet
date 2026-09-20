@@ -163,6 +163,49 @@ class TTS:
         threading.Thread(target=self._speak_blocking, args=(text,),
                          daemon=True, name="tts").start()
 
+    def prepare(self, text: str, timeout_s: float = 30.0) -> bool:
+        """同步合成（仅缓存，不播放）。返回是否成功。
+
+        用于「聊天窗回复等语音准备好后一起显示」：调用方在文本 emit 前同步
+        等到音频文件 ready，避免用户看到文本先于声音出现。
+
+        Args:
+            text: 待朗读文本（已 sanitize）
+            timeout_s: 最长等待时间；超时返回 False（不致命，UI 仍继续）
+
+        行为：
+            - 已缓存且格式正确 → 立即返回 True
+            - 未缓存 → 调 _synthesize 写到缓存 → 返回 True
+            - 缓存格式不对 → unlink 后重合成 → 返回 True
+        """
+        clean_text = _strip_emojis(text or "")
+        if not clean_text:
+            return False
+        cache_name = _cache_key(clean_text) + self.cache_ext
+        cache_path = self.cache_dir / cache_name
+        try:
+            if not cache_path.is_file():
+                log.info("TTS: prepare 合成 → %s (引擎=%s)",
+                         cache_name, type(self).__name__)
+                asyncio.run(self._synthesize(text, cache_path))
+            if not cache_path.is_file():
+                log.warning("TTS: prepare 合成后文件不存在 %s", cache_path)
+                return False
+            if not _cache_format_matches(cache_path, self.cache_ext):
+                log.warning("TTS: prepare 缓存格式不匹配 %s，删除重合成",
+                            cache_path.name)
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                asyncio.run(self._synthesize(text, cache_path))
+                if not cache_path.is_file():
+                    return False
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("TTS: prepare 失败：%s", e)
+            return False
+
     def _speak_blocking(self, text: str) -> None:
         try:
             # 移除 emoji 和装饰性符号，避免 TTS 朗读字符名称
