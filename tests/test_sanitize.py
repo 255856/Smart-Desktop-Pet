@@ -116,10 +116,33 @@ class TestSanitize:
         assert "主人想要" not in sanitize_text("主人想要一杯水。好的主人，给你倒。")
 
     def test_strip_mid_emotion_tag_inline(self):
-        """句中位置的 [happy] 标签也必须剥除（旧逻辑只剥末尾）。"""
-        out = sanitize_text("好的主人，马上帮你打开抖音~ [happy] 打开抖音的方式有很多种呢。")
+        """句中位置的 [happy] 标签也必须剥除（旧逻辑只剥末尾），前后回答都保留。"""
+        out = sanitize_text("好的主人，马上帮你打开抖音~ [happy] 记得刷完早点休息哦。")
         assert "[" not in out and "happy" not in out
-        assert "马上帮你打开抖音" in out and "打开抖音的方式有很多种呢" in out
+        assert "马上帮你打开抖音" in out and "记得刷完早点休息" in out
+
+    def test_strip_process_filler_clause(self):
+        """工具过程废话「~打开X的方式有很多种呢」应剥掉，保留前面的真动作。"""
+        out = sanitize_text("好的主人，马上帮你打开抖音~ 打开抖音的方式有很多种呢。")
+        assert "方式有很多种" not in out
+        assert "马上帮你打开抖音" in out
+
+    def test_strip_quote_analysis_sentence(self):
+        """句首引用主人指令后做意图分析「说「打开X」，这是要…」应整句剥除。"""
+        out = sanitize_text('说"打开星穹铁道"，这是要打开一个游戏应用。好的主人，帮你启动星穹铁道~')
+        assert "这是要" not in out and "游戏应用" not in out
+        assert "帮你启动星穹铁道" in out
+
+    def test_strip_leading_english_cot_prefix(self):
+        """英文 CoT 与中文回答黏在同一句（无句号）时，剥掉英文前缀、保留中文。"""
+        out = sanitize_text("- The story involves Rudy meeting his parents old friend搜到啦~动画已经完结啦。")
+        assert "The story" not in out and "Rudy" not in out
+        assert "搜到啦" in out and "动画已经完结" in out
+
+    def test_keep_normal_english_mixed(self):
+        """正常中英混排（VS Code / Chrome 等短英文词）不被误删。"""
+        out = sanitize_text("VS Code 打开了吗？我帮你看看，打开 VS Code 和 Chrome 都没问题~")
+        assert "VS Code" in out and "Chrome" in out
 
     def test_strip_unclosed_emotion_tag(self):
         """句尾未闭合的 [happy 也要剥除。"""

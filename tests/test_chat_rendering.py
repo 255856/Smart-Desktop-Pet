@@ -124,17 +124,36 @@ def test_system_message():
 
 
 def test_tool_calls_display():
-    """工具调用记录：应放在桌宠气泡下方的浅紫小卡片。"""
+    """工具调用：Claude Code 风格步骤卡片（中文名 + 目标 + 成败状态）。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
-    msg = Message(role="assistant", content="完成", tools=[("add_reminder", "已设置提醒")])
+    msg = Message(role="assistant", content="完成", tools=[
+        ("add_reminder", '{"content":"下午三点开会"}', "已设置提醒"),
+        ("web_search", '{"query":"十月新番"}', "找到 5 条结果"),
+        ("open_app", '{"app_name":"星穹铁道"}', "失败：没有找到该应用"),
+    ])
     html = cw._msg_html(msg)
     assert 'class="tools"' in html
-    assert "add_reminder" in html
-    assert "已设置提醒" in html
-    print("[OK] Tool calls displayed in .tools class")
+    assert "已执行操作" in html
+    # 中文名 + 动作目标
+    assert "设置提醒" in html and "下午三点开会" in html
+    assert "联网搜索" in html and "十月新番" in html
+    # 失败状态
+    assert "失败" in html and "星穹铁道" in html
+    # 原始英文工具名 / 原始结果文本不直接展示给主人
+    assert "add_reminder" not in html
+    assert "已设置提醒" not in html
+    # 工具卡片置于最终结果上方
+    assert html.index("已执行操作") < html.index("完成")
+    # 旧版 2 元组 (name, summary) 仍兼容：已知工具显示中文名
+    msg2 = Message(role="assistant", content="好", tools=[("calculate", "结果是7")])
+    assert "计算" in cw._msg_html(msg2)
+    # 未知工具名兜底显示原名
+    msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
+    assert "my_custom_thing" in cw._msg_html(msg3)
+    print("[OK] Tool calls rendered as step card")
 
 
 def test_user_emoji_in_content_escaped():

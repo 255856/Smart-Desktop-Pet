@@ -228,22 +228,30 @@ _META_USER_REPEAT_SENT_RE = re.compile(
 # 句首第一人称规划 / 自我过程（需配合 _META_PLAN_CONTEXT_RE 才算污染，避免误伤回答）
 _META_SELF_PLAN_SENT_RE = re.compile(
     r"^\s*(?:想让我|需要我|要求我|"
-    r"让我(?:想想|思考|先|来看看|看看|确认|调用|使用|用|执行|再试|尝试|检查|处理)?|"
+    r"让我(?:想想|思考|先|来看看|看看|确认|再确认|打开|启动|调用|使用|用|执行|再试|尝试|检查|处理)?|"
     r"我(?:需要|应该|要|打算|准备|来|将|会|可以|不应该|不能|先|再|这就|马上))"
 )
 # 规划 / 元语境关键词：与句首自我规划搭配出现
 _META_PLAN_CONTEXT_RE = re.compile(
     r"(角色|人设|回答|回复|简短|简洁|保持|自然|工具|调用|使用|执行|确认|需求|根据|设定|"
     r"规划|思考|试试|尝试|查询|检查|看看|应该|需要|上面|schema|反馈|再试|没成功|失败|"
-    r"编造|如实|建议用户|相关网站)"
+    r"编造|如实|建议用户|相关网站|之前的|成功)"
 )
 # 工具元描述（"这应该用 open_website 工具"、"让我调用工具"、"通过 XX 工具来…"）
 _META_TOOL_SENT_RE = re.compile(
     r"(?:调用|使用|借助|运行|执行|通过)\s*[A-Za-z_0-9\u4e00-\u9fff]{0,20}?工具|"
     r"工具\s*(?:来|去|打开|执行|查|完成|处理|帮)|"
     r"这应该用|应该用\s*[a-z_]+|open_[a-z_]+\s*工具|"
-    r"[a-z_]+_(?:website|app|tool|reminder|fact)",
+    r"[a-z_]+_(?:website|app|tool|reminder|fact)|"
+    r"说\s*[\"“「『\'][^。！？!?\n]{0,24}?[\"”」』]?\s*[,，]?\s*这是(?:要|一|在|个|应用|网页|链接|动作)",
     flags=re.IGNORECASE,
+)
+# 工具过程废话子句：模型解释「动作有很多种方式」，常与真回答同句（用 ~ 连接），
+# 只删该子句本身（从分隔符起），不吞前面的真正动作。
+_META_PROCESS_CLAUSE_RE = re.compile(
+    r"[，,~～\s]*(?:打开|启动|搜索|查询|使用|调用|运行|执行)"
+    r"[^。！？!?\n，,~～]{0,10}的方式有很多种[呢呀啊~～。！？!?]*",
+    flags=re.UNICODE,
 )
 # 编号规则项（"1. 禁止使用 emoji"、"4.不要复述"）
 _NUMBERED_RULE_RE = re.compile(
@@ -393,6 +401,30 @@ def _split_answer_anchor(core: str) -> Optional[str]:
     return None
 
 
+def _strip_leading_english_prefix(core: str) -> str:
+    """句首若为一段较长英文（CoT 碎片），其后紧跟中文回答，剥掉英文前缀。
+
+    处理英文 CoT 与中文回答黏在同一句（无句号分隔）的情况，如
+    "- The story involves ... old friend搜到啦~……"。
+    阈值要求英文前缀 ≥ 15 个字母且 ≥ 3 个英文单词，避免误伤
+    "VS Code 打开了吗"、"打开 VS Code 和 Chrome" 等正常中英混排。
+    """
+    n = len(core)
+    k = 0
+    while k < n and not ("\u4e00" <= core[k] <= "\u9fff"):
+        k += 1
+    if k == 0 or k >= n:
+        return core   # 本来就中文开头，或整句无中文（交给英文占比判定）
+    prefix = core[:k]
+    letters = sum(1 for ch in prefix if ch.isascii() and ch.isalpha())
+    words = len(re.findall(r"[A-Za-z']+", prefix))
+    if letters >= 15 and words >= 3:
+        rest = core[k:].strip()
+        if rest:
+            return rest
+    return core
+
+
 def _strip_meta_by_sentence(text: str) -> str:
     """逐句剥离规划 / 元描述 / 规则复读，保留角色回答句。
 
@@ -401,6 +433,7 @@ def _strip_meta_by_sentence(text: str) -> str:
     - 非污染句原样保留；
     - 污染句若含角色发语锚点（嘿嘿~ / 主人… / 好的主人…），只保留锚点之后；
     - 否则整句丢弃。
+    另外对每句先剥工具过程废话子句与句首英文 CoT 前缀。
     """
     parts = _SENT_SPLIT_RE.split(text)
     out: list[str] = []
@@ -410,12 +443,22 @@ def _strip_meta_by_sentence(text: str) -> str:
         core = body.strip()
         if not core:
             continue
+        # 工具过程废话子句（"~打开抖音的方式有很多种呢"）按短语剥掉；
+        # 仅在确实删除时才 strip 残留标点，避免误删正常句尾的语气词 ~
+        core_before = core
+        core = _META_PROCESS_CLAUSE_RE.sub("", core)
+        if core != core_before:
+            core = core.strip("，, ~～")
+        # 句首英文 CoT 前缀剥离
+        core = _strip_leading_english_prefix(core)
+        if not core:
+            continue
         if _is_pollution_sentence(core):
             kept = _split_answer_anchor(core)
             if kept:
                 out.append(kept + sep)
             continue
-        out.append(body + sep)
+        out.append(core + sep)
     return "".join(out)
 
 

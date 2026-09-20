@@ -221,9 +221,9 @@ CHAT_BUBBLE_CSS = (
     # 选择器和 td border-radius 支持不稳定，内联样式最可靠）。
     "td.bubble{line-height:1.55;font-size:10pt;}"
     # 工具调用记录（紧凑小卡片）
-    "div.tools{font-size:8pt;color:#6b5bd6;background-color:#f3eeff;"
-    "border:1px solid #e9e3ff;border-radius:8px;padding:4px 10px;"
-    "margin:4px 0 6px 56px;}"
+    "div.tools{font-size:9pt;color:#3f3f46;background-color:#f5f3ff;"
+    "border:1px solid #e9e3ff;border-radius:8px;padding:6px 9px;"
+    "margin:2px 0 8px 0;}"
     # 代码块 / 行内代码
     "pre{background:#232337;color:#e5e7eb;padding:10px 12px;"
     "border-radius:10px;font-family:Consolas,Monaco,monospace;"

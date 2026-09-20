@@ -66,13 +66,101 @@ from app.ui import ui_style
 log = logging.getLogger(__name__)
 
 
+# ---------------- 工具调用展示（Claude Code 风格步骤列表） ----------------
+# 工具名 -> (中文名, 动作目标参数键，按优先级)
+_TOOL_UI_META = {
+    "web_search": ("联网搜索", ["query", "q", "keyword"]),
+    "open_website": ("打开网页", ["url", "website", "query"]),
+    "open_app": ("启动应用", ["app_name", "name", "app"]),
+    "list_installed_apps": ("查找应用", ["query", "keyword"]),
+    "calculate": ("计算", ["expression", "query"]),
+    "convert_units": ("单位换算", ["query", "expression"]),
+    "add_reminder": ("设置提醒", ["content", "text", "title", "message"]),
+    "list_reminders": ("查看提醒", []),
+    "delete_reminder": ("删除提醒", ["content", "title", "index"]),
+    "remember_fact": ("记住信息", ["content", "fact", "key"]),
+    "recall_memory": ("回忆信息", ["query", "key", "topic"]),
+    "forget_memory": ("忘记信息", ["key", "query"]),
+    "take_screenshot": ("屏幕截图", []),
+    "system_info": ("系统信息", []),
+    "get_current_time": ("查询时间", ["timezone"]),
+    "date_info": ("查询日期", ["query"]),
+    "get_pet_status": ("桌宠状态", []),
+    "feed_self": ("投喂", ["food"]),
+    "play_animation": ("播放动画", ["animation", "name"]),
+    "change_pet_emotion": ("切换表情", ["emotion"]),
+    "say_to_user": ("发送消息", ["text", "content"]),
+    "clipboard_copy": ("复制到剪贴板", ["text", "content"]),
+    "send_notification": ("发送通知", ["title", "message"]),
+    "list_desktop_files": ("查看桌面文件", []),
+    "read_text_file": ("读取文件", ["path", "file"]),
+    "open_task_manager": ("打开任务管理器", []),
+    "open_control_panel": ("打开控制面板", []),
+    "open_windows_settings": ("打开系统设置", []),
+    "open_file_explorer": ("打开文件资源管理器", []),
+    "open_terminal": ("打开终端", []),
+    "open_notepad": ("打开记事本", []),
+    "open_calculator": ("打开计算器", []),
+}
+_CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
+_TOOL_FAIL_MARKERS = ("失败", "错误", "无法", "未安装", "没有找到", "找不到")
+
+
+def _unpack_tool(t):
+    """tools 元组兼容 2 元 (name, summary) 与 3 元 (name, args, result)。"""
+    if len(t) >= 3:
+        return t[0], t[1] or "", t[2] or ""
+    return t[0], "", (t[1] if len(t) > 1 else "") or ""
+
+
+def _tool_label(name: str, args: str):
+    """返回 (中文名, 动作目标短文本)。"""
+    import json as _json
+    cn, keys = _TOOL_UI_META.get(name, (name, []))
+    target = ""
+    a = {}
+    try:
+        a = _json.loads(args) if args else {}
+    except Exception:  # noqa: BLE001
+        a = {}
+    if isinstance(a, dict):
+        for k in keys:
+            v = a.get(k)
+            if v:
+                target = str(v)
+                break
+        if not target:
+            # 兜底：取第一个短参数
+            for v in a.values():
+                if isinstance(v, (str, int, float)) and 0 < len(str(v)) <= 30:
+                    target = str(v)
+                    break
+    if target:
+        if name == "open_website" and "://" in target:
+            target = target.split("://", 1)[1]
+        if target.startswith("www."):
+            target = target[4:]
+        if len(target) > 20:
+            target = target[:20] + "…"
+    return cn, target
+
+
+def _tool_status(result: str) -> str:
+    r = result or ""
+    if "取消" in r:
+        return "cancel"
+    if any(k in r for k in _TOOL_FAIL_MARKERS):
+        return "fail"
+    return "ok"
+
+
 @dataclass
 class Message:
     role: str
     content: str
     emotion: Optional[Emotion] = None
     ts: float = field(default_factory=time.time)
-    tools: list[tuple[str, str]] = field(default_factory=list)   # (工具名, 结果摘要)
+    tools: list[tuple[str, str, str]] = field(default_factory=list)  # (工具名, args_json, 结果)
 
 
 class _AgentWorker(QThread):
@@ -1311,7 +1399,8 @@ class ChatWindow(QWidget):
         if self._current_bot_msg is None:
             return
         summary = result.replace("\n", " ")[:80]
-        self._current_bot_msg.tools.append((name, summary))
+        # 保留完整 args / result，渲染时解析中文名、动作目标与成败状态
+        self._current_bot_msg.tools.append((name, args or "", result or ""))
         # Trace
         if self.trace is not None and self._trace_run_id:
             try:
@@ -1348,6 +1437,12 @@ class ChatWindow(QWidget):
                     "⚙️ 模型刚才回了文字但没调用工具——自动重试一次，主人稍等~"
                 )
                 log.info("ChatWindow: force_retry meta 事件已提示用户")
+            elif ev == "verify_retry":
+                # 工具结果与模型答复矛盾（如工具失败却报喜），已要求重答
+                self._append_system_msg(
+                    "🔎 核对了一下执行结果，好像不太对，让我重新确认一下~"
+                )
+                log.info("ChatWindow: verify_retry 事件已提示用户")
 
     def _on_chunk(self, tok: str) -> None:
         if self._current_bot_msg is None:
@@ -1594,6 +1689,45 @@ class ChatWindow(QWidget):
         "background:#ffffff;border:1px solid #e9e6f7;padding:9px 13px;"
         "color:#2c2c38;font-size:10pt;line-height:1.55;")
 
+    def _tool_steps_html(self, tools: list) -> str:
+        """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
+
+        工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
+        """
+        rows = []
+        for i, t in enumerate(tools):
+            name, args, result = _unpack_tool(t)
+            cn, target = _tool_label(name, args)
+            status = _tool_status(result)
+            num = _CIRCLED_NUMS[i] if i < len(_CIRCLED_NUMS) else str(i + 1)
+            if status == "cancel":
+                mark = '<span style="color:#9ca3af;">⊘ 取消</span>'
+            elif status == "fail":
+                mark = '<span style="color:#dc2626;">✕ 失败</span>'
+            else:
+                mark = '<span style="color:#16a34a;">✓</span>'
+            target_html = (
+                f'&nbsp;<span style="color:#a1a1aa;">·</span>&nbsp;<b>{_html_escape(target)}</b>'
+                if target else ""
+            )
+            rows.append(
+                '<table width="100%" cellspacing="0" cellpadding="0" style="margin:1px 0;">'
+                '<tr>'
+                '<td style="width:14px;color:#8b5cf6;font-size:9pt;padding:1px 4px 1px 0;'
+                'vertical-align:middle;white-space:nowrap;">' + num + '</td>'
+                '<td style="font-size:9pt;color:#3f3f46;vertical-align:middle;">'
+                + _html_escape(cn) + target_html + '</td>'
+                '<td align="right" style="font-size:8pt;vertical-align:middle;'
+                'white-space:nowrap;padding-left:8px;">' + mark + '</td>'
+                '</tr></table>'
+            )
+        head = (
+            '<div style="color:#8b5cf6;font-size:8pt;font-weight:bold;'
+            'margin-bottom:2px;letter-spacing:0.5px;">已执行操作 · '
+            + str(len(tools)) + '</div>'
+        )
+        return '<div class="tools">' + head + "".join(rows) + '</div>'
+
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
         """按已完成的 Message 渲染成 HTML 字符串（气泡式聊天）。
 
@@ -1641,13 +1775,10 @@ class ChatWindow(QWidget):
                 f'margin-left:6px;">· {meta_safe}</span>'
             )
 
-        # 工具调用（bot 消息专用，放在气泡内底部，浅紫小卡片）
-        tools_html = "".join(
-            f'<div class="tools">↳ <b>{name}</b> → {summary}</div>'
-            for name, summary in msg.tools
-        )
+        # 工具调用（bot 消息专用）：Claude Code 风格步骤卡片，置于最终结果上方
+        tools_html = self._tool_steps_html(msg.tools) if msg.tools else ""
         if tools_html:
-            safe = safe + tools_html
+            safe = tools_html + safe
 
         time_str = _format_time_short(msg.ts)
 
