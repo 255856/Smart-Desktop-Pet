@@ -778,14 +778,19 @@ async function loadBuiltinModel() {
   setStatus("加载 Hiyori…", "#ffce5c");
   for (const p of BUILTIN_MODEL_PATHS) {
     try {
-      const r = await fetch(p, { method: "HEAD" });
+      // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
+      const r = await fetch(p, { method: "GET" });
       if (r.ok) {
         log(`✓ 找到内置模型：${p}`, "ok");
         const url = location.origin + location.pathname.replace(/index\.html?$/, "") + p;
         await window.demo.loadModel(url);
         return;
+      } else {
+        log(`探测 ${p} → ${r.status}`, "ok");
       }
-    } catch (e) {}
+    } catch (e) {
+      log(`探测 ${p} 异常：${e.message}`, "err");
+    }
   }
   hideLoader();
   setStatus("内置模型未找到", "#ff7675");
