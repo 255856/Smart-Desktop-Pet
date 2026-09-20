@@ -48,6 +48,8 @@ CHINESE_SYSTEM_SUFFIX = (
     "「唯一允许的输出语言是简体中文。1. xxx 2. xxx」"
     "「根据角色设定我会……」\n\n"
     "工具调用只走 tool schema；不要在文字里描述要调什么工具。"
+    "信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），"
+    "必须调 web_search 拿真实信息，不允许编造或说「我不知道」。"
     "不要用 emoji 和装饰符号。回复 1~3 句。"
 )
 
@@ -173,6 +175,81 @@ _META_NUMBERED_LIST_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# ---------------------------------------------------------------------------
+#  句子级「规划 / 元描述 / 规则复读」识别（更精细，避免旧贪婪正则吞掉同段真回答）
+# ---------------------------------------------------------------------------
+# 情绪标签词（系统铁律：模型不应输出，出现即剥，无论在句尾还是句中）
+_EMOTION_WORDS = (
+    "happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip"
+)
+# 任意位置的完整情绪标签（"好的主人 [happy] 马上" 也剥）
+_EMOTION_TAG_ANY_RE = re.compile(
+    r"\s*\[(?:" + _EMOTION_WORDS + r")\]\s*", re.IGNORECASE)
+# 未闭合的情绪标签（流式截断 / 模型漏写右括号），如句尾「……[happy」
+_EMOTION_TAG_OPEN_RE = re.compile(
+    r"\s*\[(?:" + _EMOTION_WORDS + r")\s*$", re.IGNORECASE)
+# 孤立的 think 结束标签（起始标签在更早的 chunk 已被剥离，残留 </think>）
+_THINK_CLOSE_TAG_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+
+# 角色「真正开口」的发语锚点：推理模型常把「规划前缀 + 锚点 + 真正回答」塞进同一句，
+# 一旦该句被判为污染，从最后一个锚点处截断，只保留锚点之后的回答。
+_ANSWER_ANCHOR_RE = re.compile(
+    r"(嘿嘿+|哈哈+|嘻嘻+|诶嘿|嗯哼|唔嗯|好嘞|好哒|好啦|好呀|"
+    r"好的?[，,~～\s]?主人|主人[~～，,、呀呢啦嘛哦哟看]|"
+    r"唔[~～，,。]?|呜哇|嘤嘤|啊嘞|欸+|嗯[~～])",
+    flags=re.UNICODE,
+)
+
+# prompt 规则 / 风格指令被模型复读（高置信，几乎不可能出现在正常回答里）
+_META_RULE_KEYWORDS_RE = re.compile(
+    r"(唯一允许|唯一要求|输出规范|输出要求|输出风格|输出语言|输出格式|回复规范|回复风格|"
+    r"回复要求|对话规范|对话风格|对话要求|语言规范|格式规范|禁止使用|禁止出现|禁止输出|"
+    r"禁止用|不要使用|不要出现|不要输出|不要用|不要列|不要解释|不要复述|不要描述|"
+    r"不要思考|不要规划|不要自我|不要长篇|保持角色|保持人设|保持设定|保持风格|保持自然|"
+    r"保持简短|保持简洁|保持中文|保持输出|保持一致|用简体中文|中文输出|输出中文|使用中文|"
+    r"使用简体中文|中文回复|中文对话|简短自然|简短回答|简短输出|简短对话|简短回复|"
+    r"一句话|两三句|不要\s*markdown|不要\s*列表|emoji)",
+    re.IGNORECASE,
+)
+# 角色卡罗列 / 设定复述（"根据角色设定…"、"外貌：…"、"性格：…"、"擅长：…"）
+_META_CHAR_SHEET_RE = re.compile(
+    r"(?:根据|按照|依据)[^。！？!?\n]{0,8}"
+    r"(?:角色|人设|设定|性格|要求|指令|我的设定)|"
+    r"(?:^|[\s\-、，,：:；;])(?:外貌|性格|擅长|角色设定|人物设定|说话风格|常用语气词)\s*[:：]",
+    flags=re.UNICODE,
+)
+# 句首对用户的复述（"用户说 / 主人想 / 主人在问…"）
+_META_USER_REPEAT_SENT_RE = re.compile(
+    r"^\s*(?:用户|主人|对方)\s*(?:在?说|想问|希望|想要|想|问的是|说的是|是说)"
+)
+# 句首第一人称规划 / 自我过程（需配合 _META_PLAN_CONTEXT_RE 才算污染，避免误伤回答）
+_META_SELF_PLAN_SENT_RE = re.compile(
+    r"^\s*(?:想让我|需要我|要求我|"
+    r"让我(?:想想|思考|先|来看看|看看|确认|调用|使用|用|执行|再试|尝试|检查|处理)?|"
+    r"我(?:需要|应该|要|打算|准备|来|将|会|可以|不应该|不能|先|再|这就|马上))"
+)
+# 规划 / 元语境关键词：与句首自我规划搭配出现
+_META_PLAN_CONTEXT_RE = re.compile(
+    r"(角色|人设|回答|回复|简短|简洁|保持|自然|工具|调用|使用|执行|确认|需求|根据|设定|"
+    r"规划|思考|试试|尝试|查询|检查|看看|应该|需要|上面|schema|反馈|再试|没成功|失败|"
+    r"编造|如实|建议用户|相关网站)"
+)
+# 工具元描述（"这应该用 open_website 工具"、"让我调用工具"、"通过 XX 工具来…"）
+_META_TOOL_SENT_RE = re.compile(
+    r"(?:调用|使用|借助|运行|执行|通过)\s*[A-Za-z_0-9\u4e00-\u9fff]{0,20}?工具|"
+    r"工具\s*(?:来|去|打开|执行|查|完成|处理|帮)|"
+    r"这应该用|应该用\s*[a-z_]+|open_[a-z_]+\s*工具|"
+    r"[a-z_]+_(?:website|app|tool|reminder|fact)",
+    flags=re.IGNORECASE,
+)
+# 编号规则项（"1. 禁止使用 emoji"、"4.不要复述"）
+_NUMBERED_RULE_RE = re.compile(
+    r"^\s*[0-9]+\s*[.、)）]\s*"
+    r"(?:禁止|保持|不要|输出|使用|用|回复|简短|角色|人设|复述|emoji|表情|自然|中文|句)"
+)
+# 句子切分（保留分隔符）
+_SENT_SPLIT_RE = re.compile(r"([。！？!?\n]+)")
+
 
 def sanitize_text(text: str, *, is_final: bool = True) -> str:
     """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
@@ -286,6 +363,69 @@ def _drop_low_cjk_paragraphs(text: str, threshold: float = 0.3) -> str:
         return text
     kept = [p for p in paras if _cjk_ratio(p) >= threshold]
     return "\n\n".join(kept).strip()
+
+
+def _is_pollution_sentence(core: str) -> bool:
+    """判断一个句子单元是否为 CoT 规划 / 元描述 / 规则复读（高置信、保守）。"""
+    if _META_RULE_KEYWORDS_RE.search(core):
+        return True
+    if _META_CHAR_SHEET_RE.search(core):
+        return True
+    if _META_USER_REPEAT_SENT_RE.search(core):
+        return True
+    if _META_TOOL_SENT_RE.search(core):
+        return True
+    if _NUMBERED_RULE_RE.search(core):
+        return True
+    # 句首自我规划 + 规划语境（两者同时满足才判污染，避免误伤「让我帮你」类回答）
+    if _META_SELF_PLAN_SENT_RE.search(core) and _META_PLAN_CONTEXT_RE.search(core):
+        return True
+    # 纯英文长句（推理模型英文 CoT 逐句兜底；短英文 / 含中文的专名不删）
+    cjk = sum(1 for ch in core if "\u4e00" <= ch <= "\u9fff")
+    ascii_letters = sum(1 for ch in core if ch.isascii() and ch.isalpha())
+    if cjk == 0 and ascii_letters > 12:
+        return True
+    return False
+
+
+def _split_answer_anchor(core: str) -> Optional[str]:
+    """污染句里若在「角色发语锚点」之后还有正常回答，返回该回答（含锚点），否则 None。"""
+    for m in reversed(list(_ANSWER_ANCHOR_RE.finditer(core))):
+        tail = core[m.start():].strip()
+        if len(tail) < 4:
+            continue
+        if _is_pollution_sentence(tail):
+            continue
+        cjk = sum(1 for ch in tail if "\u4e00" <= ch <= "\u9fff")
+        if cjk >= 2:
+            return tail
+    return None
+
+
+def _strip_meta_by_sentence(text: str) -> str:
+    """逐句剥离规划 / 元描述 / 规则复读，保留角色回答句。
+
+    旧版用「命中引导词就替换到段尾」的贪婪正则，当模型把 CoT 和真正回答塞进
+    同一段（中间缺少句号/换行）时会连真回答一起删掉。这里改为按句末标点切句：
+    - 非污染句原样保留；
+    - 污染句若含角色发语锚点（嘿嘿~ / 主人… / 好的主人…），只保留锚点之后；
+    - 否则整句丢弃。
+    """
+    parts = _SENT_SPLIT_RE.split(text)
+    out: list[str] = []
+    for i in range(0, len(parts), 2):
+        body = parts[i]
+        sep = parts[i + 1] if i + 1 < len(parts) else ""
+        core = body.strip()
+        if not core:
+            continue
+        if _is_pollution_sentence(core):
+            kept = _split_answer_anchor(core)
+            if kept:
+                out.append(kept + sep)
+            continue
+        out.append(body + sep)
+    return "".join(out)
 
 
 class LLMError(RuntimeError):

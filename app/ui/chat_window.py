@@ -1460,7 +1460,7 @@ class ChatWindow(QWidget):
         self._streaming_anchor_pos = None
 
         # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
-        self._detect_hallucination(text, self._current_bot_msg.tools)
+        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
 
         # Trace：完成 run
         if self.trace is not None and self._trace_run_id:
