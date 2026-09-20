@@ -54,7 +54,7 @@ class MotionController:
 
     get_window:           () -> QWidget
     screen_geometry_getter: () -> QRect | None
-    animator:             PetAnimator
+    animator:             PetRenderer  # 实际为 SpriteRenderer（继承 PetAnimator）
     cursor_pos_getter:    () -> QPoint (可选，默认走 QCursor.pos())
     """
 

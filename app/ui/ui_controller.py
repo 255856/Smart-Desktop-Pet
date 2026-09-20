@@ -431,20 +431,15 @@ class UIController(QObject):
         try:
             sprite_dir = self.pet.atlas.sprite_dir
             cmd = ["python", str(_P(__file__).resolve().parent.parent
-                                 / "tools" / "rename_to_vpet.py"),
+                                 / "tools" / "_legacy" / "rename_to_vpet.py"),
                    "--retune-ms", str(ms)]
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=60)
             log.info("retune 退出码 %d, stdout=%s stderr=%s",
                      result.returncode, result.stdout[:300], result.stderr[:300])
-            # 重新构造 atlas
-            from app.animation.sprite_atlas import SpriteAtlas, PetAnimator
-            self.pet.atlas = SpriteAtlas(sprite_dir,
-                                         fallback_image=self.cfg.sprite.fallback)
-            # 重建 animator
-            self.pet.animator = PetAnimator(
-                self.pet.atlas, self.pet.player,
-                on_animation_changed=self.pet._start_frame_timer)
+            # 走 SpriteRenderer 自带的 reload_atlas（保留同一个 renderer/player/label 实例，
+            # 只换内部 atlas 引用，避免新旧 atlas/animator 双实例不同步的 bug）
+            self.pet.reload_atlas(fallback_image=self.cfg.sprite.fallback)
             # 统一覆盖所有帧的 duration_ms
             self.pet.atlas.override_frame_duration_ms(ms)
             # 让新 duration 立即生效

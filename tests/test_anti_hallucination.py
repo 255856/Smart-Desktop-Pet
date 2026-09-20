@@ -416,8 +416,8 @@ class TestHeuristicReflectorHallucination:
     """HeuristicReflector 检测「意图是工具但没调工具」幻觉。"""
 
     def test_detects_hallucination_when_no_tool_called(self):
-        from app.brain.plan import Plan, Step
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.reflector import HeuristicReflector
         # 用户意图：open_app
         refl = HeuristicReflector(plan_goal="帮我打开 QQ")
         # plan 里只有一个 final 步骤，没有任何 tool 步骤
@@ -431,8 +431,8 @@ class TestHeuristicReflectorHallucination:
         assert "open_app" in result.comment or "open" in result.comment.lower()
 
     def test_no_hallucination_when_tool_was_called(self):
-        from app.brain.plan import Plan, Step
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.reflector import HeuristicReflector
         refl = HeuristicReflector(plan_goal="帮我打开 QQ")
         plan = Plan(goal="帮我打开 QQ", steps=[
             Step(id="1", kind="tool", tool_name="open_app",
@@ -445,8 +445,8 @@ class TestHeuristicReflectorHallucination:
 
     def test_no_hallucination_for_chitchat_intent(self):
         """意图不是工具动作（闲聊）→ 不应误判。"""
-        from app.brain.plan import Plan, Step
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.reflector import HeuristicReflector
         refl = HeuristicReflector(plan_goal="陪我聊聊天")
         plan = Plan(goal="陪我聊聊天", steps=[
             Step(id="1", kind="final", result="好呀~ 主人想聊什么？"),
@@ -455,7 +455,7 @@ class TestHeuristicReflectorHallucination:
         assert result is None, "闲聊不应判幻觉"
 
     def test_set_plan_goal_updates_intent(self):
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.reflector import HeuristicReflector
         refl = HeuristicReflector(plan_goal="随便聊聊")
         assert refl._cached_intent is None
         refl.set_plan_goal("帮我打开 QQ")

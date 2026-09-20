@@ -37,10 +37,10 @@ class TestPlanExecutorHallucinationDetection:
 
     def test_hallucination_detection_triggers_replan(self):
         """plan 只有 final 步骤 + 意图是工具 → 触发 replan。"""
-        from app.brain.plan import Plan, Step
-        from app.brain.reflector import HeuristicReflector
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.reflector import HeuristicReflector
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
 
         reg = self._make_registry()
 
@@ -104,9 +104,9 @@ class TestPlanExecutorHallucinationDetection:
 
     def test_no_replan_when_tool_was_actually_called(self):
         """plan 里有 tool 步骤且真调成功 → 不触发 anti_hallucination replan。"""
-        from app.brain.plan import Plan, Step
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
 
         reg = self._make_registry()
 
@@ -149,9 +149,9 @@ class TestPlanExecutorHallucinationDetection:
 
     def test_no_replan_for_chitchat_intent(self):
         """意图不是工具动作（闲聊）→ 即使 plan 只有 final 也不触发 anti_hallucination。"""
-        from app.brain.plan import Plan, Step
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
+        from app.brain._legacy.plan import Plan, Step
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
 
         reg = self._make_registry()
 

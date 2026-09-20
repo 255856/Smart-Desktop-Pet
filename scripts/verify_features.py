@@ -45,10 +45,10 @@ def _strip_tool_markers(text):
 
 
 def _make_eval_factory(reg):
-    from app.brain.executor import PlanExecutor
-    from app.brain.plan import Plan, Step
-    from app.brain.planner import Planner
-    from app.brain.reflector import HeuristicReflector
+    from app.brain._legacy.executor import PlanExecutor
+    from app.brain._legacy.plan import Plan, Step
+    from app.brain._legacy.planner import Planner
+    from app.brain._legacy.reflector import HeuristicReflector
 
     def factory(mock_client):
         async def fake_make_plan(goal, history=None):
@@ -170,27 +170,27 @@ def main() -> int:
     # ===== 二、智能体方向 =====
     print("\n[二] 智能体方向（v3.0 新增）")
 
-    from app.brain.plan import Plan, Step
+    from app.brain._legacy.plan import Plan, Step
     check("Plan / Step 数据模型", True)
     check("Step.parallel_group（并行支持）",
           "parallel_group" in Step.__dataclass_fields__)
 
-    from app.brain.planner import Planner
+    from app.brain._legacy.planner import Planner
     check("Planner（LLM 生成 plan）", True)
 
-    from app.brain.executor import PlanExecutor
+    from app.brain._legacy.executor import PlanExecutor
     exec_src = inspect.getsource(PlanExecutor)
     check("PlanExecutor（gather 并行 + parallel_group）",
           "asyncio.gather" in exec_src and "parallel_group" in exec_src)
     check("PlanExecutor（重试 / replan）",
           "replan" in exec_src.lower())
 
-    from app.brain.reflector import HeuristicReflector, LLMReflector, make_reflector
+    from app.brain._legacy.reflector import HeuristicReflector, LLMReflector, make_reflector
     check("HeuristicReflector（规则反思）", True)
     check("LLMReflector（LLM 反思）", True)
     check("make_reflector 工厂", callable(make_reflector))
 
-    from app.brain.agent_v2 import AgentLoopV2, make_agent_loop
+    from app.brain._legacy.agent_v2 import AgentLoopV2, make_agent_loop
     check("AgentLoopV2（react / single 切换）", True)
     check("make_agent_loop 工厂", callable(make_agent_loop))
 
@@ -225,13 +225,13 @@ def main() -> int:
           "force_retry" in al_src and "必须调用" in al_src)
 
     # Reflector 必须有跨步幻觉检测
-    from app.brain.reflector import HeuristicReflector as _HR
+    from app.brain._legacy.reflector import HeuristicReflector as _HR
     hr_src = inspect.getsource(_HR)
     check("HeuristicReflector.detect_plan_hallucination",
           "detect_plan_hallucination" in hr_src)
 
     # PlanExecutor 必须用 detect_plan_hallucination
-    from app.brain.executor import PlanExecutor as _PE
+    from app.brain._legacy.executor import PlanExecutor as _PE
     pe_src = inspect.getsource(_PE)
     check("PlanExecutor 跨步检测幻觉 → 触发 replan",
           "detect_plan_hallucination" in pe_src

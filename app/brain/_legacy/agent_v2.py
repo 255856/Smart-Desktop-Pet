@@ -18,12 +18,13 @@ import logging
 from typing import AsyncIterator, Callable, Optional
 
 from app.brain.agent import AgentLoop as _LegacyAgentLoop
-from app.brain.executor import PlanExecutor
 from app.brain.llm_client import LLMClient
-from app.brain.plan import Plan
-from app.brain.planner import Planner
-from app.brain.reflector import make_reflector
 from app.engine.tools import ToolRegistry
+
+from app.brain._legacy.executor import PlanExecutor
+from app.brain._legacy.plan import Plan
+from app.brain._legacy.planner import Planner
+from app.brain._legacy.reflector import make_reflector
 
 log = logging.getLogger(__name__)
 

@@ -3,10 +3,10 @@ import asyncio
 import json
 import time
 
-from app.brain.plan import Plan, Step
-from app.brain.executor import PlanExecutor
-from app.brain.planner import Planner
-from app.brain.reflector import HeuristicReflector
+from app.brain._legacy.plan import Plan, Step
+from app.brain._legacy.executor import PlanExecutor
+from app.brain._legacy.planner import Planner
+from app.brain._legacy.reflector import HeuristicReflector
 from app.engine.tools import Tool, ToolRegistry
 
 

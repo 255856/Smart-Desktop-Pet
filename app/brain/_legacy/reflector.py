@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from app.brain.llm_client import ChatMessage, LLMClient, detect_action_intent
-from app.brain.plan import Plan, Step
+
+from app.brain._legacy.plan import Plan, Step
 
 log = logging.getLogger(__name__)
 

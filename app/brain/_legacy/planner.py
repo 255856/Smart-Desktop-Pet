@@ -17,8 +17,9 @@ import time
 from typing import Optional
 
 from app.brain.llm_client import ChatMessage, LLMClient
-from app.brain.plan import Plan, parse_plan_from_llm
 from app.engine.tools import ToolRegistry
+
+from app.brain._legacy.plan import Plan, parse_plan_from_llm
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ class Planner:
 
     async def replan(self, original: Plan, history: list[dict] | None = None) -> Plan:
         """根据 Reflector 反馈重做 Plan。"""
-        from app.brain.plan import plan_to_compact_text
+        from app.brain._legacy.plan import plan_to_compact_text
         feedback = plan_to_compact_text(original, last_n=6)
         history = history or []
         prompt = (

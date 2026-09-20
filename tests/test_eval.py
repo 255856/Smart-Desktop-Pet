@@ -13,10 +13,10 @@ from app.engine.tools import Tool, ToolRegistry
 
 def _make_agent_factory():
     """构造一个接收 MockLLMClient 的 agent 工厂（用 PlanExecutor）。"""
-    from app.brain.executor import PlanExecutor
-    from app.brain.plan import Plan, Step
-    from app.brain.planner import Planner
-    from app.brain.reflector import HeuristicReflector
+    from app.brain._legacy.executor import PlanExecutor
+    from app.brain._legacy.plan import Plan, Step
+    from app.brain._legacy.planner import Planner
+    from app.brain._legacy.reflector import HeuristicReflector
 
     reg = ToolRegistry()
     for name, ret in [

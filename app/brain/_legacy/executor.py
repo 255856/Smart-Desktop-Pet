@@ -14,11 +14,12 @@ import json
 import logging
 from typing import AsyncIterator, Callable, Optional
 
-from app.brain.plan import Plan, Step, plan_to_compact_text
-from app.brain.planner import Planner
-from app.brain.reflector import Reflection, make_reflector
 from app.brain.llm_client import LLMClient
 from app.engine.tools import ToolRegistry
+
+from app.brain._legacy.plan import Plan, Step, plan_to_compact_text
+from app.brain._legacy.planner import Planner
+from app.brain._legacy.reflector import Reflection, make_reflector
 
 log = logging.getLogger(__name__)
 

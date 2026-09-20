@@ -10,7 +10,7 @@ import tempfile
 
 import pytest
 
-from app.brain.plan import (
+from app.brain._legacy.plan import (
     Plan,
     Step,
     extract_plan_json,
@@ -103,19 +103,19 @@ class TestPlanState:
 
 class TestReflectorHeuristic:
     def test_final_with_result_ok(self):
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.reflector import HeuristicReflector
         r = HeuristicReflector().reflect(
             Step(id="1", kind="final", result="hi"))
         assert r.verdict == "ok"
 
     def test_final_empty_retry(self):
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.reflector import HeuristicReflector
         r = HeuristicReflector().reflect(
             Step(id="1", kind="final", result=""))
         assert r.verdict == "retry"
 
     def test_tool_error_retry_then_replan(self):
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.reflector import HeuristicReflector
         s = Step(id="1", kind="tool", tool_name="x",
                  arguments={}, status="failed", result="错误：xxx", retry_count=0)
         r1 = HeuristicReflector().reflect(s)
@@ -125,14 +125,14 @@ class TestReflectorHeuristic:
         assert r2.verdict == "replan"
 
     def test_tool_success(self):
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.reflector import HeuristicReflector
         s = Step(id="1", kind="tool", tool_name="x", arguments={},
                  status="done", result="操作成功")
         r = HeuristicReflector().reflect(s)
         assert r.verdict == "ok"
 
     def test_make_reflector_modes(self):
-        from app.brain.reflector import make_reflector
+        from app.brain._legacy.reflector import make_reflector
         assert make_reflector("off") is not None
         assert make_reflector("heuristic") is not None
         assert make_reflector("llm") is not None   # 没传 client 也会回退 heuristic
@@ -157,8 +157,8 @@ class TestExecutor:
         return reg
 
     def test_run_tool_success(self):
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
         from app.engine.tools import ToolRegistry
 
         reg = self._make_registry()
@@ -197,8 +197,8 @@ class TestExecutor:
         assert tool_evt[3] == "mock-ok-result"
 
     def test_run_final_step(self):
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
 
         reg = self._make_registry()
 
@@ -222,9 +222,9 @@ class TestExecutor:
         assert done[1] == "你好主人"
 
     def test_run_retry_then_success(self):
-        from app.brain.executor import PlanExecutor
-        from app.brain.planner import Planner
-        from app.brain.reflector import HeuristicReflector
+        from app.brain._legacy.executor import PlanExecutor
+        from app.brain._legacy.planner import Planner
+        from app.brain._legacy.reflector import HeuristicReflector
 
         reg = self._make_registry()
 
@@ -275,9 +275,9 @@ class TestExecutor:
 
 class TestAgentLoopV2Factory:
     def test_make_agent_loop_default(self):
-        from app.brain.agent_v2 import make_agent_loop
+        from app.brain._legacy.agent_v2 import make_agent_loop
         from app.brain.llm_client import LLMClient
-        from app.brain.plan import Plan
+        from app.brain._legacy.plan import Plan
         from app.engine.tools import Tool, ToolRegistry
         reg = ToolRegistry()
         reg.register(Tool(name="x", description="x",
@@ -291,7 +291,7 @@ class TestAgentLoopV2Factory:
         assert loop.executor is not None
 
     def test_make_agent_loop_single_mode(self):
-        from app.brain.agent_v2 import make_agent_loop
+        from app.brain._legacy.agent_v2 import make_agent_loop
         from app.brain.llm_client import LLMClient
         from app.engine.tools import Tool, ToolRegistry
         reg = ToolRegistry()
