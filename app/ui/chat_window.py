@@ -27,7 +27,7 @@ from app.core.qt_compat import (
     QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QObject, QPixmap, QPlainTextEdit, QPoint, QPushButton,
     QSplitter, Qt, QTextBrowser, QTextCursor, QTextDocument, QToolButton,
-    QVBoxLayout, QWidget, Signal, QThread, QSize, QColor, QEvent, QRect,
+    QVBoxLayout, QWidget, Signal, QThread, QTimer, QSize, QColor, QEvent, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
     QUrl, QBuffer, QByteArray,
     event_global_pos, event_local_pos,
@@ -499,6 +499,15 @@ class ChatWindow(QWidget):
         self._register_avatar_resources()
         self._append_system_welcome()
         self._load_history()  # 从 JSON 加载上次的聊天记录
+
+        # 流式等待中的「三点跳动」动画：常驻定时器，仅在存在占位气泡时重绘
+        self._current_bot_msg = None
+        self._streaming_anchor_pos = None
+        self._typing_frame = 0
+        self._typing_timer = QTimer(self)
+        self._typing_timer.setInterval(380)
+        self._typing_timer.timeout.connect(self._on_typing_tick)
+        self._typing_timer.start()
 
     def _pick_avatar(self) -> Optional[Path]:
         """挑一张头像（优先日常/开心动作的第一帧，兼容旧 idle_calm 命名）。"""
@@ -1514,9 +1523,9 @@ class ChatWindow(QWidget):
         else:
             safe = self._render_markdown(raw)
 
-        # 流式输出中：bot 气泡末尾追加 typing 提示
+        # 流式输出中：bot 气泡末尾追加「三点跳动」等待动画
         if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
-            safe = safe + ' <span style="color:#a78bfa;">⏳</span>'
+            safe = safe + " " + self._typing_dots_html()
 
         # 工具调用（bot 消息专用，放在气泡内底部，浅紫小卡片）
         tools_html = "".join(
@@ -1671,6 +1680,32 @@ class ChatWindow(QWidget):
 
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    # ---------------- 等待动画（三点跳动） ----------------
+    def _typing_dots_html(self) -> str:
+        """回复等待中的「三点跳动」动画：三个圆点依次点亮、循环流动。
+
+        Qt 富文本不支持 CSS @keyframes，所以动画由 QTimer 定时推进
+        _typing_frame（0/1/2）并整体重绘占位气泡实现。
+        """
+        frame = getattr(self, "_typing_frame", 0) % 3
+        dots = []
+        for i in range(3):
+            color = "#8b5cf6" if i == frame else "#d3cdf0"
+            dots.append(f'<span style="color:{color};">●</span>')
+        return (
+            '<span style="font-size:11px;letter-spacing:1px;">'
+            + '&nbsp;&nbsp;'.join(dots) + '</span>'
+        )
+
+    def _on_typing_tick(self) -> None:
+        """定时推进等待动画：仅当存在未完成的流式占位气泡时重绘。"""
+        if getattr(self, "_current_bot_msg", None) is None:
+            return
+        if getattr(self, "_streaming_anchor_pos", None) is None:
+            return
+        self._typing_frame = (getattr(self, "_typing_frame", 0) + 1) % 3
+        self._refresh_streaming_message()
 
     # ---------------- 信号 ----------------
     reply_ready = Signal(str, object, bool)   # text, Emotion, tts_enabled

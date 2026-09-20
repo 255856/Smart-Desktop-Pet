@@ -96,15 +96,19 @@ def test_render_markdown_ordered_list():
 
 
 def test_streaming_indicator():
-    """流式输出：bot 气泡末尾应有 ⏳ 提示（无 emotion 时）。"""
+    """流式输出：bot 气泡末尾应有「三点跳动」等待动画（无 emotion 时）。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
     msg = Message(role="assistant", content="正在思考", emotion=None)
     html = cw._msg_html(msg, streaming_meta="typing…")
-    assert "⏳" in html
-    print("[OK] Streaming indicator (⏳) shown in bot bubble")
+    # 旧的沙漏 ⏳ 已替换为三个圆点
+    assert "⏳" not in html
+    assert html.count("●") == 3, f"应渲染 3 个等待圆点，实际 {html.count('●')}"
+    # 初始帧恰好一个点高亮（主题紫）
+    assert html.count("#8b5cf6") == 1, "初始帧应有且仅有一个点高亮"
+    print("[OK] Streaming indicator (three bouncing dots) shown in bot bubble")
 
 
 def test_system_message():
