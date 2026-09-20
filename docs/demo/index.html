@@ -179,6 +179,42 @@
   #log .err { color: #ff7675; }
   #log .ok { color: #55efc4; }
 
+  /* 环境横幅（GitHub Pages vs 本地） */
+  #env-banner {
+    position: absolute; left: 16px; right: 16px; top: 56px;
+    padding: 10px 14px; border-radius: 8px;
+    background: rgba(255,206,92,.12); border: 1px solid rgba(255,206,92,.35);
+    color: #ffe9a0; font-size: 12px; line-height: 1.6;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    z-index: 5;
+  }
+  #env-banner.hidden { display: none; }
+  #env-banner .label {
+    background: #ffce5c; color: #2d2f4a; padding: 2px 8px;
+    border-radius: 4px; font-weight: 600; font-size: 11px;
+  }
+  #env-banner code {
+    background: rgba(0,0,0,.3); padding: 1px 6px; border-radius: 3px;
+    color: #ffce5c; font-family: ui-monospace, monospace;
+  }
+  #env-banner .close {
+    margin-left: auto; padding: 2px 8px; background: transparent;
+    border: 1px solid rgba(255,255,255,.15); color: #a8b0c0;
+    border-radius: 4px; font-size: 11px; cursor: pointer;
+  }
+
+  /* 快捷 URL 按钮（URL 框旁） */
+  #quick-urls {
+    display: flex; gap: 4px; padding: 0 10px 0 0;
+  }
+  #quick-urls button {
+    padding: 6px 10px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 8px; font-size: 11px; cursor: pointer;
+    white-space: nowrap;
+  }
+  #quick-urls button:hover { background: rgba(108,92,231,.4); border-color: #6c5ce7; }
+
   /* 拖拽 */
   #drop-hint {
     position: absolute; inset: 12px; border: 2px dashed rgba(108,92,231,.5);
@@ -224,11 +260,23 @@
       <!-- 聊天气泡 -->
       <div id="chat-area"></div>
 
+      <!-- 环境横幅（GitHub Pages 检测） -->
+      <div id="env-banner" class="hidden">
+        <span class="label">提示</span>
+        <span id="env-banner-text"></span>
+        <button class="close" id="env-banner-close">×</button>
+      </div>
+
       <!-- 顶部 URL 栏 -->
       <div id="url-bar">
         <input id="model-url" type="text" spellcheck="false"
                placeholder="http://127.0.0.1:8765/<你的模型>/xxx.model3.json" />
         <button id="load-btn">加载 / Load</button>
+        <div id="quick-urls">
+          <button data-url-template="local" title="本地 serve.py (127.0.0.1:8765)">本地</button>
+          <button data-url-template="hiyori" title="Live2D 官方 Hiyori 样例（需本地服务）">Hiyori</button>
+          <button data-url-clear="1" title="清空 URL 框">清空</button>
+        </div>
       </div>
 
       <!-- 日志 -->

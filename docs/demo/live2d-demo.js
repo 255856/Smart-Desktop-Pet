@@ -1,7 +1,7 @@
 "use strict";
 
 /*
- * Desktop Pet · Live2D Demo（尽量还原桌面版功能）
+ * Desktop Pet · Live2D Demo
  * ----------------------------------------------------
  * Web 端 SDK：PIXI v7 + 原生 Cubism Core + pixi-live2d-display 0.3.0（真 Live2D 渲染）
  * 复刻桌面版：
@@ -15,8 +15,36 @@
  */
 
 // ============================================================
-// 0. 工具：日志 / 加载状态 / 工具栏（保留之前版本）
+// 0. 工具：日志 / 加载状态 / 工具栏 / URL 安全校验
 // ============================================================
+// URL 校验：仅允许 http/https；拒绝 localhost/环回/私有 IP（根据 Mimosa 安全约束）
+// 注意：localhost 例外——本地 serve.py 场景需要
+const ALLOW_LOOPBACK = true;  // demo 允许 localhost（用户本地启动 serve.py）
+function validateModelUrl(url) {
+  if (!url || typeof url !== "string") return { ok: false, error: "URL 为空" };
+  const trimmed = url.trim();
+  // 自动修复：用户可能输入 "http:127.0.0.1..." 少一个斜杠 → "http://127.0.0.1..."
+  let fixed = trimmed;
+  fixed = fixed.replace(/^(https?):(?![\/\\])/i, "$1://");
+  if (!/^https?:\/\//i.test(fixed)) return { ok: false, error: "URL 必须以 http:// 或 https:// 开头（不要用 file:// 或 E:/ 本地路径）" };
+
+  try {
+    const u = new URL(fixed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, error: "协议必须是 http 或 https" };
+    const host = u.hostname.toLowerCase();
+    // 检测 localhost / 环回 / 私有 IP
+    const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]"
+                    || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
+                    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    if (isLoopback && !ALLOW_LOOPBACK) return { ok: false, error: "禁止访问 loopback/私有 IP" };
+    // 检查 URL 是否是本地文件路径（兜底）
+    if (/^[a-z]:[\\\/]/i.test(trimmed)) return { ok: false, error: "URL 不能是 Windows 本地路径（如 E:/...）" };
+    return { ok: true, url: fixed };
+  } catch (e) {
+    return { ok: false, error: "URL 格式错误：" + (e.message || e) };
+  }
+}
+
 const logEl = document.getElementById("log");
 function log(msg, level = "") {
   const line = document.createElement("div");
@@ -67,6 +95,10 @@ class Live2DDemo {
   }
   async loadModel(modelUrl) {
     if (!modelUrl) throw new Error("model URL 为空");
+    // URL 校验：http/https only；host 是合法公网/本地（localhost 允许，因为 demo 要支持本地 serve.py）
+    const valid = validateModelUrl(modelUrl);
+    if (!valid.ok) throw new Error(valid.error);
+
     this.shutdown();
     this.ensureApp();
     if (PIXI.live2d && PIXI.live2d.Live2DModel && PIXI.live2d.Live2DModel.registerTicker && PIXI.Ticker) {
@@ -119,7 +151,14 @@ class Live2DDemo {
     } catch (err) {
       hideLoader();
       setStatus("加载失败", "#ff7675");
-      log(`加载失败：${err.message || err}`, "err");
+      const msg = err.message || String(err);
+      log(`加载失败：${msg}`, "err");
+      // 常见错误提示
+      if (/Network error|fetch|404|403|Access-Control|CORS/i.test(msg)) {
+        log("💡 排查：检查 URL 拼写；浏览器拒绝混合 http/https；服务器需带 Access-Control-Allow-Origin: *", "err");
+        log("💡 如果用本地模型：在仓库根目录运行 python docs/demo/serve.py --model-dir <你的模型目录>，然后填 http://127.0.0.1:8765/...", "err");
+        log("💡 GitHub Pages 部署版（https://255856.github.io/Smart-Desktop-Pet/）无法直接访问你本机的 127.0.0.1，参见顶部横幅", "err");
+      }
       throw err;
     }
   }
@@ -657,6 +696,47 @@ async function handleUserInput(text) {
 // ============================================================
 // 11. UI 绑定
 // ============================================================
+// 环境横幅：检测是 GitHub Pages 还是本地访问
+(function setupEnvBanner() {
+  const banner = document.getElementById("env-banner");
+  const text = document.getElementById("env-banner-text");
+  if (!banner || !text) return;
+  const host = location.hostname.toLowerCase();
+  const isGithubPages = /\.github\.io$/.test(host);
+  if (isGithubPages) {
+    text.innerHTML =
+      '你正在访问 <strong>GitHub Pages 部署版</strong>（' + host + '）。' +
+      '这里 <strong>无法直接加载你本机的模型</strong>（127.0.0.1 指向 GitHub 服务器，不是你电脑）。' +
+      '要加载自己的模型：在仓库根运行 <code>python docs/demo/serve.py --port 8765 --root .</code>，' +
+      '然后访问 <code>http://127.0.0.1:8765/docs/demo/index.html</code>。';
+    banner.classList.remove("hidden");
+  }
+  const closeBtn = document.getElementById("env-banner-close");
+  if (closeBtn) closeBtn.addEventListener("click", () => banner.classList.add("hidden"));
+})();
+
+// 快捷 URL 按钮
+document.querySelectorAll("#quick-urls button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const urlInput = document.getElementById("model-url");
+    if (!urlInput) return;
+    if (btn.dataset.urlClear === "1") { urlInput.value = ""; return; }
+    const tpl = btn.dataset.urlTemplate;
+    // "local" → 自动用 prompt 让用户填模型目录
+    // "hiyori" → jsdelivr 上的公开 Hiyori 样例 URL（需本地服务）
+    if (tpl === "local") {
+      const dir = prompt("你的模型目录路径（相对 serve.py 启动的 root）：\n例：assets/live2d/bingtang/bingtang", "");
+      if (!dir) return;
+      urlInput.value = `http://127.0.0.1:8765/${dir}/${encodeURIComponent("免费模型冰糖")}.model3.json`;
+      // 注：上面是示例 URL，请按你的实际 model3.json 文件名调整
+      log("快捷 URL 已填，请核对文件名是否正确再点加载", "ok");
+    } else if (tpl === "hiyori") {
+      urlInput.value = "http://127.0.0.1:8765/path/to/Hiyori/Hiyori.model3.json";
+      log("Hiyori 是 Live2D 官方样例，请把它放到本地服务目录后用此 URL 加载", "ok");
+    }
+  });
+});
+
 let dropHint = null, dragDepth = 0;
 window.addEventListener("dragenter", (e) => {
   e.preventDefault();
