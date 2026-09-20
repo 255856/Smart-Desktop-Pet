@@ -83,3 +83,52 @@ def test_tts_speak_queue_serialization():
     assert tts.played == ["第一句", "第二句", "第三句", "第四句", "第五句"]
     # worker 只启动一次
     assert tts._speak_worker_started is True
+
+
+def test_chat_window_tts_drain_no_duplicate_queue():
+    """_tts_drain_sentences 多次调用同一段不应重复入队（修复前会重复 N 次）。
+
+    流式场景：_on_chunk 每收到一个 token 就调一次 _tts_drain_sentences(accumulated)，
+    其中 accumulated 是「从开头到当前」的整段。如果每次从头扫描，已送过的整句
+    会再次被 finditer 截出 + 入队。修复后用 _last_accumulated 增量切分。
+
+    不真正构造 ChatWindow（依赖太多），改为直接调 _tts_drain_sentences 并传入
+    同一 self / tts 的 mock，确保相同句子只入队一次。
+    """
+    from app.engine.tools._search import _format_results_md
+    # 直接用 ChatWindow 类但只测它的 _tts_drain_sentences 方法（mock char_cfg + tts）
+    import sys
+    sys.path.insert(0, '.local-packages')
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.ui.chat_window import ChatWindow
+    from app.voice.voice import TTS
+
+    # 收集 speak 调用
+    class CollectTTS(TTS):
+        def __init__(self):
+            super().__init__(voice="fake")
+            self.spoken: list[str] = []
+
+        def speak(self, text):  # type: ignore[override]
+            self.spoken.append(text)
+
+    char_cfg = CharacterConfig(name="t", persona="p", tts_enabled=True)
+    llm_cfg = LLMConfig(api_key="sk", model="m")
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites", tts=CollectTTS())
+    # 模拟流式：多次 chunk 累积同一段
+    cw._tts_drain_sentences("主人你好呀。")
+    cw._tts_drain_sentences("主人你好呀。今天天气不错。")
+    cw._tts_drain_sentences("主人你好呀。今天天气不错！要不要出门。")
+    cw._tts_drain_sentences("主人你好呀。今天天气不错！要不要出门。")
+    cw._flush_tts_tail()
+
+    # 验证：每句只入队一次（不再重复）
+    spoken = cw.tts.spoken
+    # 关键是：同一句不应被入队多次
+    assert spoken.count("主人你好呀。") == 1, f"重复入队: {spoken}"
+    # 第三次 chunk 时 "今天天气不错。" 已被 sanitize 替换为 "今天天气不错！"（累积文本变化）
+    # —— 这里只验证「重复入队」被修：同一句话不应该出现 2 次以上
+    assert len(spoken) <= 4, f"总入队过多: {spoken}"

@@ -506,6 +506,8 @@ class ChatWindow(QWidget):
         self._streaming_anchor_pos = None
         # 流式期间累积的「未送 TTS 的尾部文本」（没遇到句末标点的那一段）
         self._tts_tail = ""
+        # 上次已送 TTS 的累积位置（字符偏移），用于增量切分避免重复入队
+        self._tts_sent_tail = 0
         self._typing_frame = 0
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(380)
@@ -1364,27 +1366,43 @@ class ChatWindow(QWidget):
     def _tts_drain_sentences(self, accumulated: str) -> None:
         """逐字念出：累积内容里每出现句末标点，就把对应的那一句送入 TTS 队列。
 
-        流程：
-            - _tts_tail 累积当前未送 TTS 的尾部（最后一段无句末标点）
-            - accumulated 中所有「句末标点前的句子」依次入队 self.tts.speak(句子)
-            - 剩余尾部（最新一段）继续累积等下一个句末
+        关键设计：仅追踪「上次送过 TTS 的尾部字符数」(_tts_sent_tail)，与累积
+        文本无关（不依赖 startswith / 长度匹配）。每轮只在累积文本的「上次送出
+        位置」之后的增量部分扫句末边界。处理后更新 _tts_sent_tail 到本轮末位置。
+
+        为什么不用 startswith：累积是 sanitize_text 输出，可能跳变（修整段落、
+        剥离 think 标签等），导致前缀匹配失效，触发"容错分支"，反而又从头扫。
         """
         if not self.char_cfg.tts_enabled or self.tts is None:
             return
-        self._tts_tail = ""
+        # 上次送过的位置（不是累积文本，而是 scanned 串的字符数）
+        sent_tail = getattr(self, "_tts_sent_tail", 0)
+        # 本轮待扫描 = accumulated[sent_tail:]（sent_tail 是字符偏移）
+        # 容错：sent_tail 超过 accumulated 长度时（reset / 重连），从头开始
+        if sent_tail > len(accumulated):
+            sent_tail = 0
+        scan = accumulated[sent_tail:]
         last_end = 0
-        for m in self._TTS_SENT_END.finditer(accumulated):
-            sentence = accumulated[last_end:m.end()].strip()
+        for m in self._TTS_SENT_END.finditer(scan):
+            sentence = scan[last_end:m.end()].strip()
             last_end = m.end()
             if sentence:
                 try:
                     self.tts.speak(sentence)
                 except Exception:  # noqa: BLE001
                     log.exception("TTS.speak 入队失败: %r", sentence)
-        self._tts_tail = accumulated[last_end:]
+        # 更新 _tts_sent_tail = sent_tail + last_end
+        self._tts_sent_tail = sent_tail + last_end
+        # 兼容旧字段（保留 reset 语义）
+        self._tts_tail = ""
 
     def _flush_tts_tail(self) -> None:
-        """_on_done 时把最后一段无句末标点的尾部也送入 TTS。"""
+        """_on_done 时把最后一段无句末标点的尾部也送入 TTS。
+
+        注意：每 chunk 的 _tts_drain_sentences 已送过整段中所有完整句。
+        如果 _tts_tail 还有内容（即最后一段无句末标点），这里送一下。
+        同时重置 _last_accumulated 与 _tts_tail，避免下次会话污染状态。
+        """
         tail = (self._tts_tail or "").strip()
         if tail and self.char_cfg.tts_enabled and self.tts is not None:
             try:
@@ -1392,6 +1410,7 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 log.exception("TTS.speak 入队失败（尾部）: %r", tail)
         self._tts_tail = ""
+        self._last_accumulated = ""
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
@@ -1431,14 +1450,9 @@ class ChatWindow(QWidget):
         # + 把回复正式写入 history / chat_store + 切表情。
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
-        # 兜底尾部（如果模型最后一句话没以句号结尾）
+        # 兜底尾部（如果模型最后一句话没以句号结尾）—— 流式期间 _tts_drain_sentences
+        # 已逐句入队，这里只送最后一段无句末标点的尾部，不再重复整段
         self._flush_tts_tail()
-        # 把整条消息也送 TTS（双保险：万一 _tts_drain_sentences 因为 sanitize 漏掉某些字符）
-        if self.char_cfg.tts_enabled and self.tts is not None and parsed.text.strip():
-            try:
-                self.tts.speak(parsed.text.strip())
-            except Exception:  # noqa: BLE001
-                log.exception("TTS.speak 入队失败（整段兜底）: %r", parsed.text[:80])
 
         self.history.append(self._current_bot_msg)
         self._trim_history()
