@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 from typing import Optional
 
@@ -98,19 +99,19 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
 def _tavily_search(query: str, n: int, api_key: str, timeout_s: float) -> list[dict]:
     """调 Tavily /search API。返回 [{title, url, content}, ...]。
 
-    默认 advanced depth（更精准）+ days=30（默认近 30 天结果），
-    解决「basic 返回 5 年前剧透文」这种过期结果问题。调用方可在 query
-    里通过「2024」「最新」等关键词精确化 Tavily 的过滤。
+    关键：raw_content（页面清理后的正文）+ max_results 上调到 10，content 截取 800 字。
+    解决 Tavily 默认 content 只有导航/简介导致模型拿不到实质内容的问题。
     """
     import httpx
     payload = {
         "api_key": api_key,
         "query": query,
-        "max_results": n,
-        "search_depth": "advanced",   # 比 basic 精准，覆盖更多源
+        "max_results": min(max(n * 2, 10), 10),  # 多取一些给 _clean_content 过滤
+        "search_depth": "advanced",
         "include_answer": False,
+        "include_raw_content": True,             # 拿正文（不是 snippet），让模型看到完整内容
         "topic": "general",
-        "days": 30,                 # 默认近 30 天（搜索「最新一集」类时效性内容更准）
+        "days": 30,
     }
     with httpx.Client(timeout=timeout_s) as client:
         r = client.post("https://api.tavily.com/search", json=payload)
@@ -119,12 +120,60 @@ def _tavily_search(query: str, n: int, api_key: str, timeout_s: float) -> list[d
     raw = obj.get("results") or []
     out = []
     for it in raw[:n]:
+        # raw_content 比 content 更长（带正文），优先用；fallback 到 content
+        body = (it.get("raw_content") or it.get("content") or "").strip()
+        body = _clean_search_body(body)
         out.append({
             "title": (it.get("title") or "").strip(),
             "url": (it.get("url") or "").strip(),
-            "content": (it.get("content") or "").strip()[:600],
+            "content": body[:800],
         })
     return out
+
+
+# 噪音关键词：网站导航/登录/版权/相关推荐类 —— 几乎不含实质内容
+_SEARCH_NOISE_PATTERNS = (
+    re.compile(r"(网页新闻|贴吧|知道|网盘|图片|视频|地图|文库|资讯|采购|"
+                r"百度首页|登录|注册|设置|帮助|免责|反馈|投诉|下载|客户端|"
+                r"热门搜索|搜索历史|收藏|评论|点赞|微博|微信|空间|"
+                r"国际版|app|下载|扫一扫|二维码|分享到)",
+                re.UNICODE),
+    re.compile(r"^[^，。！？\n]*?(?:首页|帮助|登录|注册)\s*[^，。！？\n]{0,30}$",
+               re.UNICODE),
+    re.compile(r"={3,}|#{3,}|\*{3,}|-{3,}|_{3,}", re.UNICODE),  # ###### 分隔符行
+)
+
+
+def _clean_search_body(text: str) -> str:
+    """清洗 Tavily 抓取结果中的导航/广告/格式噪音。
+
+    百度/知乎/B站等页面的 snippet 经常含大量「网页新闻 贴吧 网盘 图片 视频
+    地图 文库 资讯 采购 百科 百度首页 登录 注册」这类导航词。模型看到这些
+    不知道答案的内容就会瞎编。逐行丢 + 去重，保留有实质文字的行。
+    """
+    if not text:
+        return text
+    kept_lines: list[str] = []
+    seen: set[str] = set()
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        # 整行噪音词占比超 40% 跳过
+        noise_count = sum(1 for p in _SEARCH_NOISE_PATTERNS if p.search(line))
+        if noise_count >= 1 and len(line) < 60:
+            # 短行大概率是导航/按钮
+            continue
+        # 去重（同一行重复出现）
+        if line in seen:
+            continue
+        seen.add(line)
+        kept_lines.append(line)
+    # 把多条连续 ==== #### 等分隔符清理掉
+    result = "\n".join(kept_lines)
+    result = re.sub(r"\s*={3,}\s*", "\n", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def _ddg_search(query: str, n: int, timeout_s: float) -> list[dict]:
@@ -159,7 +208,11 @@ def _ddg_search(query: str, n: int, timeout_s: float) -> list[dict]:
 
 
 def _format_results_md(results: list[dict], backend: str) -> str:
-    """格式化为 Markdown 文本，便于模型总结。"""
+    """格式化为 Markdown 文本，便于模型总结。
+
+    每个结果多行展示（标题 / 摘要 / URL），content 已 _clean_search_body 清洗。
+    content 截到 400 字（先前 240 太少，复杂问题拿不到关键信息）。
+    """
     if not results:
         return "（无结果）"
     lines = [f"搜索结果（{backend}）："]
@@ -167,8 +220,8 @@ def _format_results_md(results: list[dict], backend: str) -> str:
         title = r.get("title") or "(无标题)"
         url = r.get("url") or ""
         content = (r.get("content") or "").strip().replace("\n", " ")
-        if len(content) > 240:
-            content = content[:240] + "…"
+        if len(content) > 400:
+            content = content[:400] + "…"
         lines.append(f"\n{i}. {title}\n   {content}\n   {url}")
     return "\n".join(lines)
 
