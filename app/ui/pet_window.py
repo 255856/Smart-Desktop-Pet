@@ -1548,12 +1548,16 @@ class PetWindow(QWidget):
         self._build_feed_menu(menu)
         menu.addSeparator()
 
-        # === 小游戏（子菜单，预留以后扩展；目前含五子棋） ===
+        # === 小游戏（子菜单，预留以后扩展；目前含五子棋 / 狼人杀） ===
         games_menu = menu.addMenu("小游戏")
         a_gomoku = QAction("五子棋", self)
         a_gomoku.triggered.connect(
             lambda _=False: self.game_requested.emit("gomoku"))
         games_menu.addAction(a_gomoku)
+        a_werewolf = QAction("狼人杀（多人推理）", self)
+        a_werewolf.triggered.connect(
+            lambda _=False: self.game_requested.emit("werewolf"))
+        games_menu.addAction(a_werewolf)
         menu.addSeparator()
 
         # === 每日签到（每天一次 +100 金币；已签则禁用） ===

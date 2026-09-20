@@ -214,6 +214,7 @@ class UIController(QObject):
         self.pet.checkin_requested.connect(self._on_checkin)
         self.pet.checkin_status_fn = lambda: self.state.has_checked_in_today()
         self._gomoku_window = None
+        self._werewolf_window = None
 
         # --- 状态管理器信号 ---
         self.state_mgr.food_low.connect(self._on_food_low)
@@ -276,6 +277,41 @@ class UIController(QObject):
             self._show_gomoku()
         else:
             log.warning("未知小游戏：%s", game_id)
+
+    def _show_werewolf(self) -> None:
+        """打开狼人杀窗口（标准 9 人局，桌宠当主持人上帝）。"""
+        from app.ui.werewolf_window import WerewolfWindow
+        ww = self._werewolf_window
+        if ww is None or not ww.isVisible():
+            enable_llm = bool(self.cfg.has_api_key())
+            pet_name = getattr(self.cfg.character, "name", "桌宠") or "桌宠"
+            ww = WerewolfWindow(
+                llm_cfg=self.cfg.llm, enable_llm=enable_llm,
+                player_name="你", pet_name=pet_name)
+            ww.host_spoke.connect(self._on_werewolf_host)
+            ww.game_finished.connect(self._on_werewolf_finished)
+            ww.show()
+            self._werewolf_window = ww
+        else:
+            ww.raise_()
+            ww.activateWindow()
+
+    def _on_werewolf_host(self, text: str) -> None:
+        # 只有主持人（桌宠）的台词走气泡 + TTS；NPC 发言仅显示在窗口内
+        self._pet_speak(text, duration_ms=5000)
+
+    def _on_werewolf_finished(self, result: dict) -> None:
+        # 胜 30 金币、负/参与 5 金币（受每日游戏金币上限约束）
+        amount = 30 if result.get("player_won") else 5
+        granted = self.state.add_game_reward(amount) if amount else 0
+        self.state.on_interact(feeling_gain=2)
+        if granted:
+            self.pet.show_bubble(f"本局金币 +{granted:.0f}", duration_ms=2500)
+        acts = ("jump", "spin", "cheek") if result.get("player_won") \
+            else ("stretch", "swim")
+        self._pet_react(acts)
+        log.info("狼人杀结束 winner=%s player_won=%s 金币 +%.0f",
+                 result.get("winner"), result.get("player_won"), granted)
 
     def _show_gomoku(self) -> None:
         """打开五子棋窗口（重复打开复用已存在窗口）。"""
