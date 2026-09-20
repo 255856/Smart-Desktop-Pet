@@ -139,26 +139,43 @@ https://255856.github.io/Smart-Desktop-Pet/
 | 现象 | 原因 / 解法 |
 |---|---|
 | `404` | Pages 没启用 → 走上面"启用 GitHub Pages" |
-| 页面 200 但空白 | CDN 被墙 → 见下"CDN 加速" |
+| 页面 200 但空白 | 查看右侧日志 "SDK 加载完成" 段，看每个 SDK 实际从哪个源加载的；都从 jsdelivr/unpkg 加载说明 vendor 没被部署，重新跑 Actions |
 | Actions 一直排队 | Settings → Actions → 启用 workflow 权限 |
 | `gh-pages` 分支冲突 | 用 `git push -f`（孤儿分支 + 强制推送是正常流程）|
 
 ### CDN 加速（如果 jsdelivr / cubism.live2d.com 慢）
 
-把 `docs/demo/index.html` 里 3 个 `<script src="https://...">` 改为相对路径：
+~~把 vendor JS 拷到 docs/demo/vendor/~~ **已默认启用**，见下面说明。
 
-```bash
-mkdir -p docs/demo/vendor
-cp ../app/animation/cubism-sdk/pixi.min.js docs/demo/vendor/
-cp ../app/animation/cubism-sdk/cubism4.min.js docs/demo/vendor/
-# live2dcubismcore.min.js 从 Live2D 官方下载放到 vendor/
+**加载策略：vendor → jsdelivr → unpkg 三级 fallback**
+
+- ✅ 首选 `docs/demo/vendor/*.js`（零网络、零延迟、GitHub Pages 也能加载）
+- ✅ vendor 加载失败时自动回退 jsdelivr
+- ✅ jsdelivr 失败时自动回退 unpkg
+- ✅ 三个都失败才报"SDK 加载失败"
+
+vendor 文件夹已包含 3 个 JS（808KB 总大小）：
+
+```
+docs/demo/vendor/
+├── pixi.min.js                   456 KB
+├── cubism4.min.js                146 KB
+└── live2dcubismcore.min.js       207 KB
 ```
 
-然后把 HTML 里的 CDN URL 改成：
-```html
-<script src="vendor/pixi.min.js"></script>
-<script src="vendor/cubism4.min.js"></script>
-<script src="vendor/live2dcubismcore.min.js"></script>
+**与桌面版保持同源同版本**（来自 `app/animation/cubism-sdk/`，与
+`live2d_bridge.html` 用的完全一致），不会因为 SDK 版本不一致出现玄学 bug。
+
+部署时 `vendor/` 会被一起部署到 gh-pages，浏览器加载页面时**第一次请求
+就拿到 SDK**，不需要走任何 CDN。
+
+页面右侧日志会显示每个 SDK 实际从哪个源加载的，方便排查：
+
+```
+SDK 加载完成：
+  pixi      ← vendor/pixi.min.js
+  cubism4   ← vendor/cubism4.min.js
+  core      ← vendor/live2dcubismcore.min.js  ← ok
 ```
 
 ---

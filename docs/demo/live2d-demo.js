@@ -325,11 +325,31 @@ document.getElementById("stage").addEventListener("pointerdown", (e) => {
 
 // ---------------- 启动 ----------------
 window.addEventListener("DOMContentLoaded", () => {
-  if (typeof PIXI !== "undefined" && PIXI.live2d && PIXI.live2d.Live2DModel) {
-    log(`Pixi v${PIXI.VERSION} · cubism plugin OK`, "ok");
-    setStatus("就绪 · 请填写 Model URL", "#55efc4");
-  } else {
-    setStatus("SDK 加载失败（检查 CDN）", "#ff7675");
-    log("Pixi / cubism 插件未加载", "err");
-  }
+  // SDK 走多 CDN fallback loader，await 它确认全部就绪
+  (async () => {
+    try {
+      if (window.__sdkReady) await window.__sdkReady;
+    } catch (e) {
+      setStatus("SDK 加载失败 · 看下方日志", "#ff7675");
+      log("全部 SDK 源加载失败：" + (e.message || e), "err");
+      log("可能原因：网络受限 / vendor 文件丢失", "err");
+      log("如部署到 GitHub Pages，确保 docs/demo/vendor/ 3 个 JS 已上传", "err");
+      return;
+    }
+
+    // 加载来源展示（调试用：哪个 CDN 生效）
+    const st = window.__sdkLoadStatus || {};
+    log(`SDK 加载完成：`);
+    if (st.pixi)     log(`  pixi      ← ${st.pixi.replace(/^ok:/, "")}`);
+    if (st.cubism4)  log(`  cubism4   ← ${st.cubism4.replace(/^ok:/, "")}`);
+    if (st.core)     log(`  core      ← ${st.core.replace(/^ok:/, "")}`, "ok");
+
+    if (typeof PIXI !== "undefined" && PIXI.live2d && PIXI.live2d.Live2DModel) {
+      log(`Pixi v${PIXI.VERSION} · cubism plugin OK`, "ok");
+      setStatus("就绪 · 请填写 Model URL", "#55efc4");
+    } else {
+      setStatus("SDK 加载失败（脚本已加载但 PIXI 未注册）", "#ff7675");
+      log("Pixi / cubism 插件未注册", "err");
+    }
+  })();
 });

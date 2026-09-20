@@ -8,11 +8,16 @@
 
 规则约定（第一版，偏"明牌 + 陪聊"，降低 LLM 作弊与理解成本）：
     - 9 个玩家席位：1 名真人 + 8 名 NPC；桌宠（主持人上帝）不占席位。
-    - 夜晚顺序：狼人击杀 → 预言家查验 → 女巫救人/毒人（一夜最多用一瓶药）。
+    - 夜晚顺序：狼人击杀（狼队有独立的"狼频道"内部讨论）→ 预言家查验
+      → 女巫救人/毒人（一夜最多用一瓶药）。
     - 女巫首夜可自救；女巫药各 1 瓶。
     - 猎人被狼人杀死或被投票放逐时可开枪带走 1 人；被女巫毒死不能开枪。
     - 被刀或被毒的玩家当晚结算，死者翻牌公开身份（明牌）。
-    - 白天：公布死亡 → 遗言 → 依次发言 → 投票；平票则无人出局（平安日）。
+    - 第一天白天先进行【警长竞选】：参选者举手→竞选演说→警下投票选出警长；
+      平票则平票者 PK 演说再投，仍平票则本局无警长。警长 1.5 票，死亡时可移交
+      警徽（或撕掉）。
+    - 白天：公布死亡 → 遗言 → 依次发言 → 投票；平票则平票者 PK 发言后只在
+      他们之间再投，仍平票则无人出局（平安日）。
     - 胜负（屠边）：狼人全灭 → 好人胜；平民全灭或神职全灭 → 狼人胜。
 """
 from __future__ import annotations
@@ -48,9 +53,19 @@ ROLESET_9: List[str] = [WOLF, WOLF, WOLF, SEER, WITCH, HUNTER,
 # ---------------- 阶段 ----------------
 PHASE_NIGHT = "night"
 PHASE_REVEAL = "reveal"
+PHASE_CAMPAIGN = "campaign"
 PHASE_SPEECH = "speech"
 PHASE_VOTE = "vote"
 PHASE_OVER = "over"
+
+# 发言类型（kind）：普通发言 / 遗言 / 竞选演说 / PK 发言 / 主持人
+SPEECH_SPEECH = "speech"
+SPEECH_LAST = "last_words"
+SPEECH_CAMPAIGN = "campaign"
+SPEECH_PK = "pk"
+
+# 警长票权重（1.5 票）
+SHERIFF_VOTE_WEIGHT = 1.5
 
 # 死因
 CAUSE_WOLF = "wolf"
@@ -105,7 +120,7 @@ class NightOutcome:
 @dataclass
 class VoteOutcome:
     votes: Dict[int, int] = field(default_factory=dict)   # 投票人 → 候选人
-    tally: Dict[int, int] = field(default_factory=dict)   # 候选人 → 票数
+    tally: Dict[int, float] = field(default_factory=dict)  # 候选人 → 票数（警长 1.5）
     exiled: Optional[int] = None
     tied: bool = False
 
@@ -116,7 +131,16 @@ class SpeechRecord:
     name: str
     text: str
     day: int
-    kind: str = "speech"   # speech / last_words / host / night
+    kind: str = "speech"   # speech / last_words / campaign / pk
+
+
+@dataclass
+class WolfChatRecord:
+    """狼频道（夜晚狼队内部讨论，与公共频道分离，仅狼可见）。"""
+    day: int
+    seat: int
+    name: str
+    text: str
 
 
 @dataclass
@@ -158,6 +182,10 @@ class WerewolfGame:
         self.last_outcome: Optional[NightOutcome] = None
         self.dealt = False
         self._night_dead: List[int] = []
+        # 警长座位（None 表示无警长）
+        self.sheriff: Optional[int] = None
+        # 狼频道（夜晚狼队内部讨论，跨晚保留，仅狼视角可见）
+        self.wolf_chat: List[WolfChatRecord] = []
 
     # ---------------- 基础查询 ----------------
     def player(self, seat: int) -> Player:
@@ -273,17 +301,28 @@ class WerewolfGame:
             self._night_dead.append(seat)
 
     # ---------------- 白天 / 投票 ----------------
-    def tally_votes(self, votes: Dict[int, int]) -> VoteOutcome:
-        """统计投票。votes: {投票人seat: 目标seat}；返回唱票结果，平票则无人出局。"""
-        tally: Dict[int, int] = {}
+    def tally_votes(self, votes: Dict[int, int],
+                    weights: Optional[Dict[int, float]] = None,
+                    allowed: Optional[List[int]] = None) -> VoteOutcome:
+        """统计投票。
+
+        - votes: {投票人seat: 目标seat}
+        - weights: 投票人权重（警长 1.5 票）；缺省均 1 票
+        - allowed: 仅允许投给这些座位（PK 时限定平票者）；None 不限
+        平票（最高票并列）tied=True、exiled=None。
+        """
+        weights = weights or {}
+        tally: Dict[int, float] = {}
         valid_votes: Dict[int, int] = {}
         for src, tgt in votes.items():
             if not self.players[src].alive or not self.players[tgt].alive:
                 continue
             if src == tgt:
                 continue
+            if allowed is not None and tgt not in allowed:
+                continue
             valid_votes[src] = tgt
-            tally[tgt] = tally.get(tgt, 0) + 1
+            tally[tgt] = tally.get(tgt, 0) + weights.get(src, 1.0)
         vo = VoteOutcome(votes=valid_votes, tally=tally)
         if not tally:
             vo.tied = True
@@ -291,10 +330,35 @@ class WerewolfGame:
         maxv = max(tally.values())
         leaders = [s for s, n in tally.items() if n == maxv]
         if len(leaders) > 1:
-            vo.tied = True          # 平票：无人出局
+            vo.tied = True          # 平票
         else:
             vo.exiled = leaders[0]
         return vo
+
+    # ---------------- 警长 ----------------
+    def vote_weights(self) -> Dict[int, float]:
+        """当前生效的投票权重（警长活着时 1.5 票）。"""
+        if self.sheriff is not None and self.players[self.sheriff].alive:
+            return {self.sheriff: SHERIFF_VOTE_WEIGHT}
+        return {}
+
+    def make_sheriff(self, seat: int) -> None:
+        self.sheriff = seat
+
+    def transfer_sheriff(self, target: Optional[int]) -> None:
+        """警长死亡后移交警徽：target 为活人则继任，None 表示撕警徽。"""
+        if target is not None and self.players[target].alive:
+            self.sheriff = target
+        else:
+            self.sheriff = None
+
+    # ---------------- 狼频道 ----------------
+    def add_wolf_chat(self, seat: int, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        self.wolf_chat.append(WolfChatRecord(
+            day=self.day, seat=seat, name=self.players[seat].name, text=text))
 
     def exile(self, seat: int) -> None:
         """投票放逐（翻牌）。"""
