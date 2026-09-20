@@ -49,6 +49,8 @@ JSON_TARGET = '{"target": 座位号}'
 JSON_WOLF = '{"target": 座位号, "reason": "一句话理由"}'
 JSON_WITCH = ('{"use": "antidote 或 poison 或 none", '
               '"target": 座位号(仅毒需要)}')
+JSON_RUN = '{"run": true 或 false}'
+JSON_TRANSFER = '{"target": 座位号 或 null（撕掉警徽）}'
 
 
 def extract_json(text: str) -> Optional[dict]:
@@ -86,6 +88,13 @@ def _perspective_text(view: dict) -> str:
         lines.append(f"  {s['seat']}号 {s['name']}{tag}：{state}{role}")
     if view.get("wolf_teammates"):
         lines.append("你的狼人队友座位：" + "、".join(map(str, view["wolf_teammates"])))
+    if view.get("sheriff") is not None:
+        lines.append(f"当前警长：{view['sheriff']}号（警长投票算 1.5 票，"
+                     "出局前可移交警徽）。")
+    if view.get("wolf_chat"):
+        lines.append("狼频道讨论记录（只有狼人能看见，切勿对好人提及）：")
+        for c in view["wolf_chat"][-15:]:
+            lines.append(f"  {c['name']}：{c['text']}")
     if view.get("seer_checks"):
         if view["seer_checks"]:
             lines.append("你的查验结果：")
@@ -98,7 +107,20 @@ def _perspective_text(view: dict) -> str:
         lines.append("公开事件：")
         for e in view["public_events"]:
             lines.append(f"  · {e}")
+    if view.get("speeches"):
+        lines.append("公共频道发言（所有活人可见，包括玩家本人的发言）：")
+        for s in view["speeches"][-14:]: 
+            tag = _KIND_TAG.get(s["kind"], "发言")
+            lines.append(f"  [{tag}] {s['name']}：{s['text']}")
     return "\n".join(lines)
+
+
+_KIND_TAG = {
+    "speech": "发言",
+    "last_words": "遗言",
+    "campaign": "竞选",
+    "pk": "PK",
+}
 
 
 def _speech_text(view: dict) -> str:
@@ -271,6 +293,79 @@ class WerewolfAgent:
             return int(obj["target"])
         return self._scripted_hunter(candidates)
 
+    # ---------------- 警长竞选 ----------------
+    async def run_for_sheriff(self) -> bool:
+        prompt = (
+            "第一天白天，现在竞选警长。警长有 1.5 票、负责归票，出局前可移交。\n"
+            "结合你的身份决定是否上台（预言家通常会跳，女巫一般藏着）。\n"
+            f"输出 JSON：{JSON_RUN}")
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict) and isinstance(obj.get("run"), bool):
+            return obj["run"]
+        return self._scripted_run_sheriff()
+
+    async def campaign_speech(self) -> str:
+        prompt = (
+            "你参与警长竞选，请发表一段竞选演说（1-2 句，说明你值得信任、"
+            "你会如何带好人获胜；预言家可以跳明并报验人）。\n"
+            f"输出 JSON：{JSON_SPEECH}")
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
+            return str(obj["speech"]).strip()
+        return self._scripted_campaign_speech()
+
+    async def vote_sheriff(self, candidates: List[int]) -> Optional[int]:
+        prompt = (
+            "警下的人请从参选者中投票选出警长（你没有上台，只能投参选者）：\n"
+            f"参选者：{candidates}\n请投给你认为最可信、最像好人的人。\n"
+            f"输出 JSON：{JSON_TARGET}")
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
+                                                        candidates):
+            return int(obj["target"])
+        return self._scripted_vote_sheriff(candidates)
+
+    async def pk_speech(self) -> str:
+        prompt = (
+            "你在投票中平票，进入 PK。请发言说服大家投你、不要出你"
+            "（1-2 句，可表水、可点出你怀疑的狼）。\n"
+            f"输出 JSON：{JSON_SPEECH}")
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
+            return str(obj["speech"]).strip()
+        return self._scripted_pk_speech()
+
+    async def transfer_badge(self, candidates: List[int]) -> Optional[int]:
+        prompt = (
+            "你是警长且即将出局，请选择把警徽移交给谁（优先给信任的好神职/"
+            "预言家查验过的好人；若没有可信的人可以撕掉）。\n"
+            f"存活候选：{candidates}\n输出 JSON：{JSON_TRANSFER}")
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict):
+            t = obj.get("target")
+            if t is None:
+                return None
+            if self._valid_target(t, candidates):
+                return int(t)
+        return self._scripted_transfer_badge(candidates)
+
+    # ---------------- 狼频道 ----------------
+    async def wolf_chat_message(self, targets: List[int]) -> Tuple[str, Optional[int]]:
+        """夜晚狼频道讨论：返回 (频道发言, 建议击杀目标)。"""
+        prompt = (
+            "夜晚狼频道（只有狼队友能看见，与公共频道隔离）。请和队友讨论"
+            "今晚刀谁（说一句话，指出疑似神职的目标），并给出你的建议目标。\n"
+            f"可刀目标：{targets}\n输出 JSON："
+            '{"speech": "讨论发言", "target": 建议座位号}')
+        obj = await self._ask(prompt, want_json=True)
+        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
+            text = str(obj["speech"]).strip()
+            t = None
+            if self._valid_target(obj.get("target"), targets):
+                t = int(obj["target"])
+            return text, t
+        return self._scripted_wolf_chat(targets)
+
     # ================= 脚本降级（无 key / 解析失败） =================
     def _alive_non_self(self) -> List[int]:
         return [p.seat for p in self.game.alive_players()
@@ -345,6 +440,62 @@ class WerewolfAgent:
         known = self._known_wolves()
         pool = [w for w in known if w in candidates] or candidates
         return self.rng.choice(pool) if pool else None
+
+    # ---------- 警长 / PK / 狼频道 降级 ----------
+    def _scripted_run_sheriff(self) -> bool:
+        r = self.player.role
+        if r == SEER:
+            return True
+        if r == HUNTER:
+            return self.rng.random() < 0.7
+        if r == WITCH:
+            return False
+        if r == WOLF:
+            return self.rng.random() < 0.35
+        return self.rng.random() < 0.25
+
+    def _scripted_campaign_speech(self) -> str:
+        if self.player.role == SEER and self.game.seer_history:
+            d, t, is_wolf = self.game.seer_history[-1]
+            verdict = "狼人" if is_wolf else "好人"
+            return f"我是预言家！我查验了 {t} 号是{verdict}，请把警徽给我，我来带节奏！"
+        if self.player.role == SEER:
+            return "我是预言家，警徽给我，我每晚都能报验人！"
+        return "我是铁好人，思路清晰，警长给我，我带大家归票！"
+
+    def _scripted_vote_sheriff(self, candidates: List[int]) -> Optional[int]:
+        return self.rng.choice(candidates) if candidates else None
+
+    def _scripted_pk_speech(self) -> str:
+        known = self._known_wolves()
+        if known:
+            return f"我是好人，出我就亏了，我怀疑 {known[0]} 号，我们一起投他！"
+        return "我真的是好人，大家别冲动，给我个机会，先投真狼！"
+
+    def _scripted_transfer_badge(self, candidates: List[int]) -> Optional[int]:
+        v = self.game.perspective(self.seat)
+        # 预言家查验过的好人优先
+        for c in v.get("seer_checks", []) or []:
+            if not c["is_wolf"] and c["target"] in candidates:
+                return c["target"]
+        if self.player.role == WOLF:
+            wolves = [s for s in candidates if self.game.player(s).role == WOLF]
+            if wolves:
+                return wolves[0]
+        if self.rng.random() < 0.2:
+            return None                       # 撕掉警徽
+        return self.rng.choice(candidates) if candidates else None
+
+    def _scripted_wolf_chat(self, targets: List[int]) -> Tuple[str, Optional[int]]:
+        gods = [s for s in targets
+                if self.game.player(s).role in (SEER, WITCH, HUNTER)]
+        if gods and self.rng.random() < 0.6:
+            t = self.rng.choice(gods)
+            return f"我觉得 {t} 号像神职，建议今晚先刀。", t
+        if targets:
+            t = self.rng.choice(targets)
+            return f"我看 {t} 号可以刀，看你们怎么想。", t
+        return "今晚听你们的，我跟着刀。", None
 
 
 # ---------------- 主持人 Agent（桌宠） ----------------

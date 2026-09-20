@@ -432,6 +432,7 @@ class WerewolfGame:
             "self_camp": camp_of(v.role),
             "seats": seats,
             "day": self.day,
+            "sheriff": self.sheriff,
             "public_events": [e.text for e in self.public_events],
             "speeches": [
                 {"seat": s.seat, "name": s.name, "text": s.text,
@@ -442,6 +443,10 @@ class WerewolfGame:
         if v.role == WOLF:
             view["wolf_teammates"] = [p.seat for p in self.players
                                       if p.role == WOLF and p.seat != viewer]
+            # 狼频道（仅狼可见，跨晚累积）
+            view["wolf_chat"] = [
+                {"day": c.day, "seat": c.seat, "name": c.name, "text": c.text}
+                for c in self.wolf_chat]
         if v.role == SEER:
             view["seer_checks"] = [
                 {"target": t, "is_wolf": f} for _, t, f in self.seer_history]
