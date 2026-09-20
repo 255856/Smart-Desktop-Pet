@@ -1330,7 +1330,9 @@ class ChatWindow(QWidget):
         if self._current_bot_msg is None:
             return
         self._current_bot_msg.content += tok
-        self._refresh_streaming_message()
+        # 流式期间**不在 chat_view 实时渲染**——避免用户提前看到完整回复
+        # 与 TTS 错位（语音合成 5 秒期间文字已"显示完"）。
+        # 只在桌宠头顶气泡驱动流式打字机（streaming_chunk → ui_controller → show_streaming_bubble）。
         # Trace：累计的完整文本（每 chunk 一次）
         if self.trace is not None and self._trace_run_id and tok:
             self.trace.record(self._trace_run_id, "text", {
@@ -1356,75 +1358,50 @@ class ChatWindow(QWidget):
         # 最终清洗（每个 chunk 内 sanitize 过，但跨 chunk 的长括号段要等全文）
         from app.brain.llm_client import sanitize_text
         parsed.text = sanitize_text(parsed.text)
-        # 仅在模型真的没标情绪（tag_found=False）时才按关键词兜底；
-        # 之前用「parse 后文本 == 流式累积文本」判断，sanitize_text 跨 chunk 的差异
-        # 会让 [happy] 被错误地当成「没标」而覆盖。
+        # 仅在模型真的没标情绪（tag_found=False）时才按关键词兜底
         if not parsed.tag_found:
             parsed.emotion = guess_emotion(parsed.text)
+        # 兜底：整段被 sanitize 丢空（纯英文 / 模型暴走）时给一条默认中文，避免静默
+        if not parsed.text.strip():
+            parsed.text = "（这次不知道怎么说啦）"
 
-        # 同步：聊天窗最终回复与 TTS 音频同步显示
-        # - 流式气泡阶段：已逐字 emit streaming_chunk（用户看着文字冒出来）
-        # - 本步骤：先 commit 数据（history / chat_store / refresh）+ 幻觉检测
-        # - 然后：如果启用了 TTS，先在后台 QThread 把音频合成好，再 emit reply_ready
-        #   触发 UI 切表情 + speak 播放。避免"文字先显示完，6 秒后才出声"。
+        # 先填充当前 bot 消息（history / chat_store / refresh 全部延后到 prepare 完成）
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
-        self.history.append(self._current_bot_msg)
-        self._trim_history()
-        # 持久化 bot 消息
-        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
-        self.chat_store.add(
-            "assistant", parsed.text,
-            emotion=parsed.emotion.value if parsed.emotion else "",
-            tools=tools_list,
-        )
-        self._refresh_streaming_message(finished=True, emotion=parsed.emotion.value)
 
-        # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
-        # —— 这是 LLM 的常见幻觉，主人看不到任何效果，体验崩溃。
-        # 在 chat_view 末尾追加一条系统消息明确告知主人「我没真的做」。
-        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
-
-        # Trace：完成 run
-        if self.trace is not None and self._trace_run_id:
-            try:
-                self.trace.record(self._trace_run_id, "finish", {
-                    "emotion": parsed.emotion.value if parsed.emotion else "",
-                    "tool_count": len(self._current_bot_msg.tools),
-                })
-                self.trace.end_run(self._trace_run_id, parsed.text, status="success")
-            except Exception:  # noqa: BLE001
-                pass
-            self._trace_run_id = None
+        # 立即把流式占位就地刷新为「准备语音…」占位文字，让用户知道在等音频
+        # （流式期间 _on_chunk 不再调用 _refresh_streaming_message，所以此刻占位是空 div）
+        self._refresh_streaming_message(finished=False, emotion="")
         self._generating = False
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        # 通知桌宠：思考结束
+        # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
         self.thinking_stopped.emit()
-        # 通知桌宠气泡：流式输出结束（流式气泡停留，供后续切最终文本时对比）
         self.streaming_done.emit()
 
         # 通知外部（pet 窗口）切表情 + 触发 TTS
-        # 若 TTS 启用，先在后台合成音频，合成好后再 emit（保证声音与文字一起出现）
+        # 若 TTS 启用，先在后台 QThread 合成音频，合成好后才把回复正式显示到 chat_view
+        # + history + 触发 speak 播放。保证声音与文字一起出现。
         tts_enabled = bool(self.char_cfg.tts_enabled)
         text = parsed.text
         emotion = parsed.emotion
         if tts_enabled and self.tts is not None and text.strip():
             self._prepare_tts_then_emit(text, emotion)
         else:
+            # TTS 关闭：直接显示最终回复（无需等待）
+            self._commit_reply(text, emotion, tts_enabled=False)
             self.reply_ready.emit(text, emotion, tts_enabled)
-        # 清除当前消息状态，避免重复
-        self._current_bot_msg = None
-        self._streaming_anchor_pos = None
+        # 注意：_current_bot_msg / _streaming_anchor_pos 在 _commit_reply 里清理
 
     def _prepare_tts_then_emit(self, text: str, emotion) -> None:
-        """后台 QThread 同步合成音频，合成完才 emit reply_ready 触发 TTS 播放。
+        """后台 QThread 同步合成音频，合成完才把回复正式 commit + emit reply_ready 触发 TTS 播放。
 
         解决「聊天窗文字立即显示但 TTS 还在合成（~5 秒真空期）」问题：
             - 启动 QThread → 调 self.tts.prepare(text) 同步阻塞在该线程
-            - QThread done → 主线程槽 → emit reply_ready(text, emotion, True)
-              → UI Controller 切表情 + 调 tts.speak(text) → 直接走缓存立即播放
-            - QThread failed → 直接 emit reply_ready（不强等，避免卡死）
+            - QThread done → 主线程槽 → _commit_reply(text, emotion) 把回复 push 进
+              history / chat_store / chat_view（占位 → 完整文本）+ emit reply_ready
+              → UI Controller 切表情 + 调 tts.speak(text) → 走缓存立即播放
+            - QThread failed → _commit_reply + emit reply_ready（不强等，避免卡死）
         """
         from app.core.qt_compat import QThread
 
@@ -1449,10 +1426,54 @@ class ChatWindow(QWidget):
 
         self._tts_prepare_worker = _PrepareWorker(self.tts, text)
         self._tts_prepare_worker.done.connect(
-            lambda: self.reply_ready.emit(text, emotion, True))
+            lambda: self._commit_reply(text, emotion, tts_enabled=True))
         self._tts_prepare_worker.failed.connect(
-            lambda: self.reply_ready.emit(text, emotion, True))
+            lambda: self._commit_reply(text, emotion, tts_enabled=True))
         self._tts_prepare_worker.start()
+
+    def _commit_reply(self, text: str, emotion, tts_enabled: bool) -> None:
+        """TTS 准备完成（或 TTS 关闭）后：把回复正式写入 chat_view / history / chat_store。
+
+        在 _on_done 时流式占位是空 div（「准备语音…」），这里就地刷新为完整消息。
+        同时触发 UI Controller 切表情 + 调 tts.speak（走缓存立即播放）。
+        """
+        if self._current_bot_msg is None:
+            # 用户在 prepare 期间取消了 / 关了窗口
+            return
+        self._current_bot_msg.content = text
+        self._current_bot_msg.emotion = emotion
+        self.history.append(self._current_bot_msg)
+        self._trim_history()
+        # 持久化 bot 消息
+        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
+        self.chat_store.add(
+            "assistant", text,
+            emotion=emotion.value if emotion else "",
+            tools=tools_list,
+        )
+        # 就地刷新占位 div：现在显示完整文本 + 工具调用 + 表情
+        self._refresh_streaming_message(finished=True,
+                                         emotion=emotion.value if emotion else "")
+
+        # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
+        self._detect_hallucination(text, self._current_bot_msg.tools)
+
+        # Trace：完成 run
+        if self.trace is not None and self._trace_run_id:
+            try:
+                self.trace.record(self._trace_run_id, "finish", {
+                    "emotion": emotion.value if emotion else "",
+                    "tool_count": len(self._current_bot_msg.tools),
+                })
+                self.trace.end_run(self._trace_run_id, text, status="success")
+            except Exception:  # noqa: BLE001
+                pass
+            self._trace_run_id = None
+        # 通知外部（pet 窗口）切表情 + 触发 TTS 播放
+        self.reply_ready.emit(text, emotion, tts_enabled)
+        # 清理状态
+        self._current_bot_msg = None
+        self._streaming_anchor_pos = None
 
     def _on_failed(self, err: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
@@ -1524,8 +1545,19 @@ class ChatWindow(QWidget):
             safe = self._render_markdown(raw)
 
         # 流式输出中：bot 气泡末尾追加「三点跳动」等待动画
+        # - streaming_meta 为 truthy 字符串 + msg.emotion 未设 → 走三点跳动
+        # - streaming_meta 是「准备语音…」/「typing…」等显式文本 + msg.emotion 已设
+        #   → 显示该文本（提示用户当前状态）
         if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
             safe = safe + " " + self._typing_dots_html()
+        elif not is_user and streaming_meta and (msg.emotion and msg.role == "assistant"):
+            # 已设 emotion 但还在流式（如「准备语音…」状态）→ 显示提示文本
+            meta_safe = (streaming_meta
+                         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+            safe = safe + (
+                f' <span style="color:#8b5cf6;font-size:10px;'
+                f'margin-left:6px;">· {meta_safe}</span>'
+            )
 
         # 工具调用（bot 消息专用，放在气泡内底部，浅紫小卡片）
         tools_html = "".join(
@@ -1664,8 +1696,20 @@ class ChatWindow(QWidget):
         sb.setValue(sb.maximum())
 
     def _refresh_streaming_message(self, finished: bool = False, emotion: str = "") -> None:
-        """流式刷新「当前 bot 占位 div」——从 anchor 到末尾删除旧内容后插入新内容。"""
-        meta = emotion if finished else "typing…"
+        """流式刷新「当前 bot 占位 div」——从 anchor 到末尾删除旧内容后插入新内容。
+
+        Args:
+            finished: True = 把流式占位切换为最终完整消息（含 emotion）
+                      False = 仍是流式占位（继续打字）或「准备语音…」占位
+            emotion: 仅 finished=True 时用作 bubble 顶部 meta
+        """
+        if finished:
+            meta = emotion
+        elif self._current_bot_msg.content:
+            # 模型已产出文本、正在 prepare TTS —— 显示「准备语音…」提示
+            meta = "准备语音…"
+        else:
+            meta = "typing…"
         html = self._msg_html(self._current_bot_msg, streaming_meta=meta)
 
         cursor = self.chat_view.textCursor()

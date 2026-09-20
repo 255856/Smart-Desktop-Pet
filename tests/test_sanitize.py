@@ -97,6 +97,24 @@ class TestSanitize:
         assert "调用" not in result
         assert "打开哔哩哔哩" in result
 
+    def test_strip_plan_narration(self):
+        """元描述「根据角色设定 / 用户说 / 我需要以XX角色来回答」应被剥掉。"""
+        text = (
+            "鱼娘有什么喜欢做的事情。我需要以鲸鱼娘的可爱软萌角色来回答，保持自然简短，不要长篇大论。"
+            "\n\n根据角色设定：- 外貌：蓝渐变长卷发- 性格：可爱软萌，温柔"
+            "\n\n我可以提到一些符合角色的爱好嘿嘿~主人问鲸鱼娘的爱好呀~我喜欢游泳呢"
+        )
+        result = sanitize_text(text)
+        # 元描述应被剥掉，保留正文
+        assert "根据角色设定" not in result
+        assert "我需要" not in result
+        assert "我喜欢游泳呢" in result
+
+    def test_strip_user_repeat(self):
+        """元描述「用户说 / 主人想要 / 用户想问」应被剥掉。"""
+        assert "用户说" not in sanitize_text("用户说想看天气。今天晴朗。")
+        assert "主人想要" not in sanitize_text("主人想要一杯水。好的主人，给你倒。")
+
     def test_preserves_normal_sentences(self):
         """不包含「工具」一词的正常中文不应受影响。"""
         assert sanitize_text("天气真好，主人今天过得怎么样？") == "天气真好，主人今天过得怎么样？"

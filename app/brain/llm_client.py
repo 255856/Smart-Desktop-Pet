@@ -38,14 +38,20 @@ THINK_TAG_END = "</think>"
 
 # 中文约束片段：每次请求 system prompt 末尾追加
 CHINESE_SYSTEM_SUFFIX = (
-    "\n\n【输出规范（必须严格遵守）】\n"
+    "\n\n【输出规范（必须严格遵守，违反任何一条都会污染 UI）】\n"
     "1. 唯一允许的输出语言是简体中文。禁止出现英文/日文/韩文整段、"
     "禁止英文工具独白（禁止出现 user is saying、Let me respond、"
     "I should、The user wants、as the whale girl、brief、particleslike 等）。\n"
     "2. 禁止使用任何 emoji 表情、图标符号（表情、动物、符号）和装饰性符号（如 ★♥♪ 等）。\n"
-    "3. 简短自然（1~3 句），像跟主人面对面说话，不要解释你在做什么、"
-    "不要列 bullet、不要 markdown 标题。\n"
-    "4. 工具调用只能通过工具 schema 完成，不要在文字里描述要做什么工具。"
+    "3. 简短自然（1~3 句），像跟主人面对面说话。"
+    "绝对禁止元描述 / 内心独白 / 复述用户问题 / 自我规划：\n"
+    "   禁止出现「我需要」「我应该」「让我」「我来」「我会」「根据角色设定」"
+    "「根据人设」「保持自然」「不要长篇大论」「根据设定」「我要怎么」「以什么方法」"
+    "「作为鲸鱼娘」「扮演鲸鱼娘」「我需要先」「接下来要」"
+    "「用户说」「用户想问」「用户希望」「主人想要」等。\n"
+    "4. 工具调用只能通过工具 schema 完成，不要在文字里描述要做什么工具、"
+    "不要解释你打算怎么回答、不要列出思考过程、不要复述主人刚才问的内容。\n"
+    "5. 直接输出最终回复，不要任何前置铺垫。"
 )
 
 
@@ -116,6 +122,32 @@ _META_SHOULD_USE_TOOL_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# 兜底：「根据角色设定 / 根据人设 / 用户说 / 主人想要」类规划/复述元描述句
+# （prompt 已明令禁止，sanitize 兜底防止 prompt 失效时污染 UI）
+_META_PLAN_NARRATION_RE = re.compile(
+    r"(?<=[。.!?\n])"                                # 句首锚定
+    r"(根据|按照|依据)"                             # 引导词
+    r"\s*(角色设定|角色|人设|设定|性格|要求|指令|用户|主人)"
+    r"[^。.!?\n]*"
+    r"[。.!?]?",
+    flags=re.UNICODE,
+)
+_META_USER_REPEAT_RE = re.compile(
+    r"(^|(?<=[。.!?\n]))"
+    r"(用户|主人)\s*(说|想问|希望|想要|问的是|说的是)"
+    r"[^。.!?\n]*"
+    r"[。.!?]?",
+    flags=re.UNICODE,
+)
+# 「我需要/我应该/我要/我来/我会 + 任意动作 + 句号」类内心独白（不带工具字也算）
+_META_SELF_PLAN_RE = re.compile(
+    r"(^|(?<=[。.!?\n]))"
+    r"(我需要|我应该|我要|我来|我会|我打算|我将|我准备)"
+    r"[^。.!?\n]{2,80}"
+    r"[。.!?]?",
+    flags=re.UNICODE,
+)
+
 
 def sanitize_text(text: str, *, is_final: bool = True) -> str:
     """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
@@ -155,6 +187,10 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     if is_final:
         text = _META_TOOL_TALK_RE.sub("", text)
         text = _META_SHOULD_USE_TOOL_RE.sub("", text)
+        # 兜底剥离：根据角色设定 / 用户说 / 我需要 等规划/复述元描述
+        text = _META_PLAN_NARRATION_RE.sub("", text)
+        text = _META_USER_REPEAT_RE.sub("", text)
+        text = _META_SELF_PLAN_RE.sub("", text)
     # 多余空白收紧
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
