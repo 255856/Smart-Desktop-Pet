@@ -848,6 +848,7 @@ def _main_inner() -> int:
                 max_iterations=core.cfg.brain.langchain.max_iterations,
                 return_intermediate_steps=core.cfg.brain.langchain.return_intermediate_steps,
             ),
+            memory_store=core.brain.memory,
         )
         cw.reply_ready.connect(core._on_chat_reply_ready)
         cw.show()

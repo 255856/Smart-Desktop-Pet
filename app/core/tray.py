@@ -27,7 +27,7 @@ class TrayController(QObject):
         self.act_settings = QAction("设置...", menu)
         self.act_dashboard = QAction("调试面板 (Dashboard)", menu)
         self.act_dashboard.setToolTip("浏览器打开 http://127.0.0.1:8765")
-        self.act_memory = QAction("查看长期记忆", menu)
+        self.act_memory = QAction("管理长期记忆", menu)
         self.act_quit = QAction("退出", menu)
         menu.addAction(self.act_show)
         menu.addAction(self.act_hide)

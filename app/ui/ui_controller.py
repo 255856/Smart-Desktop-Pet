@@ -478,6 +478,7 @@ class UIController(QObject):
                     return_intermediate_steps=self.cfg.brain.langchain.return_intermediate_steps,
                 ),
                 tts=self.tts,
+                memory_store=self.brain.memory,
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)
@@ -540,19 +541,11 @@ class UIController(QObject):
         return getattr(qa, "_desktop_pet_app", None) if qa else None
 
     def _show_memory_popup(self) -> None:
-        """弹一个气泡显示最近的记忆（轻量版，方便用户随时看）。"""
-        items = self.brain.memory.recent(8)
-        if not items:
-            self.pet.show_bubble("🧠 还没有记住任何事", duration_ms=2000)
-            return
-        # 构造简短摘要
-        lines = []
-        for it in items[:6]:
-            cat = it.category
-            stars = "★" * int(round(it.importance * 5))
-            content = it.content[:18] + ("…" if len(it.content) > 18 else "")
-            lines.append(f"[{cat}]{content}{stars}")
-        self.pet.show_bubble("🧠 " + " | ".join(lines), duration_ms=6000)
+        """打开长期记忆管理面板（复用聊天窗的「记忆」面板）。"""
+        self._show_chat_window()
+        cw = self._chat_window
+        if cw is not None:
+            cw._open_memory()
 
     # ============================================================
     #  模型配置

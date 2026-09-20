@@ -62,6 +62,7 @@ from app.voice.asr import SpeechRecognizer, asr_available
 from app.engine.chat_store import ChatStore
 from app.brain.trace import TraceRecorder
 from app.ui import ui_style
+from app.ui.memory_panel import MemoryDialog
 
 log = logging.getLogger(__name__)
 
@@ -537,12 +538,16 @@ class ChatWindow(QWidget):
                  trace_recorder: Optional[TraceRecorder] = None,
                  backend: str = "lightweight",
                  langchain_cfg: Optional[LangChainAgentConfig] = None,
-                 tts: Optional[object] = None):
+                 tts: Optional[object] = None,
+                 memory_store: Optional[object] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
         self.tts = tts
+        # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
+        self.memory_store = memory_store
+        self._memory_dlg: Optional[MemoryDialog] = None
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -803,6 +808,12 @@ class ChatWindow(QWidget):
         self.btn_dashboard.clicked.connect(self._open_dashboard)
         hl.addWidget(self.btn_dashboard)
 
+        self.btn_memory = QPushButton("记忆")
+        self.btn_memory.setObjectName("ghost_btn")
+        self.btn_memory.setToolTip("管理长期记忆（查看 / 新增 / 删除）")
+        self.btn_memory.clicked.connect(self._open_memory)
+        hl.addWidget(self.btn_memory)
+
         self.btn_min = QToolButton()
         self.btn_min.setObjectName("win_btn")
         self.btn_min.setText("─")
@@ -915,7 +926,12 @@ class ChatWindow(QWidget):
         model = self.llm_cfg.model or "(未配置)"
         tool_n = len(self.registry.names()) if self.registry else 0
         mem_n = 0
-        if self.context_provider:
+        if self.memory_store is not None:
+            try:
+                mem_n = int(self.memory_store.count())
+            except Exception:  # noqa: BLE001
+                mem_n = 0
+        if not mem_n and self.context_provider:
             try:
                 ctx = self.context_provider()
                 mem_n = sum(1 for line in ctx.split("\n")
@@ -955,6 +971,21 @@ class ChatWindow(QWidget):
         # 其他键：默认行为
         from app.core.qt_compat import QPlainTextEdit as _QPT
         _QPT.keyPressEvent(self.input_edit, event)
+
+    def _open_memory(self) -> None:
+        """标题栏「记忆」：打开长期记忆管理面板（非模态，可边聊边开）。"""
+        if self.memory_store is None:
+            self._append_system_msg("⚠️ 当前未接入记忆存储，无法管理长期记忆")
+            return
+        if self._memory_dlg is None:
+            self._memory_dlg = MemoryDialog(self.memory_store, self)
+            # 增删后实时刷新副标题「N 记忆」
+            self._memory_dlg.changed.connect(
+                lambda: self.subtitle_label.setText(self._status_text()))
+        self._memory_dlg.refresh()
+        self._memory_dlg.show()
+        self._memory_dlg.raise_()
+        self._memory_dlg.activateWindow()
 
     def _open_dashboard(self) -> None:
         """托盘 / 标题栏共享：打开调试面板。"""
