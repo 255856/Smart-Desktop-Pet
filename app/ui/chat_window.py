@@ -1477,26 +1477,6 @@ class ChatWindow(QWidget):
         self._current_bot_msg = None
         self._streaming_anchor_pos = None
 
-        # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
-        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
-
-        # Trace：完成 run
-        if self.trace is not None and self._trace_run_id:
-            try:
-                self.trace.record(self._trace_run_id, "finish", {
-                    "emotion": emotion.value if emotion else "",
-                    "tool_count": len(self._current_bot_msg.tools),
-                })
-                self.trace.end_run(self._trace_run_id, text, status="success")
-            except Exception:  # noqa: BLE001
-                pass
-            self._trace_run_id = None
-        # 通知外部（pet 窗口）切表情 + 触发 TTS 播放
-        self.reply_ready.emit(text, emotion, tts_enabled)
-        # 清理状态
-        self._current_bot_msg = None
-        self._streaming_anchor_pos = None
-
     def _on_failed(self, err: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
         if self.backend == "standard" and getattr(self, "_lc_agent", None) is not None:

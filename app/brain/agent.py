@@ -281,15 +281,27 @@ class AgentLoop:
             else:
                 consecutive_tool_only = 0
 
-            # 如果下一轮要强制 final，提前注入 user 总结指令
+            # 在调工具之后、下一轮 LLM 调用之前，把工具结果注入 user 消息：
+            # —— 模型很容易把第二轮当成"继续接话"（"让我给主人推荐..."），而不是总结。
+            # 显式 user 指令「现在必须给主人一个完整中文总结，不要再调工具」能强制模型切到 final。
+            # 这条同时也是「单工具调用后」通用约束（不止连续多轮时才注入）。
+            tool_summary = self._format_tool_results(messages)
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[系统约束] 你刚才调用了工具，结果如下：\n{tool_summary}\n"
+                    "**下一轮请不要再调用任何工具**，直接用简体中文给主人一个完整、"
+                    "自然的总结回复。如果工具结果里已经有完整答案，直接转述给主人即可。"
+                ),
+            })
+
+            # 如果下一轮要强制 final，再追加一条强化指令（连续多轮纯调工具场景）
             if consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_TURNS - 1:
-                # 还有一轮机会，先在 user 里给一个软提示
-                tool_summary = self._format_tool_results(messages)
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"[提示] 你已经调用了多个工具，结果如下：\n{tool_summary}\n"
-                        "**下一轮请不要再调任何工具**，直接用中文给主人一个完整、自然的总结回复。"
+                        "**已经调了太多轮工具，这一轮不要再调了！** "
+                        "必须立刻用中文给主人一个完整总结。"
                     ),
                 })
 
