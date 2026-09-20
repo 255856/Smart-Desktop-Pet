@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 class GPTSoVITSTTS(TTS):
     """调用本地 GPT-SoVITS api_v2 的 /tts 接口，返回 wav 音频。"""
 
+    # api_v2 默认返回 wav；缓存后缀必须为 .wav，否则 pygame mixer 当 mp3 解析会报 bad stream
+    cache_ext: str = ".wav"
+
     def __init__(self, url: str = "http://127.0.0.1:9880",
                  ref_audio: str = "", prompt_text: str = "",
                  text_lang: str = "zh", prompt_lang: str = "zh",

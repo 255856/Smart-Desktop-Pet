@@ -323,7 +323,7 @@ class LangChainAgent:
                         # 多模态场景：拼成纯文本
                         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
                                        for p in text)
-                    text = sanitize_text(text)
+                    text = sanitize_text(text, is_final=False)
                     if text:
                         final_text_parts.append(text)
                         yield ("text", text)

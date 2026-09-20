@@ -129,6 +129,9 @@ class TTS:
     def set_enabled(self, v: bool) -> None:
         self._enabled = v
 
+    # 缓存文件后缀：edge-tts 默认 mp3；GPT-SoVITS / MiniMax 返回 wav 需覆盖为 .wav
+    cache_ext: str = ".mp3"
+
     def speak(self, text: str) -> None:
         """把 text 朗读出来；独立线程跑，不阻塞 Qt。"""
         if not self._enabled or not text.strip():
@@ -142,11 +145,11 @@ class TTS:
             clean_text = _strip_emojis(text)
             if not clean_text:
                 return
-            mp3_name = _cache_key(clean_text) + ".mp3"
-            mp3_path = self.cache_dir / mp3_name
-            if not mp3_path.is_file():
-                asyncio.run(self._synthesize(text, mp3_path))
-            if not mp3_path.is_file():
+            cache_name = _cache_key(clean_text) + self.cache_ext
+            cache_path = self.cache_dir / cache_name
+            if not cache_path.is_file():
+                asyncio.run(self._synthesize(text, cache_path))
+            if not cache_path.is_file():
                 return
             # 口型同步：播放开始（工作线程回调，UI 层自行保证线程安全）
             if self.on_speak_start:
@@ -156,7 +159,7 @@ class TTS:
                     pass
             # 串行排队，避免和上一段语音抢 mixer
             with self._play_lock:
-                self._play(mp3_path)
+                self._play(cache_path)
             if self.on_speak_end:
                 try:
                     self.on_speak_end()

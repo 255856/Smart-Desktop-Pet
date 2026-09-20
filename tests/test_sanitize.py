@@ -30,10 +30,10 @@ class TestSanitize:
         assert sanitize_text("你好\n\n\n世界") == "你好\n\n世界"
         assert sanitize_text("  前后空白  ") == "前后空白"
 
-    def test_keep_emotion_tag(self):
-        """情绪标签 [happy] 应保留（不是 emoji）。"""
-        assert sanitize_text("好哒 [happy]") == "好哒 [happy]"
-        assert sanitize_text("哈哈 [thinking] [shy]") == "哈哈 [thinking] [shy]"
+    def test_strip_emotion_tag(self):
+        """末尾情绪标签 [happy]/[shy] 等应该被剥掉（模型不再被要求输出标签）。"""
+        assert sanitize_text("好哒 [happy]") == "好哒"
+        assert sanitize_text("哈哈 [thinking] [shy]") == "哈哈"
 
     def test_keep_chinese_punctuation(self):
         """中文标点不应被清掉。"""
@@ -48,11 +48,11 @@ class TestSanitize:
         assert sanitize_text("") == ""
         assert sanitize_text(None) is None
 
-    def test_keep_english_words(self):
-        """纯英文不被误删（让 ChatWindow 模型决定怎么过滤）。"""
-        result = sanitize_text("Hello World")
-        assert "Hello" in result
-        assert "World" in result
+    def test_drop_pure_english(self):
+        """纯英文（无 CJK 字符）应被兜底丢弃——让上层 fallback，避免 UI 显示英文工具独白。"""
+        # 旧版本会保留纯英文；新兜底（_cjk_ratio < 0.15 → 整体丢弃）
+        assert sanitize_text("Hello World") == ""
+        assert sanitize_text("It is Sunday morning at 08:14") == ""
 
     def test_dont_strip_chinese_bracket_chars(self):
         """中文字符如 ☆ 等应该可以保留（但 ASCII 装饰符号要去掉）。"""
@@ -94,5 +94,3 @@ class TestChineseSuffix:
         """中文约束 prompt 必须包含关键规则。"""
         assert "简体中文" in CHINESE_SYSTEM_SUFFIX
         assert "emoji" in CHINESE_SYSTEM_SUFFIX.lower() or "表情" in CHINESE_SYSTEM_SUFFIX
-        # 包含「[happy]」标签允许的说明
-        assert "[happy]" in CHINESE_SYSTEM_SUFFIX

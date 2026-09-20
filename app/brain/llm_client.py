@@ -43,10 +43,9 @@ CHINESE_SYSTEM_SUFFIX = (
     "禁止英文工具独白（禁止出现 user is saying、Let me respond、"
     "I should、The user wants、as the whale girl、brief、particleslike 等）。\n"
     "2. 禁止使用任何 emoji 表情、图标符号（表情、动物、符号）和装饰性符号（如 ★♥♪ 等）。\n"
-    "3. 回复末尾保留一个情绪标签：[happy]/[shy]/[thinking]/[sad]/[surprised]/[angry]/[love] 之一。\n"
-    "4. 简短自然（1~3 句），像跟主人面对面说话，不要解释你在做什么、"
+    "3. 简短自然（1~3 句），像跟主人面对面说话，不要解释你在做什么、"
     "不要列 bullet、不要 markdown 标题。\n"
-    "5. 工具调用只能通过工具 schema 完成，不要在文字里描述要做什么工具。"
+    "4. 工具调用只能通过工具 schema 完成，不要在文字里描述要做什么工具。"
 )
 
 
@@ -92,14 +91,32 @@ _META_NARRATION_RE = re.compile(
 _LONG_PAREN_RE = re.compile(r"[（(][^)（）\n]{50,}[)）]")
 
 
-def sanitize_text(text: str) -> str:
-    """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白。"""
+def sanitize_text(text: str, *, is_final: bool = True) -> str:
+    """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
+
+    Args:
+        text: 待清洗文本
+        is_final: True 表示这是一段完整的最终回复（流式累积完或非流式结果）；
+                  此时启用「全文本 CJK 占比 < 15% 则整段丢弃」的兜底。
+                  False 表示这是一段流式 chunk（部分内容），不做占比兜底，
+                  否则单段 chunk 几乎必然被丢弃，导致流式 / langchain_agent 文本丢失。
+    """
     if not text:
         return text
     # 去掉 <think>...</think> 段（DeepSeek-r1 / MiniMax-M3 等推理模型原生标签）
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     # 去掉未闭合的 <think> 起始标签（流式末端被截断的情况）
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    # 去掉末尾的 [emotion] 标签（模型偶尔仍会带 [happy] [shy] 等，按 system 铁律不应出现）
+    # 重复剥离直到没有为止（兼容「哈哈 [thinking] [shy]」多标签尾巴）。
+    # 仅在 is_final=True 时剥离：流式 chunk 不剥，否则 LangChainAgent 等 chunk 级 yield
+    # 会把合法的 ` " [happy]"` chunk 变成空串、跳过 yield，导致「[happy] 凭空消失」测试失败。
+    if is_final:
+        _EMOTION_TAG_TAIL = re.compile(
+            r"\s*\[(happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip)\]\s*$",
+            re.IGNORECASE)
+        while _EMOTION_TAG_TAIL.search(text):
+            text = _EMOTION_TAG_TAIL.sub("", text)
     text = _EMOJI_PATTERN.sub("", text)
     for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫", "★", "☆"]:
         text = text.replace(sym, "")
@@ -115,7 +132,17 @@ def sanitize_text(text: str) -> str:
     text = _drop_leading_low_cjk_paragraphs(text)
     # 兜底：任何英文主导（占比 ≤ 30%）的非开头段也剥离（工具独白常出现在末尾）
     text = _drop_low_cjk_paragraphs(text)
-    return text.strip()
+    # 终极兜底（仅最终回复）：清洗后整段中文占比 < 15% → 模型完全没走中文铁律，
+    # 整体丢弃。处理「单段纯英文（无 \\n\\n 分隔）」的漏网场景——上面的段落函数依赖 \\n\\n。
+    # 末尾情绪标签 [happy]/[shy] 等如果模型偷偷带了，直接剥掉再判占比。
+    cleaned = text.strip()
+    if is_final and cleaned:
+        body_for_ratio = re.sub(
+            r"\[(happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip)\]",
+            "", cleaned).strip()
+        if _cjk_ratio(body_for_ratio) < 0.15:
+            return ""
+    return cleaned
 
 
 def _cjk_ratio(text: str) -> float:

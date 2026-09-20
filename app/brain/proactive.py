@@ -25,9 +25,13 @@ class _ChatOnceWorker(QThread):
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, client, messages):
+    def __init__(self, llm_cfg, system_prompt, messages):
         super().__init__()
-        self.client = client
+        # 只携带配置与消息（不在主线程共享 httpx 客户端）——
+        # ProactiveBrain 复用共享 LLMClient 会让 httpx 连接绑在已关闭的子 loop 上，
+        # 触发 "Event loop is closed"。这里每次新建 LLMClient + httpx.AsyncClient。
+        self.llm_cfg = llm_cfg
+        self.system_prompt = system_prompt
         self.messages = messages
         self._cancelled = threading.Event()
 
@@ -35,21 +39,32 @@ class _ChatOnceWorker(QThread):
         self._cancelled.set()
 
     def run(self) -> None:
+        client = None
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            from app.brain.llm_client import LLMClient
+            client = LLMClient(self.llm_cfg, self.system_prompt)
 
             async def drive() -> str:
                 if self._cancelled.is_set():
                     return ""
-                return await self.client.chat_once(self.messages)
+                return await client.chat_once(self.messages)
 
             text = loop.run_until_complete(drive())
-            loop.run_until_complete(asyncio.sleep(0))
-            loop.close()
             self.done.emit(text)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(f"{e!r}")
+        finally:
+            if client is not None:
+                try:
+                    loop.run_until_complete(client.close())
+                except Exception:
+                    pass
+            try:
+                loop.close()
+            except Exception:
+                pass
 
 
 def _get_time_context(now) -> str:
@@ -84,7 +99,6 @@ class ProactiveBrain(QObject):
         is_sleeping: Optional[Callable[[], bool]] = None,
     ):
         super().__init__()
-        from app.brain.llm_client import LLMClient  # 局部导入避免环
         self.llm_cfg = llm_cfg
         self.persona = persona
         self.state = state
@@ -96,9 +110,7 @@ class ProactiveBrain(QObject):
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
         self._last_remarks: list[str] = []
-
-        # 共享的 LLMClient（连接池复用，避免每次 _fire 都新建）
-        self._client = LLMClient(self.llm_cfg, self.persona)
+        # 注：worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     # ----- 调度 -----
     def start(self) -> None:
@@ -121,11 +133,8 @@ class ProactiveBrain(QObject):
         log.info("ProactiveBrain: 间隔调整为 %d-%d 分钟", self.min_minutes, self.max_minutes)
 
     def update_llm_config(self, new_cfg) -> None:
-        """用户修改了模型配置，更新 LLMClient 的配置。"""
+        """用户修改了模型配置，下一次 _fire 自动用新配置。"""
         self.llm_cfg = new_cfg
-        # 更新已有的 client 的配置
-        if self._client is not None:
-            self._client.cfg = new_cfg
         log.info("ProactiveBrain: LLM 配置已更新 → %s @ %s", new_cfg.model, new_cfg.base_url)
 
     def _schedule(self) -> None:
@@ -175,10 +184,13 @@ class ProactiveBrain(QObject):
         )
         user = json.dumps(context, ensure_ascii=False)
 
-        # 复用共享的 LLMClient，更新 system_prompt 为本轮上下文
+        # 每次新建 worker（独立 httpx 客户端，绑定本次子 loop）—— 见 _ChatOnceWorker 注释
         from app.brain.llm_client import ChatMessage
-        self._client.system_prompt = system
-        worker = _ChatOnceWorker(self._client, [ChatMessage(role="user", content=user)])
+        worker = _ChatOnceWorker(
+            llm_cfg=self.llm_cfg,
+            system_prompt=system,
+            messages=[ChatMessage(role="user", content=user)],
+        )
         worker.done.connect(self._on_done)
         worker.failed.connect(
             lambda e: log.info("ProactiveBrain 生成失败：%s", e))
