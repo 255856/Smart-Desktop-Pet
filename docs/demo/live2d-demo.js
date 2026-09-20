@@ -717,22 +717,51 @@ async function handleUserInput(text) {
 
 // 快捷 URL 按钮
 document.querySelectorAll("#quick-urls button").forEach(btn => {
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     const urlInput = document.getElementById("model-url");
     if (!urlInput) return;
     if (btn.dataset.urlClear === "1") { urlInput.value = ""; return; }
     const tpl = btn.dataset.urlTemplate;
-    // "local" → 自动用 prompt 让用户填模型目录
-    // "hiyori" → jsdelivr 上的公开 Hiyori 样例 URL（需本地服务）
     if (tpl === "local") {
       const dir = prompt("你的模型目录路径（相对 serve.py 启动的 root）：\n例：assets/live2d/bingtang/bingtang", "");
       if (!dir) return;
       urlInput.value = `http://127.0.0.1:8765/${dir}/${encodeURIComponent("免费模型冰糖")}.model3.json`;
-      // 注：上面是示例 URL，请按你的实际 model3.json 文件名调整
       log("快捷 URL 已填，请核对文件名是否正确再点加载", "ok");
     } else if (tpl === "hiyori") {
-      urlInput.value = "http://127.0.0.1:8765/path/to/Hiyori/Hiyori.model3.json";
-      log("Hiyori 是 Live2D 官方样例，请把它放到本地服务目录后用此 URL 加载", "ok");
+      // 自动探测本地内置 Hiyori 样例（docs/demo/hiyori_zh-Hans/）
+      // demo 页面在 /docs/demo/index.html，所以 hiyori 目录在上一层 + 同级
+      const base = location.origin;
+      const candidates = [
+        "../hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        "../hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
+      ];
+      // 探测哪些存在
+      const found = [];
+      for (const c of candidates) {
+        try {
+          const r = await fetch(c, { method: "GET" });
+          if (r.ok) found.push(c);
+        } catch (e) {}
+      }
+      if (found.length === 0) {
+        log("⚠️ 没在 docs/demo/hiyori_zh-Hans/ 下找到 model3.json", "err");
+        log("请把 Hiyori 样例放到 docs/demo/hiyori_zh-Hans/，然后用 '本地' 按钮", "err");
+        return;
+      }
+      // 列出选项让用户选
+      const choice = found.length === 1
+        ? found[0]
+        : prompt(
+            "检测到多个 Hiyori 版本，选哪个？\n" +
+            found.map((c, i) => `${i+1}. ${c}`).join("\n"),
+            "1"
+          );
+      const idx = parseInt(choice) - 1;
+      const sel = found[idx] || found[0];
+      urlInput.value = `${base}/${sel}`;
+      log(`✓ Hiyori 路径已填：${sel}`, "ok");
+      // 自动加载
+      document.getElementById("load-btn").click();
     }
   });
 });

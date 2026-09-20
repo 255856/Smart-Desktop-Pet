@@ -82,6 +82,8 @@ tools/
 # Live2D 模型（版权模型，禁止二次传播，不入库；配置模板在 assets/live2d_profiles/）
 assets/live2d/
 assets/live2d_profiles/
+# demo 内置的 Live2D Hiyori 样例（46MB，本地测试用，不入库；gh-pages 部署也不打包）
+docs/demo/hiyori_zh-Hans/
 tools/shot_log.txt
 tools/*_log.txt
 
