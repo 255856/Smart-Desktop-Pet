@@ -231,15 +231,23 @@ class AgentLoop:
 
             final_text = _sanitize_reply("".join(content_parts))
 
-            # 【抗幻觉】第 2 层：第 1 轮 + 有工具意图 + 模型没调工具 →
-            # 注入强提示重试一次（重试时不再用 force_tool_use，让 user prompt 起作用）
-            if (turn == 0 and force_first_turn and not tool_calls
+            # 【抗幻觉】第 2 层：识别到工具意图 + 多轮未调工具 → 持续注入强提示重试
+            # —— 旧版只在第 1 轮 + 模型没调工具时重试 1 次，导致第 2 轮仍只回文字就 break
+            # 出去（agent 退出）。新版：只要 force_first_turn + 没调工具就一直 force_retry，
+            # 直到 max_turns 耗尽或模型最终调工具。
+            if (force_first_turn and not tool_calls
                     and not (cancel_check and cancel_check())):
+                # 剩余轮数不足以再走一次 force_retry 时（最后一轮），放弃
+                if turn + 1 >= self.max_turns:
+                    log.warning(
+                        "AgentLoop: 已 %d 轮仍调不到工具，放弃（意图=%s）", turn + 1, intent)
+                    if final_text:
+                        yield "text", final_text
+                    break
                 log.warning(
-                    "AgentLoop: 第一轮 force_tool_use 后模型仍未调工具，"
-                    "注入强提示重试一次（意图=%s）", intent)
+                    "AgentLoop: 第 %d 轮仍未调工具（意图=%s），注入强提示重试", turn + 1, intent)
                 yield ("meta", {"event": "force_retry",
-                                "reason": "第一轮未调用工具",
+                                "reason": f"第 {turn + 1} 轮未调用工具",
                                 "intent": intent})
                 messages.append({
                     "role": "user",
@@ -249,11 +257,10 @@ class AgentLoop:
                         "必须调用对应工具（看上面 schema）。请立刻调用，不要再回文字。"
                     ),
                 })
-                # 重置连续计数（因为这一轮根本没调工具）
                 consecutive_tool_only = 0
                 continue   # 进入下一轮
 
-            # 没调工具 → 本轮即最终回复：清洗后一次性发 UI / TTS
+            # 没调工具 + 没识别到意图 → 本轮即最终回复：清洗后一次性发 UI / TTS
             if not tool_calls:
                 if final_text:
                     yield "text", final_text
