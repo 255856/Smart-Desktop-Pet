@@ -1156,9 +1156,12 @@ class Live2DRenderer(PetRenderer):
         """设置面板「试穿」：临时应用组合，约 2.6 秒后恢复当前情绪。"""
         self.note_activity()
         if b.emotion:
-            item = self.profile.find_item(b.emotion)
-            if item is not None:
-                self._play_item_expr(item, hold_ms=hold_ms)
+            if b.emotion in ("natural", "default", "none"):
+                self.reset_emotion()
+            else:
+                item = self.profile.find_item(b.emotion)
+                if item is not None:
+                    self._play_item_expr(item, hold_ms=hold_ms)
         if b.hairstyle:
             self.set_hairstyle(b.hairstyle)
         added = self._add_toggle_items(b.toggles)

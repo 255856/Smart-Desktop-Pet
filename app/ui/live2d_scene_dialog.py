@@ -209,6 +209,7 @@ class _BaseAppearanceDialog(QDialog):
         # 表情（单选）
         self._emotion_combo = QComboBox()
         self._emotion_combo.addItem("不改变（保持当前）", "")
+        self._emotion_combo.addItem("恢复自然（普通眼）", "natural")
         for iid, label in emotion_items:
             if iid == "__default__":
                 continue

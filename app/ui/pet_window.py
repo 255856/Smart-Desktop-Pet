@@ -1334,7 +1334,7 @@ class PetWindow(QWidget):
                          cache: Optional[dict] = None) -> bool:
         """把一张图片弹到角色右上角，展示 duration_ms 后消失。
 
-        随机表情包（倾斜）与食物图片（正立）的统一入口。
+        随机表情包与食物图片的统一入口（均向右倾斜）。
         加载成功返回 True；图片不存在 / 无 label 返回 False。
         """
         if self._sticker_label is None or not path:
@@ -1371,14 +1371,17 @@ class PetWindow(QWidget):
         return True
 
     def show_food_sticker(self, path: str, *, duration_ms: int = 4200) -> bool:
-        """喂食时把食物图片弹到角色右上角（正立，不随机倾斜）。"""
+        """喂食时把食物图片弹到角色右上角（与表情包同款向右 45° 倾斜）。"""
         if not path:
             return False
         base = int(getattr(self, "_sticker_size", 180) or 180)
         # 不超过窗口宽 42%，避免小窗口被食物图撑爆
         size = max(96, min(int(base * 1.05), int(self.width() * 0.42)))
+        # 角度跟随表情包设置（默认向右 45°）
+        ov = getattr(self, "_sticker_overrides", {})
+        rotation = int(ov.get("rotation", getattr(self, "_sticker_rotation", 45)))
         return self._present_sticker(
-            path, size=size, rotation=0,
+            path, size=size, rotation=rotation,
             duration_ms=duration_ms, cache=self._food_sticker_cache)
 
     def _show_random_sticker(self) -> None:

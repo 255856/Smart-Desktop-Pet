@@ -7,16 +7,14 @@
     4. 吃饭/喝水/抚摸等互动能大幅提升数值（吃饭 +30 饱食 +15 体力）
     5. 夜间（22:00-06:00）衰减仅 ×1.3（不是 ×1.5，避免过于惩罚性）
 
-衰减速率（per second, 白天）：
-    - 体力：   0.015/s  (100→0 ≈ 111 min, 夜间 ≈ 85 min)
-    - 饱食：   0.007/s  (100→0 纯衰减 ≈ 4 h；高值因被动回复略慢)
-    - 口渴：   0.025/s  (100→0 ≈ 67 min,  夜间 ≈ 51 min)
-    - 心情：   0.015/s  (100→0 ≈ 111 min)
-    - 寂寞：   10 分钟未互动 → 心情衰减 ×2
+衰减速率（per second, 白天，四项统一）：
+    - 体力 / 饱食 / 口渴 / 心情：0.007/s（100→0 纯衰减 ≈ 4 h；
+      高值因被动回复实际略慢；夜间 ×1.3 ≈ 3 h）
+    - 寂寞：   10 分钟未互动 → 心情衰减 ×2（≈ 2 h）
     - 健康：   不自动衰减，仅当饱食/口渴/心情 全部 < 15 时才下降
 
 被动回复速率（per second）：
-    - 当某项 > 70 时：每秒回复 +0.010（刚好抵消一半的白天衰减）
+    - 当某项 > 70 时：每秒回复 +0.0035（约抵消一半白天衰减）
     - 当某项 < 30 时：不回复（需要用户主动喂食）
     - 三项都 > 50 且心情 > 60 时：健康每秒 +0.020
 """
@@ -68,16 +66,16 @@ class PetState:
     mode: Mode = Mode.NORMAL
 
     # ---- 衰减速率（per second） ----
-    decay_strength: float = 0.015
+    decay_strength: float = 0.007
     decay_strength_food: float = 0.007
-    decay_strength_drink: float = 0.025
-    decay_feeling: float = 0.015
+    decay_strength_drink: float = 0.007
+    decay_feeling: float = 0.007
 
     # ---- 被动回复速率（per second，当该项 >70 时） ----
-    regen_strength: float = 0.008
+    regen_strength: float = 0.0035
     regen_strength_food: float = 0.0035
-    regen_strength_drink: float = 0.010
-    regen_feeling: float = 0.008
+    regen_strength_drink: float = 0.0035
+    regen_feeling: float = 0.0035
 
     # ---- 被动回复阈值：> regen_threshold 才开始回复 ----
     regen_threshold: float = 70.0

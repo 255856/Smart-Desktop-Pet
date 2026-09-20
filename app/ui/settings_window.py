@@ -784,7 +784,10 @@ class SettingsWindow(QWidget):
         """把一个外观组合概括成中文短标签。"""
         parts = []
         if b.emotion:
-            parts.append(f"表情·{b.emotion}")
+            if b.emotion in ("natural", "default", "none"):
+                parts.append("表情·自然（普通眼）")
+            else:
+                parts.append(f"表情·{b.emotion}")
         if b.hairstyle:
             parts.append("发型·默认" if b.hairstyle == "__default__"
                          else f"发型·{b.hairstyle}")

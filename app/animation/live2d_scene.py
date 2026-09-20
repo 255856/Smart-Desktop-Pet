@@ -68,6 +68,13 @@ _CHAT_ALIAS_KEY = {
     "chat_thinking": "thinking",
 }
 
+# 场景表情选「自然」时的内部标记；模型 YAML 里写下列任意别名即表示
+# 「触发该场景时恢复普通眼」（而不是切换到某个特殊表情）。
+NATURAL_EMOTION_TOKEN = "natural"
+_NATURAL_EMOTION_ALIASES = {
+    "natural", "default", "none", "null", "自然", "普通", "普通眼", "无",
+}
+
 # 一次性动作默认时长（毫秒）；用户未配 hold_ms 时兜底
 DEFAULT_TRANSIENT_HOLD_MS = 1600
 
@@ -165,8 +172,13 @@ class SceneStore:
         # 聊天情绪 → 通用情绪别名映射的模型表情
         if scene_id in _CHAT_ALIAS_KEY:
             target = p.emotion_aliases.get(_CHAT_ALIAS_KEY[scene_id])
-            if target and p.find_item(target) is not None:
-                return SceneBundle(emotion=target)
+            if target:
+                token = str(target).strip().lower()
+                if token in _NATURAL_EMOTION_ALIASES:
+                    # 显式「自然」：恢复普通眼，并能清掉思考/上一情绪表情
+                    return SceneBundle(emotion=NATURAL_EMOTION_TOKEN)
+                if p.find_item(target) is not None:
+                    return SceneBundle(emotion=target)
             return None
 
         if scene_id == "thinking":
