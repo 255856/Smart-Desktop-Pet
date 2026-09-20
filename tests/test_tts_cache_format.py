@@ -106,14 +106,19 @@ def test_chat_window_tts_drain_no_duplicate_queue():
     from app.ui.chat_window import ChatWindow
     from app.voice.voice import TTS
 
-    # 收集 speak 调用
+    # 收集 speak + prepare 调用
     class CollectTTS(TTS):
         def __init__(self):
             super().__init__(voice="fake")
             self.spoken: list[str] = []
+            self.prepareds: list[str] = []
 
         def speak(self, text):  # type: ignore[override]
             self.spoken.append(text)
+
+        def prepare(self, text, timeout_s=30.0):  # type: ignore[override]
+            self.prepareds.append(text)
+            return True
 
     char_cfg = CharacterConfig(name="t", persona="p", tts_enabled=True)
     llm_cfg = LLMConfig(api_key="sk", model="m")
@@ -123,12 +128,17 @@ def test_chat_window_tts_drain_no_duplicate_queue():
     cw._tts_drain_sentences("主人你好呀。今天天气不错。")
     cw._tts_drain_sentences("主人你好呀。今天天气不错！要不要出门。")
     cw._tts_drain_sentences("主人你好呀。今天天气不错！要不要出门。")
-    cw._flush_tts_tail()
+    cw._flush_tts_tail_to_prepare()
+    # 等所有 prepare worker 完成（mock prepare 立即返回 True）
+    import time
+    deadline = time.monotonic() + 5
+    while cw._sentence_workers and time.monotonic() < deadline:
+        time.sleep(0.05)
 
-    # 验证：每句只入队一次（不再重复）
-    spoken = cw.tts.spoken
-    # 关键是：同一句不应被入队多次
-    assert spoken.count("主人你好呀。") == 1, f"重复入队: {spoken}"
+    # 验证：每句只启动一次 prepare（不重复）
+    prepared = cw.tts.prepareds
+    # 关键是：同一句不应被启动 prepare 多次
+    assert prepared.count("主人你好呀。") == 1, f"重复 prepare: {prepared}"
     # 第三次 chunk 时 "今天天气不错。" 已被 sanitize 替换为 "今天天气不错！"（累积文本变化）
-    # —— 这里只验证「重复入队」被修：同一句话不应该出现 2 次以上
-    assert len(spoken) <= 4, f"总入队过多: {spoken}"
+    # —— 这里只验证「重复 prepare」被修：同一句话不应该出现 2 次以上
+    assert len(prepared) <= 4, f"总 prepare 过多: {prepared}"

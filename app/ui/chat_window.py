@@ -23,6 +23,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+
+def _safe_qapp():
+    """返回当前 QApplication 实例（无 GUI 环境返回 None）。
+
+    用于「阻塞等 worker 完成 + 处理 Qt 事件」的场景：
+    不阻塞会导致 Qt 信号无法投递，UI 死锁；processEvents 又必须有 QApplication。
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+        return QApplication.instance()
+    except Exception:  # noqa: BLE001
+        return None
+
 from app.core.qt_compat import (
     QApplication, QFont, QFrame, QHBoxLayout, QKeyEvent,
     QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -508,6 +521,10 @@ class ChatWindow(QWidget):
         self._tts_tail = ""
         # 上次已送 TTS 的累积位置（字符偏移），用于增量切分避免重复入队
         self._tts_sent_tail = 0
+        # 已「commit」（prepare 完成 + chat_view 渲染）的句子（用于 _on_done 时不再重复 prepare）
+        self._committed_text = ""
+        # 句子 prepare worker（每句一个，完成后 emit sentence_ready）
+        self._sentence_workers = []   # QThread 列表，保留引用防 GC
         self._typing_frame = 0
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(380)
@@ -1341,9 +1358,10 @@ class ChatWindow(QWidget):
         # 流式渲染统一走最终规范：聊天窗也不闪现 CoT / 规则复读 / 英文思考。
         # 占位气泡的 content 直接存清洗后的显示文本（CoT 阶段保持空 → 三点动画）。
         sanitized = sanitize_text(self._streaming_raw).strip()
+        # 累积 content 但**不**实时刷 chat_view ——等 TTS prepare 完成才显示
+        # （实现「文字与语音同步」：声音准备好后文字才一起出现）
         self._current_bot_msg.content = sanitized
-        # 流式期间实时刷新 chat_view（打字机效果）
-        self._refresh_streaming_message()
+        # chat_view 保持「准备语音…」占位（_refresh_streaming_message 故意不调）
         # Trace：累计的原始文本（每 chunk 一次），便于调试时看到模型原始输出
         if self.trace is not None and self._trace_run_id and tok:
             self.trace.record(self._trace_run_id, "text", {
@@ -1353,10 +1371,8 @@ class ChatWindow(QWidget):
         # 同步桌宠头顶气泡（与聊天窗同一份清洗后文本，口型同步也用它）
         if sanitized:
             self.streaming_chunk.emit(sanitized)
-            # **逐字念出**：每收完一句话立即调 tts.speak(句子) 入队列
-            # - 中文标点 。！？\n 视为句末
-            # - 同句标点触发 → 当前累积内容 + 最近一句送入 TTS
-            # - 后续句接着入队，pygame mixer 顺序播放，整体效果「文字逐字出、声音逐句出」
+            # **逐句 prepare**：每收完一句话立即启动后台 QThread 准备 TTS
+            # —— prepare 完成后 chat_view 才显示该句（见 _on_sentence_ready / _on_done）
             self._tts_drain_sentences(sanitized)
 
     # 中文/英文/数字标点都算句末边界。GPT-SoVITS 一次合成一句短句的体感最自然
@@ -1364,21 +1380,20 @@ class ChatWindow(QWidget):
     _TTS_SENT_END = re.compile(r"[。！？!?\n;；]+")
 
     def _tts_drain_sentences(self, accumulated: str) -> None:
-        """逐字念出：累积内容里每出现句末标点，就把对应的那一句送入 TTS 队列。
+        """逐句准备 TTS：累积内容里每出现句末标点，启动后台 QThread 调 tts.prepare(句子)。
 
-        关键设计：仅追踪「上次送过 TTS 的尾部字符数」(_tts_sent_tail)，与累积
-        文本无关（不依赖 startswith / 长度匹配）。每轮只在累积文本的「上次送出
-        位置」之后的增量部分扫句末边界。处理后更新 _tts_sent_tail 到本轮末位置。
+        prepare 完成后 emit sentence_ready(text) → 主线程才在 chat_view 渲染该句 +
+        调 tts.speak(text) 让 worker 立即播放（缓存命中）。
 
-        为什么不用 startswith：累积是 sanitize_text 输出，可能跳变（修整段落、
-        剥离 think 标签等），导致前缀匹配失效，触发"容错分支"，反而又从头扫。
+        关键设计：流式期间 chat_view 不显示句子（保持「准备语音…」占位），声音准
+        备好后**一起**出现——实现「文字与语音同步」。
+
+        为什么用 _tts_sent_tail 字符偏移而不依赖 startswith：累积是 sanitize_text 输
+        出，可能跳变（修整段落 / 剥离 think 标签），前缀匹配会失效。
         """
         if not self.char_cfg.tts_enabled or self.tts is None:
             return
-        # 上次送过的位置（不是累积文本，而是 scanned 串的字符数）
         sent_tail = getattr(self, "_tts_sent_tail", 0)
-        # 本轮待扫描 = accumulated[sent_tail:]（sent_tail 是字符偏移）
-        # 容错：sent_tail 超过 accumulated 长度时（reset / 重连），从头开始
         if sent_tail > len(accumulated):
             sent_tail = 0
         scan = accumulated[sent_tail:]
@@ -1387,30 +1402,80 @@ class ChatWindow(QWidget):
             sentence = scan[last_end:m.end()].strip()
             last_end = m.end()
             if sentence:
-                try:
-                    self.tts.speak(sentence)
-                except Exception:  # noqa: BLE001
-                    log.exception("TTS.speak 入队失败: %r", sentence)
-        # 更新 _tts_sent_tail = sent_tail + last_end
+                self._launch_sentence_prepare(sentence)
         self._tts_sent_tail = sent_tail + last_end
-        # 兼容旧字段（保留 reset 语义）
         self._tts_tail = ""
 
-    def _flush_tts_tail(self) -> None:
-        """_on_done 时把最后一段无句末标点的尾部也送入 TTS。
+    def _launch_sentence_prepare(self, sentence: str) -> None:
+        """为单句启动后台 QThread 调 tts.prepare(sentence)，完成后 emit sentence_ready。"""
+        from app.core.qt_compat import QThread, Signal
 
-        注意：每 chunk 的 _tts_drain_sentences 已送过整段中所有完整句。
-        如果 _tts_tail 还有内容（即最后一段无句末标点），这里送一下。
-        同时重置 _tts_tail / _tts_sent_tail，避免下次会话污染状态。
+        class _PrepareWorker(QThread):
+            done = Signal(str)
+
+            def __init__(self, tts_obj, txt):
+                super().__init__()
+                self.tts_obj = tts_obj
+                self.txt = txt
+
+            def run(self):
+                try:
+                    self.tts_obj.prepare(self.txt)
+                except Exception:  # noqa: BLE001
+                    log.exception("TTS.prepare 异常: %r", self.txt[:60])
+                self.done.emit(self.txt)
+
+        w = _PrepareWorker(self.tts, sentence)
+        w.done.connect(self._on_sentence_ready)
+        # 保留引用防 GC，等线程结束自动清理
+        self._sentence_workers.append(w)
+        w.finished.connect(lambda ww=w: self._sentence_workers.remove(ww))
+        w.start()
+
+    def _on_sentence_ready(self, sentence: str) -> None:
+        """单句 TTS prepare 完成：把该句加入 chat_view + 立即 speak 触发播放。"""
+        # 拼接到已 commit 的显示文本（_current_bot_msg.content 已流式累积）
+        # ——但我们要让 chat_view 显示"已 commit 句子 + 未 commit 尾部"的状态。
+        # 当前 _current_bot_msg.content = sanitized（每 chunk 整体覆盖）。
+        # 这里只调 speak 让 worker 立即播放（缓存命中），chat_view 显示由 _on_done 一次性完成。
+        # 流式期间保持占位动画（_refresh_streaming_message 不调），等 _on_done 才正式显示。
+        self._committed_text = (self._committed_text or "") + sentence
+        try:
+            self.tts.speak(sentence)
+        except Exception:  # noqa: BLE001
+            log.exception("TTS.speak 入队失败: %r", sentence[:60])
+
+    def _flush_tts_tail_to_prepare(self) -> None:
+        """_on_done 时把最后一段无句末标点的尾部启动 prepare（之前只是送 speak）。
+
+        注意：每 chunk 的 _tts_drain_sentences 已启动句子的 prepare worker。
+        如果 _tts_tail 还有内容（最后一段无句末标点），这里启动它的 prepare。
         """
         tail = (self._tts_tail or "").strip()
         if tail and self.char_cfg.tts_enabled and self.tts is not None:
-            try:
-                self.tts.speak(tail)
-            except Exception:  # noqa: BLE001
-                log.exception("TTS.speak 入队失败（尾部）: %r", tail)
+            self._launch_sentence_prepare(tail)
+        # 重置（避免下次会话污染）
         self._tts_tail = ""
         self._tts_sent_tail = 0
+
+    def _wait_all_sentence_workers(self, timeout_s: float = 120.0) -> None:
+        """阻塞等所有 sentence prepare worker 完成（或完成 + 失败）。
+
+        阻塞主线程一段时间换取「文字等语音」体验：等所有句子 prepare 完成后
+        _on_done 才把回复正式写入 history / chat_view / chat_view 渲染。
+        超时则放弃等待（避免 TTS 服务挂掉时桌宠卡死）。
+        """
+        import time
+        deadline = time.monotonic() + timeout_s
+        while self._sentence_workers and time.monotonic() < deadline:
+            # 处理 Qt 事件循环，避免 _on_chunk 等 callback 卡死
+            QApplication = _safe_qapp()
+            if QApplication is not None:
+                QApplication.processEvents()
+            time.sleep(0.05)
+        if self._sentence_workers:
+            log.warning("TTS prepare 超时（%d 个 worker 未完成），放弃等待",
+                        len(self._sentence_workers))
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
@@ -1445,14 +1510,15 @@ class ChatWindow(QWidget):
                 if not parsed.tag_found:
                     parsed.emotion = Emotion.SHY
 
-        # 流式期间 _on_chunk 已经实时把文字打到 chat_view + 每句送入 TTS 队列。
-        # 这里只需收尾：把最后一段没遇到句末标点的尾部也送 TTS（_flush_tts_tail）
-        # + 把回复正式写入 history / chat_store + 切表情。
+        # 流式期间 _on_chunk 已逐句启动 prepare worker（文字与语音同步）。
+        # 这里收尾：
+        # 1. 把最后一段无句末标点的尾部也启动 prepare（如果有）
+        # 2. **等所有 prepare worker 完成**（主线程短时阻塞；GPT-SoVITS 通常 3-5 秒）
+        #    —— 这样 chat_view 一次性显示完整文本 + 声音从第一句起按序播放
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
-        # 兜底尾部（如果模型最后一句话没以句号结尾）—— 流式期间 _tts_drain_sentences
-        # 已逐句入队，这里只送最后一段无句末标点的尾部，不再重复整段
-        self._flush_tts_tail()
+        self._flush_tts_tail_to_prepare()  # 启动尾部 prepare
+        self._wait_all_sentence_workers(timeout_s=120.0)  # 阻塞等全部 prepare 完
 
         self.history.append(self._current_bot_msg)
         self._trim_history()
