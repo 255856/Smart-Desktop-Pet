@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,7 @@ from .chat_window import ChatWindow
 from app.ui.pet_window import PetWindow
 from .settings_window import SettingsWindow
 from app.engine.state_manager import StateManager
+from app.engine.state import is_night
 from app.core.tray import TrayController
 
 log = logging.getLogger(__name__)
@@ -24,6 +26,13 @@ log = logging.getLogger(__name__)
 
 class UIController(QObject):
     """封装所有 UI 窗口管理和信号连接。"""
+
+    # 聊天/主动搭话情绪 → Live2D 固定场景 id（未列出的情绪回退直接切表情）
+    _EMOTION_SCENES = {
+        "happy": "chat_happy", "shy": "chat_shy", "angry": "chat_angry",
+        "sad": "chat_sad", "surprised": "chat_surprised",
+        "thinking": "chat_thinking",
+    }
 
     def __init__(self, root: Path, cfg, state_mgr: StateManager,
                  pet: PetWindow, tts, brain, motion,
@@ -134,6 +143,8 @@ class UIController(QObject):
         self._setup_lipsync()
         # 启动时应用 settings.json 里保存的窗口类设置（缩放/透明度/置顶/随机开关）
         self._apply_stored_window_settings()
+        # 闲置 30 分钟 / 深夜时段的 Live2D 场景
+        self._setup_env_scenes()
 
     # ============================================================
     #  信号连接
@@ -196,6 +207,7 @@ class UIController(QObject):
         self.pet.chat_requested.connect(
             lambda: self.state.on_interact(likability_gain=2))
         self.pet.eat_requested.connect(self._on_eat_requested)
+        self.pet.food_selected.connect(self._on_food_selected)
         self.pet.chat_input_sent.connect(self._on_quick_chat_sent)
 
         # --- 状态管理器信号 ---
@@ -205,6 +217,8 @@ class UIController(QObject):
         # --- 智能中枢信号 ---
         self.brain.bubble_requested.connect(self.pet.show_bubble)
         self.brain.remark_ready.connect(self._on_proactive_remark)
+        if hasattr(self.brain, "emotion_hint"):
+            self.brain.emotion_hint.connect(self._on_proactive_emotion)
 
         # --- 退出保证存档 ---
         from app.core.qt_compat import QApplication
@@ -221,11 +235,32 @@ class UIController(QObject):
         """提醒触发回调。"""
         log.info("提醒触发：%s", text)
         self.pet.show_bubble(f"⏰ 提醒：{text}")
+        anim = getattr(self.pet, "animator", None)
+        if anim is not None and hasattr(anim, "trigger_scene"):
+            anim.trigger_scene("reminder")
 
     def _on_eat_requested(self) -> None:
         """吃饭：涨饱食度 + 体力 + 心情。"""
         self.state_mgr.on_eat_requested()
         self.pet.show_bubble("🍚 吃饱啦~ 好满足！")
+
+    def _on_food_selected(self, name: str) -> None:
+        """右键投喂具体食物：按 foods.json 数值变化（主人手动投喂，不扣金币）。
+
+        图片贴纸 / desc 气泡由 PetWindow 负责；这里只改状态。
+        找不到食物库或物品时退回通用吃饭。
+        """
+        items = getattr(self.brain, "items", None)
+        item = items.by_name(name) if items is not None else None
+        if item is None:
+            log.warning("投喂未找到食物：%s，退回通用吃饭", name)
+            self.state_mgr.on_eat_requested()
+            return
+        from app.engine.works import apply_food
+        if apply_food(self.state, item, free=True):
+            # 投喂本身是陪伴：额外一点心情；好感已在 apply_food 内按每日上限处理
+            self.state.on_interact(feeling_gain=2)
+            log.info("手动投喂「%s」：%s", name, self.state.stats_summary())
 
     def _on_proactive_remark(self, text: str) -> None:
         """主动发言回调。"""
@@ -236,14 +271,69 @@ class UIController(QObject):
         self.state.on_interact(feeling_gain=1)
 
     def _on_chat_reply_ready(self, text: str, emotion, tts_enabled: bool) -> None:
-        """聊天结束回调：切桌宠表情 + 可选 TTS。"""
+        """聊天结束回调：触发聊天情绪场景 + 可选 TTS。"""
         log.info("chat reply ready: %r / %s tts=%s", text, emotion, tts_enabled)
-        try:
-            self.pet.animator.set_emotion(getattr(emotion, "value", str(emotion)))
-        except Exception as e:  # noqa: BLE001
-            log.warning("切聊天表情失败：%s", e)
+        self._apply_chat_emotion(emotion)
         if tts_enabled:
             self.tts.speak(text)
+
+    def _apply_chat_emotion(self, emotion) -> None:
+        """聊天 / 主动搭话情绪 → 触发对应聊天情绪场景；未知情绪回退直接切表情。"""
+        ev = str(getattr(emotion, "value", emotion)).lower()
+        anim = getattr(self.pet, "animator", None)
+        scene = self._EMOTION_SCENES.get(ev)
+        if anim is None:
+            return
+        if scene is not None and hasattr(anim, "trigger_scene"):
+            anim.trigger_scene(scene)
+        else:
+            try:
+                anim.set_emotion(ev)
+            except Exception as e:  # noqa: BLE001
+                log.warning("切聊天表情失败：%s", e)
+
+    def _on_proactive_emotion(self, emotion) -> None:
+        """主动搭话携带的情绪：复用聊天情绪场景。"""
+        self._apply_chat_emotion(emotion)
+
+    # ---------- 环境场景（闲置 30 分钟 / 深夜） ----------
+    def _setup_env_scenes(self) -> None:
+        self._in_idle_lonely = False
+        self._in_late_night = False
+        self._env_scene_timer = QTimer(self)
+        self._env_scene_timer.setInterval(30_000)  # 30 秒检查一次
+        self._env_scene_timer.timeout.connect(self._check_env_scenes)
+        self._env_scene_timer.start()
+
+    def _check_env_scenes(self) -> None:
+        anim = getattr(self.pet, "animator", None)
+        if anim is None or not hasattr(anim, "trigger_scene"):
+            return
+        try:
+            if getattr(anim, "is_sleeping", lambda: False)():
+                return
+            now = time.time()
+            last = float(getattr(self.state, "_last_interact_ts", 0.0) or 0.0)
+            if last <= 0:
+                last = now
+            # 许久未理（30 分钟）
+            if now - last >= 1800:
+                if not self._in_idle_lonely:
+                    self._in_idle_lonely = True
+                    anim.trigger_scene("idle_lonely")
+            elif self._in_idle_lonely:
+                self._in_idle_lonely = False
+                anim.restore_scene_appearance()
+            # 深夜时段（22:00–6:00）
+            if is_night(now):
+                if not self._in_late_night:
+                    self._in_late_night = True
+                    anim.trigger_scene("late_night")
+            elif self._in_late_night:
+                self._in_late_night = False
+                anim.restore_scene_appearance()
+        except Exception:  # noqa: BLE001
+            log.exception("环境场景检查失败")
 
     def _on_streaming_chunk(self, text: str) -> None:
         """流式输出增量：同步显示到桌宠头顶气泡。"""

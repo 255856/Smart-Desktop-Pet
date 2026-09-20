@@ -43,6 +43,12 @@ from app.animation.live2d_model_profile import (
     Live2DModelProfile,
     load_model_profile,
 )
+from app.animation.live2d_scene import (
+    BUILTIN_SCENES,
+    DEFAULT_TRANSIENT_HOLD_MS,
+    SceneBundle,
+    SceneStore,
+)
 from app.animation.pet_renderer import PetRenderer
 from app.core.qt_compat import QObject, QTimer, QUrl
 
@@ -274,7 +280,8 @@ class Live2DRenderer(PetRenderer):
     def __init__(self, model_dir: str | Path, widget_size: tuple[int, int] = (800, 800),
                  scale: float = 0.5, hide_watermark: bool = True,
                  random_exp_cfg: Optional[dict] = None,
-                 max_fps: int = 30):
+                 max_fps: int = 30,
+                 scene_dir: Optional["Path"] = None):
         if not _WEB_ENGINE_AVAILABLE:
             raise ImportError(
                 "Live2DRenderer 需要 PyQtWebEngine。"
@@ -378,6 +385,17 @@ class Live2DRenderer(PetRenderer):
         self._random_timer.setSingleShot(True)
         self._random_timer.timeout.connect(self._on_random_timeout)
 
+        # ---- 触发场景动作配置（按模型一份 JSON，覆盖 YAML triggers 默认）----
+        self._scene_dir = Path(scene_dir) if scene_dir else None
+        self.scene_store: Optional[SceneStore] = None
+        self._scene_toggles: list[str] = []      # 持续场景叠加的 toggle 条目
+        self._transient_toggles: list[str] = []  # 一次性场景临时叠加（到时收起）
+        self._persist_sig: Optional[tuple] = None  # 持续场景幂等签名
+        self._current_scene: str = ""
+        if self._scene_dir is not None:
+            scene_path = self._scene_dir / f"{self.model_dir.name}.json"
+            self.scene_store = SceneStore(scene_path, self.profile)
+
     # ----- 生命周期 -----
     def _on_page_loaded(self, ok: bool) -> None:
         """WebView 页面加载完成 → 触发 JS loadModel。"""
@@ -444,6 +462,11 @@ class Live2DRenderer(PetRenderer):
         # 启动挂机随机表情心跳
         if self._random_enabled:
             self._arm_random_timer()
+        # 应用用户配置的开机初始外观
+        try:
+            self.trigger_scene("startup")
+        except Exception:  # noqa: BLE001
+            log.exception("开机场景应用失败")
 
     def _on_model_error(self, error: str) -> None:
         self._ready = False
@@ -669,6 +692,18 @@ class Live2DRenderer(PetRenderer):
             self._js("window.live2d.stopMotions();")
             self._js(f"window.live2d.playMotion("
                      f"{json.dumps(self.profile.sleep_motion_group)});")
+        # 场景配置：睡觉额外外观（toggles 进 overlay，醒来收起；表情临时显示不改当前情绪）
+        b = self.scene_store.effective_bundle("sleeping") if self.scene_store else None
+        if b is not None and not b.is_empty():
+            for name in b.toggles:
+                if self._is_toggle_item(name) and name not in self._overlay_items:
+                    it = self.profile.find_item(name)
+                    self._overlay_items.append(name)
+                    self._apply_params([], it.params)
+            if b.emotion:
+                item = self.profile.find_item(b.emotion)
+                if item is not None:
+                    self._play_item_expr(item)
 
     def set_wake(self) -> None:
         self._sleeping = False
@@ -680,10 +715,29 @@ class Live2DRenderer(PetRenderer):
                      f"{json.dumps(self.profile.idle_motion_group)});")
         # set_idle 会把 ExpressionManager 切回当前情绪（自然睁眼），角度回正
         self.set_idle()
+        # 醒来场景外观（用户配置时才生效）
+        try:
+            self.trigger_scene("wake")
+        except Exception:  # noqa: BLE001
+            log.exception("醒来场景应用失败")
 
     def set_thinking(self) -> None:
         """AI 思考中：持续思考表情 + 可选叠加手势（回复后 set_idle 恢复）。"""
         self._thinking = True
+        # 用户在「触发场景配置」里覆盖的 AI 思考组合优先
+        b = self.scene_store.effective_bundle("thinking") if self.scene_store else None
+        if b is not None and not b.is_empty():
+            if b.emotion:
+                item = self.profile.find_item(b.emotion)
+                if item is not None:
+                    self._play_item_expr(item)
+            for name in b.toggles:
+                if self._is_toggle_item(name) and name not in self._overlay_items:
+                    it = self.profile.find_item(name)
+                    self._overlay_items.append(name)
+                    self._apply_params([], it.params)
+            return
+        # 模型默认（YAML triggers.thinking）
         if self.profile.thinking_expr:
             item = self.profile.find_item(self.profile.thinking_expr)
             if item is not None:
@@ -701,25 +755,46 @@ class Live2DRenderer(PetRenderer):
         """触摸反应：短暂表情/微笑 + 歪头，随后回到当前情绪。"""
         self.note_activity()
         tilt = 0.3 if where == 'head' else 0.15
-        if self.profile.touch_expr:
+        scene_id = "touch_head" if where == "head" else "touch_body"
+        hold = int(self.profile.touch_hold_ms or 700)
+        b = self.scene_store.effective_bundle(scene_id) if self.scene_store else None
+        if b is not None and not b.is_empty():
+            # 用户配置的触摸组合（表情 + 手势）
+            hold = int(b.hold_ms or hold)
+            if b.emotion:
+                item = self.profile.find_item(b.emotion)
+                if item is not None:
+                    self._play_item_expr(item, hold_ms=hold)
+            added = self._add_toggle_items(b.toggles)
+            self._transient_toggles.extend(added)
+            QTimer.singleShot(hold + 250, lambda: self._end_transient(added))
+        elif self.profile.touch_expr:
             item = self.profile.find_item(self.profile.touch_expr)
             if item is not None:
-                self._play_item_expr(item, hold_ms=self.profile.touch_hold_ms)
+                self._play_item_expr(item, hold_ms=hold)
         elif self.profile.touch_params:
             self._play_custom_expr("__pet_touch", self.profile.touch_params,
-                                   hold_ms=self.profile.touch_hold_ms)
+                                   hold_ms=hold)
         self._js(f"window.live2d.setParam('ParamAngleX', {tilt}, 150);")
-        QTimer.singleShot(self.profile.touch_hold_ms, self._restore_emotion_if_awake)
+        QTimer.singleShot(hold, self._restore_emotion_if_awake)
 
     def play_animation(self, anim_name: str) -> None:
-        """一次性动作：按 profile.actions 映射（引用条目 / 内联表情 / 姿态插值）。"""
+        """一次性动作：用户自定义（绑定工具动作键）优先，否则按 profile.actions。"""
         self.note_activity()
-        spec = self.profile.actions.get(anim_name.lower())
+        key = str(anim_name).lower()
+        if self.scene_store is not None:
+            custom = self.scene_store.custom_by_hook(key)
+            if custom is not None:
+                b = SceneStore.action_bundle(custom)
+                self._play_transient_bundle(
+                    b, int(custom.get("hold_ms") or DEFAULT_TRANSIENT_HOLD_MS))
+                return
+        spec = self.profile.actions.get(key)
         if spec is None:
             log.warning("Live2D: 未知动作 '%s'（模型 %s 未配置）",
                         anim_name, self.profile.name)
             return
-        self._run_action_spec(spec, slot=f"__pet_{anim_name.lower()}")
+        self._run_action_spec(spec, slot=f"__pet_{key}")
 
     def _run_action_spec(self, spec: ActionSpec, slot: str) -> None:
         dur = int(spec.duration_ms or 800)
@@ -765,6 +840,18 @@ class Live2DRenderer(PetRenderer):
         self.note_activity()
         self._js("window.live2d.setParam('ParamAngleX', 0.5, 200);")
         self._js("window.live2d.setParam('ParamAngleY', -0.3, 200);")
+        # 拖拽场景组合（toggles 进 overlay，end_drag→set_idle 收起）
+        b = self.scene_store.effective_bundle("dragging") if self.scene_store else None
+        if b is not None and not b.is_empty():
+            if b.emotion:
+                item = self.profile.find_item(b.emotion)
+                if item is not None:
+                    self._play_item_expr(item)
+            for name in b.toggles:
+                if self._is_toggle_item(name) and name not in self._overlay_items:
+                    it = self.profile.find_item(name)
+                    self._overlay_items.append(name)
+                    self._apply_params([], it.params)
 
     def end_drag(self) -> None:
         self.set_idle()
@@ -964,7 +1051,163 @@ class Live2DRenderer(PetRenderer):
             active.add(self._current_emotion)
         return active
 
+    # ============================================================
+    #  触发场景动作（设置面板「触发场景配置」可视化驱动）
+    # ============================================================
+    # 一次性场景集合（播放后恢复当前持续外观）
+    _TRANSIENT_SCENES = {sid for sid, _, kind, _ in BUILTIN_SCENES
+                         if kind == "transient"}
+    _SCENE_DEFAULT_HOLD = {
+        "touch_head": 700, "touch_body": 700,
+        "double_click": 1600, "reminder": 2500,
+    }
+
+    def _is_toggle_item(self, name: str) -> bool:
+        """条目名是否属于配件/手势/特殊（toggle 叠加组）。"""
+        item = self.profile.find_item(name)
+        if item is None:
+            return False
+        cat = self.profile.category(item.category)
+        return cat is not None and not cat.emotion and not cat.hairstyle
+
+    def _add_toggle_items(self, names: list) -> list:
+        """叠加 toggle 条目，返回真正生效的条目名（已激活的不重复）。"""
+        added = []
+        for n in names:
+            if not n or n in self._active_toggles or not self._is_toggle_item(n):
+                continue
+            item = self.profile.find_item(n)
+            self._active_toggles[n] = list(item.params.keys())
+            self._apply_params([], item.params)
+            added.append(n)
+        return added
+
+    def _clear_toggle_items(self, names: list) -> None:
+        """收起指定 toggle 条目（复位参数并从激活表移除）。"""
+        for n in list(names):
+            if n in self._active_toggles:
+                self._apply_params(self._active_toggles.pop(n), {})
+
+    def _play_persistent_bundle(self, b: SceneBundle, scene_id: str = "") -> None:
+        """持续场景：替换式应用（表情/发型持久，toggle 场景替换）。"""
+        sig = (b.emotion, b.hairstyle, tuple(sorted(b.toggles)))
+        if sig == self._persist_sig and scene_id == self._current_scene:
+            return
+        self._clear_toggle_items(self._scene_toggles)
+        self._scene_toggles = []
+        if b.emotion:
+            self.set_emotion(b.emotion)
+        if b.hairstyle:
+            self.set_hairstyle(b.hairstyle)
+        self._scene_toggles = self._add_toggle_items(b.toggles)
+        self._persist_sig = sig
+        self._current_scene = scene_id
+
+    def _play_transient_bundle(self, b: SceneBundle, hold_ms: int) -> None:
+        """一次性场景：临时表情 + 临时 toggles，到时恢复当前持续外观。"""
+        hold = max(400, int(hold_ms or DEFAULT_TRANSIENT_HOLD_MS))
+        if b.emotion:
+            item = self.profile.find_item(b.emotion)
+            if item is not None:
+                self._play_item_expr(item, hold_ms=hold)
+        added = self._add_toggle_items(b.toggles)
+        self._transient_toggles.extend(added)
+        QTimer.singleShot(hold + 250, lambda: self._end_transient(added))
+
+    def _end_transient(self, added: list) -> None:
+        """一次性动作结束：收起本次临时 toggles，恢复当前情绪。"""
+        for n in list(added):
+            if n in self._transient_toggles:
+                self._transient_toggles.remove(n)
+        if not self._sleeping:
+            self._clear_toggle_items(added)
+            self._restore_emotion()
+
+    def trigger_scene(self, scene_id: str, hold_ms: Optional[int] = None) -> None:
+        """外部触发一个固定场景（情绪 / 开机 / 提醒 / 闲置 / 深夜等）。
+
+        无配置（用户未覆盖且模型默认也没有）时直接返回，不改变外观。
+        """
+        if self.scene_store is None:
+            return
+        b = self.scene_store.effective_bundle(scene_id)
+        if b is None or b.is_empty():
+            return
+        if scene_id in self._TRANSIENT_SCENES:
+            hold = hold_ms or b.hold_ms or self._SCENE_DEFAULT_HOLD.get(
+                scene_id, DEFAULT_TRANSIENT_HOLD_MS)
+            self._play_transient_bundle(b, hold)
+        else:
+            self._play_persistent_bundle(b, scene_id)
+
+    def restore_scene_appearance(self) -> None:
+        """退出环境场景（闲置/深夜）后恢复自然外观：收起场景叠加、表情回自然。
+
+        发型保留（用户可能手动选了发型），只清场景带来的 toggle 与情绪。
+        """
+        self._clear_toggle_items(self._scene_toggles)
+        self._scene_toggles = []
+        self._persist_sig = None
+        self._current_scene = ""
+        if not self._sleeping:
+            self.reset_emotion()
+
+    def preview_bundle(self, b: SceneBundle, hold_ms: int = 2600) -> None:
+        """设置面板「试穿」：临时应用组合，约 2.6 秒后恢复当前情绪。"""
+        self.note_activity()
+        if b.emotion:
+            item = self.profile.find_item(b.emotion)
+            if item is not None:
+                self._play_item_expr(item, hold_ms=hold_ms)
+        if b.hairstyle:
+            self.set_hairstyle(b.hairstyle)
+        added = self._add_toggle_items(b.toggles)
+        QTimer.singleShot(hold_ms + 300, lambda: self._end_transient(added))
+
+    # ---- 固定场景编辑 API（设置面板用）----
+    def get_scene_bundle(self, scene_id: str) -> SceneBundle:
+        if self.scene_store is None:
+            return SceneBundle()
+        return self.scene_store.bundle_for_preview(scene_id)
+
+    def set_scene_bundle(self, scene_id: str, b: SceneBundle) -> None:
+        if self.scene_store is not None:
+            self.scene_store.set_bundle(scene_id, b)
+
+    def reset_scene_bundle(self, scene_id: str) -> None:
+        if self.scene_store is not None:
+            self.scene_store.reset_scene(scene_id)
+
+    def scene_is_overridden(self, scene_id: str) -> bool:
+        return bool(self.scene_store and self.scene_store.is_overridden(scene_id))
+
+    # ---- 自定义动作（用户命名、可绑工具动作键，初始为空）----
+    def get_custom_actions(self) -> list:
+        return list(self.scene_store.custom_actions) if self.scene_store else []
+
+    def add_custom_action(self, name, hook, b: SceneBundle, hold_ms: int) -> dict:
+        return self.scene_store.add_custom_action(name, hook, b, hold_ms)
+
+    def update_custom_action(self, cid, **kw) -> None:
+        self.scene_store.update_custom_action(cid, **kw)
+
+    def remove_custom_action(self, cid) -> bool:
+        return self.scene_store.remove_custom_action(cid)
+
+    def play_custom_action(self, cid: str) -> None:
+        """右键菜单 / 设置面板播放一个自定义动作（一次性后恢复）。"""
+        if self.scene_store is None:
+            return
+        a = self.scene_store.custom_by_id(cid)
+        if not a:
+            return
+        self.note_activity()
+        b = SceneStore.action_bundle(a)
+        self._play_transient_bundle(
+            b, int(a.get("hold_ms") or DEFAULT_TRANSIENT_HOLD_MS))
+
     # ---------- 玩一下（一次性动作菜单） ----------
+
     def get_play_options(self) -> list[tuple[str, str]]:
         """玩一下菜单数据：[(动作名, 标签)]（profile 已配置的动作）。"""
         names = list(_DEFAULT_QUICK_PLAY)

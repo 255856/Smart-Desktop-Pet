@@ -506,6 +506,10 @@ class App:
                 "max_s": int(getattr(cfg.pet.live2d, "random_expression_max_s", 70)),
             },
             live2d_max_fps=int(getattr(cfg.pet.live2d, "max_fps", 30)),
+            # 触发场景动作配置（按模型一份 JSON：data/live2d_scenes/<模型名>.json）
+            live2d_scene_dir=root / "data" / "live2d_scenes",
+            # 食物库（右键「喂食」子菜单：图片贴纸 + desc 气泡 + 状态变化）
+            foods_path=root / "data" / "foods.json",
         )
         self.pet.move(cfg.window.start_x, cfg.window.start_y)
         self.pet.attach_state(self.state_mgr.state)

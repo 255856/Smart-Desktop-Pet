@@ -98,6 +98,35 @@ class PetRenderer(ABC):
         """「玩一下」菜单数据：[(动作名, 标签)]。sprite 无默认实现（菜单自己列）。"""
         return []
 
+    # ----- 触发场景动作（Live2D 可视化配置；sprite 仅把情绪场景映射到 set_emotion） -----
+    # 聊天情绪场景 → sprite 情绪键
+    _SPRITE_CHAT_EMOTION = {
+        "chat_happy": "happy", "chat_sad": "sad", "chat_angry": "angry",
+        "chat_shy": "shy", "chat_surprised": "surprised", "chat_thinking": "think",
+    }
+
+    def trigger_scene(self, scene_id: str, hold_ms: Optional[int] = None) -> None:
+        """触发一个固定场景（情绪/开机/提醒/闲置/深夜等）。
+
+        Live2D 会按设置面板里配置的外观组合播放；sprite 仅支持把聊天情绪映射到
+        set_emotion，其余状态/互动场景由原有专用方法承担，这里 no-op。
+        """
+        emo = self._SPRITE_CHAT_EMOTION.get(scene_id)
+        if emo:
+            self.set_emotion(emo)
+
+    def get_custom_actions(self) -> list:
+        """自定义动作列表（仅 Live2D 场景配置支持，sprite 恒为空）。"""
+        return []
+
+    def restore_scene_appearance(self) -> None:
+        """退出环境场景（闲置/深夜）后恢复自然（sprite 回自然表情）。"""
+        self.reset_emotion()
+
+
+    def play_custom_action(self, cid: str) -> None:
+        """播放一个自定义动作（sprite 无此能力，no-op）。"""
+
     # ----- 挂机随机表情（Live2D 专属，sprite 默认不支持） -----
     def set_random_expressions(self, enabled: bool) -> None:
         """开关挂机随机表情。sprite 默认 no-op。"""

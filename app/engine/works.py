@@ -28,6 +28,19 @@ from app.engine.state import PetState
 log = logging.getLogger(__name__)
 
 
+# 食物类型归一化：JSON 里 Snack / Snacks 拼写不一致，统一映射到标准 key
+CATEGORY_ORDER = ["Drink", "Meal", "Snack", "Functional", "Drug", "Gift"]
+CATEGORY_LABELS = {
+    "Drink": "饮料",
+    "Meal": "正餐",
+    "Snack": "零食",
+    "Functional": "功能",
+    "Drug": "药品",
+    "Gift": "礼物",
+}
+_TYPE_ALIASES = {"snacks": "Snack"}
+
+
 @dataclass
 class Item:
     name: str
@@ -42,6 +55,7 @@ class Item:
     price: float = 0.0
     graph: str = ""
     desc: str = ""
+    path: str = ""          # 食物图片（相对项目根，如 assets/food/rmbg-1.png）
 
     @classmethod
     def from_dict(cls, d: dict) -> "Item":
@@ -58,7 +72,27 @@ class Item:
             price=float(d.get("price", 0)),
             graph=d.get("graph", ""),
             desc=d.get("desc", ""),
+            path=d.get("path", ""),
         )
+
+    @property
+    def category_key(self) -> str:
+        """归一化类型（Snack/Snacks 合并为 Snack）。"""
+        raw = (self.type or "").strip().lower()
+        return _TYPE_ALIASES.get(raw, raw.capitalize())
+
+    @property
+    def category_label(self) -> str:
+        return CATEGORY_LABELS.get(self.category_key, "其他")
+
+    def image_path(self, base_dir: "str | Path | None" = None) -> Optional["Path"]:
+        """解析食物图片绝对路径；文件不存在或未配置时返回 None。"""
+        if not self.path:
+            return None
+        q = Path(self.path)
+        if not q.is_absolute() and base_dir is not None:
+            q = Path(base_dir) / q
+        return q if q.is_file() else None
 
 
 @dataclass
@@ -108,6 +142,8 @@ class Job:
 @dataclass
 class ItemStore:
     items: list[Item] = field(default_factory=list)
+    # 物品库根目录（用于解析相对图片路径）；data/foods.json 时默认取项目根
+    base_dir: Optional[Path] = None
 
     @classmethod
     def load(cls, path: str | Path) -> "ItemStore":
@@ -121,8 +157,10 @@ class ItemStore:
             log.warning("ItemStore 读取失败：%s", e)
             return cls()
         items = [Item.from_dict(d) for d in raw.get("items", [])]
+        # data/foods.json 的父目录是 data/，再上一级是项目根（取绝对路径，避免 cwd 不同）
+        base_dir = p.resolve().parent.parent
         log.info("ItemStore: 加载 %d 个物品", len(items))
-        return cls(items=items)
+        return cls(items=items, base_dir=base_dir)
 
     def by_name(self, name: str) -> Optional[Item]:
         for it in self.items:
@@ -132,6 +170,20 @@ class ItemStore:
 
     def by_type(self, type_name: str) -> list[Item]:
         return [it for it in self.items if it.type == type_name]
+
+    def grouped(self) -> list[tuple[str, list[Item]]]:
+        """按归一化类别分组，返回 [(分类中文名, [物品...])]，按固定顺序排列。"""
+        buckets: dict[str, list[Item]] = {}
+        for it in self.items:
+            buckets.setdefault(it.category_label, []).append(it)
+        ordered = [CATEGORY_LABELS[k] for k in CATEGORY_ORDER
+                   if CATEGORY_LABELS[k] in buckets]
+        if "其他" in buckets:
+            ordered.append("其他")
+        return [(label, buckets[label]) for label in ordered]
+
+    def image_path(self, item: Item) -> Optional[Path]:
+        return item.image_path(self.base_dir)
 
 
 @dataclass
@@ -159,26 +211,45 @@ class JobStore:
 
 # ---------------- 应用 ----------------
 
-def apply_food(state: PetState, item: Item) -> bool:
-    """花一份钱喂食。成功返回 True，钱不够返回 False。
+def apply_food(state: PetState, item: Item, *, free: bool = False) -> bool:
+    """喂食。成功返回 True，钱不够返回 False。
 
     走 VPet 同款 ``eat_food``：每个 food 数值一半入主值、一半入 store*，
     由 take_store() 每 tick 慢慢补回主值（防止瞬间爆击）。
+
+    free=True 时为「主人手动投喂」（右键菜单），不扣金币；
+    free=False 时为 LLM 用桌宠自己的金币买食物，钱不够会失败。
+
+    另有两项防刷机制：饱食/口渴 ≥85 时对应补充效果 ×0.3（心情 ×0.5）；
+    好感按自然日封顶（默认每日 5 点）。
     """
-    if state.money < item.price:
-        return False
-    # 扣钱
-    state.money -= item.price
+    if not free:
+        if state.money < item.price:
+            return False
+        # 扣钱
+        state.money -= item.price
+
+    # 饱腹递减：饱食 / 口渴 ≥ 85 时「吃不下」，对应补充项 ×0.3，心情 ×0.5
+    food_full = state.strength_food >= 85.0
+    drink_full = state.strength_drink >= 85.0
+    food_mul = 0.3 if food_full else 1.0
+    drink_mul = 0.3 if drink_full else 1.0
+    feel_mul = 0.5 if (food_full or drink_full) else 1.0
+
     state.eat_food(
-        strength=item.strength,
-        strength_food=item.strength_food,
-        strength_drink=item.strength_drink,
+        strength=item.strength * food_mul,
+        strength_food=item.strength_food * food_mul,
+        strength_drink=item.strength_drink * drink_mul,
         health=item.health,
-        feeling=item.feeling,
-        likability=item.likability,
+        feeling=item.feeling * feel_mul,
+        likability=0,   # 好感统一走 add_food_likability（每日上限）
         exp=item.exp,
     )
-    log.info("喂食 %s：money=%.1f", item.name, state.money)
+    state.add_food_likability(item.likability)
+    log.info("喂食 %s（%s%s）：money=%.1f", item.name,
+             "手动投喂" if free else "金币购买",
+             "·饱腹递减" if (food_full or drink_full) else "",
+             state.money)
     return True
 
 

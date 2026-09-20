@@ -9,7 +9,7 @@
 
 衰减速率（per second, 白天）：
     - 体力：   0.015/s  (100→0 ≈ 111 min, 夜间 ≈ 85 min)
-    - 饱食：   0.020/s  (100→0 ≈ 83 min,  夜间 ≈ 64 min)
+    - 饱食：   0.007/s  (100→0 纯衰减 ≈ 4 h；高值因被动回复略慢)
     - 口渴：   0.025/s  (100→0 ≈ 67 min,  夜间 ≈ 51 min)
     - 心情：   0.015/s  (100→0 ≈ 111 min)
     - 寂寞：   10 分钟未互动 → 心情衰减 ×2
@@ -69,13 +69,13 @@ class PetState:
 
     # ---- 衰减速率（per second） ----
     decay_strength: float = 0.015
-    decay_strength_food: float = 0.020
+    decay_strength_food: float = 0.007
     decay_strength_drink: float = 0.025
     decay_feeling: float = 0.015
 
     # ---- 被动回复速率（per second，当该项 >70 时） ----
     regen_strength: float = 0.008
-    regen_strength_food: float = 0.010
+    regen_strength_food: float = 0.0035
     regen_strength_drink: float = 0.010
     regen_feeling: float = 0.008
 
@@ -94,6 +94,11 @@ class PetState:
     night_multiplier: float = 1.3
 
     _last_interact_ts: float = 0.0
+
+    # ---- 投喂好感每日上限（每次有效投喂 +1，每天最多 5 点，跨自然日重置） ----
+    feed_like_daily_cap: float = 5.0
+    feed_like_date: str = ""
+    feed_like_count: float = 0.0
 
     on_mode_change: Optional[Callable[[Mode, Mode], None]] = None
     on_change: Optional[Callable[[], None]] = None
@@ -321,6 +326,22 @@ class PetState:
         self._reevaluate_mode()
         self._fire_change()
 
+    def add_food_likability(self, like: float) -> float:
+        """投喂好感：每日上限 feed_like_daily_cap 点，跨自然日重置。返回实际增加量。"""
+        import datetime
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        if self.feed_like_date != today:
+            self.feed_like_date = today
+            self.feed_like_count = 0.0
+        like = max(0.0, float(like))
+        allowed = max(0.0, self.feed_like_daily_cap - self.feed_like_count)
+        added = min(like, allowed)
+        self.feed_like_count += added
+        if added > 0:
+            self.likability = min(self.likability_max, self.likability + added)
+            self._fire_change()
+        return added
+
     def _reevaluate_mode(self) -> None:
         new_mode = self.cal_mode()
         if new_mode != self.mode:
@@ -368,6 +389,8 @@ class PetState:
             "store_strength_drink": self.store_strength_drink,
             "mode": self.mode.value,
             "last_interact": self._last_interact_ts,
+            "feed_like_date": self.feed_like_date,
+            "feed_like_count": self.feed_like_count,
         }
 
     @classmethod
@@ -384,6 +407,10 @@ class PetState:
             s.mode = Mode.from_string(d["mode"])
         if "last_interact" in d:
             s._last_interact_ts = float(d["last_interact"])
+        if "feed_like_date" in d:
+            s.feed_like_date = str(d["feed_like_date"])
+        if "feed_like_count" in d:
+            s.feed_like_count = float(d["feed_like_count"])
         if v < 3:
             log.info("存档 v=%d 已升级到 v3（含 level 保存 + 平衡数值）", v)
         return s

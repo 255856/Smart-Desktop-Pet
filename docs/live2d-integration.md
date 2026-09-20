@@ -139,6 +139,19 @@ model3["FileReferences"]["Expressions"] = [
 
 如果模型自带的 `Expressions/` 目录有 `*.exp3.json`，profile 不用声明，渲染器自动扫描；如果想改 `Name`，在 profile 的 `emotions` 里指定。
 
+## 触发场景配置（v3.2）
+
+设置面板「Live2D」页不再平铺外观切换入口（右键菜单仍可手动切换），改为「触发场景配置」：每个场景可自由搭配**表情 / 发型 / 配件 / 手势 / 特殊**五类外观，全部留空表示该场景不改变外观。
+
+- **场景清单（18 个）**
+  - 聊天情绪：`chat_happy` 开心、`chat_shy` 害羞、`chat_angry` 生气、`chat_sad` 难过、`chat_surprised` 惊讶、`chat_thinking` 思考
+  - 状态：`thinking` AI 思考中、`sleeping` 睡觉、`wake` 醒来、`idle` 待机、`startup` 开机、`late_night` 深夜（22:00–6:00）、`idle_lonely` 许久未理（闲置 30 分钟）
+  - 互动：`touch_head` 摸头、`touch_body` 摸身体、`double_click` 双击、`reminder` 收到提醒、`dragging` 拖拽中
+- **持续 vs 一次性**：聊天情绪 / 状态 / 拖拽为持续场景，触发时替换当前外观（离开状态时恢复）；摸头 / 双击 / 提醒为一次性，播放到时长后自动恢复。
+- **默认值**：未自定义时从模型 profile 的 `emotion_aliases` / `thinking` / `touch` / `actions` 推导，与手动触发时的外观一致。
+- **自定义动作**：不预置固定动作，由用户在「自定义动作」卡新建（命名 + 触发方式 + 外观搭配 + 时长）。触发方式可绑定工具动作 hook（喂食 / 打开文件 / 转圈 / 伸懒腰 / 跳跃 / 游泳 / 吐舌 / 比耶），也可「仅手动播放」；手动动作出现在右键「玩一下」菜单。**仅 Live2D 模式，按模型分别持久化**（不同模型动作 / 外观参数不同）。
+- **配置文件**：`data/live2d_scenes/<模型目录名>.json`，包含 18 个场景的覆盖值与自定义动作；删除该文件即恢复默认。
+
 ## 参考资料
 
 - [live2d 官方示例](https://www.live2d.com/zh-CHS/learn/sample/)（官方免费模型）

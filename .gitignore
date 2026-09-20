@@ -69,8 +69,6 @@ Thumbs.db
 assets/sprites/
 # TTS 缓存（运行时生成）
 assets/tts_cache/
-#食物图片
-assets/food/
 
 # 运行时数据目录整体忽略（memory/reminders/注册表/缓存等本机数据）
 data/

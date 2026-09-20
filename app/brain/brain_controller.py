@@ -106,6 +106,8 @@ class BrainController(QObject):
 
     # 信号：主动发言就绪（文本）
     remark_ready = Signal(str)
+    # 信号：主动发言携带的情绪（Emotion 枚举）
+    emotion_hint = Signal(object)
     # 信号：工具触发的气泡请求（文本）
     bubble_requested = Signal(str)
     # 信号：工具触发的动画请求（动画名）
@@ -173,6 +175,7 @@ class BrainController(QObject):
                 is_sleeping=self._check_sleeping,
             )
             self.proactive.remark_ready.connect(self._on_proactive_remark)
+            self.proactive.emotion_hint.connect(self.emotion_hint)
             self.proactive.start()
         else:
             self.proactive = None

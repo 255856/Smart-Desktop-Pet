@@ -157,11 +157,16 @@ class PetWindow(QWidget):
     mouse_entered = Signal()
     mouse_left = Signal()
 
+    # 喂食冷却：两次有效投喂最小间隔（秒），防止连点刷满状态
+    FEED_COOLDOWN_S = 30.0
+
     # 状态栏显示/隐藏（PR-status-overlay：VPet 同款状态条）
     status_bar_toggled = Signal(bool)  # True = 显示，False = 隐藏
 
     # 吃饭（右键菜单触发：播放吃饭动画 + 主程序涨饱食/体力）
     eat_requested = Signal()
+    # 选中具体食物（右键「喂食」子菜单）：参数为食物名，由 UIController 应用状态
+    food_selected = Signal(str)
 
     # 快捷聊天输入（底部输入框发送消息）
     chat_input_sent = Signal(str)
@@ -177,7 +182,9 @@ class PetWindow(QWidget):
                  live2d_model_dir: str | Path | None = None,
                  live2d_hide_watermark: bool = True,
                  live2d_random_exp_cfg: dict | None = None,
-                 live2d_max_fps: int = 30):
+                 live2d_max_fps: int = 30,
+                 live2d_scene_dir: str | Path | None = None,
+                 foods_path: str | Path | None = None):
         super().__init__()
         # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
         self._window_size = QSize(
@@ -198,6 +205,7 @@ class PetWindow(QWidget):
             live2d_hide_watermark=live2d_hide_watermark,
             live2d_random_exp_cfg=live2d_random_exp_cfg,
             live2d_max_fps=live2d_max_fps,
+            live2d_scene_dir=Path(live2d_scene_dir) if live2d_scene_dir else None,
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用
 
@@ -210,6 +218,19 @@ class PetWindow(QWidget):
         self._sticker_rotation = 45            # 倾斜角度（顺时针）
         self._sticker_overrides: dict = {}     # 设置面板运行时覆盖（大小/角度/间隔/时长）
         self._setup_sticker_overlay()
+
+        # 食物库（右键「喂食」子菜单：食物图片贴纸 + 气泡 desc + 状态变化）
+        self.food_store = None
+        self._food_sticker_cache: dict[tuple, QPixmap] = {}
+        self._last_food_ts = 0.0
+        if foods_path:
+            try:
+                from app.engine.works import ItemStore
+                _fp = Path(foods_path)
+                if _fp.is_file():
+                    self.food_store = ItemStore.load(_fp)
+            except Exception:  # noqa: BLE001
+                log.exception("食物库加载失败：%s", foods_path)
 
         # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
         self._setup_look_at()
@@ -846,7 +867,8 @@ class PetWindow(QWidget):
         if evt.button() == Qt.MouseButton.LeftButton:
             rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
             if rtype == "live2d":
-                self.animator.play_animation('tongue')
+                # 双击走「触发场景配置」的 double_click（默认=吐舌外观，可自定义）
+                self.animator.trigger_scene('double_click')
             else:
                 self.animator.play_spin()
             evt.accept()
@@ -954,6 +976,59 @@ class PetWindow(QWidget):
         """右键菜单「吃饭」：播放吃饭动画 + 通知主程序涨状态。"""
         self.animator.play_eat()
         self.eat_requested.emit()
+
+    def _build_feed_menu(self, menu) -> None:
+        """右键「喂食」：按食物库分类挂子菜单；无库时回退为单个「吃饭」。"""
+        store = getattr(self, "food_store", None)
+        items = store.items if store is not None else []
+        if not items:
+            act_eat = QAction("吃饭", self)
+            act_eat.triggered.connect(self._on_eat_menu)
+            menu.addAction(act_eat)
+            return
+        groups = store.grouped()
+        feed_menu = menu.addMenu("喂食")
+        for label, group_items in groups:
+            # 只有一个分类时直接平铺，不嵌套；多个分类时按分类建子菜单
+            sub = feed_menu.addMenu(label) if len(groups) > 1 else feed_menu
+            for item in group_items:
+                a = QAction(item.name, self)
+                a.triggered.connect(
+                    lambda _=False, it=item: self._on_feed_picked(it))
+                sub.addAction(a)
+
+    def _on_feed_picked(self, item) -> None:
+        """选中食物：播吃/喝动画；冷却内只提示，否则食物图贴纸 + desc 气泡 + 状态变化。"""
+        # 1) 吃/喝动画（无论是否冷却都播，作为点击反馈）
+        try:
+            self.animator.play_eat()
+        except Exception:  # noqa: BLE001
+            log.exception("喂食动画播放失败")
+
+        # 2) 喂食冷却：30 秒内连点只提示「吃不下」，不重复弹贴纸 / 加状态
+        now = time.time()
+        if now - self._last_food_ts < self.FEED_COOLDOWN_S:
+            left = int(self.FEED_COOLDOWN_S - (now - self._last_food_ts)) + 1
+            self.show_bubble(f"刚刚才吃过啦，{left} 秒后再喂我嘛~", duration_ms=2500)
+            return
+        self._last_food_ts = now
+
+        # 3) 食物图片贴纸（右上角，正立）
+        try:
+            img = None
+            if self.food_store is not None:
+                img = self.food_store.image_path(item)
+            if img is not None:
+                self.show_food_sticker(str(img))
+        except Exception:  # noqa: BLE001
+            log.exception("食物图片显示失败")
+        # 4) 气泡描述（无 desc 时给默认语）
+        text = (getattr(item, "desc", "") or "").strip()
+        if not text:
+            text = f"谢谢主人的{item.name}~ 好开心！"
+        self.show_bubble(text, duration_ms=4000)
+        # 5) 通知主程序按该食物数值变化状态（不发通用 eat_requested，避免双重加成）
+        self.food_selected.emit(item.name)
 
     def _on_swim_menu(self) -> None:
         """右键菜单「游泳」：播放游泳动画（once）→ 回到 idle。"""
@@ -1162,7 +1237,18 @@ class PetWindow(QWidget):
 
     # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
     def _setup_sticker_overlay(self) -> None:
-        """模型目录带表情包（profile stickers 配置）时启用随机贴纸弹窗。"""
+        """初始化右上角贴纸层（随机表情包 + 喂食食物图共用）。
+
+        随机表情包仅在模型自带 stickers（cfg）时启用；但贴纸 label 始终创建，
+        这样 sprite 模式 / 无表情包模型也能在喂食时显示食物图片。
+        """
+        # 贴纸 label 无条件创建（食物图片在两种渲染模式下都要能弹）
+        self._sticker_label = QLabel(self)
+        self._sticker_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._sticker_label.setStyleSheet("background: transparent;")
+        self._sticker_label.hide()
+
         cfg = None
         if self.renderer is not None and hasattr(self.renderer, "get_sticker_config"):
             try:
@@ -1170,6 +1256,8 @@ class PetWindow(QWidget):
             except Exception:  # noqa: BLE001
                 cfg = None
         if not cfg:
+            # 无随机表情包：保留 label 供食物贴纸用，不启动随机定时器
+            self._sticker_timer = None
             return
         import random as _random
         self._sticker_random = _random
@@ -1178,12 +1266,6 @@ class PetWindow(QWidget):
         self._sticker_size = int(cfg.get("size", 180))
         self._sticker_min_s = int(cfg.get("min_s", 30))
         self._sticker_max_s = int(cfg.get("max_s", 90))
-
-        self._sticker_label = QLabel(self)
-        self._sticker_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._sticker_label.setStyleSheet("background: transparent;")
-        self._sticker_label.hide()
 
         self._sticker_timer = QTimer(self)
         self._sticker_timer.setSingleShot(True)
@@ -1247,6 +1329,58 @@ class PetWindow(QWidget):
     def is_random_stickers_enabled(self) -> bool:
         return bool(getattr(self, "_stickers_enabled", True))
 
+    def _present_sticker(self, path: str, *, size: int, rotation: int = 0,
+                         duration_ms: int = 4000,
+                         cache: Optional[dict] = None) -> bool:
+        """把一张图片弹到角色右上角，展示 duration_ms 后消失。
+
+        随机表情包（倾斜）与食物图片（正立）的统一入口。
+        加载成功返回 True；图片不存在 / 无 label 返回 False。
+        """
+        if self._sticker_label is None or not path:
+            return False
+        cache = cache if cache is not None else self._sticker_cache
+        key = (str(path), int(size), int(rotation))
+        pix = cache.get(key)
+        if pix is None:
+            pix = QPixmap(path)
+            if pix.isNull():
+                return False
+            pix = pix.scaled(
+                size, size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            # 倾斜显示（Qt 屏幕 y 轴向下，正角度 = 视觉顺时针 = 向右倒）
+            if rotation:
+                pix = pix.transformed(QTransform().rotate(rotation),
+                                      Qt.TransformationMode.SmoothTransformation)
+            cache[key] = pix
+
+        self._sticker_label.setPixmap(pix)
+        self._sticker_label.adjustSize()
+        # 定位到「模型」右上方：按当前渲染剪影的包围盒（而非窗口角落），
+        # 这样放大/缩小桌宠时贴纸始终贴着角色头顶右侧
+        right, top = self._model_top_right()
+        sw, sh = pix.width(), pix.height()
+        x = int(min(max(2, right - sw * 0.55), self.width() - sw - 2))
+        y = int(max(2, min(top - sh * 0.45 + 24, self.height() - sh - 2)))
+        self._sticker_label.move(x, y)
+        self._sticker_label.show()
+        self._sticker_label.raise_()
+        QTimer.singleShot(max(300, int(duration_ms)), self._sticker_label.hide)
+        return True
+
+    def show_food_sticker(self, path: str, *, duration_ms: int = 4200) -> bool:
+        """喂食时把食物图片弹到角色右上角（正立，不随机倾斜）。"""
+        if not path:
+            return False
+        base = int(getattr(self, "_sticker_size", 180) or 180)
+        # 不超过窗口宽 42%，避免小窗口被食物图撑爆
+        size = max(96, min(int(base * 1.05), int(self.width() * 0.42)))
+        return self._present_sticker(
+            path, size=size, rotation=0,
+            duration_ms=duration_ms, cache=self._food_sticker_cache)
+
     def _show_random_sticker(self) -> None:
         """随机弹一张表情包到右上角，展示 duration_s 后消失并排下一次。"""
         if not getattr(self, "_stickers_enabled", True):
@@ -1268,34 +1402,11 @@ class PetWindow(QWidget):
         self._sticker_duration_ms = int(ov.get("duration_s",
                                                cfg.get("duration_s", 4))) * 1000
         path = _random.choice(cfg["files"])
-
-        pix = self._sticker_cache.get(path)
-        if pix is None:
-            pix = QPixmap(path)
-            if pix.isNull():
-                self._arm_sticker_timer()
-                return
-            pix = pix.scaled(
-                size, size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation)
-            # 倾斜显示（Qt 屏幕 y 轴向下，正角度 = 视觉顺时针 = 向右倒）
-            pix = pix.transformed(QTransform().rotate(rotation),
-                                  Qt.TransformationMode.SmoothTransformation)
-            self._sticker_cache[path] = pix
-
-        self._sticker_label.setPixmap(pix)
-        self._sticker_label.adjustSize()
-        # 定位到「模型」右上方：按当前渲染剪影的包围盒（而非窗口角落），
-        # 这样放大/缩小桌宠时贴纸始终贴着角色头顶右侧
-        right, top = self._model_top_right()
-        sw, sh = pix.width(), pix.height()
-        x = int(min(max(2, right - sw * 0.55), self.width() - sw - 2))
-        y = int(max(2, min(top - sh * 0.45 + 24, self.height() - sh - 2)))
-        self._sticker_label.move(x, y)
-        self._sticker_label.show()
-        self._sticker_label.raise_()
-        QTimer.singleShot(self._sticker_duration_ms, self._sticker_label.hide)
+        if not self._present_sticker(
+                path, size=size, rotation=rotation,
+                duration_ms=self._sticker_duration_ms):
+            self._arm_sticker_timer()
+            return
         self._arm_sticker_timer()
 
     def _model_top_right(self) -> tuple[int, int]:
@@ -1403,6 +1514,15 @@ class PetWindow(QWidget):
                 (label, lambda _=False, n=name: self.animator.play_animation(n))
                 for name, label in play_options
             ]
+            # 用户自定义动作（设置面板「触发场景配置」里新建，初始为空）
+            try:
+                for _a in self.renderer.get_custom_actions():
+                    _cid = _a.get("id")
+                    play_actions.append(
+                        (_a.get("name", "动作"),
+                         lambda _=False, c=_cid: self.animator.play_custom_action(c)))
+            except Exception:  # noqa: BLE001
+                pass
         else:
             play_actions = [
                 ('转圈圈', self.animator.play_spin),
@@ -1416,10 +1536,8 @@ class PetWindow(QWidget):
             play_menu.addAction(a)
         menu.addSeparator()
 
-        # === 吃饭 / 文件（仅 sprite 模式有效；live2d 模式仍可调但效果是表情）===
-        act_eat = QAction("吃饭", self)
-        act_eat.triggered.connect(self._on_eat_menu)
-        menu.addAction(act_eat)
+        # === 喂食（有食物库时按分类挂子菜单；无库回退通用「吃饭」）===
+        self._build_feed_menu(menu)
         menu.addSeparator()
 
         # === 状态栏显示/隐藏 ===

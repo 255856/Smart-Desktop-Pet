@@ -28,6 +28,10 @@ from app.core.qt_compat import (
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
+from app.animation.live2d_scene import (
+    BUILTIN_SCENES, SCENE_GROUP_CHAT, SCENE_GROUP_INTERACT, SCENE_GROUP_STATE,
+    SceneStore,
+)
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.core.config import CharacterConfig
@@ -591,9 +595,7 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         return page
 
-    # ---------- Tab: Live2D（模型专属外观 / 随机表情） ----------
-    # 每个分类卡片默认直接展示的 chip 数
-    _LIVE2D_PREVIEW_CHIPS = 3
+    # ---------- Tab: Live2D（模型专属外观 / 触发场景 / 随机表情） ----------
 
     def _build_tab_live2d(self) -> QWidget:
         """Live2D 专属设置：外观/挂机置顶，五大类以可点选 chip 网格呈现。
@@ -624,12 +626,10 @@ class SettingsWindow(QWidget):
         v.setSpacing(10)
         renderer = self._renderer
 
-        # chip 状态：(group_id, item_id) -> 按钮；group_id -> [按钮…]
-        self.live2d_chips: dict[tuple[str, str], QPushButton] = {}
-        self._live2d_group_chips: dict[str, list[QPushButton]] = {}
-        # 每个分类被「更多」收起的 chip（第 4 个起）与展开状态
-        self._live2d_extra_chips: dict[str, list[QPushButton]] = {}
-        self._live2d_more_state: dict[str, bool] = {}
+        # 触发场景配置：场景行摘要 label + 打开的配置弹窗（保持引用防 GC）
+        self._scene_summary_labels: dict[str, QLabel] = {}
+        self._scene_dlgs: list = []
+        self._custom_action_layout = None
 
         # —— 模型名卡片 ——
         model_name = ""
@@ -763,117 +763,198 @@ class SettingsWindow(QWidget):
         gs.addWidget(self.spin_sticker_duration, 3, 1)
         v.addWidget(g_st)
 
-        # 当前激活项（用于初始化 chip 选中态）
-        active: set = set()
-        try:
-            active = renderer.get_active_items()
-        except Exception:  # noqa: BLE001
-            active = set()
-
-        # —— 五大分类 chip 卡片（每张默认只露前 3 个）——
-        try:
-            groups = renderer.get_menu_groups()
-        except Exception:  # noqa: BLE001
-            groups = []
-        for g in groups:
-            v.addWidget(self._build_live2d_group_card(g, active))
+        # —— 触发场景配置（每个场景搭配表情/发型/配件/手势）——
+        self._scene_card = self._build_scene_card(renderer)
+        v.addWidget(self._scene_card)
+        # —— 自定义动作（用户命名，初始为空，可绑工具动作，仅 Live2D）——
+        self._custom_action_card = self._build_custom_action_card(renderer)
+        v.addWidget(self._custom_action_card)
 
         v.addStretch(1)
         return page
 
-    def _build_live2d_group_card(self, g: dict, active: set) -> QGroupBox:
-        """单个分类卡片：标题 + 前 3 个 chip；超过 3 个用「更多 ▾」展开。"""
-        gid = g["id"]
-        kind = g.get("kind", "category")
-        exclusive = g.get("mode") == "exclusive"
-        preview = self._LIVE2D_PREVIEW_CHIPS
-        box = QGroupBox(g["label"])
+    # ============================================================
+    #  触发场景配置（Live2D）
+    # ============================================================
+    _ROW_QSS = (
+        "QFrame#scene_row{background:#ffffff; border:1px solid #eceaf5;"
+        "border-radius:10px;} QFrame#scene_row:hover{border-color:#d8d2f7;}")
+
+    def _bundle_summary(self, renderer, b) -> str:
+        """把一个外观组合概括成中文短标签。"""
+        parts = []
+        if b.emotion:
+            parts.append(f"表情·{b.emotion}")
+        if b.hairstyle:
+            parts.append("发型·默认" if b.hairstyle == "__default__"
+                         else f"发型·{b.hairstyle}")
+        if b.toggles:
+            parts.append("·".join(b.toggles))
+        return " + ".join(parts) if parts else "默认（不改变）"
+
+    def _build_scene_card(self, renderer) -> QGroupBox:
+        """触发场景配置：按 情绪 / 状态 / 互动 分组列场景行。"""
+        box = QGroupBox("触发场景配置")
         box.setObjectName("live2d_card")
         vl = QVBoxLayout(box)
-        vl.setContentsMargins(12, 20, 12, 12)
-        vl.setSpacing(8)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-        vl.addLayout(grid)
-
-        items = list(g["items"])
-        # 情绪组首项补「自然表情」（发型组 get_menu_groups 已带「默认发型」）
-        if kind == "emotion":
-            items.insert(0, ("__default__", "自然表情"))
-
-        self._live2d_group_chips[gid] = []
-        self._live2d_extra_chips[gid] = []
-        cols = 3
-        for idx, (item_id, label) in enumerate(items):
-            chip = QPushButton(label)
-            chip.setObjectName("chip")
-            chip.setCheckable(True)
-            chip.setCursor(Qt.CursorShape.PointingHandCursor)
-            chip.blockSignals(True)
-            chip.setChecked(item_id in active)
-            chip.blockSignals(False)
-            chip.clicked.connect(
-                lambda _=False, g_=gid, iid=item_id, c=chip, ex=exclusive:
-                self._on_live2d_chip(g_, iid, c, ex))
-            grid.addWidget(chip, idx // cols, idx % cols)
-            self.live2d_chips[(gid, item_id)] = chip
-            self._live2d_group_chips[gid].append(chip)
-            if idx >= preview:
-                chip.hide()
-                self._live2d_extra_chips[gid].append(chip)
-
-        # 互斥组（发型/表情）必须有一个选中：没有命中项时落在「默认 / 自然」
-        if exclusive:
-            if not any(c.isChecked() for c in self._live2d_group_chips[gid]):
-                default_chip = self.live2d_chips.get((gid, "__default__"))
-                if default_chip is not None:
-                    default_chip.blockSignals(True)
-                    default_chip.setChecked(True)
-                    default_chip.blockSignals(False)
-
-        # 超过 3 个：加「更多 ▾」展开 / 收起
-        if len(items) > preview:
-            more = QPushButton(f"更多 ▾  {len(items) - preview} 项")
-            more.setObjectName("more_btn")
-            more.setCursor(Qt.CursorShape.PointingHandCursor)
-            more.clicked.connect(
-                lambda _=False, g_=gid, b=more, n=len(items) - preview:
-                self._toggle_live2d_more(g_, b, n))
-            vl.addWidget(more)
+        vl.setContentsMargins(12, 22, 12, 12)
+        vl.setSpacing(5)
+        hint = QLabel("给每个场景搭配表情、发型、配件或手势；全部留空表示触发时不改变。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
+        vl.addWidget(hint)
+        for group in (SCENE_GROUP_CHAT, SCENE_GROUP_STATE, SCENE_GROUP_INTERACT):
+            cap = QLabel(group)
+            cap.setStyleSheet(
+                "color:#7c6cf0; font-size:9pt; font-weight:700; border:none;"
+                "background:transparent; padding:6px 2px 0 2px;")
+            vl.addWidget(cap)
+            for sid, title, kind, grp in BUILTIN_SCENES:
+                if grp == group:
+                    vl.addWidget(self._build_scene_row(renderer, sid, title, kind))
         return box
 
-    def _toggle_live2d_more(self, gid: str, btn: QPushButton,
-                            extra_count: int) -> None:
-        """展开 / 收起某分类卡片第 4 个起的 chip。"""
-        expanded = not self._live2d_more_state.get(gid, False)
-        self._live2d_more_state[gid] = expanded
-        for chip in self._live2d_extra_chips.get(gid, []):
-            chip.setVisible(expanded)
-        btn.setText("收起 ▴" if expanded else f"更多 ▾  {extra_count} 项")
+    def _build_scene_row(self, renderer, sid: str, title: str, kind: str) -> QFrame:
+        row = QFrame()
+        row.setObjectName("scene_row")
+        row.setStyleSheet(self._ROW_QSS)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 5, 8, 5)
+        h.setSpacing(8)
+        name = QLabel(title)
+        name.setFixedWidth(168)
+        name.setStyleSheet(
+            "color:#2c2c38; font-size:9pt; border:none; background:transparent;")
+        h.addWidget(name)
+        b = renderer.get_scene_bundle(sid)
+        summ = QLabel(self._bundle_summary(renderer, b))
+        summ.setStyleSheet(
+            "color:#9a9aad; font-size:8pt; border:none; background:transparent;")
+        summ.setWordWrap(False)
+        h.addWidget(summ, 1)
+        self._scene_summary_labels[sid] = summ
+        tag = QLabel("一次性" if kind == "transient" else "持续")
+        tag.setFixedWidth(44)
+        tag.setStyleSheet(
+            "color:#a0a0b4; font-size:8pt; border:none; background:transparent;")
+        h.addWidget(tag)
+        btn = QPushButton("配置")
+        btn.setObjectName("more_btn")
+        btn.setFixedWidth(54)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(
+            lambda _=False, s_=sid, t=title, k=kind:
+            self._open_scene_dialog(s_, t, k))
+        h.addWidget(btn)
+        return row
 
-    def _on_live2d_chip(self, gid: str, item_id: str,
-                        chip: QPushButton, exclusive: bool) -> None:
-        """chip 点击：互斥组保证单选（blockSignals 防递归），再通知 renderer。"""
-        if exclusive:
-            for other in self._live2d_group_chips.get(gid, []):
-                if other is not chip:
-                    other.blockSignals(True)
-                    other.setChecked(False)
-                    other.blockSignals(False)
-            chip.blockSignals(True)
-            chip.setChecked(True)
-            chip.blockSignals(False)
-        self.live2d_item_activated.emit(gid, item_id)
+    def _open_scene_dialog(self, sid: str, title: str, kind: str) -> None:
+        from app.ui.live2d_scene_dialog import SceneEditDialog
+        dlg = SceneEditDialog(self._renderer, sid, title, kind, self)
+        dlg.saved.connect(self._refresh_scene_summaries)
+        dlg.show()
+        self._scene_dlgs.append(dlg)
+
+    def _refresh_scene_summaries(self) -> None:
+        renderer = self._renderer
+        for sid, lbl in self._scene_summary_labels.items():
+            lbl.setText(self._bundle_summary(
+                renderer, renderer.get_scene_bundle(sid)))
+        self._refresh_custom_action_rows()
+
+    def _build_custom_action_card(self, renderer) -> QGroupBox:
+        """自定义动作：初始为空，用户新建/编辑/删除/播放。"""
+        box = QGroupBox("自定义动作（仅 Live2D，可绑定工具动作）")
+        box.setObjectName("live2d_card")
+        vl = QVBoxLayout(box)
+        vl.setContentsMargins(12, 22, 12, 12)
+        vl.setSpacing(6)
+        hint = QLabel("自己命名动作并搭配外观，可绑定到工具动作，也可在右键「玩一下」里手动播放。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
+        vl.addWidget(hint)
+        host = QWidget()
+        host.setStyleSheet("background:transparent;")
+        self._custom_action_host = host
+        self._custom_action_layout = QVBoxLayout(host)
+        self._custom_action_layout.setContentsMargins(0, 0, 0, 0)
+        self._custom_action_layout.setSpacing(6)
+        self._custom_action_layout.addStretch(1)
+        vl.addWidget(host)
+        add = QPushButton("＋ 新建动作")
+        add.setObjectName("accent_btn")
+        add.setCursor(Qt.CursorShape.PointingHandCursor)
+        add.clicked.connect(lambda _=False: self._open_action_dialog(None))
+        vl.addWidget(add)
+        self._refresh_custom_action_rows()
+        return box
+
+    def _refresh_custom_action_rows(self) -> None:
+        if self._custom_action_layout is None:
+            return
+        renderer = self._renderer
+        while self._custom_action_layout.count() > 1:
+            it = self._custom_action_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        hook_labels = dict(self._tool_action_hooks())
+        for a in renderer.get_custom_actions():
+            self._custom_action_layout.insertWidget(
+                self._custom_action_layout.count() - 1,
+                self._build_custom_action_row(renderer, a, hook_labels))
+
+    @staticmethod
+    def _tool_action_hooks():
+        from app.animation.live2d_scene import TOOL_ACTION_HOOKS
+        return TOOL_ACTION_HOOKS
+
+    def _build_custom_action_row(self, renderer, a: dict, hook_labels: dict) -> QFrame:
+        row = QFrame()
+        row.setObjectName("scene_row")
+        row.setStyleSheet(self._ROW_QSS)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 5, 8, 5)
+        h.setSpacing(8)
+        name = QLabel(a.get("name", "动作"))
+        name.setFixedWidth(110)
+        name.setStyleSheet(
+            "color:#2c2c38; font-size:9pt; font-weight:700; border:none;"
+            "background:transparent;")
+        h.addWidget(name)
+        hook = a.get("hook", "")
+        meta = ("绑定 · " + hook_labels.get(hook, hook)) if hook else "仅手动"
+        desc = self._bundle_summary(renderer, SceneStore.action_bundle(a))
+        info = QLabel(f"{meta}｜{desc}")
+        info.setStyleSheet(
+            "color:#9a9aad; font-size:8pt; border:none; background:transparent;")
+        h.addWidget(info, 1)
+        play = QPushButton("播放")
+        play.setObjectName("more_btn")
+        play.setFixedWidth(54)
+        play.setCursor(Qt.CursorShape.PointingHandCursor)
+        play.clicked.connect(
+            lambda _=False, cid=a.get("id"): renderer.play_custom_action(cid))
+        h.addWidget(play)
+        edit = QPushButton("编辑")
+        edit.setObjectName("more_btn")
+        edit.setFixedWidth(54)
+        edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        edit.clicked.connect(lambda _=False, x=a: self._open_action_dialog(x))
+        h.addWidget(edit)
+        return row
+
+    def _open_action_dialog(self, action) -> None:
+        from app.ui.live2d_scene_dialog import ActionEditDialog
+        dlg = ActionEditDialog(self._renderer, action, self)
+        dlg.saved.connect(self._refresh_scene_summaries)
+        dlg.show()
+        self._scene_dlgs.append(dlg)
 
     def _on_live2d_reset(self) -> None:
-        """复位全部外观：UI 回到「默认/自然」并清空叠加项，再通知 renderer。"""
-        for (_gid, iid), chip in self.live2d_chips.items():
-            chip.blockSignals(True)
-            chip.setChecked(iid == "__default__")
-            chip.blockSignals(False)
+        """复位全部外观：通知 renderer 清空当前叠加，恢复自然。"""
         self.live2d_reset_requested.emit()
 
 
