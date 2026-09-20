@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Pet · Live2D Demo</title>
+
+<!--
+  ⚠️ 模型版权说明 / Model Copyright Notice
+  ----------------------------------------
+  本页面**不包含任何 Live2D 模型文件**。Live2D 模型（*.model3.json、*.moc3、
+  textures/*.png、*.motion3.json 等）受上游创作者版权约束，**禁止二次传播**，
+  本仓库的 .gitignore 已显式排除 assets/live2d/，请勿将任何模型文件提交。
+
+  This page **does NOT bundle any Live2D model files**. Live2D models
+  (*.model3.json, *.moc3, textures/*.png, *.motion3.json …) are copyrighted
+  by their creators and **must not be redistributed**. The repository's
+  .gitignore explicitly excludes assets/live2d/. Do not commit any model.
+
+  使用方法 / How to use:
+    1. 本地起服务：python docs/demo/serve.py   → 默认 http://127.0.0.1:8765
+    2. 浏览器打开 http://127.0.0.1:8765/
+    3. 在「Model URL」框填入你的模型 *.model3.json 完整 URL
+       例：http://127.0.0.1:8765/my-model/Hiyori.model3.json
+    4. 也支持拖拽 .model3.json 到页面（浏览器 File API）
+-->
+
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #1a1c2c 0%, #2d2f4a 100%);
+    color: #e8e8f0; overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    padding: 12px 20px; background: rgba(0,0,0,.35);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header h1 .badge {
+    display: inline-block; padding: 2px 8px; margin-left: 8px;
+    background: #6c5ce7; border-radius: 10px; font-size: 11px;
+    font-weight: 500; vertical-align: middle;
+  }
+  header .spacer { flex: 1; }
+  header a { color: #74b9ff; text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+
+  #stage-wrap {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #stage { width: 100%; height: 100%; }
+  #stage canvas { display: block; }
+
+  .controls {
+    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+    display: flex; gap: 8px; padding: 10px 14px;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 24px; border: 1px solid rgba(255,255,255,.08);
+    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    max-width: 92vw; overflow-x: auto;
+  }
+  .controls button {
+    padding: 6px 14px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 16px; font-size: 13px; cursor: pointer;
+    transition: all .15s; white-space: nowrap;
+  }
+  .controls button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
+  .controls button:active { transform: scale(0.96); }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .controls select {
+    padding: 6px 10px; background: rgba(255,255,255,.06);
+    color: #e8e8f0; border: 1px solid rgba(255,255,255,.15);
+    border-radius: 16px; font-size: 13px;
+  }
+
+  #loader {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; flex-direction: column; gap: 12px;
+    background: rgba(0,0,0,.5); z-index: 10; pointer-events: none;
+    transition: opacity .3s;
+  }
+  #loader.hidden { opacity: 0; pointer-events: none; }
+  #loader .spinner {
+    width: 36px; height: 36px; border: 3px solid rgba(255,255,255,.2);
+    border-top-color: #6c5ce7; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #url-bar {
+    display: flex; gap: 8px; padding: 8px 12px;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 12px; border: 1px solid rgba(255,255,255,.08);
+    width: min(640px, 90vw);
+  }
+  #url-bar input {
+    flex: 1; padding: 6px 10px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+    color: #e8e8f0; border-radius: 8px; font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  #url-bar input:focus { outline: none; border-color: #6c5ce7; }
+  #url-bar button {
+    padding: 6px 16px; border: 0; background: #6c5ce7;
+    color: white; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  #url-bar button:hover { background: #5d4dd6; }
+
+  #log {
+    position: absolute; right: 12px; top: 12px; max-width: 360px;
+    max-height: 50vh; overflow-y: auto; padding: 8px 12px;
+    background: rgba(0,0,0,.55); border-radius: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; line-height: 1.5; color: #a8b0c0;
+    pointer-events: none;
+  }
+  #log .err { color: #ff7675; }
+  #log .ok { color: #55efc4; }
+
+  #drop-hint {
+    position: absolute; inset: 12px; border: 2px dashed rgba(108,92,231,.5);
+    border-radius: 16px; display: none; align-items: center;
+    justify-content: center; background: rgba(108,92,231,.15);
+    font-size: 18px; pointer-events: none; z-index: 20;
+  }
+  #drop-hint.show { display: flex; }
+
+  .footer-note {
+    text-align: center; padding: 6px;
+    font-size: 11px; color: #6c7080;
+    background: rgba(0,0,0,.35);
+  }
+  .footer-note a { color: #74b9ff; text-decoration: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🐳 Desktop Pet <span class="badge">Live2D Demo</span></h1>
+    <span style="font-size:12px;color:#a8b0c0" id="status">未加载模型</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">↗ GitHub</a>
+    <a href="../../docs/live2d-integration.md">文档 / Docs</a>
+  </header>
+
+  <div id="stage-wrap">
+    <div id="stage"></div>
+
+    <div id="loader"><div class="spinner"></div><div id="loader-text">加载中…</div></div>
+
+    <div id="url-bar">
+      <input id="model-url" type="text" spellcheck="false"
+             placeholder="http://127.0.0.1:8765/<你的模型目录>/xxx.model3.json" />
+      <button id="load-btn">加载 / Load</button>
+    </div>
+
+    <div class="controls" id="controls" style="display:none">
+      <select id="motion-group" title="动作组 / Motion group"></select>
+      <button id="motion-btn">▶ 动作</button>
+      <select id="expression" title="表情 / Expression"></select>
+      <button id="expression-btn">😊 表情</button>
+      <button id="reset-btn">↺ 重置</button>
+      <button id="speak-btn">💬 测试口型</button>
+    </div>
+
+    <div id="drop-hint">📂 拖拽 .model3.json 到这里</div>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="footer-note">
+    页面仅含渲染引擎骨架，<strong style="color:#ff7675">不含任何 Live2D 模型文件</strong>。
+    模型版权属原作者，请使用你自己拥有合法授权的模型。
+    / This page contains only the renderer skeleton, <strong style="color:#ff7675">no Live2D model files</strong>.
+    Model copyrights belong to their creators; please use only models you are authorized for.
+  </div>
+</div>
+
+<!--
+  从 CDN 加载运行时（与 app/animation/cubism-sdk/ 同源同版本，但这里走 CDN
+  方便独立托管，不污染本地仓库；model 文件本身仍然由用户提供）。
+  - PIXI v7 — MIT
+  - pixi-live2d-display cubism4 — MIT
+  - live2dcubismcore — Live2D Cubism Core (EULA, redistributable as part of apps)
+-->
+<script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+<script src="https://cubism.live2d.com/sdk-web/bin/CubismSdkForWeb-4-r.1/Core/live2dcubismcore.min.js"></script>
+
+<script src="live2d-demo.js"></script>
+</body>
+</html>

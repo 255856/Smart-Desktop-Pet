@@ -9,8 +9,9 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-325%2B%20passing-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-94%2B%20items-blueviolet)](scripts/verify_features.py)
+[![Live2D Demo](https://img.shields.io/badge/🎬_Live2D_Demo-Try%20Online-6c5ce7?style=flat&logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
-[中文](#中文) · [English](#english) · [文档 / Docs](docs/) · [快速开始 / Quick Start](#快速开始--quick-start)
+[中文](#中文) · [English](#english) · [🎬 **Live2D Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/) · [快速开始 / Quick Start](#快速开始--quick-start)
 
 ---
 
@@ -215,6 +216,7 @@ desktop-pet/
 
 | 文档 | 内容 |
 |---|---|
+| 🎬 [**Live2D 演示页**](docs/demo/) | 浏览器独立体验 Live2D 渲染（**不含版权模型**，需自备） |
 | [docs/quickstart.md](docs/quickstart.md) | 5 分钟跑起来 |
 | [docs/architecture.md](docs/architecture.md) | 启动时序 + Live2D 渲染子图 + Agent 流程图 |
 | [docs/live2d-integration.md](docs/live2d-integration.md) | `.model3.json` + `*.model.yaml` 五段配置 + cubism-sdk 来源 + fallback 触发条件 |

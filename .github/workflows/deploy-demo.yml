@@ -1,0 +1,52 @@
+name: Deploy Live2D Demo to GitHub Pages
+
+# 触发：master 分支 push 后自动部署；workflow_dispatch 支持手动触发
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/demo/**'
+      - '.github/workflows/deploy-demo.yml'
+  workflow_dispatch:
+
+# 权限：让 GH Actions 能写 gh-pages 分支和开 Pages
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# 防止旧部署还在跑
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v4
+
+      - name: Build demo artifact
+        run: |
+          mkdir -p _demo
+          cp docs/demo/index.html _demo/
+          cp docs/demo/live2d-demo.js _demo/
+          # serve.py 是给本地用的，不发布到 Pages；README/DEPLOY 也不发布
+          # （_demo/ 整个目录会被上传到 gh-pages 根）
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _demo
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
