@@ -284,6 +284,7 @@ class UIController(QObject):
         if gw is None or not gw.isVisible():
             gw = GomokuWindow()
             gw.game_finished.connect(self._on_gomoku_finished)
+            gw.comment.connect(self._on_game_comment)
             gw.show()
             self._gomoku_window = gw
         else:
@@ -302,29 +303,41 @@ class UIController(QObject):
         if gw is not None:
             gw.set_wallet(self.state.money, self.state.game_coin_remaining())
             gw.show_reward(granted, amount > 0 and granted <= 0)
-        lines = {
-            "win": ("呜呜，你赢了！好厉害喵～", ("tongue", "stretch", "swim")),
-            "lose": ("哈哈，我赢啦！再来一局？", ("cheek", "jump", "spin")),
-            "draw": ("和棋！势均力敌呢～", ("tongue", "stretch", "swim")),
-            "giveup": ("诶，不玩了吗？下次再战！", ("stretch", "swim")),
+        acts = {
+            "win": ("tongue", "stretch", "swim"),
+            "lose": ("cheek", "jump", "spin"),
+            "draw": ("tongue", "stretch", "swim"),
+            "giveup": ("stretch", "swim"),
         }
-        text, acts = lines.get(result, lines["draw"])
-        self.pet.show_bubble(text)
-        self._pet_react(acts)
+        # 结算台词由窗口 comment 信号朗读（_on_game_comment），这里只做动作反馈
+        self._pet_react(acts.get(result, acts["draw"]))
         self.state.on_interact(feeling_gain=2)
         log.info("五子棋结束 result=%s difficulty=%s 金币 +%.0f",
                  result, difficulty, granted)
+
+    def _on_game_comment(self, text: str) -> None:
+        # 五子棋过程 / 结算解说：气泡 + TTS 朗读
+        self._pet_speak(text)
+
+    def _pet_speak(self, text: str, duration_ms: int = 4000) -> None:
+        # 非聊天场景统一发言：显示气泡，TTS 开启时朗读（口型自动同步）
+        self.pet.show_bubble(text, duration_ms=duration_ms)
+        if getattr(self.cfg.character, "tts_enabled", False) and self.tts is not None:
+            try:
+                self.tts.speak(text)
+            except Exception:
+                log.warning("TTS 朗读失败：%s", text)
 
     def _on_checkin(self) -> None:
         """每日签到：每天一次 +100 金币。"""
         ok, reward = self.state.daily_checkin(reward=100.0)
         if ok:
-            self.pet.show_bubble(f"签到成功！金币 +{reward:.0f}，今天也要陪我玩哦～")
+            self._pet_speak(f"签到成功！金币 +{reward:.0f}，今天也要陪我玩哦～")
             self._pet_react(("jump", "spin", "cheek"))
             self.state.on_interact(feeling_gain=3)
             log.info("每日签到：金币 +%.0f", reward)
         else:
-            self.pet.show_bubble("今天已经签到过啦，明天再来吧～")
+            self._pet_speak("今天已经签到过啦，明天再来吧～")
 
     def _pet_react(self, prefer) -> None:
         """播放一个一次性动作（motion 结束自动回 idle，不影响持久表情）。"""

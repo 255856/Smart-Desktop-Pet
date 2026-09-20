@@ -21,6 +21,7 @@ from app.core.qt_compat import (
 from app.ui import ui_style
 from app.games.gomoku import (
     GomokuGame, GomokuAI, BLACK, WHITE, EMPTY, SIZE, DIFFICULTIES,
+    analyze_move,
 )
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,27 @@ REWARDS = {
     "easy":   {"win": 10, "draw": 3, "lose": 0},
     "normal": {"win": 20, "draw": 5, "lose": 1},
     "hard":   {"win": 40, "draw": 10, "lose": 2},
+}
+
+# 桌宠局势解说（关键棋型 / 结算时触发，由控制器朗读 TTS）
+COMMENTS = {
+    # 玩家刚把棋走成对应威胁
+    "player_live_four": ["不好！两头都堵不住了……", "完了完了，这要怎么防呀！"],
+    "player_rush_four": ["好险！四连了，必须堵住！", "千钧一发，可不能让你连上！"],
+    "player_live_three": ["哼，活三是吧，我这就堵上～", "想连成一片？没那么容易～",
+                          "别以为我没看见你的活三哦～"],
+    # AI 自己走成对应威胁
+    "ai_live_four": ["哼哼，再一步我就赢咯～", "看好了，这是必杀的一手！", "嘿嘿，你挡不住啦～"],
+    "ai_rush_four": ["哼哼，再一步怎么样？", "我可要冲了，小心哦～", "这一手，你打算怎么防？"],
+    "ai_live_three": ["嘿嘿，我这边也有好棋了～", "我这一手也不错呢～"],
+    # 开局偶尔闲聊
+    "idle": ["嗯……让我想想下哪里～", "我可不会输给你哦～"],
+}
+SETTLE_COMMENTS = {
+    "win": ["啊！怎么会……你居然赢了我！", "诶？！输了输了，你好厉害！"],
+    "lose": ["哼哼，承让承让～这局是我赢啦～", "哈哈，赢了赢了！再来一局？"],
+    "draw": ["棋盘下满啦，和棋，势均力敌～", "平局平局，不分胜负！"],
+    "giveup": ["诶，别灰心呀，再来一局嘛～", "这局先到这里，要再来一局吗？"],
 }
 
 # 棋盘配色（木纹）
@@ -126,8 +148,8 @@ class GomokuBoardWidget(QWidget):
     def __init__(self, game: GomokuGame, parent=None):
         super().__init__(parent)
         self.game = game
-        self.cell = 32
-        self.margin = 26
+        self.cell = 28
+        self.margin = 22
         self.radius = self.cell // 2 - 3
         self.interactive = True
         self._hover: Optional[tuple[int, int]] = None
@@ -255,6 +277,8 @@ class GomokuWindow(QDialog):
 
     # 一局结束：result ∈ win / lose / draw / giveup，第二个参数为难度
     game_finished = Signal(str, str)
+    # 桌宠局势解说（控制器负责气泡 + TTS 朗读）
+    comment = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None,
                  difficulty: str = "normal"):
@@ -267,6 +291,8 @@ class GomokuWindow(QDialog):
         self.ai = GomokuAI(self.difficulty, WHITE)
         self.rng = random.Random()
         self.over = False
+        self._player_threat = "none"     # 玩家最近一步的威胁等级
+        self._last_comment = ""          # 避免连续重复同一句
         self._ready = False
         self._build_ui()
         self._new_game()
@@ -341,11 +367,17 @@ class GomokuWindow(QDialog):
         info.addWidget(self.diff_combo)
         body.addLayout(info)
 
-        # 回合 / 状态
+        # 回合状态（固定高度容器，避免对局/结算切换时棋盘被挤压）
+        turn_box = QWidget()
+        turn_box.setFixedHeight(26)
+        tb = QVBoxLayout(turn_box)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(0)
         self.turn_lbl = QLabel("你的回合（黑棋先手）")
         self.turn_lbl.setObjectName("turn_lbl")
         self.turn_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        body.addWidget(self.turn_lbl)
+        tb.addWidget(self.turn_lbl)
+        body.addWidget(turn_box)
 
         # 棋盘
         self.board = GomokuBoardWidget(self.game)
@@ -356,16 +388,22 @@ class GomokuWindow(QDialog):
         board_wrap.addStretch(1)
         body.addLayout(board_wrap)
 
-        # 结果横幅（初始隐藏）
+        # 结算区（固定高度，对局中为空也占位，防止棋盘/按钮位移或重影）
+        res_box = QWidget()
+        res_box.setFixedHeight(50)
+        rb = QVBoxLayout(res_box)
+        rb.setContentsMargins(0, 2, 0, 0)
+        rb.setSpacing(2)
         self.result_lbl = QLabel("")
         self.result_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.result_lbl.hide()
-        body.addWidget(self.result_lbl)
+        rb.addWidget(self.result_lbl)
         self.reward_lbl = QLabel("")
         self.reward_lbl.setObjectName("reward_lbl")
         self.reward_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.reward_lbl.hide()
-        body.addWidget(self.reward_lbl)
+        rb.addWidget(self.reward_lbl)
+        body.addWidget(res_box)
 
         # 底部按钮
         btns = QHBoxLayout()
@@ -390,7 +428,7 @@ class GomokuWindow(QDialog):
         self._ai_timer.setSingleShot(True)
         self._ai_timer.timeout.connect(self._ai_move)
 
-        self.resize(560, 640)
+        self.resize(520, 720)
 
     # ------------------------------------------------------------ 游戏流程
     def _new_game(self) -> None:
@@ -398,6 +436,8 @@ class GomokuWindow(QDialog):
         self.game = GomokuGame()
         self.ai = GomokuAI(self.difficulty, WHITE)
         self.over = False
+        self._player_threat = "none"
+        self._last_comment = ""
         self.board.game = self.game
         self.board.set_interactive(True)
         self.board.update()
@@ -430,6 +470,9 @@ class GomokuWindow(QDialog):
         if self.game.winner != 0:
             self._finish()
             return
+        last = self.game.last_move()
+        if last is not None:
+            self._player_threat = analyze_move(self.game, last[0], last[1], BLACK)
         self.board.set_interactive(False)
         self.turn_lbl.setText("桌宠思考中…")
         self._ai_timer.start(380)
@@ -448,8 +491,38 @@ class GomokuWindow(QDialog):
         if self.game.winner != 0:
             self._finish()
             return
+        if mv is not None:
+            self._comment_after_ai(mv)
         self.board.set_interactive(True)
         self.turn_lbl.setText("你的回合（黑棋）")
+
+    # ------------------------------------------------------------ 局势解说
+    def _comment_after_ai(self, ai_pos: tuple[int, int]) -> None:
+        """AI 落子后，依据双方刚刚形成的威胁选一句解说。"""
+        ai_t = analyze_move(self.game, ai_pos[0], ai_pos[1], WHITE)
+        p_t = self._player_threat
+        key = None
+        if ai_t == "live_four":
+            key = "ai_live_four"
+        elif ai_t == "rush_four":
+            key = "ai_rush_four"
+        elif ai_t == "live_three" and self.rng.random() < 0.5:
+            key = "ai_live_three"
+        elif p_t == "live_four":
+            key = "player_live_four"
+        elif p_t == "rush_four":
+            key = "player_rush_four"
+        elif p_t == "live_three":
+            key = "player_live_three"
+        elif len(self.game.history) <= 4 and self.rng.random() < 0.25:
+            key = "idle"
+        if key:
+            self._say(self.rng.choice(COMMENTS[key]))
+
+    def _say(self, text: str) -> None:
+        if text and text != self._last_comment:
+            self._last_comment = text
+            self.comment.emit(text)
 
     def _give_up(self) -> None:
         if self.over or self.game.winner != 0:
@@ -480,6 +553,9 @@ class GomokuWindow(QDialog):
         self.result_lbl.show()
         self.reward_lbl.setText("")
         self.reward_lbl.hide()
+        # 结算台词（TTS 朗读）；随后才发结算信号给控制器发金币
+        if result in SETTLE_COMMENTS:
+            self.comment.emit(self.rng.choice(SETTLE_COMMENTS[result]))
         self.game_finished.emit(result, self.difficulty)
 
     # ------------------------------------------------------------ 控制器回调

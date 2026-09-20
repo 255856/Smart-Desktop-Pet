@@ -290,6 +290,36 @@ def evaluate_point(game: GomokuGame, r: int, c: int, player: int,
         b[r][c] = EMPTY
 
 
+def analyze_move(game: GomokuGame, r: int, c: int, player: int) -> str:
+    """player 在 (r,c) 已落子，判定这一步形成的最强威胁等级。
+
+    复用 evaluate_point（临时撤子再评估），天然识别跳棋型。返回：
+      "five"       五连（已获胜）
+      "live_four"  活四 / 双活三 / 冲四+活三（下一手必胜）
+      "rush_four"  冲四（一个必杀点，对手必须堵）
+      "live_three" 活三（对手不堵就会成活四）
+      "none"       其它（活二、眠型等，暂不构成威胁）
+    """
+    if not game.in_board(r, c) or game.board[r][c] != player:
+        return "none"
+    if game.winner == player:
+        return "five"
+    game.board[r][c] = EMPTY
+    try:
+        score = evaluate_point(game, r, c, player, deep=True)
+    finally:
+        game.board[r][c] = player
+    if score >= S_FIVE:
+        return "five"
+    if score >= S_LIVE_FOUR:
+        return "live_four"
+    if score >= S_RUSH_FOUR:
+        return "rush_four"
+    if score >= S_LIVE_THREE:
+        return "live_three"
+    return "none"
+
+
 @dataclass
 class GomokuAI:
     """五子棋 AI。color 为 AI 执子（默认白）。"""
