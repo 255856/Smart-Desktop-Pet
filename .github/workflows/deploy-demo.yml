@@ -42,6 +42,15 @@ jobs:
           # serve.py 是给本地用的，不发布到 Pages；README/DEPLOY 也不发布
           # （_demo/ 整个目录会被上传到 gh-pages 根）
 
+          # 把 hiyori_zh-Hans 也拷过去（33MB，Live2D 官方允许 demo 用）
+          # 注：master 的 .gitignore 排除了 hiyori_zh-Hans/，但 gh-pages 分支独立，
+          #     deploy 步骤绕过 .gitignore 直接复制。这样 GitHub Pages 部署版本能
+          #     自动加载 Hiyori Pro 真模型（零配置）。
+          if [ -d docs/demo/hiyori_zh-Hans ]; then
+            echo "Including hiyori_zh-Hans (Live2D official sample, ~33MB)"
+            cp -r docs/demo/hiyori_zh-Hans _demo/
+          fi
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

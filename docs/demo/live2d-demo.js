@@ -284,29 +284,52 @@ class TTSBridge {
   refreshVoices() {
     if (!this.synth) return;
     this.voices = this.synth.getVoices().filter(v => v.lang.startsWith("zh") || v.lang.startsWith("en"));
+    // 也保留所有 voice（包括 ja、ko 等），让用户自由选
+    this.allVoices = this.synth.getVoices();
   }
   listVoices() {
     return this.voices.map((v, i) => ({
       idx: i, name: v.name, lang: v.lang, local: v.localService
     }));
   }
+  listAllVoices() {
+    return (this.allVoices || []).map((v, i) => ({
+      idx: i, name: v.name, lang: v.lang, local: v.localService
+    }));
+  }
   setEngine(engine) {
     this.currentEngine = engine;
     log(`TTS 引擎切换：${engine}`, "ok");
-    // 不同引擎用不同语音（仅作为模拟）
+    // 不同引擎用不同 voice（仅作为模拟）
+    // edge 小晓 = Microsoft Xiaoxiao Online (Natural) - Chinese (Simplified, PRC)
+    // edge 云希 = Microsoft Yunxi Online (Natural)
+    // edge 云健 = Microsoft Yunjian Online (Natural) - 男声
+    // gptsovits = 男声克隆（桌面本地），demo 用任何男声替代
+    // minimax = 任意
     this.refreshVoices();
+  }
+  setVoiceByName(name) {
+    if (!name || !this.allVoices) return null;
+    const v = this.allVoices.find(x => x.name === name);
+    if (v) { this._pinnedVoice = v; log(`TTS 锁定语音：${v.name}（${v.lang}）`, "ok"); }
+    return v;
   }
   // 真实 speak：调用 SpeechSynthesis 同步驱动口型
   speak(text, onEnd) {
     if (!this.synth) { log("浏览器不支持 SpeechSynthesis", "err"); onEnd && onEnd(); return; }
     this.synth.cancel();
-    // 选一个 voice（按引擎）
+    // 选一个 voice
     let voice = null;
-    if (this.voices.length > 0) {
-      // edge 偏好女声、gptsovits 偏好男声、minimax 任意
-      const pref = this.currentEngine === "edge" ? ["female", "女"] :
-                   this.currentEngine === "gptsovits" ? ["male", "男"] : [];
-      voice = this.voices.find(v => pref.some(p => v.name.toLowerCase().includes(p))) || this.voices[0];
+    if (this._pinnedVoice) {
+      // 用户手动锁定的（如 Xiaoxiao）
+      voice = this._pinnedVoice;
+    } else if (this.voices.length > 0) {
+      // 按引擎匹配
+      const pref = this.currentEngine === "edge" ? ["xiaoxiao", "小晓", "female", "女"] :
+                   this.currentEngine === "gptsovits" ? ["yunjian", "云健", "male", "男"] :
+                   /* minimax */ ["yating", "云夏", "xiaoxiao", "小晓"];
+      voice = this.voices.find(v => pref.some(p => v.name.toLowerCase().includes(p.toLowerCase())))
+            || this.voices[0];
     }
     const utt = new SpeechSynthesisUtterance(text);
     if (voice) utt.voice = voice;
@@ -715,94 +738,22 @@ async function handleUserInput(text) {
   if (closeBtn) closeBtn.addEventListener("click", () => banner.classList.add("hidden"));
 })();
 
-// 快捷 URL 按钮
-document.querySelectorAll("#quick-urls button").forEach(btn => {
-  btn.addEventListener("click", async () => {
-    const urlInput = document.getElementById("model-url");
-    if (!urlInput) return;
-    if (btn.dataset.urlClear === "1") { urlInput.value = ""; return; }
-    const tpl = btn.dataset.urlTemplate;
-    if (tpl === "local") {
-      const dir = prompt("你的模型目录路径（相对 serve.py 启动的 root）：\n例：assets/live2d/bingtang/bingtang", "");
-      if (!dir) return;
-      urlInput.value = `http://127.0.0.1:8765/${dir}/${encodeURIComponent("免费模型冰糖")}.model3.json`;
-      log("快捷 URL 已填，请核对文件名是否正确再点加载", "ok");
-    } else if (tpl === "hiyori") {
-      // 自动探测本地内置 Hiyori 样例（docs/demo/hiyori_zh-Hans/）
-      // demo 页面在 /docs/demo/index.html，所以 hiyori 目录在上一层 + 同级
-      const base = location.origin;
-      const candidates = [
-        "../hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
-        "../hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
-      ];
-      // 探测哪些存在
-      const found = [];
-      for (const c of candidates) {
-        try {
-          const r = await fetch(c, { method: "GET" });
-          if (r.ok) found.push(c);
-        } catch (e) {}
-      }
-      if (found.length === 0) {
-        log("⚠️ 没在 docs/demo/hiyori_zh-Hans/ 下找到 model3.json", "err");
-        log("请把 Hiyori 样例放到 docs/demo/hiyori_zh-Hans/，然后用 '本地' 按钮", "err");
-        return;
-      }
-      // 列出选项让用户选
-      const choice = found.length === 1
-        ? found[0]
-        : prompt(
-            "检测到多个 Hiyori 版本，选哪个？\n" +
-            found.map((c, i) => `${i+1}. ${c}`).join("\n"),
-            "1"
-          );
-      const idx = parseInt(choice) - 1;
-      const sel = found[idx] || found[0];
-      urlInput.value = `${base}/${sel}`;
-      log(`✓ Hiyori 路径已填：${sel}`, "ok");
-      // 自动加载
-      document.getElementById("load-btn").click();
-    }
-  });
-});
+// 内置 Hiyori Pro 模型（零配置自动加载）
+// GitHub Pages 部署：模型放在 gh-pages 根的 hiyori_zh-Hans/ 下，index.html 在根
+// 本地 serve.py：模型放在仓库根 docs/demo/hiyori_zh-Hans/，index.html 在 docs/demo/
+// 因此路径需要按 IS_GITHUB_PAGES 切换
+const IS_GITHUB_PAGES = /\.github\.io$/.test(location.hostname);
+const BUILTIN_MODEL_PATHS = IS_GITHUB_PAGES ? [
+  // GitHub Pages：index.html 在根，hiyori_zh-Hans/ 也在根
+  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
+  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
+] : [
+  // 本地 serve.py (--root E:/study/desktop-pet)：index.html 在 docs/demo/，
+  // hiyori_zh-Hans/ 在 docs/demo/ 同级
+  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
+  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
+];
 
-let dropHint = null, dragDepth = 0;
-window.addEventListener("dragenter", (e) => {
-  e.preventDefault();
-  dragDepth++;
-  if (!dropHint) dropHint = document.getElementById("drop-hint");
-  if (dropHint) dropHint.classList.add("show");
-});
-window.addEventListener("dragleave", (e) => {
-  e.preventDefault();
-  dragDepth--;
-  if (dragDepth <= 0) {
-    dragDepth = 0;
-    if (dropHint) dropHint.classList.remove("show");
-  }
-});
-window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dragDepth = 0;
-  if (dropHint) dropHint.classList.remove("show");
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (!file) return;
-  if (!file.name.endsWith(".model3.json")) { log("请拖入 .model3.json 文件", "err"); return; }
-  const url = URL.createObjectURL(file);
-  const urlInput = document.getElementById("model-url");
-  if (urlInput) urlInput.value = `file://${file.name}（内存中）`;
-  if (window.demo) window.demo.loadModel(url);
-});
-
-document.getElementById("load-btn").addEventListener("click", () => {
-  const url = document.getElementById("model-url").value.trim();
-  if (!url) { log("请填写 Model URL", "err"); return; }
-  window.demo.loadModel(url);
-});
-document.getElementById("model-url").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("load-btn").click();
-});
 document.getElementById("motion-btn").addEventListener("click", () => {
   const g = document.getElementById("motion-group").value;
   if (g) window.demo.playMotion(g);
@@ -811,14 +762,35 @@ document.getElementById("expression-btn").addEventListener("click", () => {
   const n = document.getElementById("expression").value;
   if (n) window.demo.setExpression(n);
 });
-document.getElementById("reset-btn").addEventListener("click", () => {
-  const url = document.getElementById("model-url").value.trim();
-  if (url) window.demo.loadModel(url);
-});
+document.getElementById("reset-btn").addEventListener("click", () => loadBuiltinModel());
 document.getElementById("speak-btn").addEventListener("click", (e) => {
   if (window.demo._talking) { window.demo.stopTalk(); e.target.textContent = "🔊 测试口型"; }
   else { window.demo.startTalk(); e.target.textContent = "🛑 停止口型"; }
 });
+
+// 重新加载按钮（如果用户主动想刷）
+const reloadBtn = document.getElementById("reload-btn");
+if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel());
+
+// 自动加载内置 Hiyori 模型
+async function loadBuiltinModel() {
+  showLoader("加载内置模型…");
+  setStatus("加载 Hiyori…", "#ffce5c");
+  for (const p of BUILTIN_MODEL_PATHS) {
+    try {
+      const r = await fetch(p, { method: "HEAD" });
+      if (r.ok) {
+        log(`✓ 找到内置模型：${p}`, "ok");
+        const url = location.origin + location.pathname.replace(/index\.html?$/, "") + p;
+        await window.demo.loadModel(url);
+        return;
+      }
+    } catch (e) {}
+  }
+  hideLoader();
+  setStatus("内置模型未找到", "#ff7675");
+  log("❌ demo 内置的 Hiyori 模型未部署，请检查 hiyori_zh-Hans/ 目录", "err");
+}
 document.getElementById("chat-btn").addEventListener("click", async () => {
   const text = document.getElementById("chat-input").value.trim();
   if (!text) { log("请输入文字", "err"); return; }
@@ -855,6 +827,44 @@ const ttsSel = document.getElementById("tts-engine");
 if (ttsSel) {
   ttsSel.addEventListener("change", (e) => window.tts.setEngine(e.target.value));
 }
+
+// TTS 语音填充（等 voiceschanged 触发）
+(function setupTTSVoice() {
+  const voiceSel = document.getElementById("tts-voice");
+  if (!voiceSel) return;
+  function fillVoices() {
+    if (!window.tts || !window.tts.allVoices || window.tts.allVoices.length === 0) return;
+    voiceSel.innerHTML = '<option value="">自动（按引擎选）</option>';
+    for (const v of window.tts.allVoices) {
+      const opt = document.createElement("option");
+      opt.value = v.name;
+      const marker = /xiaoxiao|小晓/i.test(v.name) ? " 🔥小晓" :
+                     /yunjian|云健/i.test(v.name) ? " 男" :
+                     /yating|云夏/i.test(v.name) ? " 女" :
+                     /yunxi|云希/i.test(v.name) ? " 男" :
+                     /female|女/i.test(v.name) ? " 女" :
+                     /male|男/i.test(v.name) ? " 男" : "";
+      opt.textContent = `${v.name} (${v.lang})${marker}`;
+      voiceSel.appendChild(opt);
+    }
+    log(`📢 可用语音 ${window.tts.allVoices.length} 个（找小晓请选含 'Xiaoxiao' 的）`, "ok");
+  }
+  // 延迟多次尝试，因为 voiceschanged 触发有延迟
+  setTimeout(fillVoices, 500);
+  setTimeout(fillVoices, 2000);
+  setTimeout(fillVoices, 5000);
+  if (window.speechSynthesis) {
+    window.speechSynthesis.onvoiceschanged = fillVoices;
+  }
+  voiceSel.addEventListener("change", (e) => {
+    if (!e.target.value) {
+      window.tts._pinnedVoice = null;
+      log("TTS 解除语音锁定（按引擎自动选）", "ok");
+    } else {
+      window.tts.setVoiceByName(e.target.value);
+    }
+  });
+})();
 
 // Tavily key 配置
 const tavilyBtn = document.getElementById("tavily-btn");
@@ -981,10 +991,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // 填默认 URL（如果有）
     const savedUrl = localStorage.getItem("last_model_url");
     if (savedUrl) document.getElementById("model-url").value = savedUrl;
-    // 保存 URL
-    const urlInput = document.getElementById("model-url");
-    if (urlInput) {
-      urlInput.addEventListener("change", () => localStorage.setItem("last_model_url", urlInput.value));
-    }
+    // 零配置自动加载内置 Hiyori Pro 模型
+    loadBuiltinModel();
   })();
 });

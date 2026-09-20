@@ -127,24 +127,29 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  #url-bar {
-    display: flex; gap: 6px; padding: 8px 10px;
+  /* 模型信息条（替代旧的 URL 输入框） */
+  #model-info {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; min-width: 280px; max-width: 480px;
     background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
-    border-radius: 12px; border: 1px solid rgba(255,255,255,.08);
-    width: min(580px, 90vw);
+    border-radius: 12px; border: 1px solid rgba(255,255,255,.1);
+    font-size: 13px;
   }
-  #url-bar input {
-    flex: 1; padding: 6px 10px;
-    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
-    color: #e8e8f0; border-radius: 8px; font-size: 13px;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  #model-info .model-icon { font-size: 24px; }
+  #model-info .model-title { font-weight: 600; }
+  #model-info .model-sub { font-size: 11px; color: #a8b0c0; }
+  #model-info .badge-pro {
+    display: inline-block; padding: 1px 6px; margin-left: 4px;
+    background: #ffce5c; color: #2d2f4a; border-radius: 4px;
+    font-size: 10px; font-weight: 600;
   }
-  #url-bar input:focus { outline: none; border-color: #6c5ce7; }
-  #url-bar button {
-    padding: 6px 14px; border: 0; background: #6c5ce7;
-    color: white; border-radius: 8px; cursor: pointer; font-size: 13px;
+  #model-info button {
+    padding: 4px 10px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 8px; font-size: 12px; cursor: pointer;
   }
-  #url-bar button:hover { background: #5d4dd6; }
+  #model-info button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
 
   .controls {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
@@ -267,16 +272,14 @@
         <button class="close" id="env-banner-close">×</button>
       </div>
 
-      <!-- 顶部 URL 栏 -->
-      <div id="url-bar">
-        <input id="model-url" type="text" spellcheck="false"
-               placeholder="http://127.0.0.1:8765/<你的模型>/xxx.model3.json" />
-        <button id="load-btn">加载 / Load</button>
-        <div id="quick-urls">
-          <button data-url-template="local" title="本地 serve.py (127.0.0.1:8765)">本地</button>
-          <button data-url-template="hiyori" title="自动探测 docs/demo/hiyori_zh-Hans/ 下的样例模型">Hiyori</button>
-          <button data-url-clear="1" title="清空 URL 框">清空</button>
+      <!-- 顶部模型信息条（demo 已内置 Hiyori Pro，零配置自动加载） -->
+      <div id="model-info">
+        <div class="model-icon">🌸</div>
+        <div class="model-meta">
+          <div class="model-title">Hiyori (zh-Hans) <span class="badge-pro">Pro</span></div>
+          <div class="model-sub">Live2D 官方允许 demo 使用的样例模型</div>
         </div>
+        <button id="reload-btn" title="重新加载模型" style="margin-left:auto">🔄 重新加载</button>
       </div>
 
       <!-- 日志 -->
@@ -294,10 +297,11 @@
         <button id="chat-btn">💬 说</button>
         <button id="asr-btn" title="按住说话">🎤 按住说话</button>
         <select id="tts-engine" title="TTS 引擎">
-          <option value="edge">edge</option>
-          <option value="gptsovits">gptsovits</option>
-          <option value="minimax">minimax</option>
+          <option value="edge">edge（云端）</option>
+          <option value="gptsovits">gptsovits（本地）</option>
+          <option value="minimax">minimax（云端）</option>
         </select>
+        <select id="tts-voice" title="选择具体语音（如 Microsoft Xiaoxiao Online）"><option value="">自动（按引擎选）</option></select>
         <button id="mem-btn" title="查看记忆">💾 记忆</button>
         <button id="forget-btn" title="遗忘记忆">🗑️ 遗忘</button>
         <button id="remind-btn" title="加提醒">⏰ 提醒</button>
