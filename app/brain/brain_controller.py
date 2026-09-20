@@ -140,6 +140,9 @@ class BrainController(QObject):
 
         # --- 工具注册表 ---
         if cfg.brain.tools_enabled:
+            # web_search 主用 Tavily：优先 cfg.brain.tavily_api_key，否则读环境变量
+            tavily_key = getattr(getattr(cfg, "brain", None), "tavily_api_key", None) \
+                or __import__("os").environ.get("TAVILY_API_KEY") or None
             self.tool_registry = build_default_tools(
                 state=self.state,
                 reminders=reminders,
@@ -149,6 +152,7 @@ class BrainController(QObject):
                     "bubble": self.bubble_requested.emit,
                     "animation": self.animation_requested.emit,
                 },
+                tavily_api_key=tavily_key,
             )
             log.info("智能中枢：注册 %d 个工具 %s",
                      len(self.tool_registry.names()), self.tool_registry.names())

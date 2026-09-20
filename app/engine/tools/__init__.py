@@ -11,6 +11,7 @@
     _math        calculate / convert_units / date_info
     _file        list_desktop_files / read_text_file
     _shortcuts   taskmgr / control / settings / explorer / terminal / notepad / calculator
+    _search      web_search（主用 Tavily / 降级 DuckDuckGo）
 
 主程序只需调用 build_default_tools(state, reminders, memory, items, hooks) 即可获得
 一个完整 ToolRegistry。
@@ -23,7 +24,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from ._core import Tool, ToolRegistry
-from . import _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts
+from . import _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search
 
 
 def build_default_tools(
@@ -33,11 +34,14 @@ def build_default_tools(
     memory,
     items: Optional[object] = None,
     hooks: Optional[dict[str, Callable[[str], None]]] = None,
+    tavily_api_key: Optional[str] = None,
 ) -> ToolRegistry:
     """用各子系统组装默认工具集。
 
     hooks: 可选回调，key 取 "bubble"（桌宠冒泡）/"animation"（播动画），
            由主程序提供（内部用 Qt 信号转回 UI 线程）。
+    tavily_api_key: 若非空，web_search 主用 Tavily；否则降级 DuckDuckGo
+                    (建议与 llm.api_key 解耦，但优先用 TAVILY_API_KEY 环境变量)
     """
     hooks = hooks or {}
     reg = ToolRegistry()
@@ -51,6 +55,7 @@ def build_default_tools(
     _math.register(reg)
     _file.register(reg)
     _shortcuts.register(reg)
+    _search.register(reg, tavily_api_key=tavily_api_key)
 
     return reg
 

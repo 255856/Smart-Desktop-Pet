@@ -124,6 +124,9 @@ class BrainConfig(BaseModel):
     proactive_enabled: bool = True
     proactive_min_minutes: int = 25
     proactive_max_minutes: int = 45
+    # 网络搜索（web_search 工具）：主用 Tavily（需注册免费 key，访问 tavily.com）
+    # 留空则降级 DuckDuckGo（ddgs 包，零 key）。也可走环境变量 TAVILY_API_KEY。
+    tavily_api_key: str = ""
     agent: AgentConfig = AgentConfig()
     langchain: LangChainConfig = LangChainConfig()
 

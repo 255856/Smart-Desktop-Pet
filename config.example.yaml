@@ -67,6 +67,10 @@ brain:
   proactive_enabled: true
   proactive_min_minutes: 25    # 随机间隔下限（分钟）
   proactive_max_minutes: 45    # 随机间隔上限（分钟）
+  # 网络搜索（web_search 工具）：主用 Tavily，需在 tavily.com 注册免费 key
+  # 留空则降级 DuckDuckGo（免 key，但稳定性无保证）
+  # 也可设环境变量 TAVILY_API_KEY 代替填这里
+  tavily_api_key: ""
 
   # ---- Agent v2 顶层参数（两种 backend 共用）----
   agent:
