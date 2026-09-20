@@ -168,6 +168,11 @@ class PetWindow(QWidget):
     # 选中具体食物（右键「喂食」子菜单）：参数为食物名，由 UIController 应用状态
     food_selected = Signal(str)
 
+    # 打开小游戏（参数为游戏 id，如 gomoku）
+    game_requested = Signal(str)
+    # 每日签到（每天一次 +100 金币）
+    checkin_requested = Signal()
+
     # 快捷聊天输入（底部输入框发送消息）
     chat_input_sent = Signal(str)
 
@@ -1541,6 +1546,24 @@ class PetWindow(QWidget):
 
         # === 喂食（有食物库时按分类挂子菜单；无库回退通用「吃饭」）===
         self._build_feed_menu(menu)
+        menu.addSeparator()
+
+        # === 小游戏（子菜单，预留以后扩展；目前含五子棋） ===
+        games_menu = menu.addMenu("小游戏")
+        a_gomoku = QAction("五子棋", self)
+        a_gomoku.triggered.connect(
+            lambda _=False: self.game_requested.emit("gomoku"))
+        games_menu.addAction(a_gomoku)
+        menu.addSeparator()
+
+        # === 每日签到（每天一次 +100 金币；已签则禁用） ===
+        _ci_fn = getattr(self, "checkin_status_fn", None)
+        _checked = bool(_ci_fn()) if callable(_ci_fn) else False
+        a_checkin = QAction(
+            "今日已签到 ✓" if _checked else "每日签到  +100 金币", self)
+        a_checkin.setEnabled(not _checked)
+        a_checkin.triggered.connect(self.checkin_requested.emit)
+        menu.addAction(a_checkin)
         menu.addSeparator()
 
         # === 状态栏显示/隐藏 ===

@@ -98,6 +98,14 @@ class PetState:
     feed_like_date: str = ""
     feed_like_count: float = 0.0
 
+    # ---- 每日签到（每天一次，签到得金币，跨自然日重置） ----
+    checkin_date: str = ""
+
+    # ---- 小游戏金币每日上限（防刷，跨自然日重置） ----
+    game_coin_daily_cap: float = 100.0
+    game_coin_date: str = ""
+    game_coin_count: float = 0.0
+
     on_mode_change: Optional[Callable[[Mode, Mode], None]] = None
     on_change: Optional[Callable[[], None]] = None
     on_level_up: Optional[Callable[[int], None]] = None
@@ -340,6 +348,45 @@ class PetState:
             self._fire_change()
         return added
 
+    @staticmethod
+    def _today_str() -> str:
+        import datetime
+        return datetime.datetime.now().strftime("%Y-%m-%d")
+
+    def has_checked_in_today(self) -> bool:
+        """今天是否已签到。"""
+        return self.checkin_date == self._today_str()
+
+    def daily_checkin(self, reward: float = 100.0) -> tuple[bool, float]:
+        """每日签到：每天一次，成功返回 (True, 金币)，已签过返回 (False, 0)。"""
+        today = self._today_str()
+        if self.checkin_date == today:
+            return False, 0.0
+        self.checkin_date = today
+        reward = max(0.0, float(reward))
+        self.money = max(0.0, self.money + reward)
+        self._fire_change()
+        return True, reward
+
+    def add_game_reward(self, amount: float) -> float:
+        """小游戏金币：每日上限 game_coin_daily_cap，跨自然日重置。返回实际发放。"""
+        today = self._today_str()
+        if self.game_coin_date != today:
+            self.game_coin_date = today
+            self.game_coin_count = 0.0
+        amount = max(0.0, float(amount))
+        added = min(amount, max(0.0, self.game_coin_daily_cap - self.game_coin_count))
+        self.game_coin_count += added
+        if added > 0:
+            self.money = max(0.0, self.money + added)
+            self._fire_change()
+        return added
+
+    def game_coin_remaining(self) -> float:
+        """今日小游戏还可获得的金币额度。"""
+        count = self.game_coin_count if self.game_coin_date == self._today_str() else 0.0
+        return max(0.0, self.game_coin_daily_cap - count)
+
     def _reevaluate_mode(self) -> None:
         new_mode = self.cal_mode()
         if new_mode != self.mode:
@@ -389,6 +436,9 @@ class PetState:
             "last_interact": self._last_interact_ts,
             "feed_like_date": self.feed_like_date,
             "feed_like_count": self.feed_like_count,
+            "checkin_date": self.checkin_date,
+            "game_coin_date": self.game_coin_date,
+            "game_coin_count": self.game_coin_count,
         }
 
     @classmethod
@@ -409,6 +459,12 @@ class PetState:
             s.feed_like_date = str(d["feed_like_date"])
         if "feed_like_count" in d:
             s.feed_like_count = float(d["feed_like_count"])
+        if "checkin_date" in d:
+            s.checkin_date = str(d["checkin_date"])
+        if "game_coin_date" in d:
+            s.game_coin_date = str(d["game_coin_date"])
+        if "game_coin_count" in d:
+            s.game_coin_count = float(d["game_coin_count"])
         if v < 3:
             log.info("存档 v=%d 已升级到 v3（含 level 保存 + 平衡数值）", v)
         return s

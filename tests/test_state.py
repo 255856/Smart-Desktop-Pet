@@ -63,3 +63,66 @@ class TestPetState:
         """兼容旧版 Nomal 拼写"""
         s = PetState.from_dict({"mode": "Nomal"})
         assert s.mode == Mode.NORMAL
+
+
+class TestCheckin:
+    def test_checkin_once_per_day(self):
+        s = PetState()
+        s.money = 0.0
+        ok, reward = s.daily_checkin(100.0)
+        assert ok is True
+        assert reward == 100.0
+        assert s.money == 100.0
+        assert s.has_checked_in_today() is True
+        ok2, reward2 = s.daily_checkin(100.0)
+        assert ok2 is False
+        assert reward2 == 0.0
+        assert s.money == 100.0
+
+    def test_checkin_resets_next_day(self):
+        s = PetState()
+        s.checkin_date = "2000-01-01"
+        assert s.has_checked_in_today() is False
+        ok, _ = s.daily_checkin(100.0)
+        assert ok is True
+
+    def test_checkin_persisted(self):
+        s = PetState()
+        s.daily_checkin(100.0)
+        s2 = PetState.from_dict(s.to_dict())
+        assert s2.checkin_date == s.checkin_date
+
+
+class TestGameReward:
+    def test_daily_cap(self):
+        s = PetState()
+        s.money = 0.0
+        total = 0.0
+        for _ in range(6):
+            total += s.add_game_reward(20)
+        assert total == 100.0
+        assert s.money == 100.0
+        assert s.game_coin_remaining() == 0.0
+        assert s.add_game_reward(20) == 0.0
+
+    def test_partial_reward_when_near_cap(self):
+        s = PetState()
+        s.game_coin_daily_cap = 100.0
+        s.add_game_reward(90)
+        assert s.add_game_reward(20) == 10.0
+        assert s.game_coin_remaining() == 0.0
+
+    def test_resets_next_day(self):
+        s = PetState()
+        s.add_game_reward(100)
+        s.game_coin_date = "2000-01-01"
+        s.game_coin_count = 100.0
+        assert s.game_coin_remaining() == 100.0
+        assert s.add_game_reward(20) == 20.0
+
+    def test_persisted(self):
+        s = PetState()
+        s.add_game_reward(40)
+        s2 = PetState.from_dict(s.to_dict())
+        assert s2.game_coin_count == 40.0
+        assert s2.game_coin_date == s.game_coin_date

@@ -209,6 +209,11 @@ class UIController(QObject):
         self.pet.eat_requested.connect(self._on_eat_requested)
         self.pet.food_selected.connect(self._on_food_selected)
         self.pet.chat_input_sent.connect(self._on_quick_chat_sent)
+        # --- 小游戏 / 每日签到 ---
+        self.pet.game_requested.connect(self._on_game_requested)
+        self.pet.checkin_requested.connect(self._on_checkin)
+        self.pet.checkin_status_fn = lambda: self.state.has_checked_in_today()
+        self._gomoku_window = None
 
         # --- 状态管理器信号 ---
         self.state_mgr.food_low.connect(self._on_food_low)
@@ -261,6 +266,93 @@ class UIController(QObject):
             # 投喂本身是陪伴：额外一点心情；好感已在 apply_food 内按每日上限处理
             self.state.on_interact(feeling_gain=2)
             log.info("手动投喂「%s」：%s", name, self.state.stats_summary())
+
+    # ============================================================
+    #  小游戏 / 每日签到
+    # ============================================================
+    def _on_game_requested(self, game_id: str) -> None:
+        """右键「小游戏」入口。"""
+        if game_id == "gomoku":
+            self._show_gomoku()
+        else:
+            log.warning("未知小游戏：%s", game_id)
+
+    def _show_gomoku(self) -> None:
+        """打开五子棋窗口（重复打开复用已存在窗口）。"""
+        from app.ui.gomoku_window import GomokuWindow
+        gw = self._gomoku_window
+        if gw is None or not gw.isVisible():
+            gw = GomokuWindow()
+            gw.game_finished.connect(self._on_gomoku_finished)
+            gw.show()
+            self._gomoku_window = gw
+        else:
+            gw.raise_()
+            gw.activateWindow()
+        gw.set_wallet(self.state.money, self.state.game_coin_remaining())
+
+    def _on_gomoku_finished(self, result: str, difficulty: str) -> None:
+        """一局结束：按难度/结果发放金币（受每日上限约束），桌宠做反应。"""
+        from app.ui.gomoku_window import REWARDS
+        gw = self._gomoku_window
+        amount = 0
+        if result in ("win", "lose", "draw"):
+            amount = REWARDS.get(difficulty, REWARDS["normal"]).get(result, 0)
+        granted = self.state.add_game_reward(amount) if amount else 0
+        if gw is not None:
+            gw.set_wallet(self.state.money, self.state.game_coin_remaining())
+            gw.show_reward(granted, amount > 0 and granted <= 0)
+        lines = {
+            "win": ("呜呜，你赢了！好厉害喵～", ("tongue", "stretch", "swim")),
+            "lose": ("哈哈，我赢啦！再来一局？", ("cheek", "jump", "spin")),
+            "draw": ("和棋！势均力敌呢～", ("tongue", "stretch", "swim")),
+            "giveup": ("诶，不玩了吗？下次再战！", ("stretch", "swim")),
+        }
+        text, acts = lines.get(result, lines["draw"])
+        self.pet.show_bubble(text)
+        self._pet_react(acts)
+        self.state.on_interact(feeling_gain=2)
+        log.info("五子棋结束 result=%s difficulty=%s 金币 +%.0f",
+                 result, difficulty, granted)
+
+    def _on_checkin(self) -> None:
+        """每日签到：每天一次 +100 金币。"""
+        ok, reward = self.state.daily_checkin(reward=100.0)
+        if ok:
+            self.pet.show_bubble(f"签到成功！金币 +{reward:.0f}，今天也要陪我玩哦～")
+            self._pet_react(("jump", "spin", "cheek"))
+            self.state.on_interact(feeling_gain=3)
+            log.info("每日签到：金币 +%.0f", reward)
+        else:
+            self.pet.show_bubble("今天已经签到过啦，明天再来吧～")
+
+    def _pet_react(self, prefer) -> None:
+        """播放一个一次性动作（motion 结束自动回 idle，不影响持久表情）。"""
+        anim = getattr(self.pet, "animator", None)
+        if anim is None or not hasattr(anim, "play_animation"):
+            return
+        name = None
+        opts = []
+        if hasattr(anim, "get_play_options"):
+            try:
+                opts = [n for n, _ in anim.get_play_options()]
+            except Exception:  # noqa: BLE001
+                opts = []
+        for cand in prefer:
+            if cand in opts:
+                name = cand
+                break
+        if name is None:
+            # sprite 兜底：这些动作两类渲染器都支持
+            for cand in prefer:
+                if cand in ("jump", "spin", "stretch", "swim"):
+                    name = cand
+                    break
+        if name:
+            try:
+                anim.play_animation(name)
+            except Exception as e:  # noqa: BLE001
+                log.warning("桌宠动作播放失败：%s", e)
 
     def _on_proactive_remark(self, text: str) -> None:
         """主动发言回调。"""

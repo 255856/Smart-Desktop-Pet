@@ -36,12 +36,17 @@ try:
         Qt.CaseSensitivity = _Qt
     if not hasattr(Qt, "MatchFlag"):
         Qt.MatchFlag = _Qt
+    if not hasattr(Qt, "PenStyle"):
+        Qt.PenStyle = _Qt
+    if not hasattr(Qt, "BrushStyle"):
+        Qt.BrushStyle = _Qt
 
     from PyQt5.QtGui import (
         QColor, QCursor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent,
         QDropEvent, QFont, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence,
         QMouseEvent, QPainter, QPainterPath, QLinearGradient, QPaintEvent, QPixmap,
         QRegion, QTextCursor, QTextDocument, QTransform,
+        QPen, QBrush, QRadialGradient,
     )
     from PyQt5.QtWidgets import QAction
     from PyQt5.QtWidgets import (
@@ -66,6 +71,7 @@ except ImportError:
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
         QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QLinearGradient,
         QPaintEvent, QPixmap, QMimeData, QRegion, QTextCursor, QTextDocument, QTransform,
+        QPen, QBrush, QRadialGradient,
     )
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
@@ -112,6 +118,7 @@ __all__ = [
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
     "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",
+    "QPen", "QBrush", "QRadialGradient",
     "QApplication", "QCheckBox", "QComboBox", "QCompleter", "QDoubleSpinBox", "QFormLayout",
     "QFrame", "QGridLayout", "QGroupBox",
     "QHBoxLayout", "QLabel", "QLineEdit", "QDialog", "QDialogButtonBox", "QFileDialog",
