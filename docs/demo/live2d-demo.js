@@ -119,6 +119,8 @@ class Live2DDemo {
       const motionGroups = Object.keys((model.internalModel && model.internalModel.settings.motions) || {});
       setStatus(`就绪 · ${exprCount} 表情 / ${motionGroups.length} 组动作`, "#55efc4");
       log(`模型加载完成：${exprCount} 表情 / ${motionGroups.length} 组动作`, "ok");
+      // 启动 idle 行为（随机表情 + 随机动作，模拟桌宠挂机时行为）
+      if (window.startIdleBehavior) window.startIdleBehavior();
     } catch (err) {
       hideLoader();
       setStatus("加载失败", "#ff7675");
@@ -219,20 +221,80 @@ class Live2DDemo {
     this.model = null;
     this.ready = false;
   }
+
+  // 模拟"桌宠说话"：逐字驱动口型 + 偶尔切换表情
+  // 这对应桌面版：TTS 流式播放 → 逐句/逐字驱动 mouth 参数 + 情绪切换表情
+  simulateSpeak(text) {
+    if (this._simulating) return;
+    this._simulating = true;
+    const chars = Array.from(text);
+    const perCharMs = 80;  // 每字 80ms（模拟正常语速）
+    this._mouthTimer && clearInterval(this._mouthTimer);
+    this._talking = true;
+
+    let i = 0;
+    const t0 = performance.now();
+    this._mouthTimer = setInterval(() => {
+      if (!this.model || !this._simulating) {
+        clearInterval(this._mouthTimer);
+        return;
+      }
+      const t = performance.now() - t0;
+      // 口型：正弦 + 随机抖动（与桌面版公式一致）
+      const v = Math.max(0, Math.sin(t / 80)) *
+                (0.3 + 0.6 * Math.abs(Math.sin(t / 620)));
+      try {
+        this.model.internalModel.coreModel.setParameterValueById(this._talkParam, v);
+      } catch (e) {}
+      i++;
+      // 每 4 个字随机切表情
+      if (i % 4 === 0) {
+        const list = (this.model.internalModel.settings.expressions) || [];
+        if (list.length > 0) {
+          const e = list[Math.floor(Math.random() * list.length)];
+          const name = e.Name || e.name;
+          try { this.model.expression(name); } catch (err) {}
+          log(`[speak] 表情 → ${name}`);
+        }
+      }
+      // 模拟完成
+      if (i >= chars.length * 8) {
+        clearInterval(this._mouthTimer);
+        try {
+          this.model.internalModel.coreModel.setParameterValueById(this._talkParam, 0);
+        } catch (e) {}
+        this._talking = false;
+        this._simulating = false;
+        log(`[speak] 完成（共 ${chars.length} 字）`, "ok");
+      }
+    }, perCharMs / 8);
+  }
 }
 
 window.demo = new Live2DDemo();
 
 // ---------------- 拖拽 ----------------
-const dropHint = document.getElementById("drop-hint");
+let dropHint = null;
 let dragDepth = 0;
-window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; dropHint.classList.add("show"); });
-window.addEventListener("dragleave", (e) => { e.preventDefault(); dragDepth--; if (dragDepth <= 0) { dragDepth = 0; dropHint.classList.remove("show"); } });
+window.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  dragDepth++;
+  if (!dropHint) dropHint = document.getElementById("drop-hint");
+  if (dropHint) dropHint.classList.add("show");
+});
+window.addEventListener("dragleave", (e) => {
+  e.preventDefault();
+  dragDepth--;
+  if (dragDepth <= 0) {
+    dragDepth = 0;
+    if (dropHint) dropHint.classList.remove("show");
+  }
+});
 window.addEventListener("dragover", (e) => { e.preventDefault(); });
 window.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
-  dropHint.classList.remove("show");
+  if (dropHint) dropHint.classList.remove("show");
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
   if (!file) return;
   if (!file.name.endsWith(".model3.json")) {
@@ -240,8 +302,9 @@ window.addEventListener("drop", (e) => {
     return;
   }
   const url = URL.createObjectURL(file);
-  document.getElementById("model-url").value = `file://${file.name}（内存中）`;
-  window.demo.loadModel(url);
+  const urlInput = document.getElementById("model-url");
+  if (urlInput) urlInput.value = `file://${file.name}（内存中）`;
+  if (window.demo) window.demo.loadModel(url);
 });
 
 // ---------------- UI 绑定 ----------------
@@ -274,6 +337,50 @@ document.getElementById("speak-btn").addEventListener("click", (e) => {
     e.target.textContent = "🛑 停止口型";
   }
 });
+
+// 模拟"桌宠说话"：输入文字 → 按字符模拟 TTS → 口型同步 + 随机表情
+document.getElementById("chat-btn").addEventListener("click", () => {
+  const text = document.getElementById("chat-input").value.trim();
+  if (!text) { log("请输入文字", "err"); return; }
+  if (!window.demo.ready) { log("先加载模型", "err"); return; }
+  log(`💬 模拟说话：「${text}」`, "ok");
+  window.demo.simulateSpeak(text);
+});
+document.getElementById("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("chat-btn").click();
+});
+
+// 随机表情 / 随机动作：每隔 8-15s 触发一次（桌宠 idle 行为）
+function startIdleBehavior() {
+  if (window._idleTimer) clearInterval(window._idleTimer);
+  function tick() {
+    if (!window.demo.ready || window.demo._talking || window.demo._simulating) return;
+    // 50% 概率触发随机表情或随机动作
+    if (Math.random() < 0.5) {
+      const list = (window.demo.model.internalModel.settings.expressions) || [];
+      if (list.length > 0) {
+        const e = list[Math.floor(Math.random() * list.length)];
+        const name = e.Name || e.name;
+        window.demo.setExpression(name);
+        log(`[idle] 随机表情: ${name}`);
+      }
+    } else {
+      const motions = window.demo.model.internalModel.settings.motions || {};
+      const groups = Object.keys(motions);
+      if (groups.length > 0) {
+        const g = groups[Math.floor(Math.random() * groups.length)];
+        window.demo.playMotion(g);
+        log(`[idle] 随机动作: ${g}`);
+      }
+    }
+  }
+  window._idleTimer = setInterval(() => {
+    if (Math.random() < 0.5) tick();
+  }, 8000 + Math.random() * 7000);
+  // 启动后 3s 第一次
+  setTimeout(tick, 3000);
+}
+window.startIdleBehavior = startIdleBehavior;
 
 document.getElementById("stage").addEventListener("pointermove", (e) => {
   if (!window.demo.ready) return;
