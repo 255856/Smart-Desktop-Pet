@@ -197,7 +197,7 @@ class TraceRecorder:
             return run
 
     def stats(self) -> dict:
-        """统计信息：总 run 数 / 成功率 / 平均步骤 / 工具调用分布。"""
+        """统计信息：run 数 / 成功率 / 平均步骤 / 平均耗时 / 工具调用分布。"""
         with self._conn() as c:
             total = c.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             success = c.execute(
@@ -217,11 +217,36 @@ class TraceRecorder:
                     tool_counter[name] += 1
                 except Exception:  # noqa: BLE001
                     pass
+
+            def _count_status(s: str) -> int:
+                return c.execute(
+                    "SELECT COUNT(*) FROM runs WHERE status=?", (s,)
+                ).fetchone()[0]
+
+            failed = _count_status("failed")
+            running = _count_status("running")
+            cancelled = _count_status("cancelled")
+            avg_duration = c.execute(
+                "SELECT AVG(finished_at - started_at) FROM runs "
+                "WHERE finished_at IS NOT NULL AND started_at IS NOT NULL"
+            ).fetchone()[0] or 0
+            total_tool_calls = c.execute(
+                "SELECT COUNT(*) FROM events WHERE kind='tool'"
+            ).fetchone()[0]
+            last_active_at = c.execute(
+                "SELECT MAX(started_at) FROM runs"
+            ).fetchone()[0]
             return {
                 "total_runs": total,
                 "success_runs": success,
+                "failed_runs": failed,
+                "running_runs": running,
+                "cancelled_runs": cancelled,
                 "success_rate": round(success / total, 3) if total else 0,
                 "avg_steps": round(avg_steps, 2),
+                "avg_duration": round(avg_duration, 2),
+                "total_tool_calls": total_tool_calls,
+                "last_active_at": last_active_at,
                 "tool_distribution": dict(tool_counter.most_common(20)),
             }
 

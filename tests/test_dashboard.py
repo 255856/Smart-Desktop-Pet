@@ -49,7 +49,11 @@ class TestDashboard:
     def test_index_returns_html(self):
         r = self.client.get("/")
         assert r.status_code == 200
-        assert "Dashboard" in r.text
+        # 新控制台页面（中文）应包含核心结构标识
+        assert "桌宠智能体控制台" in r.text
+        assert "会话记录" in r.text
+        assert "长期记忆" in r.text
+        assert "工具统计" in r.text
 
     def test_list_runs(self):
         r = self.client.get("/api/runs?limit=10")
@@ -82,6 +86,12 @@ class TestDashboard:
         assert data["total_runs"] >= 1
         assert data["success_runs"] >= 1
         assert "add_reminder" in data["tool_distribution"]
+        # 增强字段
+        for key in ("failed_runs", "running_runs", "cancelled_runs",
+                    "avg_duration", "total_tool_calls", "last_active_at"):
+            assert key in data, f"stats 缺少字段 {key}"
+        assert data["total_tool_calls"] >= 1
+        assert data["last_active_at"] is not None
 
     def test_memory_endpoint(self):
         r = self.client.get("/api/memory")

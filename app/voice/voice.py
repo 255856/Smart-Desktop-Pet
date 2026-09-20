@@ -86,6 +86,30 @@ def _ensure_mixer() -> bool:
             return False
 
 
+def _cache_format_matches(path: Path, expected_ext: str) -> bool:
+    """检查缓存文件实际字节格式与期望扩展名是否一致。
+
+    历史遗留：GPT-SoVITS 子类早期没设置 cache_ext=''.wav''，所有缓存被写成 .mp3 但实际是 RIFF/WAV，
+    pygame mixer 加载会报 `music_drmp3: corrupt mp3 file`。这里嗅探前 12 字节，对得上 RIFF/WAV
+    视作 WAV，对得上 ID3/'\\xff\\xfb' 视作 MP3；都不像视作损坏 → 删除重合成。
+    """
+    try:
+        with open(path, "rb") as fp:
+            head = fp.read(12)
+    except Exception:
+        return False
+    if not head:
+        return False
+    is_riff_wav = head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+    is_mp3 = (head[:3] == b"ID3"
+              or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0))
+    if expected_ext == ".wav":
+        return is_riff_wav
+    if expected_ext == ".mp3":
+        return is_mp3
+    return is_riff_wav or is_mp3
+
+
 class TTS:
     """TTS 包装：异步合成 + 异步播放（独立线程，不阻塞 Qt 主循环）。
 
@@ -144,13 +168,29 @@ class TTS:
             # 移除 emoji 和装饰性符号，避免 TTS 朗读字符名称
             clean_text = _strip_emojis(text)
             if not clean_text:
+                log.info("TTS: text 被 sanitize 为空，跳过朗读")
                 return
             cache_name = _cache_key(clean_text) + self.cache_ext
             cache_path = self.cache_dir / cache_name
             if not cache_path.is_file():
+                log.info("TTS: 合成并缓存 → %s (引擎=%s)", cache_name, type(self).__name__)
                 asyncio.run(self._synthesize(text, cache_path))
             if not cache_path.is_file():
+                log.warning("TTS: 合成后文件不存在 %s", cache_path)
                 return
+            # 校验缓存文件与引擎格式一致：避免历史 .mp3 文件名实际是 wav 内容
+            # （修复 GPT-SoVITS 早期 cache_ext 写错时的遗留文件）
+            if not _cache_format_matches(cache_path, self.cache_ext):
+                log.warning("TTS: 缓存 %s 与引擎格式 %s 不匹配，删除重合成",
+                            cache_path.name, self.cache_ext)
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                log.info("TTS: 重新合成 → %s", cache_name)
+                asyncio.run(self._synthesize(text, cache_path))
+                if not cache_path.is_file():
+                    return
             # 口型同步：播放开始（工作线程回调，UI 层自行保证线程安全）
             if self.on_speak_start:
                 try:
@@ -181,7 +221,9 @@ class TTS:
         try:
             import pygame
             if not _ensure_mixer():
+                log.warning("pygame.mixer 未就绪，跳过播放 %s", mp3_path.name)
                 return
+            log.info("TTS: 播放 → %s (%d 字节)", mp3_path.name, mp3_path.stat().st_size)
             # 复位 + 加载 + 播
             pygame.mixer.music.stop()
             pygame.mixer.music.load(str(mp3_path))
@@ -189,5 +231,5 @@ class TTS:
             while pygame.mixer.music.get_busy():
                 pygame.time.wait(100)
         except Exception as e:  # noqa: BLE001
-            log.warning("播放 TTS 失败：%s", e)
+            log.warning("播放 TTS 失败：%s（文件=%s）", e, mp3_path.name)
         # 不再 quit(): mixer 留着进程级复用
