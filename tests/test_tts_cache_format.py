@@ -56,3 +56,30 @@ def test_cache_format_matches_empty():
         assert _cache_format_matches(path, ".mp3") is False
     finally:
         path.unlink()
+
+
+def test_tts_speak_queue_serialization():
+    """speak() 入队 + 唯一 worker 顺序消费（不会创建多个 thread 抢 mixer）。"""
+    import threading
+    from app.voice.voice import TTS
+
+    class FakeTTS(TTS):
+        """替换 _speak_blocking 直接记录调用顺序，避免真实 pygame 播放。"""
+        def __init__(self):
+            super().__init__(voice="fake")
+            self.played: list[str] = []
+            self._lock = threading.Lock()
+
+        def _speak_blocking(self, text):  # type: ignore[override]
+            with self._lock:
+                self.played.append(text)
+
+    tts = FakeTTS()
+    # 入队 5 句
+    for s in ["第一句", "第二句", "第三句", "第四句", "第五句"]:
+        tts.speak(s)
+    # 等 worker 处理
+    tts._speak_queue.join()
+    assert tts.played == ["第一句", "第二句", "第三句", "第四句", "第五句"]
+    # worker 只启动一次
+    assert tts._speak_worker_started is True

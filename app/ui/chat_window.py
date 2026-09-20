@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -503,6 +504,8 @@ class ChatWindow(QWidget):
         # 流式等待中的「三点跳动」动画：常驻定时器，仅在存在占位气泡时重绘
         self._current_bot_msg = None
         self._streaming_anchor_pos = None
+        # 流式期间累积的「未送 TTS 的尾部文本」（没遇到句末标点的那一段）
+        self._tts_tail = ""
         self._typing_frame = 0
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(380)
@@ -1330,9 +1333,8 @@ class ChatWindow(QWidget):
         if self._current_bot_msg is None:
             return
         self._current_bot_msg.content += tok
-        # 流式期间**不在 chat_view 实时渲染**——避免用户提前看到完整回复
-        # 与 TTS 错位（语音合成 5 秒期间文字已"显示完"）。
-        # 只在桌宠头顶气泡驱动流式打字机（streaming_chunk → ui_controller → show_streaming_bubble）。
+        # 流式期间实时刷新 chat_view（打字机效果）+ 桌宠气泡
+        self._refresh_streaming_message()
         # Trace：累计的完整文本（每 chunk 一次）
         if self.trace is not None and self._trace_run_id and tok:
             self.trace.record(self._trace_run_id, "text", {
@@ -1344,6 +1346,47 @@ class ChatWindow(QWidget):
         sanitized = sanitize_text(self._current_bot_msg.content).strip()
         if sanitized:
             self.streaming_chunk.emit(sanitized)
+            # **逐字念出**：每收完一句话立即调 tts.speak(句子) 入队列
+            # - 中文标点 。！？\n 视为句末
+            # - 同句标点触发 → 当前累积内容 + 最近一句送入 TTS
+            # - 后续句接着入队，pygame mixer 顺序播放，整体效果「文字逐字出、声音逐句出」
+            self._tts_drain_sentences(sanitized)
+
+    # 中文/英文/数字标点都算句末边界。GPT-SoVITS 一次合成一句短句的体感最自然
+    # ——既保证每句立刻上屏 + 立刻上口，又不让单句合成耗时太久。
+    _TTS_SENT_END = re.compile(r"[。！？!?\n;；]+")
+
+    def _tts_drain_sentences(self, accumulated: str) -> None:
+        """逐字念出：累积内容里每出现句末标点，就把对应的那一句送入 TTS 队列。
+
+        流程：
+            - _tts_tail 累积当前未送 TTS 的尾部（最后一段无句末标点）
+            - accumulated 中所有「句末标点前的句子」依次入队 self.tts.speak(句子)
+            - 剩余尾部（最新一段）继续累积等下一个句末
+        """
+        if not self.char_cfg.tts_enabled or self.tts is None:
+            return
+        self._tts_tail = ""
+        last_end = 0
+        for m in self._TTS_SENT_END.finditer(accumulated):
+            sentence = accumulated[last_end:m.end()].strip()
+            last_end = m.end()
+            if sentence:
+                try:
+                    self.tts.speak(sentence)
+                except Exception:  # noqa: BLE001
+                    log.exception("TTS.speak 入队失败: %r", sentence)
+        self._tts_tail = accumulated[last_end:]
+
+    def _flush_tts_tail(self) -> None:
+        """_on_done 时把最后一段无句末标点的尾部也送入 TTS。"""
+        tail = (self._tts_tail or "").strip()
+        if tail and self.char_cfg.tts_enabled and self.tts is not None:
+            try:
+                self.tts.speak(tail)
+            except Exception:  # noqa: BLE001
+                log.exception("TTS.speak 入队失败（尾部）: %r", tail)
+        self._tts_tail = ""
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
@@ -1365,95 +1408,56 @@ class ChatWindow(QWidget):
         if not parsed.text.strip():
             parsed.text = "（这次不知道怎么说啦）"
 
-        # 先填充当前 bot 消息（history / chat_store / refresh 全部延后到 prepare 完成）
+        # 流式期间 _on_chunk 已经实时把文字打到 chat_view + 每句送入 TTS 队列。
+        # 这里只需收尾：把最后一段没遇到句末标点的尾部也送 TTS（_flush_tts_tail）
+        # + 把回复正式写入 history / chat_store + 切表情。
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
+        # 兜底尾部（如果模型最后一句话没以句号结尾）
+        self._flush_tts_tail()
+        # 把整条消息也送 TTS（双保险：万一 _tts_drain_sentences 因为 sanitize 漏掉某些字符）
+        if self.char_cfg.tts_enabled and self.tts is not None and parsed.text.strip():
+            try:
+                self.tts.speak(parsed.text.strip())
+            except Exception:  # noqa: BLE001
+                log.exception("TTS.speak 入队失败（整段兜底）: %r", parsed.text[:80])
 
-        # 立即把流式占位就地刷新为「准备语音…」占位文字，让用户知道在等音频
-        # （流式期间 _on_chunk 不再调用 _refresh_streaming_message，所以此刻占位是空 div）
-        self._refresh_streaming_message(finished=False, emotion="")
+        self.history.append(self._current_bot_msg)
+        self._trim_history()
+        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
+        self.chat_store.add(
+            "assistant", parsed.text,
+            emotion=parsed.emotion.value if parsed.emotion else "",
+            tools=tools_list,
+        )
+        self._refresh_streaming_message(finished=True,
+                                         emotion=parsed.emotion.value if parsed.emotion else "")
+
+        # 【幻觉检测】
+        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
+
+        # Trace：完成 run
+        if self.trace is not None and self._trace_run_id:
+            try:
+                self.trace.record(self._trace_run_id, "finish", {
+                    "emotion": parsed.emotion.value if parsed.emotion else "",
+                    "tool_count": len(self._current_bot_msg.tools),
+                })
+                self.trace.end_run(self._trace_run_id, parsed.text, status="success")
+            except Exception:  # noqa: BLE001
+                pass
+            self._trace_run_id = None
         self._generating = False
         self.send_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
         self.thinking_stopped.emit()
         self.streaming_done.emit()
-
-        # 通知外部（pet 窗口）切表情 + 触发 TTS
-        # 若 TTS 启用，先在后台 QThread 合成音频，合成好后才把回复正式显示到 chat_view
-        # + history + 触发 speak 播放。保证声音与文字一起出现。
-        tts_enabled = bool(self.char_cfg.tts_enabled)
-        text = parsed.text
-        emotion = parsed.emotion
-        if tts_enabled and self.tts is not None and text.strip():
-            self._prepare_tts_then_emit(text, emotion)
-        else:
-            # TTS 关闭：直接显示最终回复（无需等待）
-            self._commit_reply(text, emotion, tts_enabled=False)
-            self.reply_ready.emit(text, emotion, tts_enabled)
-        # 注意：_current_bot_msg / _streaming_anchor_pos 在 _commit_reply 里清理
-
-    def _prepare_tts_then_emit(self, text: str, emotion) -> None:
-        """后台 QThread 同步合成音频，合成完才把回复正式 commit + emit reply_ready 触发 TTS 播放。
-
-        解决「聊天窗文字立即显示但 TTS 还在合成（~5 秒真空期）」问题：
-            - 启动 QThread → 调 self.tts.prepare(text) 同步阻塞在该线程
-            - QThread done → 主线程槽 → _commit_reply(text, emotion) 把回复 push 进
-              history / chat_store / chat_view（占位 → 完整文本）+ emit reply_ready
-              → UI Controller 切表情 + 调 tts.speak(text) → 走缓存立即播放
-            - QThread failed → _commit_reply + emit reply_ready（不强等，避免卡死）
-        """
-        from app.core.qt_compat import QThread
-
-        class _PrepareWorker(QThread):
-            done = Signal()
-            failed = Signal()
-
-            def __init__(self, tts_obj, txt):
-                super().__init__()
-                self.tts_obj = tts_obj
-                self.txt = txt
-
-            def run(self):
-                try:
-                    ok = bool(self.tts_obj.prepare(self.txt))
-                except Exception:  # noqa: BLE001
-                    ok = False
-                if ok:
-                    self.done.emit()
-                else:
-                    self.failed.emit()
-
-        self._tts_prepare_worker = _PrepareWorker(self.tts, text)
-        self._tts_prepare_worker.done.connect(
-            lambda: self._commit_reply(text, emotion, tts_enabled=True))
-        self._tts_prepare_worker.failed.connect(
-            lambda: self._commit_reply(text, emotion, tts_enabled=True))
-        self._tts_prepare_worker.start()
-
-    def _commit_reply(self, text: str, emotion, tts_enabled: bool) -> None:
-        """TTS 准备完成（或 TTS 关闭）后：把回复正式写入 chat_view / history / chat_store。
-
-        在 _on_done 时流式占位是空 div（「准备语音…」），这里就地刷新为完整消息。
-        同时触发 UI Controller 切表情 + 调 tts.speak（走缓存立即播放）。
-        """
-        if self._current_bot_msg is None:
-            # 用户在 prepare 期间取消了 / 关了窗口
-            return
-        self._current_bot_msg.content = text
-        self._current_bot_msg.emotion = emotion
-        self.history.append(self._current_bot_msg)
-        self._trim_history()
-        # 持久化 bot 消息
-        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
-        self.chat_store.add(
-            "assistant", text,
-            emotion=emotion.value if emotion else "",
-            tools=tools_list,
-        )
-        # 就地刷新占位 div：现在显示完整文本 + 工具调用 + 表情
-        self._refresh_streaming_message(finished=True,
-                                         emotion=emotion.value if emotion else "")
+        # 通知外部（pet 窗口）切表情（TTS 已通过 _tts_drain_sentences / _flush_tts_tail 启动播放）
+        self.reply_ready.emit(parsed.text, parsed.emotion, bool(self.char_cfg.tts_enabled))
+        # 清理状态
+        self._current_bot_msg = None
+        self._streaming_anchor_pos = None
 
         # 【幻觉检测】模型说「已打开 XX / 已启动 XX」但本轮**没有**调用任何工具
         self._detect_hallucination(text, self._current_bot_msg.tools)
@@ -1705,10 +1709,8 @@ class ChatWindow(QWidget):
         """
         if finished:
             meta = emotion
-        elif self._current_bot_msg.content:
-            # 模型已产出文本、正在 prepare TTS —— 显示「准备语音…」提示
-            meta = "准备语音…"
         else:
+            # 流式打字机期间一律显示三点跳动（typing 动画）
             meta = "typing…"
         html = self._msg_html(self._current_bot_msg, streaming_meta=meta)
 

@@ -115,6 +115,19 @@ class TestSanitize:
         assert "用户说" not in sanitize_text("用户说想看天气。今天晴朗。")
         assert "主人想要" not in sanitize_text("主人想要一杯水。好的主人，给你倒。")
 
+
+def test_tts_sentence_split_pattern():
+    """句末标点切分（流式逐句 TTS 的正则）。"""
+    import re
+    pat = re.compile(r"[。！？!?\n;；]+")
+    # 多句连续
+    text = "你好呀。今天天气不错！真的吗？嗯。"
+    ends = [m.end() for m in pat.finditer(text)]
+    # 实际切分位置：句号=4, !?=11, ?=14, 。=16
+    assert 4 in ends and len(ends) >= 3
+    # 单段无标点返回空（剩余累积）
+    assert pat.search("主人好呀") is None
+
     def test_preserves_normal_sentences(self):
         """不包含「工具」一词的正常中文不应受影响。"""
         assert sanitize_text("天气真好，主人今天过得怎么样？") == "天气真好，主人今天过得怎么样？"

@@ -1,7 +1,8 @@
 """TTS 语音合成 —— 使用 Microsoft edge-tts（免费，无需 API key）。
 
-生成 mp3 后用 pygame 播放。本设计是「边生成边播放」的体验不必要，
-所以走的是「回复完成后整段播一次」路线。
+生成 mp3 后用 pygame 播放。
+所有 speak() 调用入队，由一个 daemon worker 顺序消费 + 播放，
+避免多 thread 同时调 pygame.mixer.music.load/play 互相打断。
 """
 from __future__ import annotations
 
@@ -128,6 +129,13 @@ class TTS:
         self.on_speak_end = None
         # 串行化：不要并发调用 speak() 抢同一个 mixer channel
         self._play_lock = threading.Lock()
+        # 句子队列：所有 speak() 入队，由一个 daemon worker 顺序消费
+        # —— 解决「多 thread 同时调 pygame.mixer.music.load + play 互相打断」问题
+        import queue as _queue
+        self._speak_queue: _queue.Queue = _queue.Queue()
+        self._speak_worker: Optional[threading.Thread] = None
+        self._speak_worker_started = False
+        self._speak_worker_lock = threading.Lock()
         # 启动时清理过期缓存（7 天前的 mp3）
         self._clean_expired_cache()
 
@@ -157,11 +165,40 @@ class TTS:
     cache_ext: str = ".mp3"
 
     def speak(self, text: str) -> None:
-        """把 text 朗读出来；独立线程跑，不阻塞 Qt。"""
+        """把 text 入朗读队列；daemon worker 顺序消费 + 合成 + 播放。
+
+        流式场景下：每收完一句话就调一次 speak()，文字逐句出现在 UI，声音顺序播放。
+        内部用 pygame.mixer.music 单 channel —— 单 worker 才能避免互相打断。
+        """
         if not self._enabled or not text.strip():
             return
-        threading.Thread(target=self._speak_blocking, args=(text,),
-                         daemon=True, name="tts").start()
+        self._speak_queue.put(text)
+        self._ensure_speak_worker()
+
+    def _ensure_speak_worker(self) -> None:
+        """懒启动唯一 daemon worker 消费队列。"""
+        with self._speak_worker_lock:
+            if self._speak_worker_started:
+                return
+            self._speak_worker_started = True
+        t = threading.Thread(target=self._speak_worker_loop, daemon=True,
+                             name="tts-worker")
+        self._speak_worker = t
+        t.start()
+
+    def _speak_worker_loop(self) -> None:
+        import queue as _queue
+        while True:
+            try:
+                text = self._speak_queue.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            try:
+                self._speak_blocking(text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("TTS worker 单句失败：%s", e)
+            finally:
+                self._speak_queue.task_done()
 
     def prepare(self, text: str, timeout_s: float = 30.0) -> bool:
         """同步合成（仅缓存，不播放）。返回是否成功。
