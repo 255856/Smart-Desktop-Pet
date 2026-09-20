@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Desktop Pet · Live2D Demo</title>
+<title>Desktop Pet · 完整功能 Demo</title>
 
 <!--
   ⚠️ 模型版权说明 / Model Copyright Notice
@@ -11,20 +11,7 @@
   本页面**不包含任何 Live2D 模型文件**。Live2D 模型（*.model3.json、*.moc3、
   textures/*.png、*.motion3.json 等）受上游创作者版权约束，**禁止二次传播**，
   本仓库的 .gitignore 已显式排除 assets/live2d/，请勿将任何模型文件提交。
-
-  This page **does NOT bundle any Live2D model files**. Live2D models
-  (*.model3.json, *.moc3, textures/*.png, *.motion3.json …) are copyrighted
-  by their creators and **must not be redistributed**. The repository's
-  .gitignore explicitly excludes assets/live2d/. Do not commit any model.
-
-  使用方法 / How to use:
-    1. 本地起服务：python docs/demo/serve.py   → 默认 http://127.0.0.1:8765
-    2. 浏览器打开 http://127.0.0.1:8765/
-    3. 在「Model URL」框填入你的模型 *.model3.json 完整 URL
-       例：http://127.0.0.1:8765/my-model/Hiyori.model3.json
-    4. 也支持拖拽 .model3.json 到页面（浏览器 File API）
 -->
-
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%;
@@ -35,9 +22,9 @@
   }
   #app { display: flex; flex-direction: column; height: 100vh; }
   header {
-    padding: 12px 20px; background: rgba(0,0,0,.35);
+    padding: 10px 16px; background: rgba(0,0,0,.35);
     border-bottom: 1px solid rgba(255,255,255,.08);
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   }
   header h1 { font-size: 16px; font-weight: 600; margin: 0; }
   header h1 .badge {
@@ -49,36 +36,83 @@
   header a { color: #74b9ff; text-decoration: none; font-size: 13px; }
   header a:hover { text-decoration: underline; }
 
+  #main { flex: 1; display: flex; overflow: hidden; }
   #stage-wrap {
     flex: 1; position: relative; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle, rgba(50,60,90,.4) 0%, transparent 70%);
   }
   #stage { width: 100%; height: 100%; }
   #stage canvas { display: block; }
 
-  .controls {
-    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
-    display: flex; gap: 8px; padding: 10px 14px;
-    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
-    border-radius: 24px; border: 1px solid rgba(255,255,255,.08);
-    box-shadow: 0 8px 32px rgba(0,0,0,.4);
-    max-width: 92vw; overflow-x: auto;
+  /* 聊天气泡（右下角） */
+  #chat-area {
+    position: absolute; right: 16px; bottom: 110px; width: 320px;
+    max-height: 240px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px;
+    pointer-events: none;
   }
-  .controls button {
-    padding: 6px 14px; border: 1px solid rgba(255,255,255,.15);
-    background: rgba(255,255,255,.06); color: #e8e8f0;
-    border-radius: 16px; font-size: 13px; cursor: pointer;
-    transition: all .15s; white-space: nowrap;
+  .bubble {
+    padding: 8px 12px; border-radius: 12px; font-size: 13px;
+    line-height: 1.4; max-width: 100%; word-break: break-word;
+    box-shadow: 0 2px 8px rgba(0,0,0,.3);
+    white-space: pre-wrap;
   }
-  .controls button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
-  .controls button:active { transform: scale(0.96); }
-  .controls button:disabled { opacity: .4; cursor: not-allowed; }
-  .controls select {
-    padding: 6px 10px; background: rgba(255,255,255,.06);
-    color: #e8e8f0; border: 1px solid rgba(255,255,255,.15);
-    border-radius: 16px; font-size: 13px;
+  .bubble-user {
+    align-self: flex-end;
+    background: rgba(108,92,231,.85); color: white;
+  }
+  .bubble-assistant {
+    align-self: flex-start;
+    background: rgba(255,255,255,.95); color: #2d2f4a;
+  }
+  .bubble-proactive {
+    align-self: flex-start;
+    background: rgba(255,206,92,.9); color: #2d2f4a;
+    font-style: italic;
   }
 
+  /* Trace Dashboard（左侧） */
+  #trace-panel {
+    position: absolute; left: 16px; top: 16px; width: 280px;
+    max-height: 320px; overflow: hidden;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 8px; border: 1px solid rgba(255,255,255,.08);
+    padding: 10px; display: flex; flex-direction: column;
+    font-size: 11px;
+  }
+  #trace-panel h3 {
+    margin: 0 0 6px 0; font-size: 12px; color: #ffce5c;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #trace-panel h3 button {
+    margin-left: auto; padding: 2px 8px; background: transparent;
+    border: 1px solid rgba(255,255,255,.15); color: #a8b0c0;
+    border-radius: 4px; font-size: 10px; cursor: pointer;
+  }
+  #trace-list {
+    overflow-y: auto; flex: 1; max-height: 260px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .trace-item {
+    padding: 3px 4px; margin-bottom: 2px; border-radius: 4px;
+    background: rgba(255,255,255,.04); display: flex; gap: 6px;
+    align-items: baseline;
+  }
+  .trace-t { color: #74b9ff; flex-shrink: 0; }
+  .trace-type {
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    flex-shrink: 0; font-weight: 600;
+  }
+  .trace-tool_call .trace-type { background: #6c5ce7; color: white; }
+  .trace-tool_result .trace-type { background: #00b894; color: white; }
+  .trace-llm_call .trace-type { background: #fdcb6e; color: #2d2f4a; }
+  .trace-llm_response .trace-type { background: #ff7675; color: white; }
+  .trace-user .trace-type { background: #74b9ff; color: white; }
+  .trace-remark .trace-type { background: #ffce5c; color: #2d2f4a; }
+  .trace-content { color: #d8d8e0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 控件 */
   #loader {
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; flex-direction: column; gap: 12px;
@@ -94,10 +128,10 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   #url-bar {
-    display: flex; gap: 8px; padding: 8px 12px;
+    display: flex; gap: 6px; padding: 8px 10px;
     background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
     border-radius: 12px; border: 1px solid rgba(255,255,255,.08);
-    width: min(640px, 90vw);
+    width: min(580px, 90vw);
   }
   #url-bar input {
     flex: 1; padding: 6px 10px;
@@ -107,22 +141,45 @@
   }
   #url-bar input:focus { outline: none; border-color: #6c5ce7; }
   #url-bar button {
-    padding: 6px 16px; border: 0; background: #6c5ce7;
+    padding: 6px 14px; border: 0; background: #6c5ce7;
     color: white; border-radius: 8px; cursor: pointer; font-size: 13px;
   }
   #url-bar button:hover { background: #5d4dd6; }
 
+  .controls {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; gap: 6px; padding: 8px 10px; flex-wrap: wrap;
+    justify-content: center; max-width: 92vw;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 20px; border: 1px solid rgba(255,255,255,.08);
+    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  }
+  .controls button, .controls select, .controls input {
+    padding: 5px 12px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 14px; font-size: 12px;
+  }
+  .controls button { cursor: pointer; }
+  .controls button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .controls button.recording { background: #ff7675; border-color: #ff7675; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  .controls input { font-family: inherit; }
+  .controls input#chat-input { width: 280px; }
+
+  /* 日志（右上） */
   #log {
-    position: absolute; right: 12px; top: 12px; max-width: 360px;
-    max-height: 50vh; overflow-y: auto; padding: 8px 12px;
+    position: absolute; right: 16px; top: 16px; width: 280px;
+    max-height: 30vh; overflow-y: auto; padding: 8px 10px;
     background: rgba(0,0,0,.55); border-radius: 8px;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 11px; line-height: 1.5; color: #a8b0c0;
+    font-size: 10px; line-height: 1.4; color: #a8b0c0;
     pointer-events: none;
   }
   #log .err { color: #ff7675; }
   #log .ok { color: #55efc4; }
 
+  /* 拖拽 */
   #drop-hint {
     position: absolute; inset: 12px; border: 2px dashed rgba(108,92,231,.5);
     border-radius: 16px; display: none; align-items: center;
@@ -133,71 +190,88 @@
 
   .footer-note {
     text-align: center; padding: 6px;
-    font-size: 11px; color: #6c7080;
+    font-size: 10px; color: #6c7080;
     background: rgba(0,0,0,.35);
   }
   .footer-note a { color: #74b9ff; text-decoration: none; }
+  .footer-note strong { color: #ff7675; }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <h1>🐳 Desktop Pet <span class="badge">Live2D Demo</span></h1>
+    <h1>🐳 Desktop Pet <span class="badge">完整功能 Demo</span></h1>
     <span style="font-size:12px;color:#a8b0c0" id="status">未加载模型</span>
     <span class="spacer"></span>
     <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">↗ GitHub</a>
     <a href="../../docs/live2d-integration.md">文档 / Docs</a>
   </header>
 
-  <div id="stage-wrap">
-    <div id="stage"></div>
+  <div id="main">
+    <div id="stage-wrap">
+      <div id="stage"></div>
 
-    <div id="loader"><div class="spinner"></div><div id="loader-text">加载中…</div></div>
+      <div id="loader"><div class="spinner"></div><div id="loader-text">加载中…</div></div>
 
-    <div id="url-bar">
-      <input id="model-url" type="text" spellcheck="false"
-             placeholder="http://127.0.0.1:8765/<你的模型目录>/xxx.model3.json" />
-      <button id="load-btn">加载 / Load</button>
+      <!-- Trace Dashboard -->
+      <div id="trace-panel">
+        <h3>🧠 Agent Trace
+          <button id="trace-clear-btn">清空</button>
+        </h3>
+        <div id="trace-list"></div>
+      </div>
+
+      <!-- 聊天气泡 -->
+      <div id="chat-area"></div>
+
+      <!-- 顶部 URL 栏 -->
+      <div id="url-bar">
+        <input id="model-url" type="text" spellcheck="false"
+               placeholder="http://127.0.0.1:8765/<你的模型>/xxx.model3.json" />
+        <button id="load-btn">加载 / Load</button>
+      </div>
+
+      <!-- 日志 -->
+      <pre id="log"></pre>
+
+      <!-- 底部控件 -->
+      <div class="controls" id="controls" style="display:none">
+        <select id="motion-group" title="动作组"><option value="">—动作—</option></select>
+        <button id="motion-btn">▶ 动作</button>
+        <select id="expression" title="表情"><option value="">—表情—</option></select>
+        <button id="expression-btn">😊 表情</button>
+        <button id="reset-btn">↺ 重置</button>
+        <button id="speak-btn">🔊 测试口型</button>
+        <input id="chat-input" type="text" placeholder="和桌宠聊天：搜索/记住/提醒/换装…回车发送" />
+        <button id="chat-btn">💬 说</button>
+        <button id="asr-btn" title="按住说话">🎤 按住说话</button>
+        <select id="tts-engine" title="TTS 引擎">
+          <option value="edge">edge</option>
+          <option value="gptsovits">gptsovits</option>
+          <option value="minimax">minimax</option>
+        </select>
+        <button id="mem-btn" title="查看记忆">💾 记忆</button>
+        <button id="forget-btn" title="遗忘记忆">🗑️ 遗忘</button>
+        <button id="remind-btn" title="加提醒">⏰ 提醒</button>
+        <button id="remind-list-btn" title="查看提醒">📋 列表</button>
+        <button id="tavily-btn" title="Tavily API key（搜索用）">🔑 Tavily</button>
+      </div>
+
+      <!-- 拖拽提示 -->
+      <div id="drop-hint">📂 拖拽 .model3.json 到这里</div>
     </div>
-
-    <div class="controls" id="controls" style="display:none">
-      <select id="motion-group" title="动作组 / Motion group"></select>
-      <button id="motion-btn">▶ 动作</button>
-      <select id="expression" title="表情 / Expression"></select>
-      <button id="expression-btn">😊 表情</button>
-      <button id="reset-btn">↺ 重置</button>
-      <button id="speak-btn">💬 测试口型</button>
-      <input id="chat-input" type="text" placeholder="模拟桌宠回复：输入文字 → 同步口型 + 随机表情" />
-      <button id="chat-btn">💬 说</button>
-    </div>
-
-    <div id="drop-hint">📂 拖拽 .model3.json 到这里</div>
-    <pre id="log"></pre>
   </div>
 
   <div class="footer-note">
-    页面仅含渲染引擎骨架，<strong style="color:#ff7675">不含任何 Live2D 模型文件</strong>。
-    模型版权属原作者，请使用你自己拥有合法授权的模型。
-    / This page contains only the renderer skeleton, <strong style="color:#ff7675">no Live2D model files</strong>.
-    Model copyrights belong to their creators; please use only models you are authorized for.
+    页面含 Live2D 渲染 + TTS + ASR + 工具调用 + Trace Dashboard + 长期记忆 + 主动搭话。
+    完整复刻桌面版 <strong>app/</strong> 核心交互层。模型文件<strong>不包含</strong>，需自备合法授权的 Live2D 模型。
   </div>
 </div>
 
-<!--
-  运行时加载策略：只依赖 PIXI v7 + 原生 Cubism Core，
-  不依赖 pixi-live2d-display（实测与 PIXI v7 全量包在标准浏览器不兼容）。
-  PIXI v7 负责 WebGL 渲染，Cubism Core 负责模型数据解析；
-  demo 用 ~150 行手写代码封装 model3.json / .moc3 / 表情 / 动作加载，
-  与 `app/animation/live2d_bridge.html` 桥接版的渲染管线一致。
-
-  vendor 文件与桌面 `app/animation/cubism-sdk/` 同源同版本：
-  - PIXI v7 — MIT
-  - live2dcubismcore — Live2D Cubism Core (EULA, redistributable)
--->
+<!-- SDK 加载器（同上，保留 vendor → jsdelivr → unpkg 三级 fallback） -->
 <script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
 <script>
 "use strict";
-// SDK 加载：vendor → jsdelivr → unpkg 三级 fallback（PIXI 和 Core 各自独立）
 (function () {
   const SOURCES = {
     pixi: [
@@ -210,29 +284,22 @@
       "https://cdn.jsdelivr.net/npm/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
       "https://unpkg.com/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
     ],
-    // cubism4 (pixi-live2d-display) 不放 vendor —— 它会随 PIXI 子包依赖变化，
-    // 走 CDN 0.3.0 UMD 版即可（实测与 PIXI v7 全量包兼容）
     cubism4: [
       "https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
       "https://unpkg.com/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
     ],
   };
-
   window.__sdkLoadStatus = { pixi: "pending", core: "pending", cubism4: "pending" };
-
   function loadOne(url) {
     return new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = url;
-      // 关键：async=false 保证顺序，避免 cubism4 在 PIXI 之前加载
       s.async = false;
       s.onload = () => resolve(url);
       s.onerror = () => reject(new Error("failed: " + url));
       document.head.appendChild(s);
     });
   }
-
-  // 给 cubism4 加载多一个等待：等到 PIXI.live2d.Live2DModel.from 真的可调
   function waitFor(pred, timeoutMs) {
     const start = Date.now();
     return new Promise((resolve, reject) => {
@@ -244,7 +311,6 @@
       tick();
     });
   }
-
   async function loadGroup(name, sources) {
     let lastErr;
     for (const url of sources) {
@@ -252,7 +318,6 @@
         await loadOne(url);
         window.__sdkLoadStatus[name] = "ok:" + url;
         console.log(`[sdk] ${name} loaded from`, url);
-        // cubism4 是异步 IIFE，等 Live2DModel 真正注册
         if (name === "cubism4") {
           await waitFor(() => !!(window.PIXI && window.PIXI.live2d &&
             window.PIXI.live2d.Live2DModel &&
@@ -267,8 +332,6 @@
     window.__sdkLoadStatus[name] = "fail:" + (lastErr && lastErr.message);
     throw new Error(`all sources failed for ${name}: ${lastErr && lastErr.message}`);
   }
-
-  // 关键顺序：pixi → core → cubism4（cubism4 内部需要 PIXI 全量 + Live2DCubismCore 全量）
   window.__sdkReady = (async () => {
     await loadGroup("pixi", SOURCES.pixi);
     await loadGroup("core", SOURCES.core);
@@ -276,7 +339,5 @@
   })();
 })();
 </script>
-
 <script src="live2d-demo.js"></script>
-</body>
-</html>
+</body></html>
