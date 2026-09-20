@@ -202,8 +202,10 @@ class ProactiveBrain(QObject):
         if not text or "[skip]" in text:
             return
         from app.voice.character import parse_reply
+        from app.brain.llm_client import sanitize_text
         parsed = parse_reply(text)
-        remark = parsed.text.strip()
+        # 最终输出规范：剥掉推理模型漏到正文的 CoT / 规则复读 / 英文思考
+        remark = sanitize_text(parsed.text).strip()
         if not remark:
             return
         self._last_remarks.append(remark)

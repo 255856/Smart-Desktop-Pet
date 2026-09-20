@@ -154,6 +154,9 @@ class BaseAgent:
                         "content": (result or "")[:4000],
                     })
 
+            # 不在此处做中文角色化清洗：SubAgent 是多专家框架（CodeAgent 可能输出代码 /
+            # 英文路径），且主显示出口 chat_window._on_done 会统一 sanitize；
+            # delegate_to_agent 的工具结果回给主 agent 后也会再经最终清洗。
             return AgentResult(text=full_text, agent_name=self.name,
                                tool_calls=tool_calls_count,
                                success=True)

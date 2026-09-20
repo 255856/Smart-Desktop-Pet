@@ -115,6 +115,53 @@ class TestSanitize:
         assert "用户说" not in sanitize_text("用户说想看天气。今天晴朗。")
         assert "主人想要" not in sanitize_text("主人想要一杯水。好的主人，给你倒。")
 
+    def test_strip_mid_emotion_tag_inline(self):
+        """句中位置的 [happy] 标签也必须剥除（旧逻辑只剥末尾）。"""
+        out = sanitize_text("好的主人，马上帮你打开抖音~ [happy] 打开抖音的方式有很多种呢。")
+        assert "[" not in out and "happy" not in out
+        assert "马上帮你打开抖音" in out and "打开抖音的方式有很多种呢" in out
+
+    def test_strip_unclosed_emotion_tag(self):
+        """句尾未闭合的 [happy 也要剥除。"""
+        out = sanitize_text("嘿嘿~主人好啊，今天过得怎么样呀？[happy")
+        assert "[" not in out and "happy" not in out
+        assert "今天过得怎么样呀" in out
+
+    def test_strip_lone_think_close_tag(self):
+        """英文 CoT 后孤立的 </think> 结束标签应一并剥除，只留中文。"""
+        out = sanitize_text("I should try again.</think> 嗯？刚才没打开吗？再试一次~")
+        assert "think" not in out and "try again" not in out
+        assert "刚才没打开吗？再试一次" in out
+
+    def test_keep_answer_after_chinese_cot_same_paragraph(self):
+        """中文角色规划与真回答同段（无句号分隔）时，锚点后的真回答必须保留。"""
+        text = ("根据角色设定：- 外貌：鲸鱼娘，白色长发- 性格：温柔可爱- 擅长：游泳"
+                "好呀~我喜欢游泳呢，毕竟人家是鲸鱼嘛~")
+        out = sanitize_text(text)
+        assert "我喜欢游泳呢" in out
+        assert "根据角色设定" not in out and "外貌" not in out
+
+    def test_english_cot_with_scattered_chinese_keeps_only_answer(self):
+        """英文 CoT 夹带少量中文引用/语气词时仍应剥掉，只留中文回答。"""
+        text = ('user is saying "晚上好啊". It is late on Saturday. '
+                "I should respond in a cute soft style with 呀 呢 嘿嘿\n"
+                "嘿嘿~主人晚上好呀！都十点多了呢，主人今天过得好吗？")
+        out = sanitize_text(text)
+        assert "user is saying" not in out and "Saturday" not in out and "soft style" not in out
+        assert "嘿嘿~主人晚上好呀" in out and "都十点多了呢" in out
+
+    def test_keep_normal_zhuren_xiangwan_reply(self):
+        """回归：角色正常回应「主人想玩 X 呢，我去启动」不能被误判为复述而清空。"""
+        text = "主人想玩崩坏：星穹铁道呢，我现在就去启动游戏~"
+        assert sanitize_text(text) == text
+
+    def test_strip_tool_soliloquy_keep_answer(self):
+        """工具调用独白剥除，保留给主人的最终结果句。"""
+        text = "我应该使用 open_website 工具来打开哔哩哔哩。打开哔哩哔哩（B站），让主人看动漫。"
+        out = sanitize_text(text)
+        assert "open_website" not in out and "工具" not in out
+        assert "哔哩哔哩" in out
+
 
 def test_tts_sentence_split_pattern():
     """句末标点切分（流式逐句 TTS 的正则）。"""

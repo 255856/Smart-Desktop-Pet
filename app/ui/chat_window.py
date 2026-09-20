@@ -1167,6 +1167,7 @@ class ChatWindow(QWidget):
 
         # 占位气泡：插入一个占位 div 并记下 cursor 作为 streaming patch anchor
         self._current_bot_msg = Message(role="assistant", content="")
+        self._streaming_raw = ""   # 流式原始累积（最终规范前），供逐帧清洗显示
         self._streaming_anchor_pos = self._insert_placeholder(self._current_bot_msg)
 
         # Trace 记录：开始一条 run（每条用户消息 = 一条 run）
@@ -1332,18 +1333,22 @@ class ChatWindow(QWidget):
     def _on_chunk(self, tok: str) -> None:
         if self._current_bot_msg is None:
             return
-        self._current_bot_msg.content += tok
-        # 流式期间实时刷新 chat_view（打字机效果）+ 桌宠气泡
+        from app.brain.llm_client import sanitize_text
+        # 原始累积（worker 来的 token 已做流式安全清洗）；最终文本以 _on_done(full) 为准
+        self._streaming_raw = (self._streaming_raw or "") + tok
+        # 流式渲染统一走最终规范：聊天窗也不闪现 CoT / 规则复读 / 英文思考。
+        # 占位气泡的 content 直接存清洗后的显示文本（CoT 阶段保持空 → 三点动画）。
+        sanitized = sanitize_text(self._streaming_raw).strip()
+        self._current_bot_msg.content = sanitized
+        # 流式期间实时刷新 chat_view（打字机效果）
         self._refresh_streaming_message()
-        # Trace：累计的完整文本（每 chunk 一次）
+        # Trace：累计的原始文本（每 chunk 一次），便于调试时看到模型原始输出
         if self.trace is not None and self._trace_run_id and tok:
             self.trace.record(self._trace_run_id, "text", {
                 "delta": tok,
-                "accumulated": self._current_bot_msg.content[:500],
+                "accumulated": self._streaming_raw[:500],
             })
-        # 同步到桌宠头顶气泡（先 sanitize 剥离推理/英文段，再发；口型同步用同一份清洗后文本）
-        from app.brain.llm_client import sanitize_text
-        sanitized = sanitize_text(self._current_bot_msg.content).strip()
+        # 同步桌宠头顶气泡（与聊天窗同一份清洗后文本，口型同步也用它）
         if sanitized:
             self.streaming_chunk.emit(sanitized)
             # **逐字念出**：每收完一句话立即调 tts.speak(句子) 入队列
@@ -1404,9 +1409,22 @@ class ChatWindow(QWidget):
         # 仅在模型真的没标情绪（tag_found=False）时才按关键词兜底
         if not parsed.tag_found:
             parsed.emotion = guess_emotion(parsed.text)
-        # 兜底：整段被 sanitize 丢空（纯英文 / 模型暴走）时给一条默认中文，避免静默
+        # 兜底：整段被 sanitize 丢空（纯英文 CoT / 模型暴走）时，避免空白气泡
         if not parsed.text.strip():
-            parsed.text = "（这次不知道怎么说啦）"
+            if self._current_bot_msg.tools:
+                # 工具执行了但模型没给文字 → 一句完成确认
+                parsed.text = "好的，已经帮主人搞定啦~"
+                if not parsed.tag_found:
+                    parsed.emotion = Emotion.HAPPY
+            else:
+                # 模型没给出有效回答（思考过程被清洗掉）→ 角色化地请主人重说
+                import random as _random
+                parsed.text = _random.choice([
+                    "唔……刚刚走神了一下，主人再说一遍好不好？",
+                    "咦？刚刚没反应过来呢，主人能再说一次吗？",
+                ])
+                if not parsed.tag_found:
+                    parsed.emotion = Emotion.SHY
 
         # 流式期间 _on_chunk 已经实时把文字打到 chat_view + 每句送入 TTS 队列。
         # 这里只需收尾：把最后一段没遇到句末标点的尾部也送 TTS（_flush_tts_tail）

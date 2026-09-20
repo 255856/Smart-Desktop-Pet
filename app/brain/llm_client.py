@@ -218,9 +218,12 @@ _META_CHAR_SHEET_RE = re.compile(
     r"(?:^|[\s\-、，,：:；;])(?:外貌|性格|擅长|角色设定|人物设定|说话风格|常用语气词)\s*[:：]",
     flags=re.UNICODE,
 )
-# 句首对用户的复述（"用户说 / 主人想 / 主人在问…"）
+# 句首对用户的复述（"用户说 / 主人想要 / 主人在问…"）。
+# 注意"主人想玩 / 主人想看 / 主人想吃"是角色对主人的正常回应语气（"主人想玩X呢，我去启动"），
+# 不算复述——只有"主人想要 / 想问 / 说"这类复述需求才剥离；"用户"开头几乎必是复述。
 _META_USER_REPEAT_SENT_RE = re.compile(
-    r"^\s*(?:用户|主人|对方)\s*(?:在?说|想问|希望|想要|想|问的是|说的是|是说)"
+    r"^\s*(?:用户\s*(?:在?说|想问|想要|想|希望|问的是|说的是|是说)|"
+    r"主人\s*(?:在?说|想问|想要|希望|问的是|说的是|是说))"
 )
 # 句首第一人称规划 / 自我过程（需配合 _META_PLAN_CONTEXT_RE 才算污染，避免误伤回答）
 _META_SELF_PLAN_SENT_RE = re.compile(
@@ -263,58 +266,44 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     """
     if not text:
         return text
-    # 去掉 <think>...</think> 段（DeepSeek-r1 / MiniMax-M3 等推理模型原生标签）
+    # 1) 推理段 <think>...</think>（DeepSeek-r1 / MiniMax-M3 等原生标签），
+    #    含未闭合的起始标签（流式截断）和孤立的结束标签（起始标签已在更早 chunk 剥掉）
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    # 去掉未闭合的 <think> 起始标签（流式末端被截断的情况）
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
-    # 去掉末尾的 [emotion] 标签（模型偶尔仍会带 [happy] [shy] 等，按 system 铁律不应出现）
-    # 重复剥离直到没有为止（兼容「哈哈 [thinking] [shy]」多标签尾巴）。
-    # 仅在 is_final=True 时剥离：流式 chunk 不剥，否则 LangChainAgent 等 chunk 级 yield
-    # 会把合法的 ` " [happy]"` chunk 变成空串、跳过 yield，导致「[happy] 凭空消失」测试失败。
+    text = _THINK_CLOSE_TAG_RE.sub("", text)
+    # 2) 情绪标签（仅最终阶段；任意位置都剥，系统铁律不允许出现）。
+    #    流式 chunk 不剥：单个 chunk 可能是被拆开的 " [hap" / "py]"，逐 chunk 剥会
+    #    把合法 chunk 变空、跳过 yield，导致文字丢失（最终阶段还会再剥一次）。
     if is_final:
-        _EMOTION_TAG_TAIL = re.compile(
-            r"\s*\[(happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip)\]\s*$",
-            re.IGNORECASE)
-        while _EMOTION_TAG_TAIL.search(text):
-            text = _EMOTION_TAG_TAIL.sub("", text)
+        text = _EMOTION_TAG_ANY_RE.sub(" ", text)
+        text = _EMOTION_TAG_OPEN_RE.sub("", text)
+    # 3) emoji 与装饰符号
     text = _EMOJI_PATTERN.sub("", text)
-    for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫", "★", "☆"]:
+    for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫"]:
         text = text.replace(sym, "")
-    # 去掉 LLM 夹带的自言自语（括号内含"刚才""让我""作为"等）
+    # 4) 括号式自言自语（"（让我想想…）"）与超长括号思考段
     text = _META_NARRATION_RE.sub("", text)
-    # 兜底：去掉任何超过 50 字的纯括号段（Ollama 流式经常把整段 thinking 塞进括号）
     text = _LONG_PAREN_RE.sub("", text)
-    # 兜底（仅最终阶段）：剥离「让我调用工具」「这应该用 XX 工具」类元描述裸句——
-    # 模型即便真的调了工具，也常常把"我要做什么"塞进 final answer，污染 UI。
+    # 5) 先收紧空白，让后续按句切分 / 占比判定更准确
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    # 6) 最终阶段：逐句剥离 CoT 规划 / 元描述 / 规则复读（保留角色回答句）。
+    #    循环到不再变化，处理"污染句被删后又暴露出新污染句"的嵌套情况。
     if is_final:
-        text = _META_TOOL_TALK_RE.sub("", text)
-        text = _META_SHOULD_USE_TOOL_RE.sub("", text)
-        # 兜底剥离：根据角色设定 / 用户说 / 我需要 等规划/复述元描述
-        text = _META_PLAN_NARRATION_RE.sub("", text)
-        text = _META_USER_REPEAT_RE.sub("", text)
-        text = _META_SELF_PLAN_RE.sub("", text)
-        # 兜底：剥离模型把 system prompt 原文复读出来的段（循环剥以处理多段混杂）
         prev_text = None
         while prev_text != text:
             prev_text = text
-            text = _META_PROMPT_ECHO_RE.sub("", text)
-            text = _META_NUMBERED_LIST_RE.sub("", text)
-    # 多余空白收紧
-    text = re.sub(r"[ \t]+", " ", text)
+            text = _strip_meta_by_sentence(text)
+    # 7) 多余空行收紧
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"\n[ \t]+", "\n", text)
-    # 剥离开头的低中文占比段落（推理模型英文 CoT 以纯文本漏进正文的兜底）
+    # 8) 低中文占比段落剥离（推理模型英文 CoT 以纯文本漏进正文的段落级兜底）
     text = _drop_leading_low_cjk_paragraphs(text)
-    # 兜底：任何英文主导（占比 ≤ 30%）的非开头段也剥离（工具独白常出现在末尾）
     text = _drop_low_cjk_paragraphs(text)
-    # 终极兜底（仅最终回复）：清洗后整段中文占比 < 15% → 模型完全没走中文铁律，
-    # 整体丢弃。处理「单段纯英文（无 \\n\\n 分隔）」的漏网场景——上面的段落函数依赖 \\n\\n。
-    # 末尾情绪标签 [happy]/[shy] 等如果模型偷偷带了，直接剥掉再判占比。
+    # 9) 终极兜底（仅最终回复）：清洗后整段中文占比 < 15% → 模型完全没走中文铁律，
+    #    整体丢弃，交给上层走"空回复兜底"。情绪标签第 2 步已剥，这里再剔一次再判占比。
     cleaned = text.strip()
     if is_final and cleaned:
-        body_for_ratio = re.sub(
-            r"\[(happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip)\]",
-            "", cleaned).strip()
+        body_for_ratio = _EMOTION_TAG_ANY_RE.sub("", cleaned).strip()
         if _cjk_ratio(body_for_ratio) < 0.15:
             return ""
     return cleaned
@@ -380,10 +369,12 @@ def _is_pollution_sentence(core: str) -> bool:
     # 句首自我规划 + 规划语境（两者同时满足才判污染，避免误伤「让我帮你」类回答）
     if _META_SELF_PLAN_SENT_RE.search(core) and _META_PLAN_CONTEXT_RE.search(core):
         return True
-    # 纯英文长句（推理模型英文 CoT 逐句兜底；短英文 / 含中文的专名不删）
+    # 英文为主的句子（推理模型英文 CoT；即使夹带少量中文引用 / 语气词也判污染）。
+    # 用字母占比（不含标点 / 空格）：正常中文回答 CJK 占比通常远高于 0.15，
+    # 这里取低阈值并要求足够多英文字母，避免误删「打开 VS Code 和 Chrome」这类中英混排。
     cjk = sum(1 for ch in core if "\u4e00" <= ch <= "\u9fff")
     ascii_letters = sum(1 for ch in core if ch.isascii() and ch.isalpha())
-    if cjk == 0 and ascii_letters > 12:
+    if ascii_letters > 10 and cjk / max(1, ascii_letters + cjk) < 0.15:
         return True
     return False
 
@@ -598,7 +589,7 @@ class LLMClient:
                         if marker >= 0:
                             rest = think_buf[marker + len(THINK_TAG_END):].lstrip("\n\r ")
                             if rest:
-                                yield sanitize_text(rest)
+                                yield sanitize_text(rest, is_final=False)
                             in_think = False
                             think_buf = ""
                         continue
@@ -612,12 +603,12 @@ class LLMClient:
                         if marker >= 0:
                             rest = think_buf[marker + len(THINK_TAG_END):].lstrip("\n\r ")
                             if rest:
-                                yield sanitize_text(rest)
+                                yield sanitize_text(rest, is_final=False)
                             in_think = False
                             think_buf = ""
                         continue
 
-                    yield sanitize_text(content_chunk)
+                    yield sanitize_text(content_chunk, is_final=False)
             finally:
                 try:
                     await resp.aclose()
@@ -813,7 +804,9 @@ class LLMClient:
                     content_chunk = delta.get("content") or ""
                     if content_chunk:
                         saw_content = True
-                        clean = sanitize_text(content_chunk)
+                        # chunk 只做流式安全清洗（不做句级剥离 / CJK 兜底，避免误删）；
+                        # 完整文本的最终规范在 finish.content 与上层 _on_done 完成。
+                        clean = sanitize_text(content_chunk, is_final=False)
                         content_parts.append(clean)
                         yield ("text", clean)
 
@@ -846,11 +839,14 @@ class LLMClient:
                 if full_text:
                     yield ("text", full_text)
                     content_parts.append(full_text)
-            # finish 事件带上 reasoning（如果非空）→ 上层可选择写到 Trace
+            # finish 事件带上 reasoning（如果非空）→ 上层可选择写到 Trace。
+            # content 做一次最终规范（is_final=True）：保证任何不经过上层
+            # _on_done 的消费方（子 agent / 路由之外的文本出口）拿到的也是干净文本。
+            final_content = sanitize_text("".join(content_parts), is_final=True)
             yield ("finish", {
                 "reason": finish_reason,
                 "tool_calls": tool_calls,
-                "content": "".join(content_parts),
+                "content": final_content,
                 "reasoning": "".join(reasoning_parts),   # 给 Trace 用，不给 UI
             })
 
