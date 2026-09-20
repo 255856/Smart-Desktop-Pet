@@ -1401,7 +1401,7 @@ class ChatWindow(QWidget):
 
         注意：每 chunk 的 _tts_drain_sentences 已送过整段中所有完整句。
         如果 _tts_tail 还有内容（即最后一段无句末标点），这里送一下。
-        同时重置 _last_accumulated 与 _tts_tail，避免下次会话污染状态。
+        同时重置 _tts_tail / _tts_sent_tail，避免下次会话污染状态。
         """
         tail = (self._tts_tail or "").strip()
         if tail and self.char_cfg.tts_enabled and self.tts is not None:
@@ -1410,7 +1410,7 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 log.exception("TTS.speak 入队失败（尾部）: %r", tail)
         self._tts_tail = ""
-        self._last_accumulated = ""
+        self._tts_sent_tail = 0
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
