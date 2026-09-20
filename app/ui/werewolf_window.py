@@ -72,6 +72,7 @@ QScrollArea#feed {{ border: 1px solid #ececf3; background: #f7f6fc; border-radiu
 QWidget#feed_host {{ background: #f7f6fc; }}
 QWidget#msg_host {{ background: #f1ecff; border: 1.5px solid #d8ccfa; border-radius: 12px; }}
 QWidget#msg_private {{ background: #fbf7ea; border: 1.2px dashed #e2cf8d; border-radius: 10px; }}
+QWidget#msg_wolf {{ background: #fdecec; border: 1.5px solid #f1b4b4; border-radius: 10px; }}
 QWidget#msg_plain {{ background: #f7f7fb; border: 1px solid #ececf3; border-radius: 10px; }}
 QLabel#day_lbl {{ font-weight: 700; font-size: 11pt; color: {ui_style.ACCENT_DK}; }}
 QLabel#role_lbl {{ font-weight: 800; font-size: 11pt; }}
@@ -181,6 +182,10 @@ class WerewolfWindow(QDialog):
         self.day_lbl.setObjectName("day_lbl")
         info.addWidget(self.day_lbl)
         info.addStretch(1)
+        self.timer_lbl = QLabel("")
+        self.timer_lbl.setStyleSheet(
+            "font-weight: 700; font-size: 10pt; color: #d97706;")
+        info.addWidget(self.timer_lbl)
         self.role_lbl = QLabel("你的身份：？")
         self.role_lbl.setObjectName("role_lbl")
         info.addWidget(self.role_lbl)
@@ -253,20 +258,27 @@ class WerewolfWindow(QDialog):
     def _append_message(self, kind: str, who: str, text: str,
                         color: str = "") -> None:
         box = QFrame()
-        box.setObjectName({"host": "msg_host", "private": "msg_private"}.get(
-            kind, "msg_plain"))
+        box.setObjectName({"host": "msg_host", "private": "msg_private",
+                           "wolf": "msg_wolf"}.get(kind, "msg_plain"))
         h = QVBoxLayout(box)
         h.setContentsMargins(10, 6, 10, 6)
         h.setSpacing(1)
         head = QLabel(who)
-        head.setStyleSheet(f"font-weight: 700; font-size: 9pt; color: "
-                           f"{'#7c6cf0' if kind == 'host' else '#b8860b' if kind == 'private' else '#55507a'};")
+        head.setStyleSheet(
+            "font-weight: 700; font-size: 9pt; color: "
+            + ("#7c6cf0" if kind == "host"
+               else "#b8860b" if kind == "private"
+               else "#c0392b" if kind == "wolf"
+               else "#55507a") + ";")
         body = QLabel(text)
         body.setWordWrap(True)
-        body.setStyleSheet("font-size: 10pt; color: "
-                           + (color or ui_style.TEXT) + ";")
         if kind == "private":
             body.setStyleSheet("font-size: 9pt; color: #8a7431; font-style: italic;")
+        elif kind == "wolf":
+            body.setStyleSheet("font-size: 10pt; color: #b03a3a;")
+        else:
+            body.setStyleSheet("font-size: 10pt; color: "
+                               + (color or ui_style.TEXT) + ";")
         h.addWidget(head)
         h.addWidget(body)
         # 插到 stretch 之前
@@ -310,7 +322,9 @@ class WerewolfWindow(QDialog):
         d.your_role.connect(self._on_your_role)
         d.host_message.connect(self._on_host)
         d.speech.connect(self._on_speech)
+        d.wolf_chat.connect(self._on_wolf_chat)
         d.private_channel.connect(self._on_private)
+        d.countdown.connect(self._on_countdown)
         d.state_changed.connect(self._on_state)
         d.request_action.connect(self._on_request_action)
         d.game_over.connect(self._on_game_over)
@@ -342,6 +356,17 @@ class WerewolfWindow(QDialog):
     def _on_private(self, text: str) -> None:
         self._append_message("private", "🌙 夜晚（仅你可见）", text)
 
+    def _on_wolf_chat(self, seat: int, name: str, text: str) -> None:
+        tag = "（你）" if seat == 0 else f"（{seat}号）"
+        self._append_message("wolf", f"🐺 {name}{tag} · 狼频道", text,
+                             color="#b03a3a")
+
+    def _on_countdown(self, seconds: int) -> None:
+        if seconds and seconds > 0:
+            self.timer_lbl.setText(f"⏱ {seconds}s")
+        else:
+            self.timer_lbl.setText("")
+
     def _on_state(self, view: dict) -> None:
         self.day_lbl.setText(f"第 {view['day']} 天")
         # 座位
@@ -350,7 +375,8 @@ class WerewolfWindow(QDialog):
             s = seats[seat]
             frame = self._seats[seat]
             name_lbl, role_lbl, top_lbl = self._seat_role[seat]
-            name_lbl.setText(s["name"])
+            sheriff = view.get("sheriff")
+            name_lbl.setText(("👑 " if seat == sheriff else "") + s["name"])
             obj = "seat"
             if not s["alive"]:
                 obj = "seat_dead"
@@ -370,21 +396,54 @@ class WerewolfWindow(QDialog):
             frame.style().polish(frame)
 
     def _on_request_action(self, kind: str, options, context: dict) -> None:
-        if kind in ("speech", "last_words"):
-            self._set_input(context.get("hint", "请输入"),
-                            placeholder=("发表你的发言…" if kind == "speech"
-                                         else "留一句遗言…"))
+        input_kinds = {
+            "speech": ("发表你的发言…", "轮到你发言"),
+            "last_words": ("留一句遗言…", "请留一句遗言"),
+            "campaign_speech": ("发表你的竞选演说…", "发表竞选演说"),
+            "pk_speech": ("发表 PK 演说…", "发表 PK 演说"),
+            "wolf_chat": ("在狼频道和队友讨论…", "🐺 狼频道（仅狼可见）"),
+        }
+        if kind in input_kinds:
+            ph, default_hint = input_kinds[kind]
+            self._set_input(context.get("hint", default_hint), placeholder=ph)
         elif kind == "witch":
             self._set_witch(options)
+        elif kind == "run_sheriff":
+            self._set_run_sheriff()
+        elif kind == "transfer_badge":
+            seats = [x for x in (options or []) if isinstance(x, int)]
+            self._set_targets("👑 警徽移交给谁？", seats,
+                              allow_skip=True, skip_text="撕掉警徽",
+                              skip_payload="tear")
         else:
             labels = {
                 "wolf_kill": "🌙 你是狼人，选择今晚击杀目标",
                 "seer_check": "🔮 你是预言家，选择查验目标",
                 "vote": "🗳️ 选择你的投票对象",
-                "hunter": "🏹 你是猎人，选择开枪带走的目标",
+                "vote_sheriff": "👑 把警徽投给哪位参选者？",
+                "hunter": "🏹 你是猎人，选择开枪带走的目标（可放弃）",
             }
+            skip_text = {"vote": "弃票", "vote_sheriff": "弃票",
+                         "hunter": "放弃开枪"}
             self._set_targets(labels.get(kind, "选择目标"), options or [],
-                              allow_skip=(kind == "vote"))
+                              allow_skip=(kind in skip_text),
+                              skip_text=skip_text.get(kind, "跳过"))
+
+    def _set_run_sheriff(self) -> None:
+        self._clear_action()
+        self.action_box.setFixedHeight(48)
+        self.phase_lbl.setText("👑 是否竞选警长？")
+        row = QHBoxLayout()
+        b1 = QPushButton("🙋 举手竞选")
+        b1.setObjectName("primary_btn")
+        b1.clicked.connect(lambda: self._submit({"run": True}))
+        b2 = QPushButton("不参选")
+        b2.clicked.connect(lambda: self._submit({"run": False}))
+        row.addStretch(1)
+        row.addWidget(b1)
+        row.addWidget(b2)
+        row.addStretch(1)
+        self.action_layout.addLayout(row)
 
     def _on_failed(self, err: str) -> None:
         self._append_message("host", "⚠️ 出错了", err)
@@ -472,7 +531,7 @@ class WerewolfWindow(QDialog):
         edit.setFocus()
 
     def _set_targets(self, hint: str, candidates: List[int],
-                     allow_skip: bool = False) -> None:
+                     allow_skip: bool = False, skip_text: str = "弃票") -> None:
         self._clear_action()
         self.phase_lbl.setText(hint)
         # 高度随候选行数自适应（每行 4 个），避免按钮被裁掉
@@ -494,7 +553,7 @@ class WerewolfWindow(QDialog):
         self.action_layout.addLayout(wrap)
         if allow_skip:
             sk = QHBoxLayout()
-            skip = QPushButton("弃票")
+            skip = QPushButton(skip_text)
             skip.setObjectName("danger_btn")
             skip.clicked.connect(lambda: self._submit(None))
             sk.addStretch(1)

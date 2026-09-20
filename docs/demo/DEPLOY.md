@@ -162,23 +162,8 @@ docs/demo/vendor/
 └── live2dcubismcore.min.js       207 KB
 ```
 
-> **为什么只有 PIXI + Cubism Core，没有 pixi-live2d-display？**
->
-> 经过实测，`pixi-live2d-display` 的所有发布版本（0.3.x / 0.4.x / 0.5.0-beta）
-> 在 PIXI v7 全量包的标准浏览器中**都无法正确注册 `Live2DModel`**：
-> - 0.3.x 走 UMD 分支 4 时，内部 `require()` 抛错（浏览器无 CommonJS）
-> - 0.4.x 之后改为 PIXI monorepo 子包版（`@pixi/core` `@pixi/display` 等），
->   但 PIXI v7 全量包不暴露这些子模块
->
-> 而 desktop `live2d_bridge.html` 之所以能用，是因为 PyQt 的 QWebEngineView
-> 内置 PIXI 子模块 alias，且加载的是修改过 wrapper 的 cubism4.min.js。
->
-> 完整 cubism 渲染管线手写需要 1000+ 行代码（参考 pixi-live2d-display 源码量），
-> 远超 demo 范围。
->
-> **因此在线 demo 改为**：用 PIXI v7 渲染一个简易"猫耳圆脸"演示角色 + 完整 UI
-> 控件（动作 / 表情 / 口型按钮都可点）。**真实 Live2D 模型渲染请克隆项目本地
-> 运行** —— 见 demo 页面右上角"GitHub"链接 + 日志区说明。
+`pixi-live2d-display`（cubism4）走 jsdelivr CDN（实测 0.3.0 UMD 跟 PIXI v7 全量包兼容，
+且关键要 `s.async = false` 强制顺序加载）。
 
 ---
 

@@ -200,26 +200,46 @@
   const SOURCES = {
     pixi: [
       "vendor/pixi.min.js",
-      "https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js",
-      "https://unpkg.com/pixi.js@7.3.2/dist/pixi.min.js",
+      "https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js",
+      "https://unpkg.com/pixi.js@7.4.0/dist/pixi.min.js",
     ],
     core: [
       "vendor/live2dcubismcore.min.js",
       "https://cdn.jsdelivr.net/npm/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
       "https://unpkg.com/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
     ],
+    // cubism4 (pixi-live2d-display) 不放 vendor —— 它会随 PIXI 子包依赖变化，
+    // 走 CDN 0.3.0 UMD 版即可（实测与 PIXI v7 全量包兼容）
+    cubism4: [
+      "https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+      "https://unpkg.com/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+    ],
   };
 
-  window.__sdkLoadStatus = { pixi: "pending", core: "pending" };
+  window.__sdkLoadStatus = { pixi: "pending", core: "pending", cubism4: "pending" };
 
   function loadOne(url) {
     return new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = url;
+      // 关键：async=false 保证顺序，避免 cubism4 在 PIXI 之前加载
       s.async = false;
       s.onload = () => resolve(url);
       s.onerror = () => reject(new Error("failed: " + url));
       document.head.appendChild(s);
+    });
+  }
+
+  // 给 cubism4 加载多一个等待：等到 PIXI.live2d.Live2DModel.from 真的可调
+  function waitFor(pred, timeoutMs) {
+    const start = Date.now();
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        if (pred()) return resolve();
+        if (Date.now() - start > timeoutMs) return reject(new Error("timeout"));
+        setTimeout(tick, 30);
+      };
+      tick();
     });
   }
 
@@ -230,6 +250,12 @@
         await loadOne(url);
         window.__sdkLoadStatus[name] = "ok:" + url;
         console.log(`[sdk] ${name} loaded from`, url);
+        // cubism4 是异步 IIFE，等 Live2DModel 真正注册
+        if (name === "cubism4") {
+          await waitFor(() => !!(window.PIXI && window.PIXI.live2d &&
+            window.PIXI.live2d.Live2DModel &&
+            typeof window.PIXI.live2d.Live2DModel.from === "function"), 5000);
+        }
         return;
       } catch (e) {
         console.warn(`[sdk] ${name} failed:`, url, e.message);
@@ -240,9 +266,11 @@
     throw new Error(`all sources failed for ${name}: ${lastErr && lastErr.message}`);
   }
 
+  // 关键顺序：pixi → core → cubism4（cubism4 内部需要 PIXI 全量 + Live2DCubismCore 全量）
   window.__sdkReady = (async () => {
     await loadGroup("pixi", SOURCES.pixi);
     await loadGroup("core", SOURCES.core);
+    await loadGroup("cubism4", SOURCES.cubism4);
   })();
 })();
 </script>

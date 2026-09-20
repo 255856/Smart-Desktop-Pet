@@ -16,6 +16,11 @@
 
 部署步骤见 [DEPLOY.md](DEPLOY.md)。
 
+> **技术栈**：PIXI v7.4.0 + 原生 Cubism Core + `pixi-live2d-display` 0.3.0 真实
+> Live2D 渲染管线（与桌面版 `app/animation/live2d_bridge.html` 桥接版一致）。
+> 用户输入模型 URL 或拖入 `.model3.json` 即可看到**真实 Live2D 角色**渲染、
+> 表情切换、口型同步、鼠标视线跟随。
+
 ---
 
 ## ⚠️ 模型版权说明 / Model Copyright Notice
