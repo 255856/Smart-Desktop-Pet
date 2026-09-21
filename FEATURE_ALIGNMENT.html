@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Pet · 网页 Demo 与桌面版功能对齐报告</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<style>
+  :root{
+    --ink:#3a3550; --ink-2:#8f8aa8; --line:#ece9f8;
+    --brand:#8b7cf6; --brand-d:#7c6cf0;
+    --ok:#17a673; --ok-bg:#e7f7f0;
+    --mid:#e0a53e; --mid-bg:#fdf4e0;
+    --miss:#e0506e; --miss-bg:#fdeaee;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(600px 400px at 12% 0%, rgba(196,182,255,.45), transparent 60%),
+      radial-gradient(700px 500px at 100% 0%, rgba(255,196,224,.4), transparent 60%),
+      linear-gradient(160deg,#fdfcff,#f3eeff 60%,#fdeef8);
+    min-height:100vh; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 24px 70px;}
+  h1{font-size:26px; margin:0 0 6px;}
+  .sub{color:var(--ink-2); font-size:13.5px; line-height:1.7;}
+  .meta{color:var(--ink-2); font-size:12px; margin-top:4px;}
+  .cards{display:flex; gap:16px; margin:26px 0 8px; flex-wrap:wrap;}
+  .card{
+    flex:1; min-width:150px; background:rgba(255,255,255,.78); backdrop-filter:blur(14px);
+    border:1px solid #fff; border-radius:16px; padding:18px 20px;
+    box-shadow:0 10px 30px rgba(108,92,231,.12);
+  }
+  .card .n{font-size:32px; font-weight:800; line-height:1;}
+  .card .l{font-size:12.5px; color:var(--ink-2); margin-top:6px;}
+  .n.ok{color:var(--ok);} .n.mid{color:var(--mid);} .n.miss{color:var(--miss);} .n.brand{color:var(--brand-d);}
+  h2{font-size:17px; margin:34px 0 12px; display:flex; align-items:center; gap:8px;}
+  h2::before{content:""; width:5px; height:18px; border-radius:3px; background:linear-gradient(var(--brand),#f3a8c8);}
+  table{
+    width:100%; border-collapse:separate; border-spacing:0;
+    background:rgba(255,255,255,.8); backdrop-filter:blur(14px);
+    border:1px solid #fff; border-radius:14px; overflow:hidden;
+    box-shadow:0 8px 26px rgba(108,92,231,.1); font-size:13px;
+  }
+  th,td{padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:#f6f3ff; font-size:12px; color:var(--ink-2); font-weight:700;}
+  tr:last-child td{border-bottom:none;}
+  td.mod{font-weight:700; white-space:nowrap; width:150px;}
+  .badge{display:inline-block; padding:2px 9px; border-radius:20px; font-size:11.5px; font-weight:700; white-space:nowrap;}
+  .b-ok{background:var(--ok-bg); color:var(--ok);}
+  .b-mid{background:var(--mid-bg); color:#a9740f;}
+  .b-miss{background:var(--miss-bg); color:var(--miss);}
+  .note{font-size:11.5px; color:var(--ink-2); margin-top:2px;}
+  .group{
+    background:rgba(255,255,255,.7); border:1px solid #fff; border-radius:14px;
+    padding:16px 20px; margin-bottom:12px; box-shadow:0 8px 24px rgba(108,92,231,.08);
+  }
+  .group h3{margin:0 0 10px; font-size:14.5px;}
+  .group ul{margin:0; padding-left:18px; font-size:13px; line-height:1.9;}
+  .group li code{background:#f1edff; padding:1px 6px; border-radius:5px; color:var(--brand-d); font-size:11.5px;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr;} td.mod{width:auto;}}
+  .legend{display:flex; gap:16px; flex-wrap:wrap; margin:10px 0 0; font-size:12px; color:var(--ink-2);}
+  .legend span{display:inline-flex; align-items:center; gap:6px;}
+  .dot{width:10px; height:10px; border-radius:50%;}
+  .dot.ok{background:var(--ok);} .dot.mid{background:var(--mid);} .dot.miss{background:var(--miss);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>网页 Demo 与桌面版功能对齐报告</h1>
+  <div class="sub">
+    对比对象：<code>docs/demo/live2d-demo.js</code>（纯静态网页 Demo） vs 桌面版 <code>app/</code>（PyQt5 + PyQtWebEngine）。
+    测试方式：本地 <code>serve.py</code> 启动后，在浏览器中对 Demo 做逐项交互自测，并通读桌面源码与 <code>data/feature_check.txt</code>（94 项）。
+  </div>
+  <div class="meta">生成时间：2026-09-21 · 内置模型 Hiyori（7 组动作 / 0 表情）实测加载成功</div>
+
+  <div class="legend">
+    <span><i class="dot ok"></i>已对齐（功能完整）</span>
+    <span><i class="dot mid"></i>简化 / 模拟（能用但实现不同）</span>
+    <span><i class="dot miss"></i>缺失（Demo 无）</span>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="n ok">15</div><div class="l">已对齐能力</div></div>
+    <div class="card"><div class="n mid">12</div><div class="l">简化 / 模拟</div></div>
+    <div class="card"><div class="n miss">30+</div><div class="l">缺失能力</div></div>
+    <div class="card"><div class="n brand">4</div><div class="l">本轮顺手修复</div></div>
+  </div>
+
+  <h2>一、Live2D 渲染与动作</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>模型加载（内置 / URL / 拖拽）</td><td><span class="badge b-ok">已对齐</span></td><td>内置零配置自动加载；本轮补齐了 <b>URL 加载按钮</b> 与 <b>拖入 .model3.json 链接</b>（此前只有方法、没有入口，拖拽提示是死元素）。</td></tr>
+    <tr><td>动作播放</td><td><span class="badge b-ok">已对齐</span></td><td>7 组动作可播放，实测 <code>playMotion</code> 正常。</td></tr>
+    <tr><td>表情切换</td><td><span class="badge b-ok">已对齐</span></td><td>逻辑完整；Hiyori Pro 模型本身 0 表情，故下拉为空（数据问题，非缺陷）。</td></tr>
+    <tr><td>口型同步</td><td><span class="badge b-ok">已对齐</span></td><td>SpeechSynthesis 的 start/end 边界事件驱动 ParamMouthOpenY，与桌面思路一致。</td></tr>
+    <tr><td>视线跟随</td><td><span class="badge b-ok">已对齐</span></td><td>pointermove 归一化坐标驱动 focus。</td></tr>
+    <tr><td>随机 idle 表情/动作</td><td><span class="badge b-ok">已对齐</span></td><td>6–12 秒随机触发。</td></tr>
+    <tr><td>隐藏 WaterMark / mask 纹理扩展</td><td><span class="badge b-ok">已对齐</span></td><td>已实现。</td></tr>
+    <tr><td>场景动作配置（触发条件→动作/表情/配饰组合）</td><td><span class="badge b-miss">缺失</span></td><td>桌面版 <code>live2d_scene.py</code> + 设置面板可配置多场景。</td></tr>
+    <tr><td>配件 / 首饰 / 发型 / 服饰切换</td><td><span class="badge b-miss">缺失</span></td><td>桌面版右键菜单可切换（依赖模型 Parts 参数）。</td></tr>
+    <tr><td>Sprite 帧动画模式</td><td><span class="badge b-miss">缺失</span></td><td>桌面版 <code>renderer_factory</code> 支持 sprite / live2d 双模式；网页仅 Live2D。</td></tr>
+  </table>
+
+  <h2>二、语音（TTS / ASR）</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>语音朗读 + 口型</td><td><span class="badge b-mid">简化</span></td><td>用浏览器 <code>SpeechSynthesis</code> 发声；默认锁定 Xiaoxiao。</td></tr>
+    <tr><td>edge / gptsovits / minimax 三引擎</td><td><span class="badge b-mid">模拟</span></td><td>下拉可切换，但<b>三者底层都走浏览器语音</b>，仅按引擎挑选不同音色；并非真实 edge-tts / GPT-SoVITS / MiniMax API。</td></tr>
+    <tr><td>多角色音色（characters）</td><td><span class="badge b-miss">缺失</span></td><td>桌面版有独立角色音色库。</td></tr>
+    <tr><td>语音识别（按住说话）</td><td><span class="badge b-mid">简化</span></td><td>用浏览器 Web Speech API；桌面版用 faster-whisper（本地、可离线、识别更准）。</td></tr>
+  </table>
+
+  <h2>三、对话 / 大脑 / Agent</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>流式对话 + 气泡</td><td><span class="badge b-ok">已对齐</span></td><td>OpenAI 兼容 chatStream 增量渲染；无 key 时 mock 兜底。</td></tr>
+    <tr><td>主动搭话 + 时间上下文</td><td><span class="badge b-ok">已对齐</span></td><td>ProactiveBrain 定时（25–45 分钟）+ 时段文案。</td></tr>
+    <tr><td>意图识别</td><td><span class="badge b-mid">简化</span></td><td>用<b>正则关键词</b>（提醒/搜索/记住/动作）；桌面版用 LLM 意图识别，更鲁棒。</td></tr>
+    <tr><td>自主工具调用循环（ReAct）</td><td><span class="badge b-miss">缺失</span></td><td>这是<b>最大差距</b>：桌面版 AgentLoop 可像 Claude Code 一样自主多轮调用多个工具、规划/反思/重规划后再总结；Demo 仅正则命中后单次调用，无“先分析再作答”。</td></tr>
+    <tr><td>结果总结 / 核实</td><td><span class="badge b-miss">缺失</span></td><td>桌面版 final 阶段会汇总工具结果。</td></tr>
+    <tr><td>多 Agent（Life/Research/Code + Orchestrator）</td><td><span class="badge b-miss">缺失</span></td><td>狼人杀等场景依赖多 Agent。</td></tr>
+    <tr><td>MCP 工具协议</td><td><span class="badge b-miss">缺失</span></td><td>桌面版支持 MCP stdio / filesystem server。</td></tr>
+  </table>
+
+  <h2>四、工具集（Function Calling）</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>网页搜索</td><td><span class="badge b-mid">简化</span></td><td>仅 Tavily（无 key 用 mock）；桌面版 Tavily 主用、DuckDuckGo 降级。</td></tr>
+    <tr><td>记忆 / 提醒 / 通知</td><td><span class="badge b-mid">简化</span></td><td>remember / search / forget、提醒增删、浏览器 Notification 可用；缺 delete 提醒的 UI 入口。</td></tr>
+    <tr><td>时间 / 日期 / 计算 / 单位换算</td><td><span class="badge b-miss">缺失</span></td><td>浏览器本可实现（Date / 计算），建议补。</td></tr>
+    <tr><td>打开网站</td><td><span class="badge b-miss">缺失</span></td><td><code>window.open</code> 即可实现，建议补。</td></tr>
+    <tr><td>宠物状态 / 喂食 / 表情 / 说话</td><td><span class="badge b-miss">缺失</span></td><td>网页无养成状态系统。</td></tr>
+    <tr><td>打开本地应用 / 快捷方式 / 系统信息</td><td><span class="badge b-miss">缺失</span></td><td class="note">浏览器沙箱无法启动本地程序、任务管理器、终端、记事本等（平台限制）。</td></tr>
+    <tr><td>截图 / 读本地文件 / 剪贴板写入</td><td><span class="badge b-miss">缺失</span></td><td class="note">受浏览器安全限制（截图/文件基本不可行，剪贴板仅可有限读写）。</td></tr>
+  </table>
+  <div class="note">桌面版共注册约 <b>32 个工具</b>；Demo 实际可用的工具类能力约 <b>4 类</b>（搜索、记忆、提醒、通知）。</div>
+
+  <h2>五、记忆 / 提醒 / 数据</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>长期记忆持久化</td><td><span class="badge b-mid">简化</span></td><td>localStorage（单机单浏览器）；桌面版 JSON + 向量检索（TF-IDF / SentenceTransformer）。</td></tr>
+    <tr><td>重要性评分 / 时间衰减 / 冲突检测 / 记忆进化</td><td><span class="badge b-miss">缺失</span></td><td>importance 字段保留但不参与计算。</td></tr>
+    <tr><td>记忆管理 UI</td><td><span class="badge b-mid">简化</span></td><td>以气泡列出最近 5 条；桌面版有独立记忆面板。</td></tr>
+    <tr><td>聊天历史持久化</td><td><span class="badge b-miss">缺失</span></td><td>刷新即丢失（桌面版 chat_history.json）。</td></tr>
+    <tr><td>提醒持久化</td><td><span class="badge b-mid">简化</span></td><td>localStorage + 浏览器 Notification。</td></tr>
+  </table>
+
+  <h2>六、养成 / 游戏 / 系统</h2>
+  <table>
+    <tr><th style="width:230px">能力</th><th style="width:90px">网页 Demo</th><th>说明 / 桌面版差异</th></tr>
+    <tr><td>状态系统（体力/饱食/口渴/心情/健康/金币/经验/等级/好感）</td><td><span class="badge b-miss">缺失</span></td><td>桌面版含衰减、被动回复、睡眠、夜间倍率。</td></tr>
+    <tr><td>食物系统（foods.json / 食物表情图）</td><td><span class="badge b-miss">缺失</span></td><td>右键菜单喂食、改变状态。</td></tr>
+    <tr><td>每日签到（100 金币）/ 打工（将移除）</td><td><span class="badge b-miss">缺失</span></td><td>含金币每日上限。</td></tr>
+    <tr><td>五子棋（分档 / 金币）、狼人杀（多 Agent）</td><td><span class="badge b-miss">缺失</span></td><td>桌面版两大互动游戏。</td></tr>
+    <tr><td>托盘 / 触摸热区 / 角色拖拽 / 多设置项</td><td><span class="badge b-miss">缺失</span></td><td>桌面端专属能力（demo 已支持把 .model3.json 链接拖入加载，但不支持拖动角色）。</td></tr>
+    <tr><td>国际化（中 / 英双语）</td><td><span class="badge b-ok">已对齐</span></td><td>顶栏一键切换，localStorage 持久化，支持 <code>?lang=zh|en</code>；TTS / ASR 语言跟随；意图识别与 mock 回复双语；运行日志与真实 LLM 回复不翻译。</td></tr>
+    <tr><td>Agent Trace</td><td><span class="badge b-mid">简化</span></td><td>网页内内存 Trace（已收入调试面板）；桌面版 SQLite 落盘 + 独立 Web Dashboard（runs/stats/memory）。</td></tr>
+  </table>
+
+  <h2>七、本轮测试中发现并已修复</h2>
+  <div class="group">
+    <ul>
+      <li><b>“加载模型 URL”功能名存实亡</b>：<code>loadModel()</code> 与 URL 校验早已写好，但页面没有任何入口；已在功能面板「模型与密钥」新增 <code>加载模型 URL</code> 按钮（实测 http/https 接受、file:// 与本地盘符路径拒绝、少斜杠自动补全）。</li>
+      <li><b>拖拽提示是死元素</b>：<code>#drop-hint</code> 存在但没有任何 drag/drop 事件；已补全拖拽（仅支持拖入 http(s) 的 .model3.json 链接，拖入本地文件时给出友好提示，符合浏览器沙箱限制）。</li>
+      <li><b>提醒文案吃掉“我”字</b>：说“3分钟后提醒我喝水”，内容被记成“我喝水”；已修正正则，实测内容正确为“喝水”。</li>
+      <li><b>启动状态文案误导</b>：“请填写 Model URL”在没有输入框时显示；已改为“正在加载内置模型…”。</li>
+    </ul>
+  </div>
+
+  <h2>八、补齐建议（按可行性）</h2>
+  <div class="grid2">
+    <div class="group">
+      <h3>网页端可补齐（推荐）</h3>
+      <ul>
+        <li>把 <b>LLM Function Calling</b> 接上：让模型自主选择 时间 / 搜索 / 记忆 / 提醒 / 打开网站 / 计算 等工具并多轮调用，最后只在气泡输出总结（这是最能拉齐桌面体验的一项）。</li>
+        <li>新增工具：<code>get_current_time / date_info / calculate</code>、<code>open_website(window.open)</code>、<code>clipboard_copy</code>。</li>
+        <li>记忆用 localStorage 做轻量的重要性与最近访问排序；聊天历史持久化。</li>
+        <li>给“提醒列表/删除”补 UI 入口（API 已具备）。</li>
+      </ul>
+    </div>
+    <div class="group">
+      <h3>仅桌面可行（平台限制，网页不必强求）</h3>
+      <ul>
+        <li>启动本地应用、任务管理器/终端/控制面板、读取本地文件、系统截图。</li>
+        <li>faster-whisper 本地识别、GPT-SoVITS 本地音色克隆。</li>
+        <li>Sprite 帧动画、托盘、窗口拖拽/触摸热区、系统级通知。</li>
+        <li>养成数值、食物、金币、五子棋/狼人杀等重玩法（可移植但工作量大，且偏离“网页能力 Demo”定位）。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note" style="margin-top:18px">
+    结论：网页 Demo 在 <b>Live2D 渲染、聊天、口型、主动搭话、基础记忆/提醒/搜索</b> 这条“展示主线”上与桌面版基本对齐；最大差距集中在 <b>Agent 自主工具循环</b>、<b>工具数量（32 vs 4）</b> 与 <b>养成/游戏/系统级能力</b>，其中后者多为浏览器平台天然限制，前者是网页端最值得优先补齐的部分。
+  </div>
+</div>
+</body></html>

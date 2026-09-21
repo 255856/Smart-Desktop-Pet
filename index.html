@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Pet · Live2D Demo</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+
+<!--
+  模型版权说明 / Model Copyright Notice
+  ----------------------------------------
+  本页面不包含任何 Live2D 模型文件。Live2D 模型（*.model3.json、*.moc3、
+  textures/*.png、*.motion3.json 等）受上游创作者版权约束，禁止二次传播。
+-->
+<style>
+  :root{
+    --ink:#3a3550;
+    --ink-2:#8f8aa8;
+    --ink-3:#b6b2c9;
+    --brand:#8b7cf6;
+    --brand-d:#7c6cf0;
+    --brand-soft:#efeaff;
+    --pink:#ff9db5;
+    --card:rgba(255,255,255,.72);
+    --card-solid:#ffffff;
+    --line:rgba(124,108,240,.12);
+    --shadow:0 12px 36px rgba(108,92,231,.16);
+    --shadow-sm:0 4px 16px rgba(108,92,231,.10);
+    --radius:18px;
+  }
+  *{ box-sizing:border-box; }
+  html, body{
+    margin:0; padding:0; height:100%;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",
+                "PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--ink); overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{ font-family:inherit; }
+  #app{ display:flex; flex-direction:column; height:100vh; }
+
+  /* ---------------- 顶栏 ---------------- */
+  header{
+    height:58px; flex-shrink:0; padding:0 16px;
+    display:flex; align-items:center; gap:12px;
+    background:rgba(255,255,255,.6);
+    backdrop-filter:blur(20px) saturate(1.4);
+    -webkit-backdrop-filter:blur(20px) saturate(1.4);
+    border-bottom:1px solid var(--line);
+    z-index:15;
+  }
+  .brand{ display:flex; align-items:center; gap:10px; }
+  .logo{
+    width:34px; height:34px; border-radius:11px; display:block; object-fit:cover;
+    background:linear-gradient(135deg,#eef0ff,#f6e9f2);
+    box-shadow:0 4px 12px rgba(124,108,240,.28);
+  }
+  .brand .name{ font-size:15px; font-weight:700; letter-spacing:.2px; }
+  .brand .tag{
+    font-size:10.5px; font-weight:600; color:var(--brand-d);
+    background:var(--brand-soft); padding:2px 8px; border-radius:20px;
+    border:1px solid rgba(124,108,240,.16);
+  }
+  #status{
+    font-size:12px; color:var(--ink-2);
+    display:flex; align-items:center; gap:6px; margin-left:4px;
+  }
+  #status::before{
+    content:""; width:7px; height:7px; border-radius:50%;
+    background:var(--ink-3); transition:background .3s;
+  }
+  #status.ready::before{ background:#3ecf8e; box-shadow:0 0 0 3px rgba(62,207,142,.18); }
+  #status.err::before{ background:#ff6b81; }
+  .spacer{ flex:1; }
+  .h-actions{ display:flex; align-items:center; gap:8px; }
+  .h-link{
+    display:grid; place-items:center; width:36px; height:36px; border-radius:11px;
+    color:var(--ink-2); text-decoration:none;
+    transition:background .18s,color .18s,transform .18s;
+  }
+  .h-link:hover{ background:var(--brand-soft); color:var(--brand-d); transform:translateY(-1px); }
+  .h-link svg{ width:19px; height:19px; }
+  .iconbtn{
+    width:36px; height:36px; border-radius:11px; cursor:pointer;
+    display:grid; place-items:center; color:var(--ink-2);
+    background:transparent; border:1px solid transparent;
+    transition:all .18s;
+  }
+  .iconbtn svg{ width:18px; height:18px; }
+  .iconbtn:hover{ background:var(--brand-soft); color:var(--brand-d); }
+  .iconbtn.active{ background:var(--brand); color:#fff; box-shadow:0 4px 12px rgba(124,108,240,.35); }
+  .iconbtn.active:hover{ background:var(--brand-d); color:#fff; }
+  .langbtn{
+    width:auto; min-width:38px; height:36px; padding:0 11px; border-radius:11px; cursor:pointer;
+    display:grid; place-items:center; color:var(--brand-d); font-size:12px; font-weight:800;
+    letter-spacing:.5px; background:var(--brand-soft); border:1px solid rgba(124,108,240,.18);
+    transition:all .18s;
+  }
+  .langbtn:hover{ background:var(--brand); color:#fff; border-color:var(--brand); }
+
+  /* ---------------- 主舞台 ---------------- */
+  #main{ flex:1; display:flex; overflow:hidden; }
+  #stage-wrap{
+    flex:1; position:relative; overflow:hidden;
+    display:flex; align-items:center; justify-content:center;
+    background:
+      radial-gradient(520px 400px at 16% 18%, rgba(196,182,255,.55), transparent 62%),
+      radial-gradient(560px 440px at 84% 14%, rgba(255,196,224,.5), transparent 62%),
+      radial-gradient(640px 520px at 58% 102%, rgba(178,214,255,.55), transparent 64%),
+      linear-gradient(160deg,#fdfcff 0%,#f3eeff 52%,#fdeef8 100%);
+  }
+  #stage{ width:100%; height:100%; }
+  #stage canvas{ display:block; }
+
+  /* ---------------- 加载 ---------------- */
+  #loader{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:14px; z-index:10; pointer-events:none;
+    background:rgba(246,243,255,.55); backdrop-filter:blur(4px);
+    transition:opacity .35s;
+  }
+  #loader.hidden{
+    opacity:0; pointer-events:none; visibility:hidden;
+    transition:opacity .35s, visibility 0s .35s;
+  }
+  #loader .spinner{
+    width:38px; height:38px; border-radius:50%;
+    border:3px solid rgba(124,108,240,.18);
+    border-top-color:var(--brand);
+    animation:spin .8s linear infinite;
+  }
+  #loader-text{ font-size:13px; color:var(--ink-2); }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+
+  /* ---------------- 聊天气泡（右下） ---------------- */
+  #chat-area{
+    position:absolute; right:20px; bottom:108px; width:300px;
+    max-height:38vh; overflow-y:auto; padding:2px 2px 2px 0;
+    display:flex; flex-direction:column; gap:8px;
+    /* 容器接收事件（滚轮可滚动 + 气泡可点击）；之前 none 阻止了滚动 */
+    pointer-events:auto; scrollbar-width:thin;
+  }
+  #chat-area::-webkit-scrollbar{ width:5px; }
+  #chat-area::-webkit-scrollbar-thumb{ background:rgba(124,108,240,.25); border-radius:4px; }
+  .bubble{
+    padding:10px 14px; border-radius:16px; font-size:13.5px;
+    line-height:1.5; max-width:88%; word-break:break-word;
+    white-space:pre-wrap; box-shadow:var(--shadow-sm);
+    animation:bubbleIn .28s ease;
+  }
+  @keyframes bubbleIn{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:none; } }
+  .bubble-user{
+    align-self:flex-end; color:#fff; border-bottom-right-radius:6px;
+    background:linear-gradient(135deg,var(--brand),#9d8bff);
+  }
+  .bubble-assistant{
+    align-self:flex-start; color:var(--ink); background:rgba(255,255,255,.94);
+    border:1px solid rgba(255,255,255,.9); border-bottom-left-radius:6px;
+  }
+  .bubble-proactive{
+    align-self:flex-start; color:#7a6326; font-style:italic;
+    background:linear-gradient(135deg,#fff6e0,#fff1d2);
+    border:1px solid rgba(240,196,90,.35);
+  }
+
+  /* ---------------- 模型状态 chip（左下） ---------------- */
+  #model-info{
+    position:absolute; left:18px; bottom:20px; display:flex; align-items:center; gap:10px;
+    padding:8px 10px 8px 10px; max-width:240px;
+    background:var(--card); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+    border-radius:14px; border:1px solid rgba(255,255,255,.9); box-shadow:var(--shadow-sm);
+    font-size:12.5px;
+  }
+  #model-info .model-icon{
+    width:30px; height:30px; flex-shrink:0; border-radius:9px; display:grid; place-items:center;
+    background:linear-gradient(135deg,#ffe3f1,#ece8ff);
+  }
+  #model-info .model-icon svg{ width:17px; height:17px; color:#8b7cf6; }
+  #model-info .model-meta{ min-width:0; }
+  #model-info .model-title{ font-weight:700; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #model-info .model-sub{ font-size:10.5px; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #model-info .badge-pro{
+    display:inline-block; padding:1px 5px; margin-left:3px; font-size:9px; font-weight:700;
+    background:linear-gradient(135deg,#ffd98a,#ffb86b); color:#7a4a12; border-radius:5px;
+  }
+  #model-info .model-actions{ margin-left:auto; display:flex; gap:7px; flex-shrink:0; }
+  #model-info button{
+    width:28px; height:28px; flex-shrink:0; border-radius:9px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--ink-2);
+    display:grid; place-items:center;
+  }
+  #model-info button svg{ width:14px; height:14px; }
+  #model-info button:hover{ color:var(--brand-d); border-color:var(--brand); background:var(--brand-soft); }
+
+  /* ---------------- 底部聊天栏 ---------------- */
+  #chat-bar{
+    position:absolute; left:50%; bottom:20px; transform:translateX(-50%);
+    width:min(600px,60vw); display:flex; align-items:center; gap:8px;
+    padding:7px 8px 7px 14px;
+    background:rgba(255,255,255,.85); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    border:1px solid rgba(255,255,255,.95); border-radius:999px;
+    box-shadow:var(--shadow);
+  }
+  #chat-input{
+    flex:1; min-width:0; border:none; outline:none; background:transparent;
+    font-size:14px; color:var(--ink); padding:6px 2px;
+  }
+  #chat-input::placeholder{ color:var(--ink-3); }
+  #asr-btn{
+    width:38px; height:38px; flex-shrink:0; border-radius:50%; cursor:pointer;
+    border:1px solid var(--line); background:#f5f3ff; color:var(--brand-d);
+    display:grid; place-items:center; transition:all .18s;
+  }
+  #asr-btn svg{ width:18px; height:18px; }
+  #asr-btn:hover{ background:var(--brand-soft); }
+  #asr-btn.recording, #asr-btn.listening{
+    background:#ff6b81; border-color:#ff6b81; color:#fff;
+    animation:breathe 1.1s ease-in-out infinite;
+  }
+  @keyframes breathe{ 50%{ box-shadow:0 0 0 6px rgba(255,107,129,.2); } }
+  #chat-btn{
+    width:38px; height:38px; flex-shrink:0; border-radius:50%; cursor:pointer; border:none;
+    display:grid; place-items:center; color:#fff;
+    background:linear-gradient(135deg,var(--brand),#9d8bff);
+    box-shadow:0 4px 12px rgba(124,108,240,.4); transition:transform .15s;
+  }
+  #chat-btn svg{ width:18px; height:18px; margin-left:1px; }
+  #chat-btn:hover{ transform:scale(1.06); }
+  #chat-btn:active{ transform:scale(.94); }
+
+  /* ---------------- 功能抽屉 ---------------- */
+  #feature-panel{
+    position:absolute; left:50%; bottom:84px; transform:translate(-50%,16px);
+    width:min(640px,64vw); max-height:0; overflow:hidden; opacity:0;
+    transition:opacity .25s, transform .25s, max-height .3s ease;
+    pointer-events:none; z-index:12;
+  }
+  #feature-panel.open{
+    opacity:1; transform:translate(-50%,0); max-height:calc(100vh - 160px); pointer-events:auto;
+  }
+  #feature-panel .fp-card{
+    background:var(--card); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+    border:1px solid rgba(255,255,255,.95); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:16px 16px 14px; overflow-y:auto;
+    max-height:calc(100vh - 160px);
+    scrollbar-width:thin;
+  }
+  #controls{ display:flex; flex-direction:column; gap:14px; }
+  .fp-group h4{
+    margin:0 0 8px 0; font-size:11px; font-weight:700; letter-spacing:.6px;
+    color:var(--ink-2); text-transform:uppercase;
+  }
+  .fp-row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .fp-row select{
+    flex:1; min-width:140px; padding:8px 12px; border-radius:10px;
+    border:1px solid var(--line); background:#fff; color:var(--ink);
+    font-size:13px; outline:none; cursor:pointer;
+  }
+  .fp-row select:focus{ border-color:var(--brand); }
+  .fp-row button{
+    padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px;
+    border:1px solid var(--line); background:#fff; color:var(--ink);
+    transition:all .16s; white-space:nowrap;
+  }
+  .fp-row button:hover{ background:var(--brand-soft); border-color:var(--brand); color:var(--brand-d); }
+  .fp-row button:disabled{ opacity:.4; cursor:not-allowed; }
+  #speak-btn.live{ background:#ffe8ee; border-color:#ffc2cf; color:#e0506e; }
+
+  /* ---------------- 调试面板（默认隐藏） ---------------- */
+  #debug-panel{
+    position:absolute; top:14px; left:14px; right:14px; z-index:11;
+    display:none; justify-content:space-between; gap:14px; pointer-events:none;
+  }
+  #debug-panel.open{ display:flex; }
+  #trace-panel, #log{
+    width:330px; max-width:44vw; pointer-events:auto;
+    background:rgba(255,255,255,.82); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,255,255,.95); border-radius:14px;
+    box-shadow:var(--shadow-sm);
+  }
+  #trace-panel{ padding:11px 12px; display:flex; flex-direction:column; overflow:hidden; }
+  #trace-panel h3{
+    margin:0 0 7px 0; font-size:11px; font-weight:700; color:var(--brand-d);
+    display:flex; align-items:center; gap:6px; letter-spacing:.4px;
+  }
+  #trace-panel h3 button{
+    margin-left:auto; padding:2px 9px; background:transparent; cursor:pointer;
+    border:1px solid var(--line); color:var(--ink-2); border-radius:7px; font-size:10px;
+  }
+  #trace-panel h3 button:hover{ background:var(--brand-soft); color:var(--brand-d); }
+  #trace-list{ overflow-y:auto; max-height:220px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .trace-item{
+    padding:3px 5px; margin-bottom:3px; border-radius:7px;
+    background:rgba(124,108,240,.06); display:flex; gap:6px; align-items:baseline;
+  }
+  .trace-t{ color:var(--brand-d); flex-shrink:0; font-size:10px; }
+  .trace-type{ font-size:9.5px; padding:1px 6px; border-radius:5px; flex-shrink:0; font-weight:700; color:#fff; }
+  .trace-tool_call .trace-type{ background:#8b7cf6; }
+  .trace-tool_result .trace-type{ background:#3ecf8e; }
+  .trace-llm_call .trace-type{ background:#f5b942; color:#5a3d05; }
+  .trace-llm_response .trace-type{ background:#ff6b81; }
+  .trace-user .trace-type{ background:#5aa7ff; }
+  .trace-remark .trace-type{ background:#f5b942; color:#5a3d05; }
+  .trace-content{ color:#5b5574; font-size:10.5px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  #log{
+    padding:10px 12px; max-height:250px; overflow-y:auto;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10.5px;
+    line-height:1.55; color:#6b6584;
+  }
+  #log .err{ color:#e0506e; }
+  #log .ok{ color:#17a673; }
+
+  /* ---------------- 自定义弹窗 Modal ---------------- */
+  .modal-overlay{
+    position:fixed; inset:0; z-index:100;
+    background:rgba(58,53,80,.34);
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+    opacity:0; pointer-events:none; transition:opacity .22s ease;
+  }
+  .modal-overlay.show{ opacity:1; pointer-events:auto; }
+  .modal{
+    width:min(460px,94vw); max-height:86vh; display:flex; flex-direction:column;
+    background:rgba(255,255,255,.985); border:1px solid var(--line);
+    border-radius:22px; overflow:hidden;
+    box-shadow:0 26px 70px rgba(74,62,140,.30);
+    transform:translateY(14px) scale(.97); opacity:0;
+    transition:transform .26s cubic-bezier(.2,.9,.3,1.25), opacity .22s ease;
+  }
+  .modal-overlay.show .modal{ transform:none; opacity:1; }
+  .modal-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:20px 22px 6px;
+  }
+  .modal-title{ font-size:15.5px; font-weight:700; color:var(--ink); letter-spacing:.2px; }
+  .modal-body{ padding:6px 22px 18px; overflow-y:auto; }
+  .modal-text{ font-size:13.5px; color:#6b6584; line-height:1.75; }
+  .modal-foot{
+    display:flex; justify-content:flex-end; gap:10px;
+    padding:13px 22px 19px; border-top:1px solid var(--line);
+    background:rgba(247,246,255,.65);
+  }
+  .modal-btn{
+    min-width:76px; padding:9px 20px; border-radius:12px; font-size:13px; font-weight:600;
+    cursor:pointer; border:1px solid transparent; transition:all .16s ease; font-family:inherit;
+  }
+  .modal-btn.primary{
+    background:linear-gradient(135deg,var(--brand),var(--brand-d));
+    color:#fff; box-shadow:0 6px 16px rgba(139,124,246,.32);
+  }
+  .modal-btn.primary:hover{ filter:brightness(1.05); transform:translateY(-1px); }
+  .modal-btn.primary.danger{ background:linear-gradient(135deg,#ff7b90,#e0506e); box-shadow:0 6px 16px rgba(224,80,110,.30); }
+  .modal-btn.ghost{ background:#fff; color:var(--ink-2); border-color:var(--line); }
+  .modal-btn.ghost:hover{ background:#f5f4fc; color:var(--ink); }
+  .modal-field{ display:block; margin-top:14px; }
+  .modal-field:first-child{ margin-top:6px; }
+  .modal-label{ display:block; font-size:12px; font-weight:600; color:var(--ink-2); margin-bottom:6px; }
+  .modal-input{
+    width:100%; box-sizing:border-box;
+    padding:9px 12px; border-radius:11px; border:1px solid var(--line);
+    background:#fff; font-size:13px; color:var(--ink); outline:none; font-family:inherit;
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .modal-input:focus{ border-color:var(--brand); box-shadow:0 0 0 3px rgba(139,124,246,.15); }
+  .modal-input.invalid{ border-color:#e0506e; box-shadow:0 0 0 3px rgba(224,80,110,.12); }
+  textarea.modal-input{ resize:vertical; line-height:1.6; }
+  .modal-list{ display:flex; flex-direction:column; gap:8px; margin:6px 0 4px; }
+  .modal-list-row{
+    background:var(--brand-soft); border:1px solid rgba(139,124,246,.14);
+    border-radius:12px; padding:10px 13px;
+  }
+  .modal-list-meta{ font-size:11px; color:var(--brand-d); font-weight:600; margin-bottom:3px; }
+  .modal-list-text{ font-size:13px; color:#5b5574; line-height:1.55; word-break:break-word; }
+  .modal-empty{ text-align:center; color:var(--ink-3); font-size:13px; padding:28px 0; }
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+  }
+
+  .footer-note{
+    text-align:center; padding:7px 16px; font-size:10.5px; color:#a8a3c0;
+    background:rgba(255,255,255,.55); border-top:1px solid var(--line);
+  }
+  .footer-note a{ color:var(--brand-d); text-decoration:none; }
+  .footer-note strong{ color:#e0506e; font-weight:600; }
+
+  @media (max-width:760px){
+    #chat-bar{ width:92vw; }
+    #feature-panel{ width:94vw; }
+    #model-info{ display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">
+      <img class="logo" src="favicon.ico" alt="Desktop Pet">
+      <span class="name">Desktop Pet</span>
+      <span class="tag">Live2D Demo</span>
+    </div>
+    <span id="status" data-i18n="status_init">正在初始化</span>
+    <span class="spacer"></span>
+    <div class="h-actions">
+      <button class="langbtn" id="lang-btn" title="Switch to English" data-i18n-title="lang_btn">EN</button>
+      <button class="iconbtn" id="debug-toggle" title="调试面板（Trace / 日志）" data-i18n-title="debug_panel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      </button>
+      <button class="iconbtn" id="panel-toggle" title="功能面板（动作 / 表情 / 语音 / 记忆）" data-i18n-title="feature_panel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      </button>
+      <a class="h-link" href="https://github.com/255856/Smart-Desktop-Pet" target="_blank" title="GitHub">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <div id="main">
+    <div id="stage-wrap">
+      <div id="stage"></div>
+
+      <div id="loader"><div class="spinner"></div><div id="loader-text" data-i18n="loading">加载中…</div></div>
+
+      <!-- 调试面板（默认收起，顶栏终端图标切换） -->
+      <div id="debug-panel">
+        <div id="trace-panel">
+          <h3>Agent Trace
+            <button id="trace-clear-btn" data-i18n="clear">清空</button>
+          </h3>
+          <div id="trace-list"></div>
+        </div>
+        <pre id="log"></pre>
+      </div>
+
+      <!-- 模型状态 -->
+      <div id="model-info">
+        <div class="model-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <div class="model-meta">
+          <div class="model-title">Hiyori <span class="badge-pro">Pro</span></div>
+          <div class="model-sub" data-i18n="model_official">Live2D 官方样例模型</div>
+        </div>
+        <div class="model-actions">
+          <button id="switch-model-btn" title="切换模型" data-i18n-title="switch_model">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          </button>
+          <button id="reload-btn" title="重新加载模型" data-i18n-title="reload_model">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 聊天气泡 -->
+      <div id="chat-area"></div>
+
+      <!-- 功能抽屉（顶栏滑块图标切换） -->
+      <div id="feature-panel">
+        <div class="fp-card">
+          <div class="controls" id="controls" style="display:none">
+            <div class="fp-group">
+              <h4 data-i18n="g_model_switch">模型</h4>
+              <div class="fp-row">
+                <select id="model-select" title="模型" data-i18n-title="g_model_switch" style="flex:1"></select>
+              </div>
+            </div>
+            <div class="fp-group">
+              <h4 data-i18n="g_motion">角色动作</h4>
+              <div class="fp-row">
+                <select id="motion-group" title="动作组" data-i18n-title="motion_group"><option value="" data-i18n="choose_motion_group">选择动作组</option></select>
+                <button id="motion-btn" data-i18n="play">播放</button>
+                <select id="expression" title="表情" data-i18n-title="expression"><option value="" data-i18n="choose_expression">选择表情</option></select>
+                <button id="expression-btn" data-i18n="play_expression">播放表情</button>
+                <button id="speak-btn" data-i18n="test_lipsync">测试口型</button>
+                <button id="reset-btn" data-i18n="reset_model">重置模型</button>
+              </div>
+            </div>
+            <div class="fp-group">
+              <h4 data-i18n="g_voice">语音（TTS）</h4>
+              <div class="fp-row">
+                <select id="tts-engine" title="TTS 引擎" data-i18n-title="tts_engine">
+                  <option value="edge" data-i18n="edge_cloud">edge（云端）</option>
+                  <option value="gptsovits" data-i18n="gptsovits_local">gptsovits（本地）</option>
+                  <option value="minimax" data-i18n="minimax_cloud">minimax（云端）</option>
+                </select>
+                <select id="tts-voice" title="选择具体语音" data-i18n-title="choose_voice"><option value="" data-i18n="auto_voice">自动（按引擎选）</option></select>
+              </div>
+            </div>
+            <div class="fp-group">
+              <h4 data-i18n="g_memory">记忆与提醒</h4>
+              <div class="fp-row">
+                <button id="mem-btn" data-i18n="view_memory">查看记忆</button>
+                <button id="forget-btn" data-i18n="forget_memory">遗忘记忆</button>
+                <button id="remind-btn" data-i18n="add_reminder">添加提醒</button>
+                <button id="remind-list-btn" data-i18n="reminder_list">提醒列表</button>
+              </div>
+            </div>
+            <div class="fp-group">
+              <h4 data-i18n="g_model">服务密钥</h4>
+              <div class="fp-row">
+                <button id="tavily-btn" data-i18n="tavily_key">Tavily Key（搜索）</button>
+                <button id="llm-btn" data-i18n="llm_key">LLM Key（真实对话）</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部聊天栏 -->
+      <div id="chat-bar">
+        <button id="asr-btn" title="按住说话" aria-label="按住说话" data-i18n-title="hold_to_talk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
+        <input id="chat-input" type="text" placeholder="和桌宠聊天：搜索、记住、提醒、换装…" data-i18n-ph="chat_placeholder" />
+        <button id="chat-btn" title="发送" aria-label="发送" data-i18n-title="send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footer-note" data-i18n-html="footer_note">
+    Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。
+    内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong> 用于演示，模型来自
+    <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。
+    <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>
+  </div>
+</div>
+
+<!-- 自定义弹窗（替代原生 prompt/alert/confirm） -->
+<div id="modal-overlay" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><div class="modal-title"></div></div>
+    <div class="modal-body"></div>
+    <div class="modal-foot"></div>
+  </div>
+</div>
+
+<!-- ============================================================
+     i18n：中文 / English 双语（与桌面版 app/core/i18n.py 思路一致）
+     静态 UI 文案 + live2d-demo.js 动态文案共用同一份字典
+     ============================================================ -->
+<script>
+"use strict";
+(function () {
+  var DICT = {
+    zh: {
+      status_init: "正在初始化",
+      loading: "加载中…",
+      clear: "清空",
+      model_official: "Live2D 官方样例模型",
+      g_model_switch: "模型",
+      switch_model: "切换模型",
+      status_load_model: "加载 {name}…",
+      g_motion: "角色动作",
+      motion_group: "动作组",
+      choose_motion_group: "选择动作组",
+      play: "播放",
+      expression: "表情",
+      choose_expression: "选择表情",
+      play_expression: "播放表情",
+      test_lipsync: "测试口型",
+      stop_lipsync: "停止口型",
+      reset_model: "重置模型",
+      g_voice: "语音（TTS）",
+      tts_engine: "TTS 引擎",
+      edge_cloud: "edge（云端）",
+      gptsovits_local: "gptsovits（本地）",
+      minimax_cloud: "minimax（云端）",
+      choose_voice: "选择具体语音",
+      auto_voice: "自动（按引擎选）",
+      g_memory: "记忆与提醒",
+      view_memory: "查看记忆",
+      forget_memory: "遗忘记忆",
+      add_reminder: "添加提醒",
+      reminder_list: "提醒列表",
+      g_model: "服务密钥",
+      tavily_key: "Tavily Key（搜索）",
+      llm_key: "LLM Key",
+      hold_to_talk: "按住说话",
+      listening: "正在听…",
+      chat_placeholder: "和桌宠聊天：搜索、记忆、提醒…",
+      send: "发送",
+      footer_note: 'Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong> 用于演示，模型来自 <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
+
+      loading_model: "加载模型…",
+      status_loading: "加载中…",
+      status_ready: "就绪 · {expr} 表情 / {mot} 组动作{tag}",
+      mock_tag: " · mock 回复",
+      status_load_failed: "加载失败",
+      loading_builtin: "加载内置模型…",
+      status_load_hiyori: "加载 Hiyori…",
+      status_builtin_missing: "内置模型未找到",
+      status_sdk_failed: "SDK 加载失败",
+      status_pixi_missing: "PIXI 未加载",
+      status_core_missing: "Cubism Core 未加载",
+      status_from_unavailable: "Live2DModel.from 不可用",
+      status_pixi_init_failed: "PIXI 初始化失败",
+      status_ready_loading: "就绪 · 正在加载内置模型…",
+      err_no_key: "未配置 API key",
+      err_prefix: "出错了：",
+      model_empty: "（模型未返回）",
+
+      remind_default: "该做事了",
+      remind_confirm: "好的，{n}{unit}后提醒你「{content}」",
+      rem_notify_title: "桌宠提醒",
+      rem_tts: "提醒：{c}",
+      remind_mins_prompt: "几分钟后来提醒？",
+      remind_content_prompt: "提醒内容？",
+      rem_empty: "（暂无提醒）",
+      rem_list: "{n} 个待触发提醒：\n{s}",
+
+      search_count: "{n} 个结果",
+      search_reply: "搜索到 {n} 个结果：\n\n{summary}",
+      search_tts: "搜索到 {n} 个结果，第一条是 {title}",
+      mock_s1: "[Mock] {q} 的搜索结果 1",
+      mock_s2: "[Mock] {q} 的搜索结果 2",
+      mock_c1: "这是关于「{q}」的模拟搜索结果。在 Tavily key 配置后会显示真实内容。",
+      mock_c2: "另一个相关结果，包含 {q} 的延伸信息。",
+
+      mem_confirm: "好的，我记住了「{c}」",
+      mem_empty: "（暂无记忆）",
+      mem_recent: "最近 {n} 条记忆：\n{s}",
+      mem_tts: "我记着 {n} 件事",
+      forget_prompt: "遗忘包含此关键词的记忆：",
+      action_ok: "好～",
+
+      fb1: "主人说的是「{x}」对吧？我想想...",
+      fb2: "嗯嗯，我听到了。",
+      fb3: "好的，主人。{q}",
+      fb3q: "让我想想这个问题...",
+      fb4: "收到～",
+
+      tctx_night: "深夜", tctx_morning: "上午", tctx_afternoon: "下午", tctx_evening: "晚上",
+      pa1: "主人现在是{t}，要不要休息一下？{mem}",
+      pa1mem: "上次你说 {x}，进展如何？",
+      pa2: "今天{t}好，记得多喝水呀～",
+      pa3: "主人看起来坐了很久了，起来动一动吧！",
+      pa4: "我刚才在发呆想主人～{mem}",
+      pa4mem: "对了，{x}，后续怎么样了？",
+      pa5: "{t}安，要不要听一首歌？",
+      pa6: "主人，我在呢，有事随时叫我。",
+      pa_llm: "现在是{t}。{mem}请用 1 句话（≤30 字）主动搭话主人，像真人在微信里突然冒出来。",
+      pa_llm_mem: "最近记忆：{m}。",
+      memory_ctx: "主人最近记忆：{m}",
+
+      tavily_prompt: "输入 Tavily API key（留空用 mock）：",
+      tavily_set: "已设置", tavily_cleared: "已清空",
+      llm_base_url: "Base URL (OpenAI 兼容)：",
+      llm_api_key: "API Key：",
+      llm_model: "模型名（如 gpt-4o-mini / deepseek-chat / qwen-turbo）：",
+      llm_sysprompt: "System Prompt（回车用默认）：",
+      llm_default_sys: "你是桌宠「小白」，性格温柔黏人。回复 1-2 句话（30 字以内），像真人对主人说话。",
+      llm_unconfigured: "未配置",
+
+      voice_reco: " ·推荐", voice_male: " 男", voice_female: " 女",
+      unit_sec: "秒", unit_min: "分钟", unit_hour: "小时",
+
+      modal_ok: "确定",
+      modal_cancel: "取消",
+      modal_close: "关闭",
+      modal_save: "保存",
+      modal_empty: "暂无内容",
+      tavily_title: "Tavily 搜索密钥",
+      llm_title: "LLM 对话配置",
+      llm_configured_log: "已切换为真实 LLM 回复（停用 mock）",
+      llm_need_key: "请填写 API Key，否则继续使用 mock 回复",
+      forget_title: "遗忘记忆",
+      forget_keyword: "关键词",
+      remind_title: "新建提醒",
+      remind_minutes: "多少分钟后提醒",
+      remind_content_label: "提醒内容",
+      mem_title: "长期记忆",
+      rem_title: "提醒事项",
+      mem_at: "记忆于",
+      rem_at: "将于",
+    },
+
+    en: {
+      status_init: "Initializing",
+      loading: "Loading…",
+      clear: "Clear",
+      model_official: "Official Live2D sample",
+      g_model_switch: "Model",
+      switch_model: "Switch model",
+      status_load_model: "Loading {name}…",
+      g_motion: "Motion",
+      motion_group: "Motion group",
+      choose_motion_group: "Select group",
+      play: "Play",
+      expression: "Expression",
+      choose_expression: "Select expression",
+      play_expression: "Expression",
+      test_lipsync: "Test Lipsync",
+      stop_lipsync: "Stop Lipsync",
+      reset_model: "Reset",
+      g_voice: "Voice (TTS)",
+      tts_engine: "TTS engine",
+      edge_cloud: "edge (cloud)",
+      gptsovits_local: "gptsovits (local)",
+      minimax_cloud: "minimax (cloud)",
+      choose_voice: "Choose voice",
+      auto_voice: "Auto (by engine)",
+      g_memory: "Memory & Reminders",
+      view_memory: "Memory",
+      forget_memory: "Forget",
+      add_reminder: "Remind me",
+      reminder_list: "Reminders",
+      g_model: "API Keys",
+      tavily_key: "Tavily Key (Search)",
+      llm_key: "LLM Key (Live Chat)",
+      hold_to_talk: "Hold to talk",
+      listening: "Listening…",
+      chat_placeholder: "Chat with your pet: search, remember, remind…",
+      send: "Send",
+      footer_note: 'Live2D · TTS · ASR · Tools · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample models Hiyori / Miara</strong>; models from <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noopener">Live2D official samples</a>. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
+
+      loading_model: "Loading model…",
+      status_loading: "Loading…",
+      status_ready: "Ready · {expr} expressions / {mot} motion groups{tag}",
+      mock_tag: " · mock replies",
+      status_load_failed: "Load failed",
+      loading_builtin: "Loading built-in model…",
+      status_load_hiyori: "Loading Hiyori…",
+      status_builtin_missing: "Built-in model not found",
+      status_sdk_failed: "SDK failed to load",
+      status_pixi_missing: "PIXI not loaded",
+      status_core_missing: "Cubism Core not loaded",
+      status_from_unavailable: "Live2DModel.from unavailable",
+      status_pixi_init_failed: "PIXI init failed",
+      status_ready_loading: "Ready · loading built-in model…",
+      err_no_key: "API key is not configured",
+      err_prefix: "Error: ",
+      model_empty: "(no response)",
+
+      remind_default: "Time to do it",
+      remind_confirm: "OK, I'll remind you about “{content}” in {n} {unit}",
+      rem_notify_title: "Pet Reminder",
+      rem_tts: "Reminder: {c}",
+      remind_mins_prompt: "In how many minutes?",
+      remind_content_prompt: "Reminder content?",
+      rem_empty: "(No reminders)",
+      rem_list: "{n} pending reminders:\n{s}",
+
+      search_count: "{n} results",
+      search_reply: "Found {n} results:\n\n{summary}",
+      search_tts: "Found {n} results. The first is {title}",
+      mock_s1: "[Mock] Search result 1 for {q}",
+      mock_s2: "[Mock] Search result 2 for {q}",
+      mock_c1: "This is a mock result for “{q}”. Configure a Tavily key for real content.",
+      mock_c2: "Another related result about {q}.",
+
+      mem_confirm: "Got it, I've remembered: “{c}”",
+      mem_empty: "(No memories yet)",
+      mem_recent: "Latest {n} memories:\n{s}",
+      mem_tts: "I remember {n} things",
+      forget_prompt: "Forget memories containing this keyword:",
+      action_ok: "Okay~",
+
+      fb1: "You mean “{x}”, right? Let me think...",
+      fb2: "Mhm, I heard you.",
+      fb3: "Sure. {q}",
+      fb3q: "Let me think about that...",
+      fb4: "Got it~",
+
+      tctx_night: "late night", tctx_morning: "morning", tctx_afternoon: "afternoon", tctx_evening: "evening",
+      pa1: "It's {t} now, want to take a break? {mem}",
+      pa1mem: "Earlier you mentioned {x}, how's that going?",
+      pa2: "Good {t}, remember to drink water~",
+      pa3: "You've been sitting a while, get up and stretch!",
+      pa4: "I was just thinking about you~ {mem}",
+      pa4mem: "Oh, about {x}, how did it turn out?",
+      pa5: "Good {t}, want to listen to a song?",
+      pa6: "I'm here, just call me if you need anything.",
+      pa_llm: "It's {t}. {mem}Proactively message the owner in ONE sentence (≤30 words), like a real person texting out of the blue.",
+      pa_llm_mem: "Recent memories: {m}. ",
+      memory_ctx: "Recent memories: {m}",
+
+      tavily_prompt: "Enter Tavily API key (blank for mock):",
+      tavily_set: "set", tavily_cleared: "cleared",
+      llm_base_url: "Base URL (OpenAI-compatible):",
+      llm_api_key: "API Key:",
+      llm_model: "Model name (e.g. gpt-4o-mini / deepseek-chat):",
+      llm_sysprompt: "System Prompt (Enter for default):",
+      llm_default_sys: "You are the desktop pet “Xiaobai”, gentle and clingy. Reply in 1-2 sentences (under 30 words), like a real person chatting with their owner.",
+      llm_unconfigured: "Not configured",
+
+      voice_reco: " ·pick", voice_male: " M", voice_female: " F",
+      unit_sec: "sec", unit_min: "min", unit_hour: "hour",
+
+      modal_ok: "OK",
+      modal_cancel: "Cancel",
+      modal_close: "Close",
+      modal_save: "Save",
+      modal_empty: "Nothing here yet",
+      tavily_title: "Tavily Search Key",
+      llm_title: "LLM Chat Settings",
+      llm_configured_log: "Switched to real LLM replies (mock off)",
+      llm_need_key: "Please enter an API Key, otherwise mock replies continue",
+      forget_title: "Forget Memory",
+      forget_keyword: "Keyword",
+      remind_title: "New Reminder",
+      remind_minutes: "Remind in how many minutes",
+      remind_content_label: "Content",
+      mem_title: "Long-term Memory",
+      rem_title: "Reminders",
+      mem_at: "Remembered at",
+      rem_at: "Due at",
+    }
+  };
+
+  // 语言优先级：localStorage > URL ?lang= > 默认 zh
+  var lang = localStorage.getItem("demo-lang")
+    || (function () { var m = location.search.match(/[?&]lang=([a-z]{2})/i); return m ? m[1].toLowerCase() : null; })()
+    || "zh";
+  if (lang !== "zh" && lang !== "en") lang = "zh";
+  var changeHooks = [];
+
+  function t(key, params) {
+    var table = DICT[lang] || DICT.zh;
+    var s = table[key] != null ? table[key] : (DICT.zh[key] != null ? DICT.zh[key] : key);
+    if (params) s = s.replace(/\{(\w+)\}/g, function (_, k) { return params[k] != null ? params[k] : ""; });
+    return s;
+  }
+  function applyStatic(root) {
+    root = root || document;
+    root.querySelectorAll("[data-i18n]").forEach(function (el) {
+      el.textContent = t(el.getAttribute("data-i18n"));
+    });
+    root.querySelectorAll("[data-i18n-ph]").forEach(function (el) {
+      el.setAttribute("placeholder", t(el.getAttribute("data-i18n-ph")));
+    });
+    root.querySelectorAll("[data-i18n-title]").forEach(function (el) {
+      el.setAttribute("title", t(el.getAttribute("data-i18n-title")));
+    });
+    root.querySelectorAll("[data-i18n-html]").forEach(function (el) {
+      el.innerHTML = t(el.getAttribute("data-i18n-html"));
+    });
+    var lb = document.getElementById("lang-btn");
+    if (lb) {
+      lb.textContent = lang === "zh" ? "EN" : "中";
+      lb.title = lang === "zh" ? "切换为英文" : "Switch to Chinese";
+    }
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  }
+  function setLang(l) {
+    if (l !== "zh" && l !== "en") return;
+    lang = l;
+    localStorage.setItem("demo-lang", l);
+    applyStatic();
+    changeHooks.forEach(function (fn) { try { fn(l); } catch (e) {} });
+  }
+
+  window.I18N = {
+    get lang() { return lang; },
+    t: t, setLang: setLang, applyStatic: applyStatic,
+    onChange: function (fn) { changeHooks.push(fn); }
+  };
+  window.t = t;
+
+  // 脚本位于 body 末尾、live2d-demo.js 之前，DOM 已就绪，立即应用（避免英文用户看到中文闪烁）
+  applyStatic();
+  var lb = document.getElementById("lang-btn");
+  if (lb) lb.addEventListener("click", function () { setLang(lang === "zh" ? "en" : "zh"); });
+})();
+</script>
+
+<!-- 面板开关（纯 UI，不依赖 live2d-demo.js） -->
+<script>
+(function () {
+  var panel = document.getElementById("feature-panel");
+  var pt = document.getElementById("panel-toggle");
+  var dbg = document.getElementById("debug-panel");
+  var dt = document.getElementById("debug-toggle");
+  pt.addEventListener("click", function () {
+    panel.classList.toggle("open");
+    pt.classList.toggle("active", panel.classList.contains("open"));
+    if (panel.classList.contains("open")) { dbg.classList.remove("open"); dt.classList.remove("active"); }
+  });
+  dt.addEventListener("click", function () {
+    dbg.classList.toggle("open");
+    dt.classList.toggle("active", dbg.classList.contains("open"));
+    if (dbg.classList.contains("open")) { panel.classList.remove("open"); pt.classList.remove("active"); }
+  });
+})();
+</script>
+
+<!-- SDK 加载器（vendor → jsdelivr → unpkg 三级 fallback） -->
+<script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
+<script>
+"use strict";
+(function () {
+  const SOURCES = {
+    pixi: [
+      "vendor/pixi.min.js",
+      "https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js",
+      "https://unpkg.com/pixi.js@7.4.0/dist/pixi.min.js",
+    ],
+    core: [
+      "vendor/live2dcubismcore.min.js",
+      "https://cdn.jsdelivr.net/npm/live2d-cubism-core@1.0.2/lib/live2dcubismcore.min.js",
+      "https://unpkg.com/live2d-cubism-core@1.0.2/lib/live2dcubismcore.min.js",
+    ],
+    cubism4: [
+      "https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+      "https://unpkg.com/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+    ],
+  };
+  window.__sdkLoadStatus = { pixi: "pending", core: "pending", cubism4: "pending" };
+  function loadOne(url) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = url; s.async = false;
+      s.onload = () => resolve(url);
+      s.onerror = () => reject(new Error("failed: " + url));
+      document.head.appendChild(s);
+    });
+  }
+  function waitFor(pred, timeoutMs) {
+    const start = Date.now();
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        if (pred()) return resolve();
+        if (Date.now() - start > timeoutMs) return reject(new Error("timeout"));
+        setTimeout(tick, 30);
+      };
+      tick();
+    });
+  }
+  async function loadGroup(name, sources) {
+    let lastErr;
+    for (const url of sources) {
+      try {
+        await loadOne(url);
+        window.__sdkLoadStatus[name] = "ok:" + url;
+        console.log(`[sdk] ${name} loaded from`, url);
+        if (name === "cubism4") {
+          await waitFor(() => !!(window.PIXI && window.PIXI.live2d &&
+            window.PIXI.live2d.Live2DModel &&
+            typeof window.PIXI.live2d.Live2DModel.from === "function"), 5000);
+        }
+        return;
+      } catch (e) {
+        console.warn(`[sdk] ${name} failed:`, url, e.message);
+        lastErr = e;
+      }
+    }
+    window.__sdkLoadStatus[name] = "fail:" + (lastErr && lastErr.message);
+    throw new Error(`all sources failed for ${name}: ${lastErr && lastErr.message}`);
+  }
+  window.__sdkReady = (async () => {
+    await loadGroup("pixi", SOURCES.pixi);
+    await loadGroup("core", SOURCES.core);
+    await loadGroup("cubism4", SOURCES.cubism4);
+  })();
+})();
+</script>
+<script src="live2d-demo.js"></script>
+</body></html>
