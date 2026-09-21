@@ -32,7 +32,7 @@ jobs:
         with:
           path: main
 
-      - name: Checkout gh-pages（取大模型 Hiyori）
+      - name: Checkout gh-pages（取大模型 Hiyori / Miara）
         uses: actions/checkout@v4
         with:
           ref: gh-pages
@@ -52,6 +52,7 @@ jobs:
           # 页面与逻辑（master 最新版）
           cp main/docs/demo/index.html _demo/
           cp main/docs/demo/live2d-demo.js _demo/
+          cp main/docs/demo/favicon.ico _demo/
 
           # 渲染库（必须，否则线上无法加载 PIXI / Cubism Core）
           cp main/docs/demo/vendor/pixi.min.js _demo/vendor/
@@ -63,6 +64,14 @@ jobs:
             cp -r pages/hiyori_zh-Hans _demo/
           else
             echo "::warning::未在 gh-pages 分支找到 hiyori_zh-Hans，线上将无法零配置加载内置模型"
+          fi
+
+          # 内置 Miara 模型（约 39MB，仅存在于 gh-pages 分支）
+          if [ -d pages/miara_en ]; then
+            echo "Including Miara from gh-pages branch"
+            cp -r pages/miara_en _demo/
+          else
+            echo "::warning::未在 gh-pages 分支找到 miara_en，线上将缺少 Miara 模型"
           fi
 
           # 功能对齐报告（附加静态页）

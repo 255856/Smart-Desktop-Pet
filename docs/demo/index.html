@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Desktop Pet · Live2D Demo</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http:%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%20100%20100'%3E%3Ctext%20y%3D'.9em'%20font-size%3D'88'%3E%F0%9F%90%B3%3C%2Ftext%3E%3C%2Fsvg%3E">
+<link rel="icon" href="favicon.ico" sizes="any">
 
 <!--
   模型版权说明 / Model Copyright Notice
@@ -51,12 +51,10 @@
   }
   .brand{ display:flex; align-items:center; gap:10px; }
   .logo{
-    width:34px; height:34px; border-radius:11px; display:grid; place-items:center;
-    font-size:20px; line-height:1;
-    background:linear-gradient(135deg,#a79bff,#f3a8c8);
-    box-shadow:0 4px 12px rgba(124,108,240,.35);
+    width:34px; height:34px; border-radius:11px; display:block; object-fit:cover;
+    background:linear-gradient(135deg,#eef0ff,#f6e9f2);
+    box-shadow:0 4px 12px rgba(124,108,240,.28);
   }
-  .logo svg{ width:19px; height:19px; stroke:#fff; fill:rgba(255,255,255,.9); }
   .brand .name{ font-size:15px; font-weight:700; letter-spacing:.2px; }
   .brand .tag{
     font-size:10.5px; font-weight:600; color:var(--brand-d);
@@ -184,10 +182,11 @@
     display:inline-block; padding:1px 5px; margin-left:3px; font-size:9px; font-weight:700;
     background:linear-gradient(135deg,#ffd98a,#ffb86b); color:#7a4a12; border-radius:5px;
   }
+  #model-info .model-actions{ margin-left:auto; display:flex; gap:7px; flex-shrink:0; }
   #model-info button{
     width:28px; height:28px; flex-shrink:0; border-radius:9px; cursor:pointer;
     border:1px solid var(--line); background:#fff; color:var(--ink-2);
-    display:grid; place-items:center; margin-left:auto;
+    display:grid; place-items:center;
   }
   #model-info button svg{ width:14px; height:14px; }
   #model-info button:hover{ color:var(--brand-d); border-color:var(--brand); background:var(--brand-soft); }
@@ -395,7 +394,7 @@
 <div id="app">
   <header>
     <div class="brand">
-      <span class="logo">🐳</span>
+      <img class="logo" src="favicon.ico" alt="Desktop Pet">
       <span class="name">Desktop Pet</span>
       <span class="tag">Live2D Demo</span>
     </div>
@@ -441,9 +440,14 @@
           <div class="model-title">Hiyori <span class="badge-pro">Pro</span></div>
           <div class="model-sub" data-i18n="model_official">Live2D 官方样例模型</div>
         </div>
-        <button id="reload-btn" title="重新加载模型" data-i18n-title="reload_model">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        </button>
+        <div class="model-actions">
+          <button id="switch-model-btn" title="切换模型" data-i18n-title="switch_model">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          </button>
+          <button id="reload-btn" title="重新加载模型" data-i18n-title="reload_model">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
       </div>
 
       <!-- 聊天气泡 -->
@@ -453,6 +457,12 @@
       <div id="feature-panel">
         <div class="fp-card">
           <div class="controls" id="controls" style="display:none">
+            <div class="fp-group">
+              <h4 data-i18n="g_model_switch">模型</h4>
+              <div class="fp-row">
+                <select id="model-select" title="模型" data-i18n-title="g_model_switch" style="flex:1"></select>
+              </div>
+            </div>
             <div class="fp-group">
               <h4 data-i18n="g_motion">角色动作</h4>
               <div class="fp-row">
@@ -511,7 +521,8 @@
 
   <div class="footer-note" data-i18n-html="footer_note">
     Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。
-    模型文件<strong>不包含</strong>，需自备合法授权的 Live2D 模型。
+    内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong> 用于演示，模型来自
+    <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。
     <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>
   </div>
 </div>
@@ -538,6 +549,9 @@
       loading: "加载中…",
       clear: "清空",
       model_official: "Live2D 官方样例模型",
+      g_model_switch: "模型",
+      switch_model: "切换模型",
+      status_load_model: "加载 {name}…",
       g_motion: "角色动作",
       motion_group: "动作组",
       choose_motion_group: "选择动作组",
@@ -567,7 +581,7 @@
       listening: "正在听…",
       chat_placeholder: "和桌宠聊天：搜索、记住、提醒、换装…",
       send: "发送",
-      footer_note: 'Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori</strong> 用于演示。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
+      footer_note: 'Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong> 用于演示，模型来自 <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
 
       loading_model: "加载模型…",
       status_loading: "加载中…",
@@ -667,6 +681,9 @@
       loading: "Loading…",
       clear: "Clear",
       model_official: "Official Live2D sample",
+      g_model_switch: "Model",
+      switch_model: "Switch model",
+      status_load_model: "Loading {name}…",
       g_motion: "Motion",
       motion_group: "Motion group",
       choose_motion_group: "Select group",
@@ -696,7 +713,7 @@
       listening: "Listening…",
       chat_placeholder: "Chat with your pet: search, remember, remind…",
       send: "Send",
-      footer_note: 'Live2D · TTS · ASR · Tools · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample model Hiyori</strong> for demo use. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
+      footer_note: 'Live2D · TTS · ASR · Tools · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample models Hiyori / Miara</strong>; models from <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noopener">Live2D official samples</a>. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
 
       loading_model: "Loading model…",
       status_loading: "Loading…",

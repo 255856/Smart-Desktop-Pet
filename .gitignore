@@ -86,6 +86,8 @@ assets/live2d/
 assets/live2d_profiles/
 # demo 内置的 Live2D Hiyori 样例（46MB，本地测试用，不入库；gh-pages 部署也不打包）
 docs/demo/hiyori_zh-Hans/
+# demo 内置的 Live2D Miara 样例（39MB，本地测试用，不入库；模型放在 gh-pages 分支）
+docs/demo/miara_en/
 tools/shot_log.txt
 tools/*_log.txt
 

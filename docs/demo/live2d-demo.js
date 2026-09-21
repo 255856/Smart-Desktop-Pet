@@ -143,6 +143,12 @@ class Live2DDemo {
         if (hidden) log(`隐藏通用 WaterMark 图层 ${hidden} 个`, "ok");
       } catch (e) {}
       this._fit();
+      // 原始画布尺寸就绪后 _fit 即稳定；少量延迟兜底首帧布局 / 尺寸就绪
+      if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} }
+      if (this._fitTimers) this._fitTimers.forEach(clearTimeout);
+      this._fitTimers = [50, 200, 600, 1200].map((ms) => setTimeout(() => {
+        if (this.model === model) this._fit();
+      }, ms));
       this.ready = true;
       const exprs = (model.internalModel && model.internalModel.settings.expressions) || [];
       const motions = (model.internalModel && model.internalModel.settings.motions) || {};
@@ -170,12 +176,21 @@ class Live2DDemo {
       throw err;
     }
   }
+  // 模型原始画布尺寸（固定，不随 scale / 渲染状态变化）。
+  // pixi-live2d-display 0.3 的 model.width 会随渲染状态变化，若每帧用它反算 scale，
+  // 在部分模型（如 Miara）上会出现 scale 在 0.129 与 1 之间自激振荡。
+  _modelSize() {
+    const im = this.model && this.model.internalModel;
+    const mw = (im && im.originalWidth) || this.model.width;
+    const mh = (im && im.originalHeight) || this.model.height;
+    return { mw, mh };
+  }
   _fit() {
     if (!this.model || !this.app) return;
     const w = this.app.screen.width, h = this.app.screen.height;
-    // 与桌面版 live2d_bridge.html 完全一致：手动按 canvas 尺寸算 scale
     // fitFactor 0.7 留 30% 边距（桌面默认 0.94，demo 用更大边距让 UI 不被遮挡）
-    const scale = Math.min((w / this.model.width) * this.fitFactor, (h / this.model.height) * this.fitFactor);
+    const { mw, mh } = this._modelSize();
+    const scale = Math.min((w / mw) * this.fitFactor, (h / mh) * this.fitFactor);
     this.model.scale.set(scale);
     try { this.model.anchor.set(0.5, 0.5); } catch (e) {}
     this.model.x = w / 2;
@@ -264,13 +279,15 @@ class Live2DDemo {
   focus(nx, ny) {
     if (!this.model || !this.ready) return;
     try {
-      this.model.focus(this.model.width / 2 + nx * this.model.width / 2,
-                        this.model.height / 2 + ny * this.model.height / 2);
+      const { mw, mh } = this._modelSize();
+      this.model.focus(mw / 2 + nx * mw / 2, mh / 2 + ny * mh / 2);
     } catch (e) {}
   }
   shutdown() {
     this._talking = false;
     if (this._mouthTimer) { clearInterval(this._mouthTimer); this._mouthTimer = null; }
+    if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} this._fitTicker = null; }
+    if (this._fitTimers) { this._fitTimers.forEach(clearTimeout); this._fitTimers = null; }
     if (this.model && this.app) {
       try { this.app.stage.removeChild(this.model); this.model.destroy(); } catch (e) {}
     }
@@ -1132,21 +1149,21 @@ const Modal = (function () {
 })();
 window.UI = Modal;
 
-// 内置 Hiyori Pro 模型（零配置自动加载）
-// GitHub Pages 部署：模型放在 gh-pages 根的 hiyori_zh-Hans/ 下，index.html 在根
-// 本地 serve.py：模型放在仓库根 docs/demo/hiyori_zh-Hans/，index.html 在 docs/demo/
-// 因此路径需要按 IS_GITHUB_PAGES 切换
-const IS_GITHUB_PAGES = /\.github\.io$/.test(location.hostname);
-const BUILTIN_MODEL_PATHS = IS_GITHUB_PAGES ? [
-  // GitHub Pages：index.html 在根，hiyori_zh-Hans/ 也在根
-  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
-  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
-] : [
-  // 本地 serve.py (--root E:/study/desktop-pet)：index.html 在 docs/demo/，
-  // hiyori_zh-Hans/ 在 docs/demo/ 同级
-  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
-  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
+// 内置官方样例模型（零配置自动加载；功能面板 / 角色卡可切换）
+// 本地 serve.py 与 GitHub Pages 部署中，模型目录均与 index.html 同级，统一用相对路径
+const BUILTIN_MODELS = [
+  { id: "hiyori_pro",  name: "Hiyori", badge: "Pro",  path: "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json" },
+  { id: "hiyori_free", name: "Hiyori", badge: "Free", path: "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json" },
+  { id: "miara_pro",   name: "Miara",  badge: "Pro",  path: "miara_en/runtime/miara_pro_t03.model3.json" },
 ];
+const MODEL_STORAGE_KEY = "desktop_pet_model";
+function currentModelId() {
+  const id = localStorage.getItem(MODEL_STORAGE_KEY);
+  return BUILTIN_MODELS.some(m => m.id === id) ? id : BUILTIN_MODELS[0].id;
+}
+function resolveModelUrl(p) {
+  return location.origin + location.pathname.replace(/index\.html?$/, "") + p;
+}
 
 document.getElementById("motion-btn").addEventListener("click", () => {
   const g = document.getElementById("motion-group").value;
@@ -1162,34 +1179,64 @@ document.getElementById("speak-btn").addEventListener("click", (e) => {
   else { window.demo.startTalk(); e.target.textContent = window.t("stop_lipsync"); e.target.classList.add("live"); }
 });
 
-// 重新加载按钮（如果用户主动想刷）
-const reloadBtn = document.getElementById("reload-btn");
-if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel());
-
-// 自动加载内置 Hiyori 模型
-async function loadBuiltinModel() {
-  showLoader(window.t("loading_builtin"));
-  setStatus(window.t("status_load_hiyori"), "#ffce5c");
-  for (const p of BUILTIN_MODEL_PATHS) {
-    try {
-      // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
-      const r = await fetch(p, { method: "GET" });
-      if (r.ok) {
-        log(`找到内置模型：${p}`, "ok");
-        const url = location.origin + location.pathname.replace(/index\.html?$/, "") + p;
-        await window.demo.loadModel(url);
-        return;
-      } else {
-        log(`探测 ${p} → ${r.status}`, "ok");
-      }
-    } catch (e) {
-      log(`探测 ${p} 异常：${e.message}`, "err");
-    }
-  }
-  hideLoader();
-  setStatus(window.t("status_builtin_missing"), "#ff7675");
-  log("demo 内置的 Hiyori 模型未部署，请检查 hiyori_zh-Hans/ 目录", "err");
+// 角色卡显示当前模型
+function updateModelCard(model) {
+  const title = document.querySelector("#model-info .model-title");
+  if (title) title.innerHTML = `${model.name} <span class="badge-pro">${model.badge}</span>`;
 }
+function syncModelSelect(id) {
+  const sel = document.getElementById("model-select");
+  if (sel) sel.value = id;
+}
+
+// 加载指定内置模型（id 缺省取上次选择 / 默认第一个）
+async function loadBuiltinModel(id) {
+  const model = BUILTIN_MODELS.find(m => m.id === id) || BUILTIN_MODELS.find(m => m.id === currentModelId());
+  showLoader(window.t("loading_builtin"));
+  setStatus(window.t("status_load_model", { name: model.name }), "#ffce5c");
+  try {
+    // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
+    const r = await fetch(model.path, { method: "GET" });
+    if (!r.ok) {
+      hideLoader();
+      setStatus(window.t("status_builtin_missing"), "#ff7675");
+      log(`内置模型 ${model.name} 未部署（${model.path} → ${r.status}）`, "err");
+      return;
+    }
+    log(`加载内置模型：${model.name} ${model.badge}（${model.path}）`, "ok");
+    await window.demo.loadModel(resolveModelUrl(model.path));
+    localStorage.setItem(MODEL_STORAGE_KEY, model.id);
+    updateModelCard(model);
+    syncModelSelect(model.id);
+  } catch (e) {
+    hideLoader();
+    setStatus(window.t("status_builtin_missing"), "#ff7675");
+    log(`内置模型 ${model.name} 加载失败：${e.message || e}`, "err");
+  }
+}
+
+// 功能面板：模型选择下拉
+(function setupModelSelect() {
+  const sel = document.getElementById("model-select");
+  if (!sel) return;
+  for (const m of BUILTIN_MODELS) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `${m.name} ${m.badge}`;
+    sel.appendChild(opt);
+  }
+  sel.value = currentModelId();
+  sel.addEventListener("change", () => { if (sel.value) loadBuiltinModel(sel.value); });
+})();
+
+// 角色卡：循环切换模型 / 重新加载当前模型
+const switchBtn = document.getElementById("switch-model-btn");
+if (switchBtn) switchBtn.addEventListener("click", () => {
+  const idx = BUILTIN_MODELS.findIndex(m => m.id === currentModelId());
+  loadBuiltinModel(BUILTIN_MODELS[(idx + 1) % BUILTIN_MODELS.length].id);
+});
+const reloadBtn = document.getElementById("reload-btn");
+if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel(currentModelId()));
 
 document.getElementById("chat-btn").addEventListener("click", async () => {
   const text = document.getElementById("chat-input").value.trim();
@@ -1470,7 +1517,7 @@ window.addEventListener("DOMContentLoaded", () => {
     else log("ASR 不可用（请用 Chrome / Edge）", "err");
     if (window.tts.voices.length) log(`TTS 可用（${window.tts.voices.length} 个语音）`, "ok");
     else log("TTS 暂未加载语音", "err");
-    // 零配置自动加载内置 Hiyori Pro 模型
-    loadBuiltinModel();
+    // 零配置自动加载上次选择的内置模型（默认 Hiyori Pro）
+    loadBuiltinModel(currentModelId());
   })();
 });
