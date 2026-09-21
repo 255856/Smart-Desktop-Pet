@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Pet · 完整功能 Demo</title>
+
+<!--
+  ⚠️ 模型版权说明 / Model Copyright Notice
+  ----------------------------------------
+  本页面**不包含任何 Live2D 模型文件**。Live2D 模型（*.model3.json、*.moc3、
+  textures/*.png、*.motion3.json 等）受上游创作者版权约束，**禁止二次传播**，
+  本仓库的 .gitignore 已显式排除 assets/live2d/，请勿将任何模型文件提交。
+-->
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #1a1c2c 0%, #2d2f4a 100%);
+    color: #e8e8f0; overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    padding: 10px 16px; background: rgba(0,0,0,.35);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header h1 .badge {
+    display: inline-block; padding: 2px 8px; margin-left: 8px;
+    background: #6c5ce7; border-radius: 10px; font-size: 11px;
+    font-weight: 500; vertical-align: middle;
+  }
+  header .spacer { flex: 1; }
+  header a { color: #74b9ff; text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+
+  #main { flex: 1; display: flex; overflow: hidden; }
+  #stage-wrap {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle, rgba(50,60,90,.4) 0%, transparent 70%);
+  }
+  #stage { width: 100%; height: 100%; }
+  #stage canvas { display: block; }
+
+  /* 聊天气泡（右下角） */
+  #chat-area {
+    position: absolute; right: 16px; bottom: 110px; width: 320px;
+    max-height: 240px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px;
+    pointer-events: none;
+  }
+  .bubble {
+    padding: 8px 12px; border-radius: 12px; font-size: 13px;
+    line-height: 1.4; max-width: 100%; word-break: break-word;
+    box-shadow: 0 2px 8px rgba(0,0,0,.3);
+    white-space: pre-wrap;
+  }
+  .bubble-user {
+    align-self: flex-end;
+    background: rgba(108,92,231,.85); color: white;
+  }
+  .bubble-assistant {
+    align-self: flex-start;
+    background: rgba(255,255,255,.95); color: #2d2f4a;
+  }
+  .bubble-proactive {
+    align-self: flex-start;
+    background: rgba(255,206,92,.9); color: #2d2f4a;
+    font-style: italic;
+  }
+
+  /* Trace Dashboard（左侧） */
+  #trace-panel {
+    position: absolute; left: 16px; top: 16px; width: 280px;
+    max-height: 320px; overflow: hidden;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 8px; border: 1px solid rgba(255,255,255,.08);
+    padding: 10px; display: flex; flex-direction: column;
+    font-size: 11px;
+  }
+  #trace-panel h3 {
+    margin: 0 0 6px 0; font-size: 12px; color: #ffce5c;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #trace-panel h3 button {
+    margin-left: auto; padding: 2px 8px; background: transparent;
+    border: 1px solid rgba(255,255,255,.15); color: #a8b0c0;
+    border-radius: 4px; font-size: 10px; cursor: pointer;
+  }
+  #trace-list {
+    overflow-y: auto; flex: 1; max-height: 260px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .trace-item {
+    padding: 3px 4px; margin-bottom: 2px; border-radius: 4px;
+    background: rgba(255,255,255,.04); display: flex; gap: 6px;
+    align-items: baseline;
+  }
+  .trace-t { color: #74b9ff; flex-shrink: 0; }
+  .trace-type {
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    flex-shrink: 0; font-weight: 600;
+  }
+  .trace-tool_call .trace-type { background: #6c5ce7; color: white; }
+  .trace-tool_result .trace-type { background: #00b894; color: white; }
+  .trace-llm_call .trace-type { background: #fdcb6e; color: #2d2f4a; }
+  .trace-llm_response .trace-type { background: #ff7675; color: white; }
+  .trace-user .trace-type { background: #74b9ff; color: white; }
+  .trace-remark .trace-type { background: #ffce5c; color: #2d2f4a; }
+  .trace-content { color: #d8d8e0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 控件 */
+  #loader {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; flex-direction: column; gap: 12px;
+    background: rgba(0,0,0,.5); z-index: 10; pointer-events: none;
+    transition: opacity .3s;
+  }
+  #loader.hidden { opacity: 0; pointer-events: none; }
+  #loader .spinner {
+    width: 36px; height: 36px; border: 3px solid rgba(255,255,255,.2);
+    border-top-color: #6c5ce7; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 模型信息条（替代旧的 URL 输入框） */
+  #model-info {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; min-width: 280px; max-width: 480px;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 12px; border: 1px solid rgba(255,255,255,.1);
+    font-size: 13px;
+  }
+  #model-info .model-icon { font-size: 24px; }
+  #model-info .model-title { font-weight: 600; }
+  #model-info .model-sub { font-size: 11px; color: #a8b0c0; }
+  #model-info .badge-pro {
+    display: inline-block; padding: 1px 6px; margin-left: 4px;
+    background: #ffce5c; color: #2d2f4a; border-radius: 4px;
+    font-size: 10px; font-weight: 600;
+  }
+  #model-info button {
+    padding: 4px 10px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 8px; font-size: 12px; cursor: pointer;
+  }
+  #model-info button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
+
+  .controls {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; gap: 6px; padding: 8px 10px; flex-wrap: wrap;
+    justify-content: center; max-width: 92vw;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
+    border-radius: 20px; border: 1px solid rgba(255,255,255,.08);
+    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  }
+  .controls button, .controls select, .controls input {
+    padding: 5px 12px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 14px; font-size: 12px;
+  }
+  .controls button { cursor: pointer; }
+  .controls button:hover { background: rgba(108,92,231,.5); border-color: #6c5ce7; }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .controls button.recording { background: #ff7675; border-color: #ff7675; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  .controls input { font-family: inherit; }
+  .controls input#chat-input { width: 280px; }
+
+  /* 日志（右上） */
+  #log {
+    position: absolute; right: 16px; top: 16px; width: 280px;
+    max-height: 30vh; overflow-y: auto; padding: 8px 10px;
+    background: rgba(0,0,0,.55); border-radius: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px; line-height: 1.4; color: #a8b0c0;
+    pointer-events: none;
+  }
+  #log .err { color: #ff7675; }
+  #log .ok { color: #55efc4; }
+
+  /* 环境横幅（GitHub Pages vs 本地） */
+  #env-banner {
+    position: absolute; left: 16px; right: 16px; top: 56px;
+    padding: 10px 14px; border-radius: 8px;
+    background: rgba(255,206,92,.12); border: 1px solid rgba(255,206,92,.35);
+    color: #ffe9a0; font-size: 12px; line-height: 1.6;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    z-index: 5;
+  }
+  #env-banner.hidden { display: none; }
+  #env-banner .label {
+    background: #ffce5c; color: #2d2f4a; padding: 2px 8px;
+    border-radius: 4px; font-weight: 600; font-size: 11px;
+  }
+  #env-banner code {
+    background: rgba(0,0,0,.3); padding: 1px 6px; border-radius: 3px;
+    color: #ffce5c; font-family: ui-monospace, monospace;
+  }
+  #env-banner .close {
+    margin-left: auto; padding: 2px 8px; background: transparent;
+    border: 1px solid rgba(255,255,255,.15); color: #a8b0c0;
+    border-radius: 4px; font-size: 11px; cursor: pointer;
+  }
+
+  /* 快捷 URL 按钮（URL 框旁） */
+  #quick-urls {
+    display: flex; gap: 4px; padding: 0 10px 0 0;
+  }
+  #quick-urls button {
+    padding: 6px 10px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(255,255,255,.06); color: #e8e8f0;
+    border-radius: 8px; font-size: 11px; cursor: pointer;
+    white-space: nowrap;
+  }
+  #quick-urls button:hover { background: rgba(108,92,231,.4); border-color: #6c5ce7; }
+
+  /* 拖拽 */
+  #drop-hint {
+    position: absolute; inset: 12px; border: 2px dashed rgba(108,92,231,.5);
+    border-radius: 16px; display: none; align-items: center;
+    justify-content: center; background: rgba(108,92,231,.15);
+    font-size: 18px; pointer-events: none; z-index: 20;
+  }
+  #drop-hint.show { display: flex; }
+
+  .footer-note {
+    text-align: center; padding: 6px;
+    font-size: 10px; color: #6c7080;
+    background: rgba(0,0,0,.35);
+  }
+  .footer-note a { color: #74b9ff; text-decoration: none; }
+  .footer-note strong { color: #ff7675; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🐳 Desktop Pet <span class="badge">完整功能 Demo</span></h1>
+    <span style="font-size:12px;color:#a8b0c0" id="status">未加载模型</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">↗ GitHub</a>
+    <a href="../../docs/live2d-integration.md">文档 / Docs</a>
+  </header>
+
+  <div id="main">
+    <div id="stage-wrap">
+      <div id="stage"></div>
+
+      <div id="loader"><div class="spinner"></div><div id="loader-text">加载中…</div></div>
+
+      <!-- Trace Dashboard -->
+      <div id="trace-panel">
+        <h3>🧠 Agent Trace
+          <button id="trace-clear-btn">清空</button>
+        </h3>
+        <div id="trace-list"></div>
+      </div>
+
+      <!-- 聊天气泡 -->
+      <div id="chat-area"></div>
+
+      <!-- 环境横幅（GitHub Pages 检测） -->
+      <div id="env-banner" class="hidden">
+        <span class="label">提示</span>
+        <span id="env-banner-text"></span>
+        <button class="close" id="env-banner-close">×</button>
+      </div>
+
+      <!-- 顶部模型信息条（demo 已内置 Hiyori Pro，零配置自动加载） -->
+      <div id="model-info">
+        <div class="model-icon">🌸</div>
+        <div class="model-meta">
+          <div class="model-title">Hiyori (zh-Hans) <span class="badge-pro">Pro</span></div>
+          <div class="model-sub">Live2D 官方允许 demo 使用的样例模型</div>
+        </div>
+        <button id="reload-btn" title="重新加载模型" style="margin-left:auto">🔄 重新加载</button>
+      </div>
+
+      <!-- 日志 -->
+      <pre id="log"></pre>
+
+      <!-- 底部控件 -->
+      <div class="controls" id="controls" style="display:none">
+        <select id="motion-group" title="动作组"><option value="">—动作—</option></select>
+        <button id="motion-btn">▶ 动作</button>
+        <select id="expression" title="表情"><option value="">—表情—</option></select>
+        <button id="expression-btn">😊 表情</button>
+        <button id="reset-btn">↺ 重置</button>
+        <button id="speak-btn">🔊 测试口型</button>
+        <input id="chat-input" type="text" placeholder="和桌宠聊天：搜索/记住/提醒/换装…回车发送" />
+        <button id="chat-btn">💬 说</button>
+        <button id="asr-btn" title="按住说话">🎤 按住说话</button>
+        <select id="tts-engine" title="TTS 引擎">
+          <option value="edge">edge（云端）</option>
+          <option value="gptsovits">gptsovits（本地）</option>
+          <option value="minimax">minimax（云端）</option>
+        </select>
+        <select id="tts-voice" title="选择具体语音（如 Microsoft Xiaoxiao Online）"><option value="">自动（按引擎选）</option></select>
+        <button id="mem-btn" title="查看记忆">💾 记忆</button>
+        <button id="forget-btn" title="遗忘记忆">🗑️ 遗忘</button>
+        <button id="remind-btn" title="加提醒">⏰ 提醒</button>
+        <button id="remind-list-btn" title="查看提醒">📋 列表</button>
+        <button id="tavily-btn" title="Tavily API key（搜索用）">🔑 Tavily</button>
+        <button id="llm-btn" title="LLM API key（让桌宠说真话）">🧠 LLM</button>
+      </div>
+
+      <!-- 拖拽提示 -->
+      <div id="drop-hint">📂 拖拽 .model3.json 到这里</div>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    页面含 Live2D 渲染 + TTS + ASR + 工具调用 + Trace Dashboard + 长期记忆 + 主动搭话。
+    完整复刻桌面版 <strong>app/</strong> 核心交互层。模型文件<strong>不包含</strong>，需自备合法授权的 Live2D 模型。
+  </div>
+</div>
+
+<!-- SDK 加载器（同上，保留 vendor → jsdelivr → unpkg 三级 fallback） -->
+<script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
+<script>
+"use strict";
+(function () {
+  const SOURCES = {
+    pixi: [
+      "vendor/pixi.min.js",
+      "https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js",
+      "https://unpkg.com/pixi.js@7.4.0/dist/pixi.min.js",
+    ],
+    core: [
+      "vendor/live2dcubismcore.min.js",
+      "https://cdn.jsdelivr.net/npm/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
+      "https://unpkg.com/live2dcubismcore@1.0.2/lib/live2dcubismcore.min.js",
+    ],
+    cubism4: [
+      "https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+      "https://unpkg.com/pixi-live2d-display@0.3.0/dist/cubism4.min.js",
+    ],
+  };
+  window.__sdkLoadStatus = { pixi: "pending", core: "pending", cubism4: "pending" };
+  function loadOne(url) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = false;
+      s.onload = () => resolve(url);
+      s.onerror = () => reject(new Error("failed: " + url));
+      document.head.appendChild(s);
+    });
+  }
+  function waitFor(pred, timeoutMs) {
+    const start = Date.now();
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        if (pred()) return resolve();
+        if (Date.now() - start > timeoutMs) return reject(new Error("timeout"));
+        setTimeout(tick, 30);
+      };
+      tick();
+    });
+  }
+  async function loadGroup(name, sources) {
+    let lastErr;
+    for (const url of sources) {
+      try {
+        await loadOne(url);
+        window.__sdkLoadStatus[name] = "ok:" + url;
+        console.log(`[sdk] ${name} loaded from`, url);
+        if (name === "cubism4") {
+          await waitFor(() => !!(window.PIXI && window.PIXI.live2d &&
+            window.PIXI.live2d.Live2DModel &&
+            typeof window.PIXI.live2d.Live2DModel.from === "function"), 5000);
+        }
+        return;
+      } catch (e) {
+        console.warn(`[sdk] ${name} failed:`, url, e.message);
+        lastErr = e;
+      }
+    }
+    window.__sdkLoadStatus[name] = "fail:" + (lastErr && lastErr.message);
+    throw new Error(`all sources failed for ${name}: ${lastErr && lastErr.message}`);
+  }
+  window.__sdkReady = (async () => {
+    await loadGroup("pixi", SOURCES.pixi);
+    await loadGroup("core", SOURCES.core);
+    await loadGroup("cubism4", SOURCES.cubism4);
+  })();
+})();
+</script>
+<script src="live2d-demo.js"></script>
+</body></html>
