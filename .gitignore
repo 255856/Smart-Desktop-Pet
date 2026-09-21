@@ -75,6 +75,8 @@ data/
 # ZCode 本地会话配置
 .zcode/
 .agents/plans/
+# Mimosa 安全扫描工具的本地 cache（每次扫描会重建）
+.mimosa/
 # 日志与预览截图产物
 *.log
 tools/
