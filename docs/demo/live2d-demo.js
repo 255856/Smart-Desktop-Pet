@@ -993,9 +993,6 @@ window.addEventListener("DOMContentLoaded", () => {
     else log("⚠️ ASR 不可用（请用 Chrome / Edge）", "err");
     if (window.tts.voices.length) log(`✅ TTS 可用（${window.tts.voices.length} 个语音）`, "ok");
     else log("⚠️ TTS 暂未加载语音", "err");
-    // 填默认 URL（如果有）
-    const savedUrl = localStorage.getItem("last_model_url");
-    if (savedUrl) document.getElementById("model-url").value = savedUrl;
     // 零配置自动加载内置 Hiyori Pro 模型
     loadBuiltinModel();
   })();
