@@ -74,6 +74,7 @@ class Live2DDemo {
     this._mouthTimer = null;
     this._simulating = false;
     this._emotionListeners = [];  // 监听 emotion 变化
+    this.fitFactor = 0.7;  // 留 30% 边距（桌面默认 0.94）
   }
   onEmotion(fn) { this._emotionListeners.push(fn); }
   _emitEmotion(emotion) { for (const fn of this._emotionListeners) try { fn(emotion); } catch (e) {} }
@@ -197,10 +198,13 @@ class Live2DDemo {
   _fit() {
     if (!this.model || !this.app) return;
     const w = this.app.screen.width, h = this.app.screen.height;
-    const s = Math.min((w / this.model.width) * 0.94, (h / this.model.height) * 0.94);
-    this.model.scale.set(s);
+    // 与桌面版 live2d_bridge.html 完全一致：手动按 canvas 尺寸算 scale
+    // fitFactor 0.7 留 30% 边距（桌面默认 0.94，demo 用更大边距让 UI 不被遮挡）
+    const scale = Math.min((w / this.model.width) * this.fitFactor, (h / this.model.height) * this.fitFactor);
+    this.model.scale.set(scale);
     try { this.model.anchor.set(0.5, 0.5); } catch (e) {}
-    this.model.x = w / 2; this.model.y = h / 2;
+    this.model.x = w / 2;
+    this.model.y = h / 2;
   }
   _refreshControls() {
     const ctrl = document.getElementById("controls");
@@ -318,6 +322,34 @@ class TTSBridge {
     this.voices = this.synth.getVoices().filter(v => v.lang.startsWith("zh") || v.lang.startsWith("en"));
     // 也保留所有 voice（包括 ja、ko 等），让用户自由选
     this.allVoices = this.synth.getVoices();
+    // 启动后默认锁定 Xiaoxiao（找不到再降级）
+    if (!this._pinnedVoice) {
+      this._autoPickDefault();
+    }
+  }
+  _autoPickDefault() {
+    if (!this.allVoices || this.allVoices.length === 0) return;
+    // 优先级：Xiaoxiao/小晓 > 第一个 zh-CN female voice > 第一个 voice
+    const pref = [
+      /xiaoxiao.*online.*natural/i,
+      /microsoft\s+xiaoxiao/i,
+      /小晓/,
+    ];
+    let voice = null;
+    for (const re of pref) {
+      voice = this.allVoices.find(v => re.test(v.name));
+      if (voice) break;
+    }
+    if (!voice) {
+      // 找第一个 zh-CN 女声
+      voice = this.allVoices.find(v =>
+        v.lang.toLowerCase().startsWith("zh-cn") && /female|女/i.test(v.name)
+      ) || this.allVoices.find(v => v.lang.toLowerCase().startsWith("zh"));
+    }
+    if (voice) {
+      this._pinnedVoice = voice;
+      console.log(`[TTS] 默认锁定语音：${voice.name}（${voice.lang}）`);
+    }
   }
   listVoices() {
     return this.voices.map((v, i) => ({
