@@ -169,8 +169,14 @@ class Live2DDemo {
       const motions = (model.internalModel && model.internalModel.settings.motions) || {};
       this._refreshControls();
       hideLoader();
-      setStatus(`就绪 · ${exprs.length} 表情 / ${Object.keys(motions).length} 组动作`, "#55efc4");
+      const llmTag = window.llm.hasKey() ? ` 🧠${window.llm.cfg.model}` : " 🎭mock";
+      setStatus(`就绪 · ${exprs.length} 表情 / ${Object.keys(motions).length} 组动作${llmTag}`, "#55efc4");
       log(`模型加载完成：${exprs.length} 表情 / ${Object.keys(motions).length} 组动作`, "ok");
+      if (window.llm.hasKey()) {
+        log(`✅ LLM 已配置：${window.llm.status()}`, "ok");
+      } else {
+        log(`ℹ️ 未配置 LLM API，桌宠用 mock 回复（点 🧠 LLM 按钮填 key 启用真模型）`, "ok");
+      }
       if (window.startIdleBehavior) window.startIdleBehavior();
       this._emitEmotion("neutral");
       return { expressions: exprs, motions };
@@ -582,12 +588,98 @@ class TraceDashboard {
 window.trace = new TraceDashboard();
 
 // ============================================================
-// 8. 主动搭话（按时间上下文生成 mock 关心话语）
+// 8. LLM 桥接（OpenAI 兼容 API；支持填 key + 切 base_url）
+// ============================================================
+class LLMBridge {
+  constructor() {
+    this.cfg = this._loadCfg();
+  }
+  _loadCfg() {
+    try {
+      return JSON.parse(localStorage.getItem("llm_cfg") || "{}");
+    } catch { return {}; }
+  }
+  _saveCfg() {
+    localStorage.setItem("llm_cfg", JSON.stringify(this.cfg));
+  }
+  setConfig({ baseUrl, apiKey, model, systemPrompt }) {
+    this.cfg = {
+      baseUrl: (baseUrl || this.cfg.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, ""),
+      apiKey: apiKey || this.cfg.apiKey || "",
+      model: model || this.cfg.model || "gpt-4o-mini",
+      systemPrompt: systemPrompt || this.cfg.systemPrompt ||
+        "你是桌宠「小白」，性格温柔黏人。回复 1-2 句话（30 字以内），像真人对主人说话。",
+    };
+    this._saveCfg();
+  }
+  hasKey() { return !!(this.cfg.apiKey && this.cfg.apiKey.length > 10); }
+  status() { return this.hasKey() ? `${this.cfg.model} @ ${this.cfg.baseUrl}` : "未配置"; }
+
+  // OpenAI 兼容 /chat/completions（流式）
+  async chatStream(messages, onDelta, onDone, onError) {
+    if (!this.hasKey()) {
+      onError && onError(new Error("未配置 API key"));
+      return;
+    }
+    try {
+      const resp = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.cfg.model,
+          messages: [{ role: "system", content: this.cfg.systemPrompt }, ...messages],
+          stream: true,
+          temperature: 0.8,
+          max_tokens: 200,
+        }),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let fullText = "";
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t || !t.startsWith("data:")) continue;
+          const payload = t.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const obj = JSON.parse(payload);
+            const delta = obj.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              fullText += delta;
+              onDelta && onDelta(delta, fullText);
+            }
+          } catch (e) {}
+        }
+      }
+      onDone && onDone(fullText);
+    } catch (e) {
+      onError && onError(e);
+    }
+  }
+}
+window.llm = new LLMBridge();
+
+// ============================================================
+// 9. 主动搭话（用 LLM API 生成，mock 兜底）
 // ============================================================
 class ProactiveBrain {
   constructor() {
     this.lastRemarks = [];
-    this.minMin = 1;   // demo 用 1-2 分钟（桌面 25-45 分钟太长）
+    this.minMin = 1;
     this.maxMin = 2;
     this._timer = null;
   }
@@ -611,28 +703,64 @@ class ProactiveBrain {
     if (h < 18) return "下午";
     return "晚上";
   }
-  _fire() {
+  async _fire() {
     this._schedule();
     const timeCtx = this._getTimeContext();
     const memorySample = window.memory.recent(3).map(m => m.content);
-    const candidates = [
-      `主人现在是${timeCtx}，要不要休息一下？${memorySample.length ? '上次你说 ' + memorySample[0].slice(0, 15) + '，进展如何？' : ''}`,
-      `今天${timeCtx}好，记得多喝水呀～`,
-      `主人看起来坐了很久了，起来动一动吧！`,
-      `我刚才在发呆想主人～${memorySample.length > 1 ? '对了，' + memorySample[1].slice(0, 15) + '，后续怎么样了？' : ''}`,
-      `${timeCtx}安，要不要听一首歌？`,
-      `主人，我在呢，有事随时叫我。`,
-    ];
-    const remark = candidates[Math.floor(Math.random() * candidates.length)];
-    if (this.lastRemarks.includes(remark)) return;
-    this.lastRemarks.push(remark);
-    if (this.lastRemarks.length > 3) this.lastRemarks.shift();
+
+    // mock 兜底（无 API key 时）
+    const fallback = () => {
+      const candidates = [
+        `主人现在是${timeCtx}，要不要休息一下？${memorySample.length ? '上次你说 ' + memorySample[0].slice(0, 15) + '，进展如何？' : ''}`,
+        `今天${timeCtx}好，记得多喝水呀～`,
+        `主人看起来坐了很久了，起来动一动吧！`,
+        `我刚才在发呆想主人～${memorySample.length > 1 ? '对了，' + memorySample[1].slice(0, 15) + '，后续怎么样了？' : ''}`,
+        `${timeCtx}安，要不要听一首歌？`,
+        `主人，我在呢，有事随时叫我。`,
+      ];
+      const remark = candidates[Math.floor(Math.random() * candidates.length)];
+      if (this.lastRemarks.includes(remark)) return;
+      this.lastRemarks.push(remark);
+      if (this.lastRemarks.length > 3) this.lastRemarks.shift();
+      this._show(remark);
+    };
+
+    // 真实 LLM（有 API key 时）
+    if (window.llm.hasKey()) {
+      try {
+        const messages = [{
+          role: "user",
+          content: `现在是${timeCtx}。${memorySample.length ? '最近记忆：' + memorySample.join('；') : ''}
+请用 1 句话（≤30 字）主动搭话主人，像真人在微信里突然冒出来。`
+        }];
+        const text = await new Promise((resolve, reject) => {
+          window.llm.chatStream(
+            messages,
+            () => {},  // 流式增量暂不处理
+            (full) => resolve(full),
+            (err) => reject(err)
+          );
+        });
+        const remark = text.trim();
+        if (!remark || this.lastRemarks.includes(remark)) return fallback();
+        this.lastRemarks.push(remark);
+        if (this.lastRemarks.length > 3) this.lastRemarks.shift();
+        window.trace.add("proactive", remark);
+        return this._show(remark);
+      } catch (e) {
+        log(`⚠️ LLM 调用失败：${e.message}（用 mock 兜底）`, "err");
+        return fallback();
+      }
+    }
+    fallback();
+  }
+
+  _show(remark) {
     log(`💭 ProactiveBrain 主动搭话：${remark}`, "ok");
     window.trace.add("remark", remark);
-    // 桌面情绪映射（简化：按时段）
+    const timeCtx = this._getTimeContext();
     const emotion = timeCtx === "上午" ? "happy" : timeCtx === "下午" ? "neutral" : "sleepy";
     window.demo._emitEmotion(emotion);
-    // TTS + UI 显示
     window.tts.speak(remark);
     appendChatBubble("proactive", remark);
   }
@@ -727,19 +855,60 @@ async function handleUserInput(text) {
     window.demo._emitEmotion("happy");
     return;
   }
-  // 5. 模拟"智能体"回复（mock LLM）
-  window.trace.add("llm_call", "mock chat");
-  await new Promise(r => setTimeout(r, 300));
-  const fallbackReplies = [
-    `主人说的是「${t.slice(0, 20)}${t.length > 20 ? '…' : ''}」对吧？我想想...`,
-    `嗯嗯，我听到了。`,
-    `好的，主人。${t.endsWith('?') || t.endsWith('？') ? '让我想想这个问题...' : ''}`,
-    `收到～`,
+  // 5. 真实 LLM 调用（OpenAI 兼容 API；mock 兜底）
+  window.trace.add("llm_call", `chat("${t.slice(0, 30)}${t.length > 30 ? '…' : ''}")`);
+  const memoryCtx = window.memory.recent(3).map(m => m.content).join('；');
+
+  if (!window.llm.hasKey()) {
+    // 无 API key：mock 兜底
+    await new Promise(r => setTimeout(r, 300));
+    const fallbackReplies = [
+      `主人说的是「${t.slice(0, 20)}${t.length > 20 ? '…' : ''}」对吧？我想想...`,
+      `嗯嗯，我听到了。`,
+      `好的，主人。${t.endsWith('?') || t.endsWith('？') ? '让我想想这个问题...' : ''}`,
+      `收到～`,
+    ];
+    const reply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
+    window.trace.add("llm_response", reply);
+    appendChatBubble("assistant", reply);
+    window.tts.speak(reply);
+    return;
+  }
+
+  // 真 API 调用
+  const messages = [
+    { role: "user", content: t },
+    ...(memoryCtx ? [{ role: "system", content: `主人最近记忆：${memoryCtx}` }] : []),
   ];
-  const reply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
-  window.trace.add("llm_response", reply);
-  appendChatBubble("assistant", reply);
-  window.tts.speak(reply);
+
+  // 增量显示（流式）
+  const bubble = document.createElement("div");
+  bubble.className = "bubble bubble-assistant";
+  bubble.textContent = "…";
+  chatEl.appendChild(bubble);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  while (chatEl.children.length > 6) chatEl.removeChild(chatEl.firstChild);
+
+  try {
+    let reply = "";
+    await window.llm.chatStream(
+      messages,
+      (delta, full) => { reply = full; bubble.textContent = full; chatEl.scrollTop = chatEl.scrollHeight; },
+      (full) => {
+        reply = full.trim() || "（模型未返回）";
+        bubble.textContent = reply;
+        window.trace.add("llm_response", reply);
+        window.tts.speak(reply);
+      },
+      (err) => {
+        bubble.textContent = `❌ 调用失败：${err.message}`;
+        log(`❌ LLM 调用失败：${err.message}`, "err");
+      }
+    );
+  } catch (e) {
+    bubble.textContent = `❌ ${e.message}`;
+    log(`❌ LLM 异常：${e.message}`, "err");
+  }
 }
 
 // ============================================================
@@ -906,6 +1075,26 @@ if (tavilyBtn) {
       localStorage.setItem("tavily_api_key", key);
       log(`Tavily key ${key ? "已设置" : "已清空"}`, "ok");
     }
+  });
+}
+
+// LLM API 配置（OpenAI 兼容）
+const llmBtn = document.getElementById("llm-btn");
+if (llmBtn) {
+  llmBtn.addEventListener("click", () => {
+    const cur = window.llm.cfg;
+    // 用 prompt 分多步收集（demo 简单实现，未来可换 form modal）
+    const baseUrl = prompt("Base URL (OpenAI 兼容)：", cur.baseUrl || "https://api.openai.com/v1");
+    if (!baseUrl) return;
+    const apiKey = prompt("API Key：", cur.apiKey || "");
+    if (!apiKey) return;
+    const model = prompt("模型名（如 gpt-4o-mini / deepseek-chat / qwen-turbo）：", cur.model || "gpt-4o-mini");
+    if (!model) return;
+    const sysDefault = "你是桌宠「小白」，性格温柔黏人。回复 1-2 句话（30 字以内），像真人对主人说话。";
+    const systemPrompt = prompt("System Prompt（回车用默认）：", cur.systemPrompt || sysDefault) || sysDefault;
+    window.llm.setConfig({ baseUrl, apiKey, model, systemPrompt });
+    log(`✅ LLM 已配置：${window.llm.status()}`, "ok");
+    log(`现在桌宠会调用真实 LLM 生成回复（不再用 mock）`, "ok");
   });
 }
 
