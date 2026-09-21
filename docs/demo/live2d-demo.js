@@ -82,16 +82,29 @@ class Live2DDemo {
     if (this.app) return;
     if (typeof PIXI === "undefined") throw new Error("PIXI 未加载");
     const stage = document.getElementById("stage");
+    const w = Math.max(stage.clientWidth, 400);
+    const h = Math.max(stage.clientHeight, 400);
     this.app = new PIXI.Application({
       backgroundAlpha: 0, antialias: true, autoDensity: true,
       resolution: Math.min(window.devicePixelRatio || 1, 1.5),
       autoStart: true,
-      width: stage.clientWidth || 800,
-      height: stage.clientHeight || 800,
+      width: w,
+      height: h,
     });
     stage.appendChild(this.app.view);
     this.app.ticker.maxFPS = 30;
-    window.addEventListener("resize", () => this._fit());
+    // resize 监听：画布跟着容器走
+    const onResize = () => {
+      if (!this.app) return;
+      const nw = Math.max(stage.clientWidth, 400);
+      const nh = Math.max(stage.clientHeight, 400);
+      this.app.renderer.resize(nw, nh);
+      this._fit();
+    };
+    window.addEventListener("resize", onResize);
+    // 首次延迟 100ms 再 fit（确保 CSS 布局完成）
+    setTimeout(onResize, 100);
+    setTimeout(onResize, 500);
   }
   async loadModel(modelUrl) {
     if (!modelUrl) throw new Error("model URL 为空");
