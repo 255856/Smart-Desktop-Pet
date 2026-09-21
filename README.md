@@ -17,21 +17,21 @@
 
 ## 它能做什么？
 
-- **🧠 真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 max_turns → 工具结果直接总结），可选 **LangChain** 后端
-- **🛠️ 32 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
-- **💾 真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
-- **🎤 真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
-- **🎨 真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
-- **🎮 真玩法**：**五子棋**（3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
-- **🧩 真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
-- **📊 可观测**：所有 LLM/工具调用落 SQLite，**FastAPI Dashboard** (`localhost:8766`) 可视化 Trace、回放、调参
+- **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 max_turns → 工具结果直接总结），可选 **LangChain** 后端
+- **32个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
+- **真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
+- **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
+- **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
+- **真玩法**：**五子棋**（3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
+- **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
+- **可观测**：所有 LLM/工具调用落 SQLite，**FastAPI Dashboard** (`localhost:8766`) 可视化 Trace、回放、调参
 
 ---
 
-## 🚀 5 分钟跑起来
+## 5 分钟跑起来
 
 > **目标**：克隆 → 安装 → 配置 → 启动桌宠 → 看 UI
-> **依赖**：Python 3.10+、Windows / macOS / Linux、4GB 内存
+> **依赖**：Python 3.10+、Windows 4GB 内存
 
 ### 第 1 步：克隆仓库
 
@@ -115,7 +115,7 @@ python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Liv
 
 ---
 
-## 📁 项目结构
+## 项目结构
 
 ```
 Smart-Desktop-Pet/
@@ -153,11 +153,11 @@ Smart-Desktop-Pet/
 
 ---
 
-## 📚 文档导航
+## 文档导航
 
 | 文档 | 看什么 |
 |---|---|
-| 🎬 **[Live2D 在线 Demo](https://255856.github.io/Smart-Desktop-Pet/)** | 浏览器直接看 Hiyori 真实渲染（含 TTS/ASR/主动搭话/Trace） |
+| **[Live2D 在线 Demo](https://255856.github.io/Smart-Desktop-Pet/)** | 浏览器直接看 Hiyori 真实渲染（含 TTS/ASR/主动搭话/Trace） |
 | [docs/quickstart.md](docs/quickstart.md) | 5 分钟极简版（跳过 README 的炫技部分） |
 | [docs/architecture.md](docs/architecture.md) | 启动时序 + Live2D 渲染子图 + Agent 流程图 |
 | [docs/config-reference.md](docs/config-reference.md) | `config.yaml` 全部字段（默认/范围/说明） |
@@ -172,7 +172,7 @@ Smart-Desktop-Pet/
 
 ---
 
-## ❓ FAQ
+## FAQ
 
 - **桌宠启动后看不到？** 看右下角系统托盘，单击显隐，或右键菜单 → 显示桌宠
 - **聊天窗闪退？** 看 `crash.log` 末尾错误；删 `data/chat_history.json` 重试
@@ -186,7 +186,7 @@ Smart-Desktop-Pet/
 
 ---
 
-## 📜 License
+## License
 
 **MIT** — 代码部分。
 
@@ -194,7 +194,7 @@ Smart-Desktop-Pet/
 
 ---
 
-## 🤝 贡献
+## 贡献
 
 PR 欢迎！请先读：
 - [docs/dev-testing.md](docs/dev-testing.md) — 测试约定
@@ -203,7 +203,7 @@ PR 欢迎！请先读：
 
 ---
 
-# 🌐 5-Min Quick Start
+# 5-Min Quick Start
 
 > **Goal**: clone → install → configure → launch → see the pet
 > **Deps**: Python 3.10+, Windows/macOS/Linux, 4GB RAM

@@ -686,10 +686,16 @@ class LLMBridge {
       const decoder = new TextDecoder("utf-8");
       let fullText = "";
       let buf = "";
+      let rawBuf = "";          // 未清洗的原始缓冲（用于 finalize）
+      let inThink = false;       // 是否在 <think>...</think> 内
+      const THINK_OPEN_RE = /<think>/gi;
+      const THINK_CLOSE_RE = /<\/think>/gi;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        buf += chunk;
+        rawBuf += chunk;
         const lines = buf.split("\n");
         buf = lines.pop() || "";
         for (const line of lines) {
@@ -699,19 +705,81 @@ class LLMBridge {
           if (payload === "[DONE]") continue;
           try {
             const obj = JSON.parse(payload);
-            const delta = obj.choices?.[0]?.delta?.content || "";
-            if (delta) {
-              fullText += delta;
-              onDelta && onDelta(delta, fullText);
+            const choice = obj.choices?.[0] || {};
+            const delta = choice.delta || {};
+            // 1) reasoning_content / reasoning 字段（DeepSeek-r1 / Ollama qwen-thinking）
+            const reasoningChunk = delta.reasoning_content || delta.reasoning || "";
+            // 2) content 字段里可能夹杂 <think>...</think>
+            let contentChunk = delta.content || "";
+            if (contentChunk) {
+              // 维护 inThink 状态（流式 chunk 可能被切断在 <think> 中间）
+              let cleaned = contentChunk;
+              // 处理跨 chunk 的 <think>...</think>
+              if (inThink) {
+                const closeIdx = cleaned.search(/<\/think>/i);
+                if (closeIdx >= 0) {
+                  cleaned = cleaned.slice(closeIdx + cleaned.match(/<\/think>/i)[0].length);
+                  inThink = false;
+                } else {
+                  cleaned = "";
+                }
+              }
+              // 剩余 chunk 里出现新的 <think> → 切到丢弃模式
+              const openMatch = cleaned.match(/<think>/gi);
+              if (openMatch) {
+                let dropFrom = -1;
+                for (const m of cleaned.matchAll(/<think>/gi)) {
+                  dropFrom = m.index;
+                  break;
+                }
+                if (dropFrom >= 0) {
+                  cleaned = cleaned.slice(0, dropFrom);
+                  inThink = true;
+                }
+              }
+              contentChunk = cleaned;
+            }
+            // 合并到 rawBuf 供最终清洗
+            if (contentChunk || reasoningChunk) {
+              fullText += contentChunk;
+              // 仅把"真正显示"的内容传给 onDelta（reasoning 一律不显示）
+              if (contentChunk) onDelta && onDelta(contentChunk, fullText);
             }
           } catch (e) {}
         }
       }
+      // 最终全量清洗（流式 chunk 不剥的多余空白 + 表情标签）
+      fullText = sanitizeLLMText(fullText, true);
       onDone && onDone(fullText);
     } catch (e) {
       onError && onError(e);
     }
   }
+}
+
+// LLM 输出清洗：剥离 <think>...</think> 残留、情绪标签、emoji、多余空白
+function sanitizeLLMText(text, isFinal = true) {
+  if (!text) return text;
+  // 1) 残留 <think>...</think>（流式 chunk 边界可能漏掉）
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  text = text.replace(/<think>[\s\S]*$/gi, "");   // 未闭合的起始标签
+  text = text.replace(/<\/think>/gi, "");         // 孤立闭合标签
+  // 2) 情绪标签（最终回复不允许出现）
+  if (isFinal) {
+    text = text.replace(/\[\s*(?:happy|sad|angry|surprised|sleepy|neutral|neutral2|talk|joy|smile|laugh|shy|confuse|shock|worry|anger|disgust|love|fun|bored|excited|thinking|greeting|thinking1|thinking2|thinking3|thinking4)\s*[,\s\]]/gi, " ");
+    // 3) emoji + 装饰符号
+    text = text.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F2FF}]/gu, "");
+    text = text.replace(/[✨★☆♥♡♪♫]/g, "");
+    // 4) 多余空白
+    text = text.replace(/[ \t]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n");
+    text = text.trim();
+    // 5) 整段中文占比 < 15% → 视为英文 CoT 漏入正文，整体丢弃
+    if (text) {
+      const cjk = [...text].filter(ch => /[\u4e00-\u9fff\u3040-\u30ff]/.test(ch)).length;
+      if (cjk / text.length < 0.15) text = "";
+    }
+  }
+  return text;
 }
 window.llm = new LLMBridge();
 
