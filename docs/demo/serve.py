@@ -89,6 +89,8 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
     # ---------- 路由 ----------
     def translate_path(self, path: str) -> str:
         """默认走 --root；/models/* 改走 --model-dir。"""
+        # 剥离 query string / fragment，避免 index.html?lang=en 被当成文件名
+        path = path.split("?", 1)[0].split("#", 1)[0]
         if self.model_dir and (path == "/models" or path.startswith("/models/")):
             rel = path[len("/models"):].lstrip("/")
             target = (self.model_dir / rel).resolve()
@@ -101,8 +103,9 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         return str(safe_resolve(self.server_root, path) or self.server_root)
 
     def do_GET(self):
-        # 根路径 → 跳 index.html
-        if self.path in ("/", ""):
+        # 根路径（允许带 query）→ 跳 index.html
+        path_only = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path_only in ("/", ""):
             self.path = "/index.html"
             return super().do_GET()
         # 目录 → 渲染简易索引
