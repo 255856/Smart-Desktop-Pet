@@ -9,9 +9,9 @@ on:
       - '.github/workflows/deploy-demo.yml'
   workflow_dispatch:
 
-# 权限：让 GH Actions 能写 gh-pages 分支和开 Pages
+# 权限：pages + id-token 用于部署；只读取仓库内容（模型从 gh-pages 分支拉取，不回写）
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -27,8 +27,18 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Checkout
+      - name: Checkout master（页面/逻辑源码）
         uses: actions/checkout@v4
+        with:
+          path: main
+
+      - name: Checkout gh-pages（取大模型 Hiyori）
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+        # 模型仅存放在 gh-pages 分支（不进 master），若该分支不存在也不阻断其余部署
+        continue-on-error: true
 
       - name: Setup Pages
         id: pages
@@ -36,20 +46,31 @@ jobs:
 
       - name: Build demo artifact
         run: |
-          mkdir -p _demo
-          cp docs/demo/index.html _demo/
-          cp docs/demo/live2d-demo.js _demo/
-          # serve.py 是给本地用的，不发布到 Pages；README/DEPLOY 也不发布
-          # （_demo/ 整个目录会被上传到 gh-pages 根）
+          set -e
+          mkdir -p _demo/vendor
 
-          # 把 hiyori_zh-Hans 也拷过去（33MB，Live2D 官方允许 demo 用）
-          # 注：master 的 .gitignore 排除了 hiyori_zh-Hans/，但 gh-pages 分支独立，
-          #     deploy 步骤绕过 .gitignore 直接复制。这样 GitHub Pages 部署版本能
-          #     自动加载 Hiyori Pro 真模型（零配置）。
-          if [ -d docs/demo/hiyori_zh-Hans ]; then
-            echo "Including hiyori_zh-Hans (Live2D official sample, ~33MB)"
-            cp -r docs/demo/hiyori_zh-Hans _demo/
+          # 页面与逻辑（master 最新版）
+          cp main/docs/demo/index.html _demo/
+          cp main/docs/demo/live2d-demo.js _demo/
+
+          # 渲染库（必须，否则线上无法加载 PIXI / Cubism Core）
+          cp main/docs/demo/vendor/pixi.min.js _demo/vendor/
+          cp main/docs/demo/vendor/live2dcubismcore.min.js _demo/vendor/
+
+          # 内置 Hiyori 模型（约 45MB，仅存在于 gh-pages 分支，保持 master 轻量）
+          if [ -d pages/hiyori_zh-Hans ]; then
+            echo "Including Hiyori from gh-pages branch"
+            cp -r pages/hiyori_zh-Hans _demo/
+          else
+            echo "::warning::未在 gh-pages 分支找到 hiyori_zh-Hans，线上将无法零配置加载内置模型"
           fi
+
+          # 功能对齐报告（附加静态页）
+          cp main/docs/demo/FEATURE_ALIGNMENT.html _demo/ 2>/dev/null || true
+
+          echo "---- _demo 目录结构 ----"
+          du -sh _demo
+          find _demo -maxdepth 2 -type d | sort
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
