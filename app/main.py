@@ -154,7 +154,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-banner", action="store_true",
                    help="关闭启动横幅（纯日志输出）")
     p.add_argument("--with-dashboard", action="store_true",
-                   help="启动时自动打开 Web Dashboard (http://127.0.0.1:8765)")
+                   help="启动时自动打开 Agent Trace 面板 (http://127.0.0.1:8766)")
     return p.parse_args()
 
 
@@ -292,8 +292,44 @@ def _build_tts(cfg, root: Path) -> TTS:
 # ============================================================================
 
 
-def start_dashboard_subprocess(root: Path, port: int = 8765) -> int | None:
-    """后台启动 Dashboard 进程，返回 PID 或 None。"""
+# 本地服务端口：纯静态 Live2D Demo（主入口，8765）与 FastAPI Agent Trace（开发者，8766）
+DEMO_PORT = 8765
+TRACE_PORT = 8766
+
+
+def start_demo_subprocess(root: Path, port: int = DEMO_PORT) -> int | None:
+    """后台启动纯静态 Live2D Demo（docs/demo/serve.py）。
+
+    返回 PID（新启动）/ -1（端口已有服务）/ None（文件缺失或启动失败）。
+    """
+    import subprocess
+    serve = root / "docs" / "demo" / "serve.py"
+    if not serve.is_file():
+        log.warning("Demo 服务脚本不存在：%s", serve)
+        return None
+    if _port_listening(port):
+        return -1
+    log_file = root / "data" / "demo.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(serve), "--port", str(port),
+             "--root", str(root)],
+            cwd=str(root),
+            stdout=open(log_file, "ab"),
+            stderr=subprocess.STDOUT,
+            creationflags=(subprocess.DETACHED_PROCESS
+                           | subprocess.CREATE_NO_WINDOW
+                           if os.name == "nt" else 0),
+        )
+        return proc.pid
+    except Exception as e:  # noqa: BLE001
+        log.warning("Demo 启动失败：%s", e)
+        return None
+
+
+def start_dashboard_subprocess(root: Path, port: int = TRACE_PORT) -> int | None:
+    """后台启动 FastAPI Agent Trace 进程，返回 PID 或 None。"""
     import subprocess
     log_file = root / "data" / "dashboard.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -359,7 +395,7 @@ def start_tts_api_subprocess(root: Path, port: int = 9880) -> int | None:
         return None
 
 
-def wait_dashboard_ready(port: int = 8765, timeout: float = 8.0) -> bool:
+def wait_dashboard_ready(port: int = DEMO_PORT, timeout: float = 8.0) -> bool:
     """等待 Dashboard 在 :port 监听起来。"""
     import socket
     import time
@@ -557,8 +593,9 @@ class App:
             root, cfg, self.state_mgr, self.pet, self.tts,
             self.brain, self.motion,
         )
-        # Dashboard 状态记录
-        self._dashboard_pid: int | None = None
+        # 本地服务进程状态记录
+        self._dashboard_pid: int | None = None  # FastAPI Agent Trace（TRACE_PORT）
+        self._demo_pid: int | None = None        # 纯静态 Live2D Demo（DEMO_PORT）
 
         banner.section("⑧ 启动")
         self.state_mgr.start()
@@ -591,30 +628,53 @@ class App:
         except Exception as e:  # noqa: BLE001
             log.warning("mode 切换回调异常：%s", e)
 
+    def _start_demo(self) -> bool:
+        """启动纯静态 Live2D Demo 服务并打开浏览器。"""
+        port = DEMO_PORT
+        pid = start_demo_subprocess(self.root, port=port)
+        if pid is None:
+            self.banner.fail("Live2D Demo 启动失败", "查看 data/demo.log")
+            return False
+        self._demo_pid = pid
+        if wait_dashboard_ready(port=port, timeout=6.0):
+            url = f"http://127.0.0.1:{port}/"
+            self.banner.ok("Live2D Demo", url)
+            QTimer.singleShot(300, lambda: open_in_browser(url))
+            return True
+        self.banner.warn("Live2D Demo 启动超时", "查看 data/demo.log")
+        return False
+
+    def open_demo(self) -> bool:
+        """给 UI 调用的『打开 Live2D Demo』：已在跑直接打开，否则启动。"""
+        port = DEMO_PORT
+        if _port_listening(port):
+            open_in_browser(f"http://127.0.0.1:{port}/")
+            return True
+        return self._start_demo()
+
     def _start_dashboard(self) -> bool:
-        """启动 Dashboard 子进程。"""
-        port = 8765
-        log.info("启动 Dashboard (port=%d)…", port)
+        """启动 FastAPI Agent Trace 子进程（开发者用，端口 8766）。"""
+        port = TRACE_PORT
+        log.info("启动 Agent Trace (port=%d)…", port)
         pid = start_dashboard_subprocess(self.root, port=port)
         if pid is None:
-            self.banner.fail("Dashboard 启动失败", "查看 data/dashboard.log")
+            self.banner.fail("Agent Trace 启动失败", "查看 data/dashboard.log")
             return False
         self._dashboard_pid = pid
         if wait_dashboard_ready(port=port, timeout=8.0):
             url = f"http://127.0.0.1:{port}"
-            self.banner.ok("Dashboard", f"{url}  (pid={pid})")
+            self.banner.ok("Agent Trace", f"{url}  (pid={pid})")
             self.banner.info("浏览器已自动打开",
-                            "也可用托盘菜单『📊 调试面板』随时打开")
-            # 稍等再开浏览器，避免阻塞
+                            "也可用托盘菜单『Agent Trace（开发）』随时打开")
             QTimer.singleShot(500, lambda: open_in_browser(url))
             return True
         else:
-            self.banner.warn("Dashboard 启动超时", "查看 data/dashboard.log")
+            self.banner.warn("Agent Trace 启动超时", "查看 data/dashboard.log")
             return False
 
     def open_dashboard(self) -> bool:
-        """给 UI 调用的『打开 Dashboard』：先看是否已启动，没启动就拉一个。"""
-        port = 8765
+        """给 UI 调用的『打开 Agent Trace』：先看是否已启动，没启动就拉一个。"""
+        port = TRACE_PORT
         import socket
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.3):
@@ -671,24 +731,24 @@ class App:
         self.ui._on_quick_chat_sent(text)
 
     def _quit(self):
-        # 关 Dashboard 子进程
-        if self._dashboard_pid:
-            try:
-                import psutil
-                p = psutil.Process(self._dashboard_pid)
-                p.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+        # 关本地服务子进程（Live2D Demo / Agent Trace）
+        for _pid in (self._demo_pid, self._dashboard_pid):
+            if _pid:
+                try:
+                    import psutil
+                    psutil.Process(_pid).terminate()
+                except Exception:  # noqa: BLE001
+                    pass
         self.ui._quit()
 
     def _on_about_to_quit(self):
-        if self._dashboard_pid:
-            try:
-                import psutil
-                p = psutil.Process(self._dashboard_pid)
-                p.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+        for _pid in (self._demo_pid, self._dashboard_pid):
+            if _pid:
+                try:
+                    import psutil
+                    psutil.Process(_pid).terminate()
+                except Exception:  # noqa: BLE001
+                    pass
         self.ui._on_about_to_quit()
 
 

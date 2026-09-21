@@ -75,6 +75,17 @@ data/
 # ZCode 本地会话配置
 .zcode/
 .agents/plans/
+# 计划 / 进度 / 草稿类文档（只保留本地，不入库）
+**/plans/
+*.plan.md
+*PLAN*.md
+*TODO*.md
+*ROADMAP*.md
+*NEXT_STEPS*.md
+*计划*.md
+*进度*.md
+*待办*.md
+*规划*.md
 # Mimosa 安全扫描工具的本地 cache（每次扫描会重建）
 .mimosa/
 # 日志与预览截图产物

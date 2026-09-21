@@ -191,7 +191,8 @@ class UIController(QObject):
         self.tray.act_show.triggered.connect(self.pet.show)
         self.tray.act_chat.triggered.connect(self._show_chat_window)
         self.tray.act_settings.triggered.connect(self._show_settings)
-        self.tray.act_dashboard.triggered.connect(self._open_dashboard)
+        self.tray.act_demo.triggered.connect(self._open_demo)
+        self.tray.act_trace.triggered.connect(self._open_trace)
         self.tray.act_memory.triggered.connect(self._show_memory_popup)
 
         # --- PetWindow 右键菜单信号 ---
@@ -745,26 +746,41 @@ class UIController(QObject):
         sw.raise_()
         sw.activateWindow()
 
-    def _open_dashboard(self) -> None:
-        """打开 Web Dashboard：先看 App 是否暴露了 open_dashboard，否则自启。"""
+    def _open_demo(self) -> None:
+        """打开纯静态 Live2D Demo（本地 8765）：优先用 App 入口，否则直接启子进程。"""
+        app = self._find_app()
+        if app is not None and hasattr(app, "open_demo"):
+            app.open_demo()
+            return
+        from app.main import (start_demo_subprocess, wait_dashboard_ready,
+                              open_in_browser, DEMO_PORT)
+        from pathlib import Path
+        root = Path.cwd()
+        if start_demo_subprocess(root, port=DEMO_PORT) is None:
+            self.pet.show_bubble("Live2D Demo 启动失败", duration_ms=3000)
+            return
+        if wait_dashboard_ready(port=DEMO_PORT, timeout=6.0):
+            open_in_browser(f"http://127.0.0.1:{DEMO_PORT}/")
+        else:
+            self.pet.show_bubble("Live2D Demo 启动超时", duration_ms=3000)
+
+    def _open_trace(self) -> None:
+        """打开 FastAPI Agent Trace 可视化面板（开发者，8766）。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_dashboard"):
             app.open_dashboard()
+            return
+        from app.main import (start_dashboard_subprocess, wait_dashboard_ready,
+                              open_in_browser, TRACE_PORT)
+        from pathlib import Path
+        root = Path.cwd()
+        if start_dashboard_subprocess(root, port=TRACE_PORT) is None:
+            self.pet.show_bubble("Agent Trace 启动失败", duration_ms=3000)
+            return
+        if wait_dashboard_ready(port=TRACE_PORT, timeout=8.0):
+            open_in_browser(f"http://127.0.0.1:{TRACE_PORT}")
         else:
-            # 退化：直接启子进程
-            from app.main import start_dashboard_subprocess, wait_dashboard_ready, open_in_browser
-            import time
-            from pathlib import Path
-            root = Path.cwd()
-            pid = start_dashboard_subprocess(root, port=8765)
-            if pid is None:
-                self.pet.show_bubble("⚠️ Dashboard 启动失败", duration_ms=3000)
-                return
-            if wait_dashboard_ready(port=8765, timeout=8.0):
-                self.pet.show_bubble("📊 Dashboard 已打开", duration_ms=2000)
-                open_in_browser("http://127.0.0.1:8765")
-            else:
-                self.pet.show_bubble("⚠️ Dashboard 启动超时", duration_ms=3000)
+            self.pet.show_bubble("Agent Trace 启动超时", duration_ms=3000)
 
     def _find_app(self):
         """找到 App 实例（通过 Qt 顶层窗口反查不靠谱，用 App 注入更稳）。"""

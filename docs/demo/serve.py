@@ -103,9 +103,22 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         return str(safe_resolve(self.server_root, path) or self.server_root)
 
     def do_GET(self):
-        # 根路径（允许带 query）→ 跳 index.html
+        # 根路径（允许带 query）
         path_only = self.path.split("?", 1)[0].split("#", 1)[0]
         if path_only in ("/", ""):
+            if (self.server_root / "index.html").is_file():
+                # 静态根本身就是 demo 目录（默认启动）
+                self.path = "/index.html"
+                return super().do_GET()
+            # 静态根为项目根（--root .）时，根路径没有 index.html，重定向到内置 demo
+            if (self.server_root / "docs" / "demo" / "index.html").is_file():
+                target = "/docs/demo/index.html"
+                if "?" in self.path:
+                    target += "?" + self.path.split("?", 1)[1]
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.end_headers()
+                return
             self.path = "/index.html"
             return super().do_GET()
         # 目录 → 渲染简易索引

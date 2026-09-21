@@ -503,7 +503,13 @@ QMenu::right-arrow {{
 def style_menu(menu: QMenu) -> None:
     """给菜单（及其子菜单）套用圆角卡片皮肤。"""
     menu.setStyleSheet(MENU_QSS)
-    # 圆角需要透明背景，否则 QSS 圆角外露出系统底色
+    # 圆角需要透明背景，否则 QSS 圆角外露出系统底色；
+    # 同时去掉 Windows 系统矩形阴影（阴影层是矩形，会在圆角四个角露出黑边）。
+    menu.setWindowFlags(
+        menu.windowFlags()
+        | Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.NoDropShadowWindowHint
+    )
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     for child in menu.findChildren(QMenu):
         style_menu(child)

@@ -644,7 +644,8 @@ class ChatWindow(QWidget):
     def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
         """生成圆形头像 QPixmap（外圈 2px 白边）。
 
-        bot 角色：角色头像图（居中裁剪成圆）；无图则用首字 + 粉紫渐变。
+        bot 角色：统一使用项目图标 assets/icon.ico（居中裁剪成圆）；
+                  图标缺失时回退角色首帧，再无图则用首字 + 粉紫渐变。
         user 角色：首字「我」+ 蓝色渐变。
         """
         pm = QPixmap(size, size)
@@ -654,7 +655,11 @@ class ChatWindow(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
 
         if role == "bot":
-            src = QPixmap(str(self._avatar_path)) if self._avatar_path else QPixmap()
+            # 聊天窗桌宠头像统一使用 assets/icon.ico；缺失时回退角色首帧
+            icon = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
+            src = QPixmap(str(icon)) if icon.is_file() else QPixmap()
+            if src.isNull() and self._avatar_path:
+                src = QPixmap(str(self._avatar_path))
             if not src.isNull():
                 # 先画白色底圆（即 2px 白边）
                 p.setBrush(QColor(255, 255, 255))
@@ -730,12 +735,12 @@ class ChatWindow(QWidget):
         结构（从上到下）：
             ┌──────────────────────────────────────────────┐
             │ 头像  鲸鱼娘                                  │
-            │       模型 · 工具数 · 记忆数   [🧹清空] [📊调试] │   ← 标题
+            │       模型 · 工具数 · 记忆数   [清空] [Demo]  │   ← 标题
             ├──────────────────────────────────────────────┤
             │ ┌──────────────────────────────────────────┐ │   ← 能力展示面板
             │ │ [聊天陪伴] [定时提醒] [记住事实]          │ │
             │ │ [打开应用] [查时间/单位/农历] [看桌面]      │ │
-            │ │ [多智能体协作] [可视化调试面板]            │ │
+            │ │ [多智能体协作] [Live2D Demo]              │ │
             │ └──────────────────────────────────────────┘ │
             ├──────────────────────────────────────────────┤
             │                                              │
@@ -802,11 +807,11 @@ class ChatWindow(QWidget):
         self.btn_clear.clicked.connect(self._on_clear)
         hl.addWidget(self.btn_clear)
 
-        self.btn_dashboard = QPushButton("调试")
-        self.btn_dashboard.setObjectName("ghost_btn")
-        self.btn_dashboard.setToolTip("打开可视化调试面板 http://127.0.0.1:8765")
-        self.btn_dashboard.clicked.connect(self._open_dashboard)
-        hl.addWidget(self.btn_dashboard)
+        self.btn_demo = QPushButton("Demo")
+        self.btn_demo.setObjectName("ghost_btn")
+        self.btn_demo.setToolTip("打开本地 Live2D 演示页 http://127.0.0.1:8765")
+        self.btn_demo.clicked.connect(self._open_demo)
+        hl.addWidget(self.btn_demo)
 
         self.btn_memory = QPushButton("记忆")
         self.btn_memory.setObjectName("ghost_btn")
@@ -865,7 +870,7 @@ class ChatWindow(QWidget):
         # / 命令补全
         self._cmd_completer = _CommandCompleter(self.input_edit, [
             "/状态", "/喂 ", "/记 ", "/时间", "/说 ", "/帮助", "/记忆",
-            "/提醒", "/清除", "/调试", "/打开 ",
+            "/提醒", "/清除", "/demo", "/调试", "/打开 ",
         ])
         il.addWidget(self.input_edit)
 
@@ -987,20 +992,37 @@ class ChatWindow(QWidget):
         self._memory_dlg.raise_()
         self._memory_dlg.activateWindow()
 
-    def _open_dashboard(self) -> None:
-        """托盘 / 标题栏共享：打开调试面板。"""
+    def _open_demo(self) -> None:
+        """打开纯静态 Live2D Demo（本地 8765）。"""
+        app = self._find_app()
+        if app is not None and hasattr(app, "open_demo"):
+            app.open_demo()
+            return
+        from app.main import (start_demo_subprocess, wait_dashboard_ready,
+                              open_in_browser, DEMO_PORT)
+        from pathlib import Path
+        pid = start_demo_subprocess(Path.cwd(), port=DEMO_PORT)
+        if pid is not None and wait_dashboard_ready(port=DEMO_PORT, timeout=6.0):
+            open_in_browser(f"http://127.0.0.1:{DEMO_PORT}/")
+            self._append_system_msg("Live2D Demo 已打开 (http://127.0.0.1:8765/)")
+        else:
+            self._append_system_msg("Live2D Demo 启动失败，查看 data/demo.log")
+
+    def _open_trace(self) -> None:
+        """打开 FastAPI Agent Trace（开发者，8766）。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_dashboard"):
             app.open_dashboard()
+            return
+        from app.main import (start_dashboard_subprocess, wait_dashboard_ready,
+                              open_in_browser, TRACE_PORT)
+        from pathlib import Path
+        pid = start_dashboard_subprocess(Path.cwd(), port=TRACE_PORT)
+        if pid is not None and wait_dashboard_ready(port=TRACE_PORT, timeout=8.0):
+            open_in_browser(f"http://127.0.0.1:{TRACE_PORT}")
+            self._append_system_msg("Agent Trace 已打开 (http://127.0.0.1:8766)")
         else:
-            from app.main import start_dashboard_subprocess, wait_dashboard_ready, open_in_browser
-            from pathlib import Path
-            pid = start_dashboard_subprocess(Path.cwd(), port=8765)
-            if pid and wait_dashboard_ready(port=8765, timeout=8.0):
-                open_in_browser("http://127.0.0.1:8765")
-                self._append_system_msg("📊 调试面板已打开 (http://127.0.0.1:8765)")
-            else:
-                self._append_system_msg("⚠️ 调试面板启动失败，查看 data/dashboard.log")
+            self._append_system_msg("Agent Trace 启动失败，查看 data/dashboard.log")
 
     def _find_app(self):
         qa = QApplication.instance()
@@ -1130,7 +1152,7 @@ class ChatWindow(QWidget):
         # 帮助
         if cmd in ("/帮助", "/help", "/?"):
             self._append_system_msg(
-                "💡 命令：/喂 /状态 /时间 /记 /说 /记忆 /提醒 /清除 /调试 /打开")
+                "命令：/喂 /状态 /时间 /记 /说 /记忆 /提醒 /清除 /demo /调试 /打开")
             self._render_message(Message(
                 role="assistant",
                 content=(
@@ -1143,7 +1165,8 @@ class ChatWindow(QWidget):
                     "• /记忆      — 看长期记忆\n"
                     "• /提醒      — 看/管提醒\n"
                     "• /清除      — 清空聊天上下文（不影响长期记忆）\n"
-                    "• /调试      — 打开 Dashboard\n"
+                    "• /demo      — 打开 Live2D Demo 演示页\n"
+                    "• /调试      — 打开 Agent Trace 调试面板（开发）\n"
                     "• /打开 名称 — 打开应用（如 /打开 记事本）"
                 ),
             ))
@@ -1176,9 +1199,12 @@ class ChatWindow(QWidget):
                         role="assistant", content=f"⏰ {result}"))
             return
 
-        # /调试：打开 Dashboard
+        # /demo：打开 Live2D Demo；/调试：打开 Agent Trace（开发者）
+        if cmd == "/demo":
+            self._open_demo()
+            return
         if cmd == "/调试":
-            self._open_dashboard()
+            self._open_trace()
             return
 
         # /打开

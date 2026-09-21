@@ -302,6 +302,13 @@ class PetWindow(QWidget):
         self._bubble_text: str = ""
         self._bubble_until: float = 0.0
         self._streaming_bubble: bool = False
+        self._bubble_stream_last: float = 0.0
+        # 自动隐藏定时器：独立于渲染模式（帧动画 / Live2D 都生效）。
+        # 以前隐藏逻辑写在帧计时器里，Live2D 模式下不执行，导致气泡一直停留。
+        self._bubble_timer = QTimer(self)
+        self._bubble_timer.setInterval(250)
+        self._bubble_timer.timeout.connect(self._check_bubble_timeout)
+        self._bubble_timer.start()
 
         # VPet 同款状态栏（透明背景，小进度条显示关键指标）
         self._status_bar: Optional[QWidget] = None
@@ -440,7 +447,27 @@ class PetWindow(QWidget):
                                10 + self._bubble_label.height() - 4)
         self._bubble_tail.show()
 
+    def _hide_bubble(self) -> None:
+        self._bubble_text = ""
+        self._bubble_label.hide()
+        self._bubble_tail.hide()
+
+    def _check_bubble_timeout(self) -> None:
+        # 周期检查：到期的普通气泡自动隐藏；流式气泡长时间无更新也收尾
+        if not self._bubble_text:
+            return
+        now = time.time()
+        if self._streaming_bubble:
+            # 兜底：60s 没收到新流式内容（停止/异常路径漏发 done）时强制收尾
+            if self._bubble_stream_last and now - self._bubble_stream_last > 60.0:
+                self.stop_streaming_bubble()
+            return
+        if now >= self._bubble_until:
+            self._hide_bubble()
+
     def show_bubble(self, text: str, duration_ms: int = 4000) -> None:
+        # 普通气泡按 duration 自动隐藏；复位流式标记，避免上次流式残留导致不消失
+        self._streaming_bubble = False
         self._bubble_text = text if len(text) <= 60 else text[:57] + "…"
         self._bubble_until = time.time() + duration_ms / 1000.0
         self._bubble_label.setText(self._bubble_text)
@@ -455,6 +482,7 @@ class PetWindow(QWidget):
         if len(display) > 120:
             display = display[:117] + "…"
         self._bubble_text = display
+        self._bubble_stream_last = time.time()
         self._bubble_until = time.time() + 9999.0  # 不自动隐藏
         self._bubble_label.setText(display)
         self._place_bubble()
@@ -617,12 +645,6 @@ class PetWindow(QWidget):
         if frame_idx < 0 or frame_idx >= len(anim.frames):
             return
         duration_ms = max(1, anim.frames[frame_idx].duration_ms)
-
-        # 自动隐藏气泡（流式气泡在结束前不自动隐藏）
-        if self._bubble_text and not self._streaming_bubble and time.time() >= self._bubble_until:
-            self._bubble_text = ""
-            self._bubble_label.hide()
-            self._bubble_tail.hide()
 
         # PR-bugfix: 重用同一个 QTimer 实例。先 stop 旧 timer 避免多 timer 并发。
         if self._frame_timer is None:

@@ -8,7 +8,7 @@
     - GET  /api/memory   —— 当前 memory.json 内容
 
 启动：
-    python -m app.web.dashboard --port 8765
+    python -m app.web.dashboard --port 8766
 """
 from __future__ import annotations
 
@@ -659,7 +659,7 @@ def create_app(trace_db: str | Path,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--trace-db", default="data/traces.db")
     parser.add_argument("--memory-file", default="data/memory.json")
     parser.add_argument("--reload", action="store_true")
