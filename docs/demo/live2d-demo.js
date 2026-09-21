@@ -92,19 +92,32 @@ class Live2DDemo {
       height: h,
     });
     stage.appendChild(this.app.view);
+    // 让 canvas CSS 跟随 stage 容器大小（PIXI Application canvas 是绝对定位元素）
+    const canvas = this.app.view;
+    canvas.style.position = "absolute";
+    canvas.style.top = "0";
+    canvas.style.left = "0";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    canvas.style.display = "block";
     this.app.ticker.maxFPS = 30;
     // resize 监听：画布跟着容器走
     const onResize = () => {
       if (!this.app) return;
       const nw = Math.max(stage.clientWidth, 400);
       const nh = Math.max(stage.clientHeight, 400);
-      this.app.renderer.resize(nw, nh);
+      // 同时改 PIXI 内部 size + canvas style
+      if (this.app.renderer.width !== nw || this.app.renderer.height !== nh) {
+        this.app.renderer.resize(nw, nh);
+      }
       this._fit();
     };
     window.addEventListener("resize", onResize);
-    // 首次延迟 100ms 再 fit（确保 CSS 布局完成）
-    setTimeout(onResize, 100);
-    setTimeout(onResize, 500);
+    // 多次延迟 fit（确保 CSS 布局完成 + 窗口 resize 后再 fit）
+    setTimeout(onResize, 50);
+    setTimeout(onResize, 200);
+    setTimeout(onResize, 600);
+    setTimeout(onResize, 1500);
   }
   async loadModel(modelUrl) {
     if (!modelUrl) throw new Error("model URL 为空");
