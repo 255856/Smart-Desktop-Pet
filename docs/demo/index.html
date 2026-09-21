@@ -311,40 +311,71 @@
   #log .err{ color:#e0506e; }
   #log .ok{ color:#17a673; }
 
-  /* ---------------- 环境提示 toast ---------------- */
-  #env-banner{
-    position:absolute; top:14px; left:50%; transform:translateX(-50%);
-    width:min(720px,92vw); z-index:13; display:flex; align-items:center; gap:10px;
-    padding:10px 14px; border-radius:13px;
-    background:rgba(255,250,235,.95); backdrop-filter:blur(12px);
-    border:1px solid rgba(240,196,90,.4); color:#8a6d3b;
-    font-size:12px; line-height:1.6; box-shadow:var(--shadow-sm);
+  /* ---------------- 自定义弹窗 Modal ---------------- */
+  .modal-overlay{
+    position:fixed; inset:0; z-index:100;
+    background:rgba(58,53,80,.34);
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+    opacity:0; pointer-events:none; transition:opacity .22s ease;
   }
-  #env-banner.hidden{ display:none; }
-  #env-banner .label{
-    background:linear-gradient(135deg,#ffd98a,#ffb86b); color:#7a4a12;
-    padding:2px 9px; border-radius:7px; font-weight:700; font-size:10.5px; white-space:nowrap;
+  .modal-overlay.show{ opacity:1; pointer-events:auto; }
+  .modal{
+    width:min(460px,94vw); max-height:86vh; display:flex; flex-direction:column;
+    background:rgba(255,255,255,.985); border:1px solid var(--line);
+    border-radius:22px; overflow:hidden;
+    box-shadow:0 26px 70px rgba(74,62,140,.30);
+    transform:translateY(14px) scale(.97); opacity:0;
+    transition:transform .26s cubic-bezier(.2,.9,.3,1.25), opacity .22s ease;
   }
-  #env-banner code{
-    background:rgba(180,140,40,.12); padding:1px 6px; border-radius:5px;
-    color:#7a5a12; font-family:ui-monospace,Menlo,monospace;
+  .modal-overlay.show .modal{ transform:none; opacity:1; }
+  .modal-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:20px 22px 6px;
   }
-  #env-banner .close{
-    margin-left:auto; width:24px; height:24px; flex-shrink:0; border:none; cursor:pointer;
-    background:transparent; color:#a8873f; border-radius:7px; font-size:15px; line-height:1;
+  .modal-title{ font-size:15.5px; font-weight:700; color:var(--ink); letter-spacing:.2px; }
+  .modal-body{ padding:6px 22px 18px; overflow-y:auto; }
+  .modal-text{ font-size:13.5px; color:#6b6584; line-height:1.75; }
+  .modal-foot{
+    display:flex; justify-content:flex-end; gap:10px;
+    padding:13px 22px 19px; border-top:1px solid var(--line);
+    background:rgba(247,246,255,.65);
   }
-  #env-banner .close:hover{ background:rgba(180,140,40,.15); }
-
-  /* ---------------- 拖拽提示 ---------------- */
-  #drop-hint{
-    position:absolute; inset:12px; border:2px dashed rgba(124,108,240,.5);
-    border-radius:20px; display:none; flex-direction:column; gap:12px;
-    align-items:center; justify-content:center;
-    background:rgba(139,124,246,.12); font-size:16px; color:var(--brand-d);
-    pointer-events:none; z-index:20;
+  .modal-btn{
+    min-width:76px; padding:9px 20px; border-radius:12px; font-size:13px; font-weight:600;
+    cursor:pointer; border:1px solid transparent; transition:all .16s ease; font-family:inherit;
   }
-  #drop-hint svg{ width:36px; height:36px; stroke:var(--brand); }
-  #drop-hint.show{ display:flex; }
+  .modal-btn.primary{
+    background:linear-gradient(135deg,var(--brand),var(--brand-d));
+    color:#fff; box-shadow:0 6px 16px rgba(139,124,246,.32);
+  }
+  .modal-btn.primary:hover{ filter:brightness(1.05); transform:translateY(-1px); }
+  .modal-btn.primary.danger{ background:linear-gradient(135deg,#ff7b90,#e0506e); box-shadow:0 6px 16px rgba(224,80,110,.30); }
+  .modal-btn.ghost{ background:#fff; color:var(--ink-2); border-color:var(--line); }
+  .modal-btn.ghost:hover{ background:#f5f4fc; color:var(--ink); }
+  .modal-field{ display:block; margin-top:14px; }
+  .modal-field:first-child{ margin-top:6px; }
+  .modal-label{ display:block; font-size:12px; font-weight:600; color:var(--ink-2); margin-bottom:6px; }
+  .modal-input{
+    width:100%; box-sizing:border-box;
+    padding:9px 12px; border-radius:11px; border:1px solid var(--line);
+    background:#fff; font-size:13px; color:var(--ink); outline:none; font-family:inherit;
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .modal-input:focus{ border-color:var(--brand); box-shadow:0 0 0 3px rgba(139,124,246,.15); }
+  .modal-input.invalid{ border-color:#e0506e; box-shadow:0 0 0 3px rgba(224,80,110,.12); }
+  textarea.modal-input{ resize:vertical; line-height:1.6; }
+  .modal-list{ display:flex; flex-direction:column; gap:8px; margin:6px 0 4px; }
+  .modal-list-row{
+    background:var(--brand-soft); border:1px solid rgba(139,124,246,.14);
+    border-radius:12px; padding:10px 13px;
+  }
+  .modal-list-meta{ font-size:11px; color:var(--brand-d); font-weight:600; margin-bottom:3px; }
+  .modal-list-text{ font-size:13px; color:#5b5574; line-height:1.55; word-break:break-word; }
+  .modal-empty{ text-align:center; color:var(--ink-3); font-size:13px; padding:28px 0; }
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+  }
 
   .footer-note{
     text-align:center; padding:7px 16px; font-size:10.5px; color:#a8a3c0;
@@ -389,13 +420,6 @@
       <div id="stage"></div>
 
       <div id="loader"><div class="spinner"></div><div id="loader-text" data-i18n="loading">加载中…</div></div>
-
-      <!-- 环境提示（GitHub Pages 访问时出现，可关闭） -->
-      <div id="env-banner" class="hidden">
-        <span class="label" data-i18n="env_label">提示</span>
-        <span id="env-banner-text"></span>
-        <button class="close" id="env-banner-close" aria-label="close">×</button>
-      </div>
 
       <!-- 调试面板（默认收起，顶栏终端图标切换） -->
       <div id="debug-panel">
@@ -461,9 +485,8 @@
               </div>
             </div>
             <div class="fp-group">
-              <h4 data-i18n="g_model">模型与密钥</h4>
+              <h4 data-i18n="g_model">服务密钥</h4>
               <div class="fp-row">
-                <button id="load-url-btn" data-i18n="load_model_url">加载模型 URL</button>
                 <button id="tavily-btn" data-i18n="tavily_key">Tavily Key（搜索）</button>
                 <button id="llm-btn" data-i18n="llm_key">LLM Key（真实对话）</button>
               </div>
@@ -483,11 +506,6 @@
         </button>
       </div>
 
-      <!-- 拖拽提示 -->
-      <div id="drop-hint">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span data-i18n="drop_hint">松开以加载 .model3.json 链接</span>
-      </div>
     </div>
   </div>
 
@@ -495,6 +513,15 @@
     Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。
     模型文件<strong>不包含</strong>，需自备合法授权的 Live2D 模型。
     <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>
+  </div>
+</div>
+
+<!-- 自定义弹窗（替代原生 prompt/alert/confirm） -->
+<div id="modal-overlay" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><div class="modal-title"></div></div>
+    <div class="modal-body"></div>
+    <div class="modal-foot"></div>
   </div>
 </div>
 
@@ -509,7 +536,6 @@
     zh: {
       status_init: "正在初始化",
       loading: "加载中…",
-      env_label: "提示",
       clear: "清空",
       model_official: "Live2D 官方样例模型",
       g_motion: "角色动作",
@@ -534,16 +560,14 @@
       forget_memory: "遗忘记忆",
       add_reminder: "添加提醒",
       reminder_list: "提醒列表",
-      g_model: "模型与密钥",
-      load_model_url: "加载模型 URL",
+      g_model: "服务密钥",
       tavily_key: "Tavily Key（搜索）",
       llm_key: "LLM Key（真实对话）",
       hold_to_talk: "按住说话",
       listening: "正在听…",
       chat_placeholder: "和桌宠聊天：搜索、记住、提醒、换装…",
       send: "发送",
-      drop_hint: "松开以加载 .model3.json 链接",
-      footer_note: 'Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。模型文件<strong>不包含</strong>，需自备合法授权的 Live2D 模型。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
+      footer_note: 'Live2D 渲染 · TTS · ASR · 工具调用 · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori</strong> 用于演示。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
 
       loading_model: "加载模型…",
       status_loading: "加载中…",
@@ -559,15 +583,6 @@
       status_from_unavailable: "Live2DModel.from 不可用",
       status_pixi_init_failed: "PIXI 初始化失败",
       status_ready_loading: "就绪 · 正在加载内置模型…",
-      url_prompt: "输入 .model3.json 的 http(s) URL：",
-      drop_local_file: "网页版受浏览器安全限制，无法直接读取本地模型文件。\n请拖入 .model3.json 的 http(s) 链接，或改用桌面版加载本地模型。",
-      drop_no_url: "未识别到链接，请拖入 .model3.json 的 http(s) URL。",
-      url_err_scheme: "URL 必须以 http:// 或 https:// 开头（不要用 file:// 或 E:/ 本地路径）",
-      url_err_protocol: "协议必须是 http 或 https",
-      url_err_loopback: "禁止访问 loopback / 私有 IP",
-      url_err_localpath: "URL 不能是 Windows 本地路径（如 E:/...）",
-      url_err_format: "URL 格式错误：{msg}",
-      url_err_empty: "URL 为空",
       err_no_key: "未配置 API key",
       err_prefix: "出错了：",
       model_empty: "（模型未返回）",
@@ -627,13 +642,29 @@
       voice_reco: " ·推荐", voice_male: " 男", voice_female: " 女",
       unit_sec: "秒", unit_min: "分钟", unit_hour: "小时",
 
-      env_banner: '你正在访问 <strong>GitHub Pages 部署版</strong>（{host}）。这里 <strong>无法直接加载你本机的模型</strong>（127.0.0.1 指向 GitHub 服务器，不是你电脑）。要加载自己的模型：在仓库根运行 <code>python docs/demo/serve.py --port 8765 --root .</code>，然后访问 <code>http://127.0.0.1:8765/docs/demo/index.html</code>。'
+      modal_ok: "确定",
+      modal_cancel: "取消",
+      modal_close: "关闭",
+      modal_save: "保存",
+      modal_empty: "暂无内容",
+      tavily_title: "Tavily 搜索密钥",
+      llm_title: "LLM 对话配置",
+      llm_configured_log: "已切换为真实 LLM 回复（停用 mock）",
+      llm_need_key: "请填写 API Key，否则继续使用 mock 回复",
+      forget_title: "遗忘记忆",
+      forget_keyword: "关键词",
+      remind_title: "新建提醒",
+      remind_minutes: "多少分钟后提醒",
+      remind_content_label: "提醒内容",
+      mem_title: "长期记忆",
+      rem_title: "提醒事项",
+      mem_at: "记忆于",
+      rem_at: "将于",
     },
 
     en: {
       status_init: "Initializing",
       loading: "Loading…",
-      env_label: "Notice",
       clear: "Clear",
       model_official: "Official Live2D sample",
       g_motion: "Motion",
@@ -658,16 +689,14 @@
       forget_memory: "Forget",
       add_reminder: "Remind me",
       reminder_list: "Reminders",
-      g_model: "Model & Keys",
-      load_model_url: "Load Model URL",
+      g_model: "API Keys",
       tavily_key: "Tavily Key (Search)",
       llm_key: "LLM Key (Live Chat)",
       hold_to_talk: "Hold to talk",
       listening: "Listening…",
       chat_placeholder: "Chat with your pet: search, remember, remind…",
       send: "Send",
-      drop_hint: "Drop to load a .model3.json link",
-      footer_note: 'Live2D · TTS · ASR · Tools · Long-term memory · Proactive chat · Agent Trace. Model files are <strong>not included</strong>; use a properly licensed Live2D model. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
+      footer_note: 'Live2D · TTS · ASR · Tools · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample model Hiyori</strong> for demo use. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
 
       loading_model: "Loading model…",
       status_loading: "Loading…",
@@ -683,15 +712,6 @@
       status_from_unavailable: "Live2DModel.from unavailable",
       status_pixi_init_failed: "PIXI init failed",
       status_ready_loading: "Ready · loading built-in model…",
-      url_prompt: "Enter the http(s) URL of a .model3.json:",
-      drop_local_file: "Browsers can't read local model files directly.\nPlease drop an http(s) link to a .model3.json, or use the desktop app for local files.",
-      drop_no_url: "No link recognized. Please drop an http(s) .model3.json URL.",
-      url_err_scheme: "URL must start with http:// or https:// (not file:// or a local path like E:/).",
-      url_err_protocol: "Protocol must be http or https",
-      url_err_loopback: "Loopback / private IP addresses are not allowed",
-      url_err_localpath: "URL can't be a Windows local path (e.g. E:/...).",
-      url_err_format: "Invalid URL: {msg}",
-      url_err_empty: "URL is empty",
       err_no_key: "API key is not configured",
       err_prefix: "Error: ",
       model_empty: "(no response)",
@@ -751,7 +771,24 @@
       voice_reco: " ·pick", voice_male: " M", voice_female: " F",
       unit_sec: "sec", unit_min: "min", unit_hour: "hour",
 
-      env_banner: 'You are viewing the <strong>GitHub Pages deployment</strong> ({host}). It <strong>cannot load models from your own machine</strong> (127.0.0.1 points to GitHub, not your computer). To use your own model: run <code>python docs/demo/serve.py --port 8765 --root .</code> at the repo root, then open <code>http://127.0.0.1:8765/docs/demo/index.html</code>.'
+      modal_ok: "OK",
+      modal_cancel: "Cancel",
+      modal_close: "Close",
+      modal_save: "Save",
+      modal_empty: "Nothing here yet",
+      tavily_title: "Tavily Search Key",
+      llm_title: "LLM Chat Settings",
+      llm_configured_log: "Switched to real LLM replies (mock off)",
+      llm_need_key: "Please enter an API Key, otherwise mock replies continue",
+      forget_title: "Forget Memory",
+      forget_keyword: "Keyword",
+      remind_title: "New Reminder",
+      remind_minutes: "Remind in how many minutes",
+      remind_content_label: "Content",
+      mem_title: "Long-term Memory",
+      rem_title: "Reminders",
+      mem_at: "Remembered at",
+      rem_at: "Due at",
     }
   };
 

@@ -15,36 +15,8 @@
  */
 
 // ============================================================
-// 0. 工具：日志 / 加载状态 / 工具栏 / URL 安全校验
+// 0. 工具：日志 / 加载状态 / 工具栏
 // ============================================================
-// URL 校验：仅允许 http/https；拒绝 localhost/环回/私有 IP（根据 Mimosa 安全约束）
-// 注意：localhost 例外——本地 serve.py 场景需要
-const ALLOW_LOOPBACK = true;  // demo 允许 localhost（用户本地启动 serve.py）
-function validateModelUrl(url) {
-  if (!url || typeof url !== "string") return { ok: false, error: window.t("url_err_empty") };
-  const trimmed = url.trim();
-  // 自动修复：用户可能输入 "http:127.0.0.1..." 少一个斜杠 → "http://127.0.0.1..."
-  let fixed = trimmed;
-  fixed = fixed.replace(/^(https?):(?![\/\\])/i, "$1://");
-  if (!/^https?:\/\//i.test(fixed)) return { ok: false, error: window.t("url_err_scheme") };
-
-  try {
-    const u = new URL(fixed);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, error: window.t("url_err_protocol") };
-    const host = u.hostname.toLowerCase();
-    // 检测 localhost / 环回 / 私有 IP
-    const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]"
-                    || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
-                    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
-    if (isLoopback && !ALLOW_LOOPBACK) return { ok: false, error: window.t("url_err_loopback") };
-    // 检查 URL 是否是本地文件路径（兜底）
-    if (/^[a-z]:[\\\/]/i.test(trimmed)) return { ok: false, error: window.t("url_err_localpath") };
-    return { ok: true, url: fixed };
-  } catch (e) {
-    return { ok: false, error: window.t("url_err_format", { msg: (e.message || e) }) };
-  }
-}
-
 const logEl = document.getElementById("log");
 function log(msg, level = "") {
   const line = document.createElement("div");
@@ -130,9 +102,7 @@ class Live2DDemo {
   }
   async loadModel(modelUrl) {
     if (!modelUrl) throw new Error("model URL 为空");
-    // URL 校验：http/https only；host 是合法公网/本地（localhost 允许，因为 demo 要支持本地 serve.py）
-    const valid = validateModelUrl(modelUrl);
-    if (!valid.ok) throw new Error(valid.error);
+    // demo 仅加载内置官方模型（URL 由 loadBuiltinModel 基于当前页面构造），无需外部 URL 校验
 
     this.shutdown();
     this.ensureApp();
@@ -193,12 +163,9 @@ class Live2DDemo {
       hideLoader();
       setStatus(window.t("status_load_failed"), "#ff7675");
       const msg = err.message || String(err);
-      log(`加载失败：${msg}`, "err");
-      // 常见错误提示
+      log(`内置模型加载失败：${msg}`, "err");
       if (/Network error|fetch|404|403|Access-Control|CORS/i.test(msg)) {
-        log("排查：检查 URL 拼写；浏览器拒绝混合 http/https；服务器需带 Access-Control-Allow-Origin: *", "err");
-        log("如果用本地模型：在仓库根目录运行 python docs/demo/serve.py --model-dir <你的模型目录>，然后填 http://127.0.0.1:8765/...", "err");
-        log("GitHub Pages 部署版（https://255856.github.io/Smart-Desktop-Pet/）无法直接访问你本机的 127.0.0.1，参见顶部横幅", "err");
+        log("排查：网络或资源缺失，请检查网络后点击左下角刷新按钮重试", "err");
       }
       throw err;
     }
@@ -977,20 +944,193 @@ async function handleUserInput(text) {
 // ============================================================
 // 11. UI 绑定
 // ============================================================
-// 环境横幅：检测是 GitHub Pages 还是本地访问
-(function setupEnvBanner() {
-  const banner = document.getElementById("env-banner");
-  const text = document.getElementById("env-banner-text");
-  if (!banner || !text) return;
-  const host = location.hostname.toLowerCase();
-  const isGithubPages = /\.github\.io$/.test(host);
-  if (isGithubPages) {
-    text.innerHTML = window.t('env_banner', { host });
-    banner.classList.remove("hidden");
+// ============================================================
+// 自定义弹窗（替代原生 prompt / alert / confirm），Promise 风格
+// ============================================================
+const Modal = (function () {
+  const overlay = document.getElementById("modal-overlay");
+  const titleEl = overlay.querySelector(".modal-title");
+  const bodyEl = overlay.querySelector(".modal-body");
+  const footEl = overlay.querySelector(".modal-foot");
+  let lastFocus = null, keyHandler = null;
+
+  function show() {
+    lastFocus = document.activeElement;
+    overlay.classList.add("show");
+    document.body.style.overflow = "hidden";
   }
-  const closeBtn = document.getElementById("env-banner-close");
-  if (closeBtn) closeBtn.addEventListener("click", () => banner.classList.add("hidden"));
+  function hide() {
+    overlay.classList.remove("show");
+    document.body.style.overflow = "";
+    if (keyHandler) { document.removeEventListener("keydown", keyHandler); keyHandler = null; }
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+
+  function open(opt) {
+    return new Promise(function (resolve) {
+      titleEl.textContent = opt.title || "";
+      titleEl.parentElement.style.display = opt.title ? "flex" : "none";
+      bodyEl.innerHTML = "";
+      bodyEl.appendChild(opt.node);
+      footEl.innerHTML = "";
+
+      function finish(val) { hide(); resolve(val); }
+      const dismissable = opt.dismissable !== false;
+
+      if (opt.showCancel !== false) {
+        const c = document.createElement("button");
+        c.type = "button"; c.className = "modal-btn ghost";
+        c.textContent = opt.cancelText || window.t("modal_cancel");
+        c.addEventListener("click", function () { finish(null); });
+        footEl.appendChild(c);
+      }
+      const ok = document.createElement("button");
+      ok.type = "button";
+      ok.className = "modal-btn primary" + (opt.danger ? " danger" : "");
+      ok.textContent = opt.okText || window.t("modal_ok");
+      ok.addEventListener("click", async function () {
+        if (opt.onOk) {
+          let val;
+          try { val = await opt.onOk(); } catch (e) { val = false; }
+          if (val === false) return;          // 校验失败，保持弹窗
+          finish(val === undefined ? true : val);
+        } else {
+          finish(true);
+        }
+      });
+      footEl.appendChild(ok);
+
+      overlay.onclick = function (e) { if (dismissable && e.target === overlay) finish(null); };
+      keyHandler = function (e) {
+        if (!overlay.classList.contains("show")) return;
+        if (e.key === "Escape") { if (dismissable) finish(null); }
+        else if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") {
+          e.preventDefault(); ok.click();
+        }
+      };
+      document.addEventListener("keydown", keyHandler);
+      show();
+      if (opt.onShown) opt.onShown();
+    });
+  }
+
+  function textNode(text) {
+    const d = document.createElement("div");
+    d.className = "modal-text";
+    d.textContent = text || "";
+    return d;
+  }
+
+  function makeField(f) {
+    const wrap = document.createElement("label");
+    wrap.className = "modal-field";
+    if (f.label) {
+      const lab = document.createElement("span");
+      lab.className = "modal-label";
+      lab.textContent = f.label;
+      wrap.appendChild(lab);
+    }
+    let input;
+    if (f.textarea) {
+      input = document.createElement("textarea");
+      input.rows = f.rows || 3;
+    } else {
+      input = document.createElement("input");
+      input.type = f.type || "text";
+    }
+    input.className = "modal-input";
+    input.value = f.value || "";
+    if (f.placeholder) input.placeholder = f.placeholder;
+    if (f.autocomplete === false) input.setAttribute("autocomplete", "off");
+    wrap.appendChild(input);
+    f._input = input;
+    return wrap;
+  }
+
+  return {
+    alert: function (text, title) {
+      return open({ title: title, node: textNode(text), showCancel: false });
+    },
+    confirm: function (text, opts) {
+      opts = opts || {};
+      return open({ title: opts.title, node: textNode(text), okText: opts.okText, danger: opts.danger });
+    },
+    prompt: function (opts) {
+      const node = document.createElement("div");
+      if (opts.text) node.appendChild(textNode(opts.text));
+      const f = { label: opts.label, type: opts.type, value: opts.value,
+                  placeholder: opts.placeholder, textarea: opts.textarea, autocomplete: false };
+      node.appendChild(makeField(f));
+      return open({
+        title: opts.title, node: node, okText: opts.okText,
+        onShown: function () { f._input.focus(); if (f._input.select) { try { f._input.select(); } catch (e) {} } },
+        onOk: function () {
+          const v = f._input.value;
+          if (opts.required && !v.trim()) { f._input.classList.add("invalid"); return false; }
+          return opts.trim === false ? v : v.trim();
+        }
+      });
+    },
+    form: function (opts) {
+      const node = document.createElement("div");
+      if (opts.text) node.appendChild(textNode(opts.text));
+      const fields = opts.fields.map(makeField);
+      fields.forEach(function (fe) { node.appendChild(fe); });
+      const inputs = opts.fields.map(function (f) { return f._input; });
+      return open({
+        title: opts.title, node: node,
+        okText: opts.okText || window.t("modal_save"),
+        onShown: function () { if (inputs[0]) inputs[0].focus(); },
+        onOk: function () {
+          const values = {};
+          let bad = null;
+          for (let i = 0; i < opts.fields.length; i++) {
+            const f = opts.fields[i];
+            let v = inputs[i].value;
+            if (f.trim !== false) v = v.trim();
+            inputs[i].classList.remove("invalid");
+            values[f.name] = v;
+            let err = (f.required && !v) ? "required" : null;
+            if (!err && typeof f.validate === "function") err = f.validate(v, values);
+            if (err) { inputs[i].classList.add("invalid"); if (!bad) bad = inputs[i]; }
+          }
+          if (bad) { bad.focus(); return false; }
+          return values;
+        }
+      });
+    },
+    list: function (opts) {
+      const node = document.createElement("div");
+      node.className = "modal-list";
+      const items = opts.items || [];
+      if (!items.length) {
+        const e = document.createElement("div");
+        e.className = "modal-empty";
+        e.textContent = opts.emptyText || window.t("modal_empty");
+        node.appendChild(e);
+      } else {
+        items.forEach(function (it) {
+          const row = document.createElement("div");
+          row.className = "modal-list-row";
+          if (it.meta) {
+            const m = document.createElement("div");
+            m.className = "modal-list-meta";
+            m.textContent = it.meta;
+            row.appendChild(m);
+          }
+          const t = document.createElement("div");
+          t.className = "modal-list-text";
+          t.textContent = it.text;
+          row.appendChild(t);
+          node.appendChild(row);
+        });
+      }
+      return open({ title: opts.title, node: node, showCancel: false,
+                    okText: opts.okText || window.t("modal_close") });
+    }
+  };
 })();
+window.UI = Modal;
 
 // 内置 Hiyori Pro 模型（零配置自动加载）
 // GitHub Pages 部署：模型放在 gh-pages 根的 hiyori_zh-Hans/ 下，index.html 在根
@@ -1050,46 +1190,6 @@ async function loadBuiltinModel() {
   setStatus(window.t("status_builtin_missing"), "#ff7675");
   log("demo 内置的 Hiyori 模型未部署，请检查 hiyori_zh-Hans/ 目录", "err");
 }
-
-// 通过 URL 加载自定义 Live2D 模型（复用 loadModel 的校验）
-const loadUrlBtn = document.getElementById("load-url-btn");
-if (loadUrlBtn) {
-  loadUrlBtn.addEventListener("click", async () => {
-    const url = (prompt(window.t("url_prompt")) || "").trim();
-    if (!url) return;
-    const v = validateModelUrl(url);
-    if (!v.ok) { alert(v.error); return; }
-    showLoader(window.t("loading_model"));
-    try { await window.demo.loadModel(v.url); }
-    catch (e) { hideLoader(); setStatus(window.t("status_load_failed"), "#ff7675"); }
-  });
-}
-
-// 拖拽加载：网页安全限制下仅支持拖入 http(s) 的 .model3.json 链接；本地文件请用桌面版
-(function setupDrop() {
-  const hint = document.getElementById("drop-hint");
-  if (!hint) return;
-  let depth = 0;
-  window.addEventListener("dragenter", (e) => { e.preventDefault(); depth++; hint.classList.add("show"); });
-  window.addEventListener("dragover", (e) => { e.preventDefault(); });
-  window.addEventListener("dragleave", (e) => { e.preventDefault(); depth--; if (depth <= 0) { depth = 0; hint.classList.remove("show"); } });
-  window.addEventListener("drop", async (e) => {
-    e.preventDefault(); depth = 0; hint.classList.remove("show");
-    const dt = e.dataTransfer;
-    if (dt.files && dt.files.length) {
-      alert(window.t("drop_local_file"));
-      return;
-    }
-    const raw = dt.getData("text/uri-list") || dt.getData("text") || "";
-    const url = (raw.split(/\r?\n/).map(s => s.trim()).find(s => s && !s.startsWith("#"))) || "";
-    if (!url) { alert(window.t("drop_no_url")); return; }
-    const v = validateModelUrl(url);
-    if (!v.ok) { alert(v.error); return; }
-    showLoader(window.t("loading_model"));
-    try { await window.demo.loadModel(v.url); }
-    catch (err) { hideLoader(); setStatus(window.t("status_load_failed"), "#ff7675"); }
-  });
-})();
 
 document.getElementById("chat-btn").addEventListener("click", async () => {
   const text = document.getElementById("chat-input").value.trim();
@@ -1181,35 +1281,47 @@ if (ttsSel) {
   window.__refreshVoiceOptions = fillVoices;
 })();
 
-// Tavily key 配置
+// Tavily key 配置（自定义弹窗）
 const tavilyBtn = document.getElementById("tavily-btn");
 if (tavilyBtn) {
-  tavilyBtn.addEventListener("click", () => {
-    const key = prompt(window.t("tavily_prompt"), localStorage.getItem("tavily_api_key") || "");
-    if (key !== null) {
-      localStorage.setItem("tavily_api_key", key);
-      log(`Tavily key ${key ? "已设置" : "已清空"}`, "ok");
+  tavilyBtn.addEventListener("click", async () => {
+    const cur = localStorage.getItem("tavily_api_key") || "";
+    const v = await UI.prompt({
+      title: window.t("tavily_title"),
+      text: window.t("tavily_prompt"),
+      value: cur
+    });
+    if (v !== null) {
+      localStorage.setItem("tavily_api_key", v);
+      log(`Tavily key ${v ? window.t("tavily_set") : window.t("tavily_cleared")}`, "ok");
     }
   });
 }
 
-// LLM API 配置（OpenAI 兼容）
+// LLM API 配置（OpenAI 兼容，单个表单弹窗）
 const llmBtn = document.getElementById("llm-btn");
 if (llmBtn) {
-  llmBtn.addEventListener("click", () => {
+  llmBtn.addEventListener("click", async () => {
     const cur = window.llm.cfg;
-    // 用 prompt 分多步收集（demo 简单实现，未来可换 form modal）
-    const baseUrl = prompt(window.t("llm_base_url"), cur.baseUrl || "https://api.openai.com/v1");
-    if (!baseUrl) return;
-    const apiKey = prompt(window.t("llm_api_key"), cur.apiKey || "");
-    if (!apiKey) return;
-    const model = prompt(window.t("llm_model"), cur.model || "gpt-4o-mini");
-    if (!model) return;
-    const sysDefault = window.t("llm_default_sys");
-    const systemPrompt = prompt(window.t("llm_sysprompt"), cur.systemPrompt || sysDefault) || sysDefault;
-    window.llm.setConfig({ baseUrl, apiKey, model, systemPrompt });
+    const vals = await UI.form({
+      title: window.t("llm_title"),
+      fields: [
+        { name: "baseUrl", label: window.t("llm_base_url"), value: cur.baseUrl || "https://api.openai.com/v1" },
+        { name: "apiKey", label: window.t("llm_api_key"), value: cur.apiKey || "", type: "password", required: true },
+        { name: "model", label: window.t("llm_model"), value: cur.model || "gpt-4o-mini" },
+        { name: "systemPrompt", label: window.t("llm_sysprompt"), textarea: true, value: cur.systemPrompt || window.t("llm_default_sys") }
+      ]
+    });
+    if (!vals) return;
+    if (!vals.apiKey) { log(window.t("llm_need_key"), "err"); return; }
+    window.llm.setConfig({
+      baseUrl: vals.baseUrl || "https://api.openai.com/v1",
+      apiKey: vals.apiKey,
+      model: vals.model || "gpt-4o-mini",
+      systemPrompt: vals.systemPrompt || window.t("llm_default_sys")
+    });
     log(`LLM 已配置：${window.llm.status()}`, "ok");
-    log(`现在桌宠会调用真实 LLM 生成回复（不再用 mock）`, "ok");
+    log(window.t("llm_configured_log"), "ok");
   });
 }
 
@@ -1218,16 +1330,22 @@ const memBtn = document.getElementById("mem-btn");
 if (memBtn) {
   memBtn.addEventListener("click", () => {
     const items = window.memory.list();
-    if (items.length === 0) { appendChatBubble("assistant", window.t("mem_empty")); return; }
-    const summary = items.slice(-5).map(m => `· ${m.content}`).join("\n");
-    appendChatBubble("assistant", window.t("mem_recent", { n: items.length, s: summary }));
-    window.tts.speak(window.t("mem_tts", { n: items.length }));
+    UI.list({
+      title: window.t("mem_title") + (items.length ? ` · ${items.length}` : ""),
+      emptyText: window.t("mem_empty"),
+      items: items.slice().reverse().map(m => ({ meta: new Date(m.time).toLocaleString(), text: m.content }))
+    });
+    if (items.length) window.tts.speak(window.t("mem_tts", { n: items.length }));
   });
 }
 const forgetBtn = document.getElementById("forget-btn");
 if (forgetBtn) {
-  forgetBtn.addEventListener("click", () => {
-    const q = prompt(window.t("forget_prompt"));
+  forgetBtn.addEventListener("click", async () => {
+    const q = await UI.prompt({
+      title: window.t("forget_title"),
+      text: window.t("forget_prompt"),
+      label: window.t("forget_keyword")
+    });
     if (q) { window.memory.forget(q); }
   });
 }
@@ -1235,11 +1353,19 @@ if (forgetBtn) {
 // 提醒面板
 const remindBtn = document.getElementById("remind-btn");
 if (remindBtn) {
-  remindBtn.addEventListener("click", () => {
-    const mins = prompt(window.t("remind_mins_prompt"));
-    if (mins && !isNaN(parseInt(mins))) {
-      const content = prompt(window.t("remind_content_prompt")) || window.t("remind_default");
-      window.reminders.add(content, parseInt(mins));
+  remindBtn.addEventListener("click", async () => {
+    const v = await UI.form({
+      title: window.t("remind_title"),
+      fields: [
+        { name: "mins", label: window.t("remind_minutes"), type: "number", placeholder: "10",
+          required: true, validate: function (v) { return /^[1-9]\d*$/.test(v) ? null : "bad"; } },
+        { name: "content", label: window.t("remind_content_label"), placeholder: window.t("remind_default") }
+      ]
+    });
+    if (!v) return;
+    const mins = parseInt(v.mins, 10);
+    if (!isNaN(mins)) {
+      window.reminders.add(v.content || window.t("remind_default"), mins);
     }
   });
 }
@@ -1247,9 +1373,14 @@ const remindListBtn = document.getElementById("remind-list-btn");
 if (remindListBtn) {
   remindListBtn.addEventListener("click", () => {
     const items = window.reminders.list();
-    if (items.length === 0) { appendChatBubble("assistant", window.t("rem_empty")); return; }
-    const summary = items.map(r => `· ${new Date(r.fireAt).toLocaleTimeString()} - ${r.content}`).join("\n");
-    appendChatBubble("assistant", window.t("rem_list", { n: items.length, s: summary }));
+    UI.list({
+      title: window.t("rem_title") + (items.length ? ` · ${items.length}` : ""),
+      emptyText: window.t("rem_empty"),
+      items: items.map(r => ({
+        meta: window.t("rem_at") + " " + new Date(r.fireAt).toLocaleString(),
+        text: r.content
+      }))
+    });
   });
 }
 
