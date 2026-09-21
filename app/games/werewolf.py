@@ -94,6 +94,7 @@ class Player:
     has_antidote: bool = False
     has_poison: bool = False
     death_cause: str = ""
+    revealed: bool = False       # 是否被公开翻牌（身份对所有人可见）
 
     @property
     def is_wolf(self) -> bool:
@@ -228,6 +229,7 @@ class WerewolfGame:
             p.role = roles[i]
             p.alive = True
             p.death_cause = ""
+            p.revealed = False
             if p.role == WITCH:
                 p.has_antidote = True
                 p.has_poison = True
@@ -373,7 +375,10 @@ class WerewolfGame:
             return False
         if not self.players[target].alive or target == seat:
             return False
+        # 猎人开枪属于公开技能：猎人本人与被带走目标均翻牌
+        hunter.revealed = True
         self._kill_public(target, CAUSE_HUNTER)
+        self.players[target].revealed = True
         return True
 
     def can_hunt(self, seat: int) -> bool:
@@ -387,6 +392,15 @@ class WerewolfGame:
             return
         p.alive = False
         p.death_cause = cause
+
+    def reveal(self, seat: int) -> None:
+        """公开翻牌（如猎人发动技能），身份对所有人可见。"""
+        self.players[seat].revealed = True
+
+    def reveal_all(self) -> None:
+        """游戏结束：亮出全部身份。"""
+        for p in self.players:
+            p.revealed = True
 
     # ---------------- 胜负 ----------------
     def check_winner(self) -> Optional[str]:
@@ -406,12 +420,13 @@ class WerewolfGame:
         v = self.players[viewer]
         if target == viewer:
             return t.role
-        # 死者翻牌：所有人可见
-        if not t.alive:
-            return t.role
         # 狼队友互知
         if v.role == WOLF and t.role == WOLF:
             return WOLF
+        # 仅被公开翻牌者（猎人开枪 / 游戏结束）身份对所有人可见；
+        # 普通死亡（夜晚 / 投票）默认暗牌不公布
+        if getattr(t, "revealed", False):
+            return t.role
         return None
 
     def perspective(self, viewer: int) -> Dict[str, object]:
@@ -478,4 +493,4 @@ class WerewolfGame:
             for s in out.deaths:
                 p = self.players[s]
                 self.add_event(
-                    f"第 {out.day} 天：天亮了，{p.name}（{ROLE_LABEL[p.role]}）昨夜死亡。")
+                    f"第 {out.day} 天：天亮了，{p.seat}号 {p.name} 昨夜死亡。")

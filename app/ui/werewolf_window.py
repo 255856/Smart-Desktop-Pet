@@ -16,6 +16,7 @@ from app.core.qt_compat import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
     QColor, QObject, QEvent, QPushButton, Qt, QToolButton, QVBoxLayout,
     QGridLayout, QWidget, QDialog, Signal, QScrollArea, QSizePolicy,
+    QTimer,
 )
 from app.ui import ui_style
 from app.games.werewolf import ROLE_LABEL
@@ -220,6 +221,8 @@ class WerewolfWindow(QDialog):
         self.feed_layout.setSpacing(6)
         self.feed_layout.addStretch(1)
         self.feed.setWidget(feed_host)
+        self.feed.viewport().installEventFilter(self)
+        self.feed.installEventFilter(self)
         body.addWidget(self.feed)
 
         # 操作区（固定高度，随阶段切换）
@@ -257,6 +260,8 @@ class WerewolfWindow(QDialog):
     # ------------------------------------------------------------ 消息渲染
     def _append_message(self, kind: str, who: str, text: str,
                         color: str = "") -> None:
+        bar = self.feed.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 40
         box = QFrame()
         box.setObjectName({"host": "msg_host", "private": "msg_private",
                            "wolf": "msg_wolf"}.get(kind, "msg_plain"))
@@ -283,11 +288,32 @@ class WerewolfWindow(QDialog):
         h.addWidget(body)
         # 插到 stretch 之前
         self.feed_layout.insertWidget(self.feed_layout.count() - 1, box)
-        self._scroll_bottom()
+        if at_bottom:
+            self._scroll_bottom()
 
     def _scroll_bottom(self) -> None:
         bar = self.feed.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+        def _do() -> None:
+            # 新消息插入后布局高度在下一帧才更新，先刷新内部尺寸再滚到底
+            self.feed.widget().adjustSize()
+            self.feed.widget().updateGeometry()
+            bar.setValue(bar.maximum())
+
+        QTimer.singleShot(0, _do)
+
+    def eventFilter(self, obj, evt):
+        # 消息区滚轮滚动（在 viewport 与滚动区上都生效）
+        if evt.type() == QEvent.Type.Wheel and obj in (
+                self.feed, self.feed.viewport()):
+            bar = self.feed.verticalScrollBar()
+            delta = evt.angleDelta().y()
+            if delta:
+                steps = delta / 120.0
+                bar.setValue(bar.value() - int(steps * 90))
+                return True
+        return super().eventFilter(obj, evt)
 
     # ------------------------------------------------------------ 开始 / 介绍
     def _show_intro(self) -> None:
@@ -325,6 +351,7 @@ class WerewolfWindow(QDialog):
         d.wolf_chat.connect(self._on_wolf_chat)
         d.private_channel.connect(self._on_private)
         d.countdown.connect(self._on_countdown)
+        d.npc_phase.connect(self._on_npc_phase)
         d.state_changed.connect(self._on_state)
         d.request_action.connect(self._on_request_action)
         d.game_over.connect(self._on_game_over)
@@ -361,13 +388,33 @@ class WerewolfWindow(QDialog):
         self._append_message("wolf", f"🐺 {name}{tag} · 狼频道", text,
                              color="#b03a3a")
 
+    @staticmethod
+    def _fmt_clock(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
     def _on_countdown(self, seconds: int) -> None:
+        # 玩家操作倒计时（橙色）
         if seconds and seconds > 0:
-            self.timer_lbl.setText(f"⏱ {seconds}s")
+            self.timer_lbl.setStyleSheet(
+                "font-weight: 700; font-size: 10pt; color: #d97706;")
+            self.timer_lbl.setText(f"⏱ {self._fmt_clock(seconds)}")
         else:
             self.timer_lbl.setText("")
 
+    def _on_npc_phase(self, label: str, seconds: int) -> None:
+        # 等待 NPC 集体行动：灰色倒计时，提示仍在进行而非卡死
+        if label:
+            self.phase_lbl.setText(label)
+        self.timer_lbl.setStyleSheet(
+            "font-weight: 700; font-size: 10pt; color: #8a8f99;")
+        if seconds and seconds > 0:
+            self.timer_lbl.setText(f"⏳ {self._fmt_clock(seconds)}")
+        else:
+            self.timer_lbl.setText("⏳ 请稍候…")
+
     def _on_state(self, view: dict) -> None:
+        self._last_view = view
         self.day_lbl.setText(f"第 {view['day']} 天")
         # 座位
         seats = {s["seat"]: s for s in view["seats"]}
@@ -458,6 +505,16 @@ class WerewolfWindow(QDialog):
         text = (f"{title}\n你是{ROLE_LABEL.get(role, role)}，"
                 f"本局共 {result.get('days', 0)} 天，{camp}阵营获胜。")
         self._append_message("host", "🏁 游戏结束", text)
+        view = getattr(self, "_last_view", None)
+        if view:
+            parts = []
+            for s in view["seats"]:
+                r = s.get("role")
+                if r:
+                    parts.append(f"{s['seat']}号{s['name']}"
+                                 f"（{ROLE_EMOJI.get(r, '')}{ROLE_LABEL.get(r, r)}）")
+            if parts:
+                self._append_message("host", "🔎 身份揭晓", "、".join(parts))
         self.game_finished.emit(result)
         self._clear_action()
         self.action_box.setFixedHeight(88)
@@ -608,16 +665,24 @@ class WerewolfWindow(QDialog):
         self._start()
 
     def _stop_director(self) -> None:
-        if self.director is not None:
-            d = self.director
-            try:
-                d.request_stop()
-                d.wait(2000)
+        d = self.director
+        if d is None:
+            return
+        self.director = None
+        try:
+            d.request_stop()          # 取消 asyncio 任务（含进行中的网络请求）
+            if d.isRunning():
+                d.wait(5000)          # 取消后通常 1-2 秒结束
+            if d.isRunning():
+                # 极端情况仍未结束：交给 finished 信号延迟清理，
+                # 绝不在线程运行时 deleteLater（会原生崩溃）
+                d.finished.connect(
+                    lambda: (d.setParent(None), d.deleteLater()))
+            else:
                 d.setParent(None)
                 d.deleteLater()
-            except Exception:
-                pass
-            self.director = None
+        except Exception:
+            log.exception("停止狼人杀导演失败")
 
     def closeEvent(self, event):  # noqa: N802
         self._stop_director()

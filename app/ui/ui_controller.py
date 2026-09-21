@@ -275,6 +275,8 @@ class UIController(QObject):
         """右键「小游戏」入口。"""
         if game_id == "gomoku":
             self._show_gomoku()
+        elif game_id == "werewolf":
+            self._show_werewolf()
         else:
             log.warning("未知小游戏：%s", game_id)
 

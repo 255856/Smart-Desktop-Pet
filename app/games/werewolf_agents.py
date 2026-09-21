@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -46,6 +47,7 @@ PERSONAS: List[Dict[str, str]] = [
 JSON_SPEECH = '{"speech": "你的发言"}'
 JSON_LAST = '{"speech": "遗言"}'
 JSON_TARGET = '{"target": 座位号}'
+JSON_VOTE = ('{"target": 座位号, "reason": "一两句话理由，必须引用具体发言、查验结果或上一轮投票站队"}')
 JSON_WOLF = '{"target": 座位号, "reason": "一句话理由"}'
 JSON_WITCH = ('{"use": "antidote 或 poison 或 none", '
               '"target": 座位号(仅毒需要)}')
@@ -73,6 +75,38 @@ def extract_json(text: str) -> Optional[dict]:
         except Exception:
             return None
 
+
+async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
+    """带并发限流、单次超时与 529/429 过载退避的 LLM 调用。
+
+    - semaphore：全局 asyncio.Semaphore（由 Director 注入），限制同时请求数；
+    - per_call_timeout：单次请求超时（含流式生成），超时按可重试处理；
+    - 服务端过载/限流/超时退避重试最多 3 次；
+    - asyncio.CancelledError 必须直接抛出（关闭线程时中断用）。
+    """
+    last_exc = None
+    for attempt in range(3):
+        async def _do():
+            if semaphore is not None:
+                async with semaphore:
+                    return await client.chat_once(msgs)
+            return await client.chat_once(msgs)
+        try:
+            return await asyncio.wait_for(_do(), timeout=per_call_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            m = str(e)
+            retryable = (
+                '529' in m or '429' in m or 'overloaded' in m.lower()
+                or 'rate' in m.lower()
+                or isinstance(e, (asyncio.TimeoutError, TimeoutError)))
+            if retryable:
+                await asyncio.sleep(1.2 * (attempt + 1))
+                continue
+            raise
+    raise last_exc
 
 # ---------------- 上下文文本 ----------------
 def _perspective_text(view: dict) -> str:
@@ -104,14 +138,14 @@ def _perspective_text(view: dict) -> str:
         lines.append(f"你的解药：{'有' if view['witch_antidote'] else '无'}；"
                      f"毒药：{'有' if view['witch_poison'] else '无'}")
     if view.get("public_events"):
-        lines.append("公开事件：")
-        for e in view["public_events"]:
+        lines.append("公开事件与结果（死亡、投票明细、唱票放逐、警长变更等，按时间）：")
+        for e in view["public_events"][-40:]:
             lines.append(f"  · {e}")
     if view.get("speeches"):
-        lines.append("公共频道发言（所有活人可见，包括玩家本人的发言）：")
-        for s in view["speeches"][-14:]: 
+        lines.append("公共频道发言（按时间，含座位号；竞选/遗言/PK 已标注）：")
+        for s in view["speeches"][-40:]:
             tag = _KIND_TAG.get(s["kind"], "发言")
-            lines.append(f"  [{tag}] {s['name']}：{s['text']}")
+            lines.append(f"  [第{s['day']}天·{tag}] {s['seat']}号 {s['name']}：{s['text']}")
     return "\n".join(lines)
 
 
@@ -141,6 +175,7 @@ class WerewolfAgent:
         self.persona = persona
         self.name = persona["name"]
         self.client = client          # LLMClient（在 Director 的事件循环里创建）
+        self.semaphore = None  # 全局并发限流信号量（Director 注入）
         self.rng = random.Random(1000 + seat)
 
     @property
@@ -162,7 +197,8 @@ class WerewolfAgent:
             f"不要使用 Markdown 或列表，不要暴露自己的真实身份（除非你是预言家"
             f"选择跳明身份，或狼人打配合）。\n"
             f"规则：3 狼人、1 预言家、1 女巫、1 猎人、3 平民。夜晚狼刀、预言家查验、"
-            f"女巫救/毒；白天轮流发言后投票，平票无人出局；死者翻牌公开身份。\n"
+            f"女巫救/毒；白天轮流发言后投票，平票无人出局；本局为暗牌，玩家出局时不公布身份，\n"
+            f"只有猎人开枪等特殊技能发动或游戏结束时才会亮明身份。\n"
             f"你是 {ROLE_LABEL[p.role]}。"
         )
         if p.role == WOLF:
@@ -187,7 +223,7 @@ class WerewolfAgent:
         try:
             # system_prompt 在 client 构造时已固定；这里把当前局面放进 system 通道
             self.client.system_prompt = self._system()
-            raw = await self.client.chat_once(msgs)
+            raw = await _llm_chat(self.client, msgs, self.semaphore)
         except Exception as e:  # noqa: BLE001
             log.warning("狼人杀 agent %d 调用失败：%r", self.seat, e)
             return None
@@ -203,8 +239,10 @@ class WerewolfAgent:
     async def day_speech(self, already: str) -> str:
         prompt = (
             f"现在轮到你白天发言（座位 {self.seat} 号 {self.name}）。\n"
-            f"今天的发言记录：\n{already}\n\n"
-            "请以你的性格说一段符合当前局势的发言（1-3 句，口语化）。\n"
+            f"今天此前的发言记录：\n{already}\n\n"
+            "请结合上面的公开事件、查验结果与此前各位玩家的发言，说一段符合当前局势的话：\n"
+            "可以回应、质疑或附和某位玩家的具体发言，指出明确疑点或给出判断依据；\n"
+            "不要在没有任何依据时凭空说『我觉得某某有问题』。1-3 句，口语化。\n"
             f"输出 JSON：{JSON_SPEECH}")
         obj = await self._ask(prompt, want_json=True)
         if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
@@ -224,9 +262,13 @@ class WerewolfAgent:
     # ---------------- 投票 ----------------
     async def vote(self, candidates: List[int]) -> Optional[int]:
         prompt = (
-            "白天发言结束，现在投票。请从以下存活且非自己的座位中选一个投票：\n"
-            f"候选：{candidates}\n（不能投自己）\n"
-            f"输出 JSON：{JSON_TARGET}")
+            "白天发言结束，现在投票。你必须基于上面『公开事件与结果』和『公共频道发言』里的真实信息判断，禁止凭空怀疑：\n"
+            "1. 回顾预言家起跳/查验、各人发言与站队、上一轮投票明细；\n"
+            "2. 找出具体疑点：谁的发言前后矛盾、谁在划水、谁被查杀、谁的投票可疑；\n"
+            "3. 狼人要伪装好人逻辑、保护队友并把嫌疑引向好人；好人力争投出狼人。\n"
+            "请在 reason 里写清推理依据（引用具体座位/发言），再给出 target。\n"
+            f"候选（存活且非自己）：{candidates}\n"
+            f"输出 JSON：{JSON_VOTE}")
         obj = await self._ask(prompt, want_json=True)
         if isinstance(obj, dict) and self._valid_target(obj.get("target"),
                                                         candidates):
@@ -296,8 +338,11 @@ class WerewolfAgent:
     # ---------------- 警长竞选 ----------------
     async def run_for_sheriff(self) -> bool:
         prompt = (
-            "第一天白天，现在竞选警长。警长有 1.5 票、负责归票，出局前可移交。\n"
-            "结合你的身份决定是否上台（预言家通常会跳，女巫一般藏着）。\n"
+            "第一天白天，现在竞选警长。警长有 1.5 票、负责归票，出局前可移交，"
+            "是非常重要的身份。\n"
+            "请大胆决定是否上台：预言家通常必跳；平民也可以大胆举手、帮好人拿警徽；"
+            "狼人可以悍跳争夺警徽、带节奏；只有女巫通常隐藏。\n"
+            "绝大多数玩家都愿意参与，除非你是女巫，否则倾向于举手。\n"
             f"输出 JSON：{JSON_RUN}")
         obj = await self._ask(prompt, want_json=True)
         if isinstance(obj, dict) and isinstance(obj.get("run"), bool):
@@ -505,6 +550,7 @@ class HostAgent:
 
     def __init__(self, client=None, pet_name: str = "桌宠"):
         self.client = client
+        self.semaphore = None
         self.pet_name = pet_name
         self._system = (
             f"你是{pet_name}，正在主持一局标准 9 人狼人杀，你是“上帝”主持人，"
@@ -522,9 +568,11 @@ class HostAgent:
         from app.brain.llm_client import ChatMessage
         try:
             self.client.system_prompt = self._system
-            raw = await self.client.chat_once(
+            raw = await _llm_chat(
+                self.client,
                 [ChatMessage(role="user",
-                             content=f"请用一两句俏皮话主持这个环节：{situation}")])
+                             content=f"请用一两句俏皮话主持这个环节：{situation}")],
+                self.semaphore)
             text = (raw or "").strip().strip("“”\"'")
             if text:
                 return text
