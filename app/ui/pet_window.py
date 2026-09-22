@@ -1,14 +1,4 @@
-"""桌宠主窗口（重写）—— VPet 风格
-
-特性：
-    - 透明无边框置顶
-    - VPet 同款帧动画（QTimer.singleShot 按帧持续时间驱动）
-    - 触摸热区（head/body/drag）
-    - 拖动 = raise（抓住角色整只移动）
-    - 单击身体不同部位触发不同反应
-    - 头顶气泡
-    - 移动动画（由 motion.py 驱动）
-"""
+"""桌宠主窗口（重写）—— VPet 风格"""
 from __future__ import annotations
 
 import logging
@@ -106,7 +96,6 @@ def _clear_pixmap_cache() -> None:
 
 
 # 触摸热区（在 sprite 坐标系内的相对比例，0.0-1.0）
-# VPet 同款约定（GameCore.cs TouchArea 重构）
 @dataclass
 class TouchArea:
     """VPet 同款触摸热区（src: GameCore.cs TouchArea）。
@@ -119,7 +108,7 @@ class TouchArea:
     size: tuple[float, float] = (1.0, 1.0)     # (w, h) 矩形，相对比例
     on_click: Optional[Callable[[], None]] = None    # 单击 / 双击 触发的回调
     on_press: Optional[Callable[[], None]] = None    # 长按才触发（VPet IsPress）
-    is_press: bool = False          # VPet 同款：True 表示要长按才触发 on_press
+    is_press: bool = False
     priority: int = 0              # 同坐标命中时高 priority 优先
 
     def hit(self, sx: int, sy: int, sprite_size: tuple[int, int]) -> bool:
@@ -134,7 +123,6 @@ class TouchArea:
         return lx <= sx <= lx + lw and ly <= sy <= ly + lh
 
 
-# 兼容老代码（仍用字符串 'head' / 'body' / 'raise' 标识）
 class HitZone:
     HEAD = "head"
     BODY = "body"
@@ -144,23 +132,20 @@ class PetWindow(QWidget):
     chat_requested = Signal()
     quit_requested = Signal()
     reaction_requested = Signal(str)   # 触摸了 head / body
-    # PR-right-click-settings: 让 main.py 弹出 SettingsWindow
     open_settings_requested = Signal()
-    # PR-right-click-fps: 让 main.py 跑 retune_ms + reload atlas
     retune_ms_requested = Signal(int)
-    # PR-right-click-settings: 动态改缩放 / crossfade / lock_idle
     scale_changed = Signal(float)
     crossfade_toggled = Signal(bool, int)
     lock_first_idle_toggled = Signal(bool)
 
-    # 鼠标进入/离开桌宠窗（PR-mute-motion：进入后不再自主运动）
+
     mouse_entered = Signal()
     mouse_left = Signal()
 
     # 喂食冷却：两次有效投喂最小间隔（秒），防止连点刷满状态
     FEED_COOLDOWN_S = 30.0
 
-    # 状态栏显示/隐藏（PR-status-overlay：VPet 同款状态条）
+
     status_bar_toggled = Signal(bool)  # True = 显示，False = 隐藏
 
     # 吃饭（右键菜单触发：播放吃饭动画 + 主程序涨饱食/体力）
@@ -228,6 +213,8 @@ class PetWindow(QWidget):
         self.food_store = None
         self._food_sticker_cache: dict[tuple, QPixmap] = {}
         self._last_food_ts = 0.0
+        # 投喂前金币余额查询回调（控制器注入，返回当前金币）；None 表示不预检
+        self.food_money_fn = None
         if foods_path:
             try:
                 from app.engine.works import ItemStore
@@ -255,8 +242,6 @@ class PetWindow(QWidget):
         if hasattr(self._sprite_label, 'setStyleSheet'):
             self._sprite_label.setStyleSheet("background-color: transparent;")
 
-        # PR-fix-drag-menu (live2d): QWebEngineView 在 PetWindow 内会拦截鼠标事件。
-        # 实测真实鼠标事件落在 QWebEngineView 内部一个全屏覆盖的 Chromium delegate
         # 子 QWidget 上（不冒泡到 view），只给 view 本身装过滤器会漏掉拖动、点击、
         # 右键菜单和文件拖拽。这里递归覆盖 view 及其所有后代；eventFilter 里还会
         # 通过 ChildAdded 为页面加载后动态创建的子控件补装。
@@ -265,7 +250,7 @@ class PetWindow(QWidget):
         if hasattr(self, 'atlas'):
             _clear_pixmap_cache()
 
-        # 气泡 label（替代 _draw_bubble）—— v2 美化：白底大圆角 + 淡紫描边 + 柔和阴影 + 尖角
+        # 气泡 label
         self._bubble_label = QLabel(self)
         self._bubble_label.setStyleSheet(
             "QLabel { background-color: rgba(255,255,255,242); color: #28283c; "
@@ -310,7 +295,6 @@ class PetWindow(QWidget):
         self._bubble_timer.timeout.connect(self._check_bubble_timeout)
         self._bubble_timer.start()
 
-        # VPet 同款状态栏（透明背景，小进度条显示关键指标）
         self._status_bar: Optional[QWidget] = None
         self._status_bars: dict[str, QProgressBar] = {}
         self._attached_state = None
@@ -323,10 +307,10 @@ class PetWindow(QWidget):
         self._dragging = False
         self._system_moving = False
         self._drag_start = QPoint()
-        # 用户交互时间戳（PR-mute-motion：press / drag / hover 都算）
+
         self._last_user_interaction_ts = 0.0
         self._user_inside = False
-        # 帧计时器（用 singleShot 按帧持续时间驱动，VPet 同款方式）
+        # 帧计时器
         self._frame_timer: Optional[QTimer] = None
 
         self._build_window(always_on_top)
@@ -335,14 +319,11 @@ class PetWindow(QWidget):
         # 立即显示第一帧并启动帧计时器
         self._start_frame_timer()
 
-    # ---------------- 窗口初始化 ----------------
     def _build_window(self, always_on_top: bool) -> None:
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        # PR-fix-window-invisible:
-        # 之前用 WA_NoSystemBackground + WA_TranslucentBackground + Frameless 三件套让桌宠
         # 在某些 Windows 系统（DWM 未启用 / 多显示器 / 远程桌面 / 高 DPI 缩放）下渲染成
         # 100% 透明完全看不到。这里：
         #   - 去掉 WA_NoSystemBackground（让 Qt 自己绘制窗口背景）
@@ -354,10 +335,8 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFixedSize(self._window_size)
         self.setMouseTracking(True)
-        # PR-drag-drop: 让 widget 接收系统拖拽
         self.setAcceptDrops(True)
 
-        # PR-V2: VPet 同款 TouchArea（src: GameCore.cs TouchArea）
         # 每个区域带 on_click / on_press 回调，加 sprite 改尺寸不用改业务代码。
         self._init_touch_areas()
 
@@ -388,7 +367,6 @@ class PetWindow(QWidget):
             ),
         ]
 
-    # ---- TouchArea 回调 ----
     def _on_touch_head_click(self) -> None:
         self.animator.play_reaction('head')
         self.reaction_requested.emit('head')
@@ -410,7 +388,6 @@ class PetWindow(QWidget):
             self._chat_input.clear()
             self._chat_input.hide()
 
-    # ---------------- 公开 API ----------------
     def play_reaction(self, where: str) -> None:
         """由外部调用（chat reply / mood trigger）：play reaction。"""
         self.animator.play_reaction(where)
@@ -609,15 +586,13 @@ class PetWindow(QWidget):
         else:
             self._chat_input.hide()
 
-    # ---------------- 内部：帧推进 ----------------
-    # PR-right-click-fps: 帧率统计（右键「显示 FPS」勾选时启用）
     _fps_enabled: bool = False
     _fps_count: int = 0
     _fps_window_start: float = 0.0
     _last_fps_report: float = 0.0
 
     def _start_frame_timer(self) -> None:
-        """显示当前帧并按其 duration_ms 调度 advance（VPet 同款方式）。
+        """显示当前帧 + 调度下一帧。
 
         PR-bugfix：
             1. advance 在 setPixmap 之后立即调，**第 0 帧永远只显示一帧**——已
@@ -646,7 +621,6 @@ class PetWindow(QWidget):
             return
         duration_ms = max(1, anim.frames[frame_idx].duration_ms)
 
-        # PR-bugfix: 重用同一个 QTimer 实例。先 stop 旧 timer 避免多 timer 并发。
         if self._frame_timer is None:
             self._frame_timer = QTimer(self)
             self._frame_timer.setSingleShot(True)
@@ -676,13 +650,12 @@ class PetWindow(QWidget):
                     self._last_fps_report = now
         self._start_frame_timer()
 
-    # ---------------- 绘制（由 QLabel 完成，无需自定义 paintEvent）---------------
     # 但保留一个简单的 paintEvent 用于调试
     def paintEvent(self, evt) -> None:
         # QLabel 会处理精灵绘制，这里什么都不做
         pass
 
-    # ---------------- 触摸热区（PR-V2: VPet TouchArea 数据驱动） ----------------
+
     def _hit_zone(self, pos: QPoint) -> Optional[TouchArea]:
         """把窗口坐标归一化到 sprite 1000x1000，按 priority 找命中的 TouchArea。
 
@@ -700,7 +673,6 @@ class PetWindow(QWidget):
                 return area
         return None
 
-    # ---------------- 鼠标事件 ----------------
     def mousePressEvent(self, evt: QMouseEvent) -> None:
         self._last_user_interaction_ts = time.time()
         self._drag_animation_started = False  # 重置拖动动画标记
@@ -900,7 +872,6 @@ class PetWindow(QWidget):
                 self.animator.play_spin()
             evt.accept()
 
-    # ---------------- 拖拽文件接收 ----------------
     _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
     @classmethod
@@ -995,7 +966,6 @@ class PetWindow(QWidget):
                 self.show_bubble("转换失败了…", duration_ms=2000)
                 QMessageBox.warning(self, "转换失败", f"无法将 {path.name} 转换为 {convert_suffix}")
 
-    # ---------------- 右键菜单信号包装器 ----------------
     def _emit_open_settings(self) -> None:
         self.open_settings_requested.emit()
 
@@ -1037,6 +1007,15 @@ class PetWindow(QWidget):
         if now - self._last_food_ts < self.FEED_COOLDOWN_S:
             left = int(self.FEED_COOLDOWN_S - (now - self._last_food_ts)) + 1
             self.show_bubble(f"刚刚才吃过啦，{left} 秒后再喂我嘛~", duration_ms=2500)
+            return
+        # 2.5) 购买扣金币：余额不足直接拦截（不弹贴纸 / 不进冷却）；扣款由控制器 apply_food 完成
+        price = float(getattr(item, "price", 0.0) or 0.0)
+        money_fn = getattr(self, "food_money_fn", None)
+        money = float(money_fn()) if callable(money_fn) else None
+        if money is not None and price > 0 and money < price:
+            self.show_bubble(
+                f"金币不够哦～{item.name}要{price:g}金币，还差{price - money:g}，"
+                "去玩小游戏或签到赚金币吧～", duration_ms=4000)
             return
         self._last_food_ts = now
 
@@ -1112,7 +1091,6 @@ class PetWindow(QWidget):
         self.clearMask()
         QTimer.singleShot(800, self._sample_base_mask)
 
-    # ---------------- 点击穿透（live2d：透明区域不让它挡住后面的窗口） ----------------
     def _setup_click_mask(self) -> None:
         """live2d 模式下窗口是方形画布，模型四周大量透明像素会挡住点击。
         周期性从渲染帧的 alpha 通道生成窗口遮罩（setMask）：遮罩外既不显示
@@ -1235,7 +1213,6 @@ class PetWindow(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(on))
         self.show()   # setWindowFlag 会把可见窗口隐藏，需要重新 show
 
-    # ---------------- 视线跟随（live2d：头/眼追鼠标，驱动物理） ----------------
     def _setup_look_at(self) -> None:
         rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
         if rtype != "live2d":
@@ -1262,7 +1239,6 @@ class PetWindow(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
-    # ---------------- 表情包贴纸（模型自带表情包随机弹出右上角） ----------------
     def _setup_sticker_overlay(self) -> None:
         """初始化右上角贴纸层（随机表情包 + 喂食食物图共用）。
 
@@ -1451,30 +1427,25 @@ class PetWindow(QWidget):
             pass
         return self.width(), 0
 
-    # ---------------- 右键菜单（精简版） ----------------
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
 
-        # === 标题：显示当前渲染器类型 ===
         rtype = self.renderer.get_renderer_type() if self.renderer else "?"
         title = QAction(f"🐳 桌宠 ({rtype})", self)
         title.setEnabled(False)
         menu.addAction(title)
         menu.addSeparator()
 
-        # === 聊天入口 ===
         a1 = QAction("和鲸鱼娘聊聊", self)
         a1.triggered.connect(self.chat_requested.emit)
         menu.addAction(a1)
         menu.addSeparator()
 
-        # === 完整设置面板 ===
         act_settings = QAction("设置面板", self)
         act_settings.triggered.connect(self._emit_open_settings)
         menu.addAction(act_settings)
         menu.addSeparator()
 
-        # === 切换表情（自动适配渲染器：sprite 固定 5 个 / live2d 用模型自带情绪 + 自然）===
         emo_menu = menu.addMenu("切换表情")
         emotions = self.renderer.get_emotion_options() if self.renderer else [
             ('happy', '开心'), ('sad', '悲伤'), ('angry', '生气'),
@@ -1489,7 +1460,6 @@ class PetWindow(QWidget):
             no_emo.setEnabled(False)
             emo_menu.addAction(no_emo)
 
-        # === 切换发型（仅模型自带发型开关时显示，如 Live2D 冰糖；sprite 无此菜单）===
         if self.renderer is not None and getattr(self.renderer, "supports_hairstyles",
                                                  lambda: False)():
             hairstyles = self.renderer.get_hairstyle_options()
@@ -1500,7 +1470,6 @@ class PetWindow(QWidget):
                     a.triggered.connect(
                         lambda _=False, n=name: self.animator.set_hairstyle(n))
                     hair_menu.addAction(a)
-        # === Live2D 分类外观子菜单（按键说明五大类：特殊/配件/手势等）===
         # 表情/发型已由上面两个子菜单覆盖，这里渲染其余分类；sprite 无此部分。
         menu_groups: list[dict] = []
         try:
@@ -1519,7 +1488,6 @@ class PetWindow(QWidget):
                 sub.addAction(a)
         menu.addSeparator()
 
-        # === 睡觉 / 醒来（仅 sprite；live2d 作息由睡眠触发规则/参数管理） ===
         if rtype != "live2d":
             act_sleep = QAction("睡觉", self)
             act_sleep.triggered.connect(self.animator.set_sleep)
@@ -1529,7 +1497,6 @@ class PetWindow(QWidget):
             menu.addAction(act_wake)
         menu.addSeparator()
 
-        # === 一次性动作（按渲染器能力）===
         # sprite：转圈 / 伸懒腰 / 起跳 / 游泳（真帧动画）。
         # Live2D：按模型 profile 的动作映射动态生成（引用模型手势/特殊条目）。
         play_menu = menu.addMenu("玩一下")
@@ -1566,11 +1533,9 @@ class PetWindow(QWidget):
             play_menu.addAction(a)
         menu.addSeparator()
 
-        # === 喂食（有食物库时按分类挂子菜单；无库回退通用「吃饭」）===
         self._build_feed_menu(menu)
         menu.addSeparator()
 
-        # === 小游戏（子菜单，预留以后扩展；目前含五子棋 / 狼人杀） ===
         games_menu = menu.addMenu("小游戏")
         a_gomoku = QAction("五子棋", self)
         a_gomoku.triggered.connect(
@@ -1582,7 +1547,6 @@ class PetWindow(QWidget):
         games_menu.addAction(a_werewolf)
         menu.addSeparator()
 
-        # === 每日签到（每天一次 +100 金币；已签则禁用） ===
         _ci_fn = getattr(self, "checkin_status_fn", None)
         _checked = bool(_ci_fn()) if callable(_ci_fn) else False
         a_checkin = QAction(
@@ -1592,12 +1556,10 @@ class PetWindow(QWidget):
         menu.addAction(a_checkin)
         menu.addSeparator()
 
-        # === 状态栏显示/隐藏 ===
         act_status = QAction("显示状态栏"if not self._status_visible else "隐藏状态栏", self)
         act_status.triggered.connect(lambda _: self.toggle_status_bar(not self._status_visible))
         menu.addAction(act_status)
 
-        # === 快捷聊天输入 ===
         quick_chat_visible = getattr(self, '_chat_input_visible', False)
         act_quick_chat = QAction(f"{'快速输入'if not quick_chat_visible else '隐藏输入'}", self)
         act_quick_chat.triggered.connect(self._toggle_quick_chat_menu)

@@ -1,22 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""打包脚本：生成独立的桌面宠物。
-
-使用方式：
-    pip install pyinstaller
-    python build.py              # 正常打包
-    python build.py --clean      # 清理后重新打包
-
-产物：
-    dist/desktop-pet/
-    ├── desktop-pet.exe     ← 双击运行
-    └── _internal/           ← Python 环境 + 所有依赖 + assets
-
-注意：
-    - ASR 语音模型不在打包文件里，首次语音识别时自动下载
-    - 如网络受限，可在 config.yaml 设置 asr.enabled=false
-    - 打包后运行出错时，请查看 dist/desktop-pet/crash.log
-"""
+"""打包脚本：PyInstaller 生成独立的桌面宠物。"""
 from __future__ import annotations
 
 import argparse

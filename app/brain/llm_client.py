@@ -1,23 +1,4 @@
-"""大模型客户端（OpenAI 兼容协议，支持流式 + 推理模型 + Ollama + 中文清洗）。
-
-用法：
-    client = LLMClient(cfg.llm, cfg.character.persona)
-    async for token in client.chat_stream([{"role": "user", "content": "你好"}]):
-        ...
-
-支持的正文字段（按优先级）：
-    - content            — OpenAI 标准
-    - reasoning_content  — DeepSeek-r1 推理模型
-    - reasoning          — Ollama qwen3.5 风格（OpenAI 兼容端口）
-
-Ollama reasoning 模型特殊处理：
-    Ollama 在 SSE 流式时把整段（thinking + answer）都塞进 reasoning 字段，
-    content 字段一直是空。本客户端检测这种情况，fallback 到非流式拿真正的 answer。
-
-输出清洗：
-    LLMClient 会自动给 system prompt 追加「中文 + 禁 emoji」规范，
-    并对每条 yield 的 chunk 调用 sanitize_text 去 emoji / 装饰符号。
-"""
+"""大模型客户端（OpenAI 兼容协议，支持流式 + 推理模型 + Ollama + 中文清洗）。"""
 from __future__ import annotations
 
 import json
@@ -175,9 +156,7 @@ _META_NUMBERED_LIST_RE = re.compile(
     flags=re.UNICODE,
 )
 
-# ---------------------------------------------------------------------------
 #  句子级「规划 / 元描述 / 规则复读」识别（更精细，避免旧贪婪正则吞掉同段真回答）
-# ---------------------------------------------------------------------------
 # 情绪标签词（系统铁律：模型不应输出，出现即剥，无论在句尾还是句中）
 _EMOTION_WORDS = (
     "happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip"
@@ -751,7 +730,6 @@ class LLMClient:
             if tool_choice:
                 payload["tool_choice"] = tool_choice
 
-        # ---- 第一次请求 ----
         saw_content = False
         saw_tool_calls = False
         try:
@@ -773,7 +751,6 @@ class LLMClient:
             # 其它错误：原样抛
             raise
 
-        # ---- tool_choice="required" 服务端没报错但模型依然没调工具 → 二次降级 ----
         if (tool_choice and tools and not saw_tool_calls
                 and not (cancel_check and cancel_check())
                 and allow_prompt_fallback):
@@ -926,9 +903,7 @@ class LLMClient:
         return "".join(parts)
 
 
-# ---------------------------------------------------------------------------
 #  工具调用意图识别（轻量级正则判定，用于自动开启 force_tool_use）
-# ---------------------------------------------------------------------------
 
 # 这些模式一旦命中，说明用户就是要工具做事 —— 第一轮强制调工具
 _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (

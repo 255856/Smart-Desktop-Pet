@@ -26,7 +26,6 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-# ---------------- 角色 / 阵营 ----------------
 WOLF = "wolf"
 SEER = "seer"
 WITCH = "witch"
@@ -50,7 +49,6 @@ CAMP_GOOD = "good"
 ROLESET_9: List[str] = [WOLF, WOLF, WOLF, SEER, WITCH, HUNTER,
                         VILLAGER, VILLAGER, VILLAGER]
 
-# ---------------- 阶段 ----------------
 PHASE_NIGHT = "night"
 PHASE_REVEAL = "reveal"
 PHASE_CAMPAIGN = "campaign"
@@ -83,7 +81,6 @@ def camp_of(role: str) -> str:
     return CAMP_WOLF if role == WOLF else CAMP_GOOD
 
 
-# ---------------- 数据结构 ----------------
 @dataclass
 class Player:
     seat: int
@@ -151,7 +148,6 @@ class PublicEvent:
     text: str
 
 
-# ---------------- 游戏主体 ----------------
 class WerewolfGame:
     """标准 9 人狼人杀状态机。
 
@@ -188,7 +184,6 @@ class WerewolfGame:
         # 狼频道（夜晚狼队内部讨论，跨晚保留，仅狼视角可见）
         self.wolf_chat: List[WolfChatRecord] = []
 
-    # ---------------- 基础查询 ----------------
     def player(self, seat: int) -> Player:
         return self.players[seat]
 
@@ -219,7 +214,6 @@ class WerewolfGame:
                 return p.seat
         return None
 
-    # ---------------- 发牌 ----------------
     def deal(self) -> Dict[str, str]:
         """随机分配身份，返回 {seat: role}（仅用于内部/测试，玩家各自看自己的）。"""
         roles = list(ROLESET_9)
@@ -237,7 +231,6 @@ class WerewolfGame:
         self.dealt = True
         return assignment
 
-    # ---------------- 夜晚结算 ----------------
     def resolve_night(self, wolf_target: Optional[int],
                       seer_target: Optional[int],
                       witch_save: bool, witch_poison: Optional[int]) -> NightOutcome:
@@ -302,7 +295,6 @@ class WerewolfGame:
         if seat not in self._night_dead:
             self._night_dead.append(seat)
 
-    # ---------------- 白天 / 投票 ----------------
     def tally_votes(self, votes: Dict[int, int],
                     weights: Optional[Dict[int, float]] = None,
                     allowed: Optional[List[int]] = None) -> VoteOutcome:
@@ -337,7 +329,6 @@ class WerewolfGame:
             vo.exiled = leaders[0]
         return vo
 
-    # ---------------- 警长 ----------------
     def vote_weights(self) -> Dict[int, float]:
         """当前生效的投票权重（警长活着时 1.5 票）。"""
         if self.sheriff is not None and self.players[self.sheriff].alive:
@@ -354,7 +345,6 @@ class WerewolfGame:
         else:
             self.sheriff = None
 
-    # ---------------- 狼频道 ----------------
     def add_wolf_chat(self, seat: int, text: str) -> None:
         text = (text or "").strip()
         if not text:
@@ -402,7 +392,6 @@ class WerewolfGame:
         for p in self.players:
             p.revealed = True
 
-    # ---------------- 胜负 ----------------
     def check_winner(self) -> Optional[str]:
         """返回 CAMP_WOLF / CAMP_GOOD / None。"""
         if not self.alive_wolves():
@@ -413,7 +402,6 @@ class WerewolfGame:
             return CAMP_WOLF
         return None
 
-    # ---------------- 视角过滤 ----------------
     def role_visible_to(self, target: int, viewer: int) -> Optional[str]:
         """viewer 视角下 target 的角色：可见返回角色，否则返回 None。"""
         t = self.players[target]
@@ -471,7 +459,6 @@ class WerewolfGame:
             # 仅在夜晚结算前由 Director 单独告知狼刀目标（不放在静态视角里）
         return view
 
-    # ---------------- 公开事件 / 发言 ----------------
     def add_event(self, text: str) -> None:
         self.public_events.append(PublicEvent(self.day, text))
 
@@ -484,7 +471,6 @@ class WerewolfGame:
             SpeechRecord(seat=seat, name=p.name, text=text,
                          day=self.day, kind=kind))
 
-    # ---------------- 夜晚事件播报（确定性模板） ----------------
     def _announce_night(self, out: NightOutcome) -> None:
         self.add_event(f"第 {out.day} 天：天黑了，请闭眼。")
         if out.peaceful:

@@ -1,9 +1,4 @@
-"""TTS 语音合成 —— 使用 Microsoft edge-tts（免费，无需 API key）。
-
-生成 mp3 后用 pygame 播放。
-所有 speak() 调用入队，由一个 daemon worker 顺序消费 + 播放，
-避免多 thread 同时调 pygame.mixer.music.load/play 互相打断。
-"""
+"""TTS 语音合成 —— 使用 Microsoft edge-tts（免费，无需 API key）。"""
 from __future__ import annotations
 
 import asyncio
@@ -130,7 +125,6 @@ class TTS:
         # 串行化：不要并发调用 speak() 抢同一个 mixer channel
         self._play_lock = threading.Lock()
         # 句子队列：所有 speak() 入队，由一个 daemon worker 顺序消费
-        # —— 解决「多 thread 同时调 pygame.mixer.music.load + play 互相打断」问题
         import queue as _queue
         self._speak_queue: _queue.Queue = _queue.Queue()
         self._speak_worker: Optional[threading.Thread] = None

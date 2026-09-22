@@ -1,17 +1,4 @@
-"""聊天窗口：把桌宠和大模型对话接到一起。
-
-功能：
-    - 多轮消息历史（带情绪标签）
-    - 流式输出（每个 token 增量追加到气泡）
-    - 打字时桌宠显示「思考中」表情
-    - 收到完整回复后解析末尾 [emotion] 标签切回对应表情
-    - 可选 TTS 朗读
-    - 「清除上下文」「暂停/继续生成」按钮
-
-性能要点（PR1 修复）：
-    - 流式渲染从「clear + 重画整段历史」改为「cursor patch」——每个 chunk O(1)。
-    - 「停止」按钮真接 cancel_event，传给 chat_stream —— httpx 流能真断开。
-"""
+"""聊天窗口：把桌宠和大模型对话接到一起。"""
 from __future__ import annotations
 
 import asyncio
@@ -67,7 +54,6 @@ from app.ui.memory_panel import MemoryDialog
 log = logging.getLogger(__name__)
 
 
-# ---------------- 工具调用展示（Claude Code 风格步骤列表） ----------------
 # 工具名 -> (中文名, 动作目标参数键，按优先级)
 _TOOL_UI_META = {
     "web_search": ("联网搜索", ["query", "q", "keyword"]),
@@ -332,9 +318,7 @@ class _StreamWorker(QThread):
             self.failed.emit(f"调用出错：{e!r}")
 
 
-# ============================================================================
 #  / 命令补全（QPlainTextEdit 没有 setCompleter，自己写一个轻量版）
-# ============================================================================
 
 
 def _html_escape(text: str) -> str:
@@ -590,7 +574,6 @@ class ChatWindow(QWidget):
             self.setWindowIcon(QIcon(str(_ico)))
         self.resize(720, 540)
         self.setMinimumSize(560, 400)
-        # v2 美化：无边框圆角窗口（窗口透明，内部白色圆角卡片 + 自绘标题栏）
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setObjectName("chat_root")
@@ -640,7 +623,6 @@ class ChatWindow(QWidget):
                     return files[0]
         return None
 
-    # ---- 头像（QTextBrowser 富文本用的圆形 PNG）----
     def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
         """生成圆形头像 QPixmap（外圈 2px 白边）。
 
@@ -728,7 +710,6 @@ class ChatWindow(QWidget):
         # 富文本头像缓存（只影响之后的新消息）
         self._register_avatar_resources()
 
-    # ---------------- UI ----------------
     def _build_ui(self) -> None:
         """新版 UI：能力展示 + 聊天 + 多行输入 + 命令。
 
@@ -759,7 +740,6 @@ class ChatWindow(QWidget):
         root.setContentsMargins(18, 14, 18, 18)
         root.setSpacing(0)
 
-        # ============ 白色圆角卡片容器（窗口透明，卡片负责圆角 + 阴影）============
         card = QFrame(self)
         card.setObjectName("window_card")
         card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
@@ -773,7 +753,6 @@ class ChatWindow(QWidget):
         cl.setSpacing(8)
         root.addWidget(card, 1)
 
-        # ============ 自绘标题栏（可拖动）============
         header = QFrame(card)
         header.setObjectName("titlebar")
         header.setStyleSheet(ui_style.TITLEBAR_QSS)
@@ -842,7 +821,6 @@ class ChatWindow(QWidget):
         self.avatar_label.installEventFilter(self._drag_filter)
         title.installEventFilter(self._drag_filter)
 
-        # ============ 中间：聊天气泡区（占满剩余空间）============
         self.chat_view = QTextBrowser()
         self.chat_view.setObjectName("chat_view")
         self.chat_view.setOpenExternalLinks(True)
@@ -853,7 +831,6 @@ class ChatWindow(QWidget):
         self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_BUBBLE_CSS)
         cl.addWidget(self.chat_view, 1)
 
-        # ============ 输入区（多行 + 工具栏）============
         input_container = QFrame()
         input_container.setObjectName("input_container")
         il = QVBoxLayout(input_container)
@@ -1113,7 +1090,6 @@ class ChatWindow(QWidget):
             self._render_message(msg)
             self.history.append(msg)
 
-    # ---------------- 历史/输入 ----------------
     def _on_clear(self) -> None:
         if self._generating:
             QMessageBox.information(self, "提示", "生成中，请先停止再清空")
@@ -1256,7 +1232,6 @@ class ChatWindow(QWidget):
             self._worker.request_stop()
             self.stop_btn.setEnabled(False)
 
-    # ---------------- 语音输入（ASR） ----------------
     def _on_mic_pressed(self) -> None:
         """按住麦克风按钮：开始录音。"""
         if self._mic_busy or self.asr is None:
@@ -1305,7 +1280,6 @@ class ChatWindow(QWidget):
         self.mic_btn.setEnabled(True)
         self.chat_view.append(f"⚠️ {err}")
 
-    # ---------------- 流式生成 ----------------
     def _kickoff_llm(self) -> None:
         if not self.llm_cfg.api_key or self.llm_cfg.api_key == "PUT-YOUR-API-KEY-HERE":
             self._render_message(Message(
@@ -1524,11 +1498,9 @@ class ChatWindow(QWidget):
         if sanitized:
             self.streaming_chunk.emit(sanitized)
             # **逐句 prepare**：每收完一句话立即启动后台 QThread 准备 TTS
-            # —— prepare 完成后 chat_view 才显示该句（见 _on_sentence_ready / _on_done）
             self._tts_drain_sentences(sanitized)
 
     # 中文/英文/数字标点都算句末边界。GPT-SoVITS 一次合成一句短句的体感最自然
-    # ——既保证每句立刻上屏 + 立刻上口，又不让单句合成耗时太久。
     _TTS_SENT_END = re.compile(r"[。！？!?\n;；]+")
 
     def _tts_drain_sentences(self, accumulated: str) -> None:
@@ -1587,7 +1559,6 @@ class ChatWindow(QWidget):
     def _on_sentence_ready(self, sentence: str) -> None:
         """单句 TTS prepare 完成：把该句加入 chat_view + 立即 speak 触发播放。"""
         # 拼接到已 commit 的显示文本（_current_bot_msg.content 已流式累积）
-        # ——但我们要让 chat_view 显示"已 commit 句子 + 未 commit 尾部"的状态。
         # 当前 _current_bot_msg.content = sanitized（每 chunk 整体覆盖）。
         # 这里只调 speak 让 worker 立即播放（缓存命中），chat_view 显示由 _on_done 一次性完成。
         # 流式期间保持占位动画（_refresh_streaming_message 不调），等 _on_done 才正式显示。
@@ -1666,7 +1637,6 @@ class ChatWindow(QWidget):
         # 这里收尾：
         # 1. 把最后一段无句末标点的尾部也启动 prepare（如果有）
         # 2. **等所有 prepare worker 完成**（主线程短时阻塞；GPT-SoVITS 通常 3-5 秒）
-        #    —— 这样 chat_view 一次性显示完整文本 + 声音从第一句起按序播放
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
         self._flush_tts_tail_to_prepare()  # 启动尾部 prepare
@@ -1683,7 +1653,6 @@ class ChatWindow(QWidget):
         self._refresh_streaming_message(finished=True,
                                          emotion=parsed.emotion.value if parsed.emotion else "")
 
-        # 【幻觉检测】
         self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
 
         # Trace：完成 run
@@ -1736,7 +1705,6 @@ class ChatWindow(QWidget):
         self.reply_ready.emit(self._current_bot_msg.content, Emotion.SAD, False)
         self.streaming_done.emit()
 
-    # ---------------- 渲染 ----------------
     # 气泡内联样式（Qt 富文本对多 class 选择器 / td border-radius 支持不稳定，
     # 直接内联最可靠）
     _BUBBLE_STYLE_USER = (
@@ -1794,7 +1762,6 @@ class ChatWindow(QWidget):
               - 内容列：meta（名字/时间）+ 内层 shrink-to-fit table（整块气泡背景）
             用户消息：内容列右对齐、头像列在右；桌宠消息反之。
         """
-        # ---- 系统消息：居中灰色条 ----
         if msg.role == "system":
             raw = (msg.content or "").replace("&", "&amp;").replace(
                 "<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
@@ -1961,7 +1928,7 @@ class ChatWindow(QWidget):
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertHtml(html)
-        cursor.insertBlock()  # PR-fix-line-breaks: 让下一条消息从新 <p> 开始
+        cursor.insertBlock()
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -1993,7 +1960,6 @@ class ChatWindow(QWidget):
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    # ---------------- 等待动画（三点跳动） ----------------
     def _typing_dots_html(self) -> str:
         """回复等待中的「三点跳动」动画：三个圆点依次点亮、循环流动。
 
@@ -2019,7 +1985,6 @@ class ChatWindow(QWidget):
         self._typing_frame = (getattr(self, "_typing_frame", 0) + 1) % 3
         self._refresh_streaming_message()
 
-    # ---------------- 信号 ----------------
     reply_ready = Signal(str, object, bool)   # text, Emotion, tts_enabled
     streaming_chunk = Signal(str)              # 流式输出增量（已累积的完整文本）
     streaming_done = Signal()                  # 流式输出结束

@@ -1,17 +1,4 @@
-"""桌宠设置面板（重构版）。
-
-新设计：把「帧时长 → 显示 FPS 调试」的整条链路完整搬到设置面板，
-按语义分成 4 个 Tab：
-     状态    状态条（体力/饱食/口渴/心情/健康/好感 + 摘要）
-     帧数    FPS 预设按钮 + 帧时长滑块 + 实时改帧率 + FPS 气泡调试
-     视觉    缩放预设 + 滑块 + 透明度 + crossfade + lock idle
-     控制    表情 / 睡觉 / 醒来 / 聊天 / 自主行为节拍
-
-打开方式：托盘菜单「设置」 / 桌宠右键菜单「打开设置面板」。
-
-所有控件**实时生效**（不再需要「应用帧时长」重命名文件的方式，改的是内存里
-frame.duration_ms；只有用户想把帧时长持久化到 PNG 文件名时才用持久化按钮）。
-"""
+"""桌宠设置面板（重构版）。"""
 from __future__ import annotations
 
 import logging
@@ -23,7 +10,7 @@ from app.core.qt_compat import (
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
     QSizePolicy, QSize, QSlider, QTabWidget, QVBoxLayout,
     QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
-    QToolButton, QObject, QScrollArea,
+    QToolButton, QObject, QScrollArea, QMenu, QAction,
     event_global_pos,
 )
 from app.ui import ui_style
@@ -72,7 +59,6 @@ class _SettingsDrag(QObject):
 class SettingsWindow(QWidget):
     """桌宠设置窗口（Tab 布局）。"""
 
-    # --- 视觉/行为相关 ---
     settings_changed = Signal()
     # 用户点了「持久化帧时长到文件」（会改 PNG 文件名，较重，有单独按钮）
     persist_frames_requested = Signal(int)   # ms
@@ -83,30 +69,22 @@ class SettingsWindow(QWidget):
     reset_to_defaults_requested = Signal()
     lock_first_idle_changed = Signal(bool)
     crossfade_changed = Signal(bool, int)  # enabled, ms
-    # --- 调试：显示 FPS 气泡开关 ---
     fps_monitor_toggled = Signal(bool)
-    # --- 控制快捷：表情 / 睡觉 / 醒来 ---
     emotion_requested = Signal(str)   # 'happy' / 'sad' / 'angry' / 'shy' / 'think'
     sleep_requested = Signal()
     idle_requested = Signal()
     chat_requested = Signal()
-    # --- 模型配置变更（base_url, api_key, model, temperature, max_tokens, timeout）---
     model_config_changed = Signal(dict)
-    # --- TTS 语音变更 ---
     voice_changed = Signal(str)
-    # --- Live2D 专属（仅 live2d 渲染器时显示该 Tab）---
     live2d_item_activated = Signal(str, str)   # (group_id, item_id)
     live2d_reset_requested = Signal()
     random_exp_changed = Signal(bool)          # 挂机随机表情开关
     random_sticker_changed = Signal(bool)      # 随机表情包贴纸开关
-    # --- 窗口 / 持久化 ---
     always_on_top_changed = Signal(bool)       # 窗口置顶开关
     save_settings_requested = Signal()         # 点了「保存设置」按钮
-    # --- Live2D 参数细化 ---
     sticker_options_changed = Signal(dict)     # {size, rotation, min_s, max_s, duration_s}
     random_interval_changed = Signal(int, int)  # 挂机随机间隔（秒）
     max_fps_changed = Signal(int)              # 渲染帧率上限
-    # --- 全量面板化：TTS / 主动关心 / 渲染器 / 水印 / 角色 ---
     tts_config_changed = Signal(dict)          # {tts_enabled, engine, minimax_voice_id, gptsovits_url, ref_audio, prompt_text}
     proactive_changed = Signal(dict)           # {enabled, min_minutes, max_minutes}
     renderer_changed = Signal(str)             # sprite / live2d（重启生效）
@@ -118,7 +96,8 @@ class SettingsWindow(QWidget):
                  renderer: Optional[object] = None,
                  sticker_enabled: bool = True,
                  always_on_top: bool = True,
-                 live2d_state: Optional[dict] = None) -> None:
+                 live2d_state: Optional[dict] = None,
+                 game_action_store: Optional[object] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -129,7 +108,6 @@ class SettingsWindow(QWidget):
             self.setWindowIcon(QIcon(str(_ico)))
         self.setMinimumSize(QSize(520, 760))
         self.resize(620, 800)
-        # v2 美化：无边框圆角窗口（窗口透明，内部白色圆角卡片 + 自绘标题栏）
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(ui_style.SETTINGS_QSS)
@@ -156,6 +134,14 @@ class SettingsWindow(QWidget):
             "hide_watermark": bool(st.get("hide_watermark", True)),
             "character": st.get("character", {}),
         }
+        # 小游戏动作反馈配置（必须在 _build_ui 前就绪，Live2D Tab 构建时会用到）
+        if game_action_store is not None:
+            self._game_store = game_action_store
+        else:
+            from app.engine.game_actions import GameActionStore
+            self._game_store = GameActionStore(
+                Path(__file__).resolve().parent.parent.parent / 'data' / 'game_actions.json')
+        self._game_action_labels: dict = {}
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -165,9 +151,7 @@ class SettingsWindow(QWidget):
         self.settings_store = SettingsStore()
         self._load_from_store()
 
-    # ============================================================
     #  Public: attach state（V3 状态条）
-    # ============================================================
     def attach_state(self, state) -> None:
         """挂 PetState，状态变化自动刷新进度条 + 同时触发存档。"""
         if self._attached_state is state:
@@ -186,9 +170,7 @@ class SettingsWindow(QWidget):
             state.on_change = _combined
             self.refresh_state()
 
-    # ============================================================
     #  UI 构造
-    # ============================================================
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 14, 18, 18)
@@ -257,7 +239,6 @@ class SettingsWindow(QWidget):
                 pass
         cl.addWidget(tabs, 1)
 
-        # —— 底部状态栏 + 按钮 ——
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setStyleSheet(f"color: {ui_style.TEXT_SUB};")
         cl.addWidget(self.lbl_status)
@@ -275,7 +256,6 @@ class SettingsWindow(QWidget):
         row.addWidget(self.btn_close)
         cl.addLayout(row)
 
-    # ---------- Tab: 状态 ----------
     def _build_tab_status(self) -> QWidget:
         page = QWidget()
         v = QVBoxLayout(page)
@@ -292,34 +272,44 @@ class SettingsWindow(QWidget):
             bar.setRange(0, 100)
             bar.setTextVisible(False)
             bar.setFixedHeight(14)
-            bar.setStyleSheet(ui_style.stat_bar_qss(ui_style.STAT_BAR_COLORS[key]))
+            bar.setStyleSheet(ui_style.stat_bar_qss(*ui_style.STAT_BAR_COLORS[key]))
         labels_and_bars = [
-            ("体力", self.bar_strength),
-            ("饱食", self.bar_food),
-            ("口渴", self.bar_drink),
-            ("心情", self.bar_feeling),
-            ("健康", self.bar_health),
-            ("好感", self.bar_likability),
+            ("体力", self.bar_strength, "strength"),
+            ("饱食", self.bar_food, "strength_food"),
+            ("口渴", self.bar_drink, "strength_drink"),
+            ("心情", self.bar_feeling, "feeling"),
+            ("健康", self.bar_health, "health"),
+            ("好感", self.bar_likability, "likability"),
         ]
-        for text, bar in labels_and_bars:
+        self._stat_bars = [(attr, bar) for _t, bar, attr in labels_and_bars]
+        self._stat_value_labels: dict = {}
+        for text, bar, attr in labels_and_bars:
             row = QHBoxLayout()
-            lbl = QLabel(text); lbl.setFixedWidth(56)
+            lbl = QLabel(text); lbl.setFixedWidth(40)
+            lbl.setStyleSheet("color:#4b4b5e; font-size:9pt;")
             row.addWidget(lbl); row.addWidget(bar, 1)
+            vlbl = QLabel("0")
+            vlbl.setFixedWidth(58)
+            vlbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            vlbl.setStyleSheet(
+                "color:#8a8a9c; font-size:8pt; border:none;"
+                "background:transparent;")
+            self._stat_value_labels[attr] = vlbl
+            row.addWidget(vlbl)
             gv.addLayout(row)
         self.lbl_summary = QLabel("（未连接 state）")
         f = self.lbl_summary.font(); f.setBold(True); self.lbl_summary.setFont(f)
+        self.lbl_summary.setStyleSheet("color:#6b6b7d; font-size:9pt; padding-top:2px;")
         gv.addWidget(self.lbl_summary)
         v.addWidget(g)
         v.addStretch(1)
         return page
 
-    # ---------- Tab: 帧数（核心重构：FPS 预设 + 实时改帧率 + FPS 气泡调试） ----------
     def _build_tab_fps(self) -> QWidget:
         page = QWidget()
         v = QVBoxLayout(page)
         v.setSpacing(10)
 
-        # —— FPS 预设按钮 ——
         g_fps = QGroupBox("帧率预设")
         gv = QVBoxLayout(g_fps)
         row = QHBoxLayout()
@@ -336,7 +326,6 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.lbl_fps_apply)
         v.addWidget(g_fps)
 
-        # —— 帧时长滑块（细调）——
         g_ms = QGroupBox("帧时长细调")
         gv = QVBoxLayout(g_ms)
         row = QHBoxLayout()
@@ -357,7 +346,6 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.lbl_ms_range)
         v.addWidget(g_ms)
 
-        # —— 持久化按钮（慎重：会改磁盘上 PNG 文件名）——
         g_save = QGroupBox("持久化")
         gv = QVBoxLayout(g_save)
         warn = QLabel("仅在你想永久保存当前帧时长到素材文件时使用。改完后下次启动仍是该帧率。")
@@ -371,7 +359,6 @@ class SettingsWindow(QWidget):
         gv.addLayout(row)
         v.addWidget(g_save)
 
-        # —— FPS 气泡调试 ——
         g_debug = QGroupBox("调试：桌宠头顶 FPS 气泡")
         gv = QVBoxLayout(g_debug)
         row = QHBoxLayout()
@@ -386,13 +373,11 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         return page
 
-    # ---------- Tab: 视觉 ----------
     def _build_tab_visual(self) -> QWidget:
         page = QWidget()
         v = QVBoxLayout(page)
         v.setSpacing(10)
 
-        # —— 渲染器（切换需重启）——
         g_renderer = QGroupBox("渲染器")
         gr = QVBoxLayout(g_renderer)
         rrow = QHBoxLayout()
@@ -411,7 +396,6 @@ class SettingsWindow(QWidget):
         gr.addWidget(tip_r)
         v.addWidget(g_renderer)
 
-        # —— 缩放：预设按钮 + 滑块 ——
         g_scale = QGroupBox("桌宠缩放")
         gv = QVBoxLayout(g_scale)
         row = QHBoxLayout()
@@ -435,7 +419,6 @@ class SettingsWindow(QWidget):
         gv.addLayout(row)
         v.addWidget(g_scale)
 
-        # —— 透明度 ——
         g_op = QGroupBox("窗口透明度")
         gv = QVBoxLayout(g_op)
         row = QHBoxLayout()
@@ -454,7 +437,6 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.cb_always_on_top)
         v.addWidget(g_op)
 
-        # —— 动画切换优化（豆包生成图不连贯时用）——
         g_anim = QGroupBox("动画切换优化")
         gv = QVBoxLayout(g_anim)
         row = QHBoxLayout()
@@ -481,7 +463,6 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         return page
 
-    # ---------- Tab: 控制 ----------
     def _build_tab_control(self) -> QWidget:
         # 外层包 QScrollArea，防止内容过多时按钮被压缩、文字糊成黑条
         page = QWidget()
@@ -500,7 +481,6 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
-        # —— 快捷入口：聊天 / 睡觉 / 醒来 ——
         g_short = QGroupBox("快捷入口")
         gv = QHBoxLayout(g_short)
         self.btn_chat  = QPushButton("和她聊聊")
@@ -510,7 +490,6 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.btn_chat); gv.addWidget(self.btn_sleep); gv.addWidget(self.btn_wake)
         v.addWidget(g_short)
 
-        # —— 表情 ——
         # live2d 模型在 Live2D 页已有完整表情/外观，这里只给引导，不重复铺一长串按钮；
         # sprite 渲染器则保留 5 个基础情绪。
         g_emo = QGroupBox("切换表情")
@@ -548,7 +527,6 @@ class SettingsWindow(QWidget):
                 gv.addWidget(btn, r, c)
         v.addWidget(g_emo)
 
-        # —— 自主行为节拍 ——
         g_motion = QGroupBox("自主行为")
         gv = QVBoxLayout(g_motion)
         pairs = [
@@ -570,7 +548,6 @@ class SettingsWindow(QWidget):
             self.motion_sliders[key] = (slider, val)
         v.addWidget(g_motion)
 
-        # —— 主动关心（空闲时主动找主人说话）——
         st_p = self._panel_state.get("proactive", {})
         g_pro = QGroupBox("主动关心")
         gp = QGridLayout(g_pro)
@@ -595,7 +572,6 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         return page
 
-    # ---------- Tab: Live2D（模型专属外观 / 触发场景 / 随机表情） ----------
 
     def _build_tab_live2d(self) -> QWidget:
         """Live2D 专属设置：外观/挂机置顶，五大类以可点选 chip 网格呈现。
@@ -631,7 +607,6 @@ class SettingsWindow(QWidget):
         self._scene_dlgs: list = []
         self._custom_action_layout = None
 
-        # —— 模型名卡片 ——
         model_name = ""
         try:
             model_name = getattr(renderer.profile, "name", "") or ""
@@ -650,7 +625,6 @@ class SettingsWindow(QWidget):
         hl.addWidget(nm)
         v.addWidget(head)
 
-        # —— 外观 / 挂机（置顶，最常用的复位与随机开关）——
         g_misc = QGroupBox("外观 / 挂机")
         gm = QVBoxLayout(g_misc)
         gm.setSpacing(8)
@@ -680,7 +654,6 @@ class SettingsWindow(QWidget):
         self.cb_hide_watermark.toggled.connect(self.hide_watermark_changed.emit)
         gm.addWidget(self.cb_hide_watermark)
 
-        # —— 挂机随机间隔 ——
         ri = self._live2d_state.get("random_interval", (20, 50))
         row = QHBoxLayout()
         row.addWidget(QLabel("随机间隔（秒）"))
@@ -699,7 +672,6 @@ class SettingsWindow(QWidget):
         row.addStretch(1)
         gm.addLayout(row)
 
-        # —— 渲染帧率（性能） ——
         row = QHBoxLayout()
         row.addWidget(QLabel("渲染帧率"))
         self.cmb_max_fps = QComboBox()
@@ -714,7 +686,6 @@ class SettingsWindow(QWidget):
         gm.addLayout(row)
         v.addWidget(g_misc)
 
-        # —— 表情包贴纸参数 ——
         st_cfg = self._live2d_state.get("sticker", {})
         g_st = QGroupBox("表情包贴纸")
         gs = QGridLayout(g_st)
@@ -763,19 +734,127 @@ class SettingsWindow(QWidget):
         gs.addWidget(self.spin_sticker_duration, 3, 1)
         v.addWidget(g_st)
 
-        # —— 触发场景配置（每个场景搭配表情/发型/配件/手势）——
         self._scene_card = self._build_scene_card(renderer)
         v.addWidget(self._scene_card)
-        # —— 自定义动作（用户命名，初始为空，可绑工具动作，仅 Live2D）——
         self._custom_action_card = self._build_custom_action_card(renderer)
         v.addWidget(self._custom_action_card)
+        # 游戏动作反馈（所有小游戏共用一套场景配置）
+        self._game_action_card = self._build_game_action_card()
+        v.addWidget(self._game_action_card)
 
         v.addStretch(1)
         return page
 
-    # ============================================================
+    # ---------- 游戏动作反馈（所有小游戏共用一套场景） ----------
+    def _build_game_action_card(self) -> QGroupBox:
+        from app.engine.game_actions import GAME_EVENTS
+        box = QGroupBox("游戏动作反馈（五子棋 / 狼人杀通用）")
+        box.setObjectName("live2d_card")
+        vl = QVBoxLayout(box)
+        vl.setContentsMargins(12, 22, 12, 12)
+        vl.setSpacing(6)
+        hint = QLabel(
+            "对局达到对应情形时做一个一次性动作；所有小游戏共用这一套场景配置，"
+            "同时兼容 Live2D 与帧动画。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
+        vl.addWidget(hint)
+        self.cb_game_action = QCheckBox("启用游戏动作反馈")
+        self.cb_game_action.setChecked(bool(self._game_store.enabled))
+        self.cb_game_action.toggled.connect(self._on_game_action_enabled)
+        vl.addWidget(self.cb_game_action)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("动作最小间隔（秒）"))
+        self.spin_game_cd = QSpinBox()
+        self.spin_game_cd.setRange(0, 30)
+        self.spin_game_cd.setValue(int(self._game_store.cooldown_s))
+        self.spin_game_cd.valueChanged.connect(self._on_game_action_cooldown)
+        row.addWidget(self.spin_game_cd)
+        row.addStretch(1)
+        self.btn_game_reset = QPushButton("恢复默认")
+        self.btn_game_reset.setObjectName("more_btn")
+        self.btn_game_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_game_reset.clicked.connect(self._on_game_action_reset)
+        row.addWidget(self.btn_game_reset)
+        vl.addLayout(row)
+        for eid, title, _default in GAME_EVENTS:
+            vl.addWidget(self._build_game_action_row(eid, title))
+        return box
+
+    def _build_game_action_row(self, event_id: str, title: str) -> QFrame:
+        row = QFrame()
+        row.setObjectName("scene_row")
+        row.setStyleSheet(self._ROW_QSS)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 5, 8, 5)
+        h.setSpacing(8)
+        name = QLabel(title)
+        name.setMinimumWidth(200)
+        name.setStyleSheet(
+            "color:#2c2c38; font-size:9pt; border:none; background:transparent;")
+        h.addWidget(name)
+        summ = QLabel(self._game_store.summary(event_id))
+        summ.setStyleSheet(
+            "color:#9a9aad; font-size:8pt; border:none; background:transparent;")
+        summ.setWordWrap(False)
+        h.addWidget(summ, 1)
+        self._game_action_labels[event_id] = summ
+        btn = QPushButton("配置")
+        btn.setObjectName("more_btn")
+        btn.setFixedWidth(54)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(
+            lambda _=False, b=btn, e=event_id: self._open_game_action_menu(b, e))
+        h.addWidget(btn)
+        return row
+
+    def _open_game_action_menu(self, anchor: QPushButton, event_id: str) -> None:
+        from app.engine.game_actions import GAME_ACTION_CHOICES
+        menu = QMenu(self)
+        cur = set(self._game_store.actions.get(event_id, []))
+        for key, label in GAME_ACTION_CHOICES:
+            act = QAction(label, menu)
+            act.setCheckable(True)
+            act.setChecked((key == "none" and not cur)
+                           or (key != "none" and key in cur))
+            act.triggered.connect(
+                lambda _=False, k=key, e=event_id:
+                self._on_game_action_toggle(e, k))
+            menu.addAction(act)
+        ui_style.style_menu(menu)
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _on_game_action_toggle(self, event_id: str, key: str) -> None:
+        from app.engine.game_actions import GAME_ACTION_CHOICES
+        cur = list(self._game_store.actions.get(event_id, []))
+        if key == "none":
+            new = []
+        elif key in cur:
+            new = [a for a in cur if a != key]
+        else:
+            new = cur + [key]
+        order = [k for k, _ in GAME_ACTION_CHOICES]
+        new = [a for a in order if a in new]
+        self._game_store.set_event(event_id, new)
+        lbl = self._game_action_labels.get(event_id)
+        if lbl is not None:
+            lbl.setText(self._game_store.summary(event_id))
+
+    def _on_game_action_enabled(self, on: bool) -> None:
+        self._game_store.set_enabled(on)
+
+    def _on_game_action_cooldown(self, val: int) -> None:
+        self._game_store.set_cooldown(float(val))
+
+    def _on_game_action_reset(self) -> None:
+        self._game_store.reset()
+        self.cb_game_action.setChecked(self._game_store.enabled)
+        self.spin_game_cd.setValue(int(self._game_store.cooldown_s))
+        for _eid, _lbl in self._game_action_labels.items():
+            _lbl.setText(self._game_store.summary(_eid))
+
     #  触发场景配置（Live2D）
-    # ============================================================
     _ROW_QSS = (
         "QFrame#scene_row{background:#ffffff; border:1px solid #eceaf5;"
         "border-radius:10px;} QFrame#scene_row:hover{border-color:#d8d2f7;}")
@@ -961,7 +1040,6 @@ class SettingsWindow(QWidget):
         self.live2d_reset_requested.emit()
 
 
-    # ---------- Tab: 模型配置 ----------
     def _build_tab_model(self) -> QWidget:
         """模型配置：LLM API 地址、密钥、模型名、参数。"""
         # 内容较多（API + 参数 + 预设 + TTS），外层包 QScrollArea 防止压缩重叠
@@ -980,7 +1058,6 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
-        # —— API 连接 ——
         g_api = QGroupBox("API 连接")
         gv = QVBoxLayout(g_api)
         form = QFormLayout()
@@ -1027,7 +1104,6 @@ class SettingsWindow(QWidget):
         gv.addWidget(self.lbl_model_status)
         v.addWidget(g_api)
 
-        # —— 生成参数 ——
         g_param = QGroupBox("生成参数")
         gv = QVBoxLayout(g_param)
         pform = QFormLayout()
@@ -1068,7 +1144,6 @@ class SettingsWindow(QWidget):
         gv.addLayout(pform)
         v.addWidget(g_param)
 
-        # —— 常用 API 预设 ——
         g_preset = QGroupBox("常用 API 预设")
         gv = QVBoxLayout(g_preset)
         row = QHBoxLayout()
@@ -1087,7 +1162,6 @@ class SettingsWindow(QWidget):
         gv.addLayout(row)
         v.addWidget(g_preset)
 
-        # —— TTS 语音设置 ——
         g_voice = QGroupBox("TTS 语音")
         gv = QVBoxLayout(g_voice)
         vform = QFormLayout()
@@ -1125,7 +1199,6 @@ class SettingsWindow(QWidget):
         gv.addLayout(vform)
         v.addWidget(g_voice)
 
-        # —— 语音引擎与参数（全量面板化：改后即存即生效）——
         st_tts = self._panel_state.get("tts", {})
         g_tts_cfg = QGroupBox("语音引擎与参数")
         gform = QFormLayout(g_tts_cfg)
@@ -1161,7 +1234,6 @@ class SettingsWindow(QWidget):
         gform.addRow("", self.tts_tip)
         v.addWidget(g_tts_cfg)
 
-        # —— 角色设定 ——
         st_char = self._panel_state.get("character", {})
         g_char = QGroupBox("角色设定")
         cform = QFormLayout(g_char)
@@ -1185,7 +1257,6 @@ class SettingsWindow(QWidget):
 
         v.addStretch(1)
         return page
-    # ============================================================
     def _wire_signals(self) -> None:
         # FPS 预设
         for btn, fps, ms in self.fps_presets:
@@ -1235,9 +1306,7 @@ class SettingsWindow(QWidget):
         self.btn_reset.clicked.connect(self.reset_to_defaults_requested.emit)
         self.btn_close.clicked.connect(self.close)
 
-    # ============================================================
     #  加载默认值（所有 setValue/setChecked 都 blockSignals，避免初始化期就触发外部 slot）
-    # ============================================================
     def _load_defaults(self) -> None:
         # scale
         self.scale_slider.blockSignals(True)
@@ -1314,9 +1383,7 @@ class SettingsWindow(QWidget):
             btn.blockSignals(False)
         self._set_status("默认值已加载")
 
-    # ============================================================
     #  从持久化存储加载设置
-    # ============================================================
     def _load_from_store(self) -> None:
         """从 SettingsStore 加载已保存的设置（如果有的话）。"""
         store = self.settings_store
@@ -1406,9 +1473,7 @@ class SettingsWindow(QWidget):
             self.cb_tts_enabled.setChecked(tts_enabled)
             self.cb_tts_enabled.blockSignals(False)
 
-    # ============================================================
     #  事件处理
-    # ============================================================
     def _on_fps_preset_clicked(self, btn, ms: int, fps: int) -> None:
         """用户点了 FPS 预设按钮：勾上对应按钮 + 把细调滑块同步 + 立刻改内存帧时长。
 
@@ -1440,7 +1505,6 @@ class SettingsWindow(QWidget):
         self.override_frame_ms_requested.emit(v)
 
     def _highlight_fps_preset(self, ms: int) -> None:
-        # PR-fix-stack-overrun: 互斥按钮 setChecked 必须 blockSignals，否则递归炸栈
         matched = False
         for btn, fps, preset_ms in self.fps_presets:
             btn.blockSignals(True)
@@ -1474,9 +1538,7 @@ class SettingsWindow(QWidget):
         else:
             self._set_status("FPS 气泡监测已关闭")
 
-    # ---- 视觉 ----
     def _on_scale_preset_clicked(self, btn, sc: float) -> None:
-        # PR-fix-stack-overrun: 互斥按钮必须 blockSignals
         for b, _ in self.scale_presets:
             b.blockSignals(True)
             b.setChecked(b is btn)
@@ -1494,7 +1556,6 @@ class SettingsWindow(QWidget):
         self.settings_changed.emit()
 
     def _highlight_scale_preset(self, sc: float) -> None:
-        # PR-fix-stack-overrun: 互斥按钮必须 blockSignals
         for btn, preset_sc in self.scale_presets:
             btn.blockSignals(True)
             btn.setChecked(abs(preset_sc - sc) < 0.001)
@@ -1515,9 +1576,7 @@ class SettingsWindow(QWidget):
         if self.cb_crossfade.isChecked():
             self.crossfade_changed.emit(True, v)
 
-    # ---- 控制 ----
     def _on_emotion_clicked(self, btn, key: str) -> None:
-        # PR-fix-stack-overrun: 互斥按钮必须 blockSignals
         for b, _ in self.emo_btns:
             b.blockSignals(True)
             b.setChecked(b is btn)
@@ -1533,7 +1592,6 @@ class SettingsWindow(QWidget):
         self.settings_store.set(f"motion_{key}", v)
         self.settings_changed.emit()
 
-    # ---- 模型配置 ----
     def _on_model_config_changed(self) -> None:
         """用户修改了模型配置，发出信号并持久化。"""
         cfg = self.get_model_config()
@@ -1663,9 +1721,7 @@ class SettingsWindow(QWidget):
     def _set_status(self, msg: str) -> None:
         self.lbl_status.setText(msg)
 
-    # ============================================================
     #  Public API（供主程序读）
-    # ============================================================
     def get_scale(self) -> float:
         return self.scale_slider.value() / 100.0
 
@@ -1673,7 +1729,6 @@ class SettingsWindow(QWidget):
         """窗口置顶开关当前状态。"""
         return self.cb_always_on_top.isChecked()
 
-    # ---------- 全量面板化（TTS / 角色 / 主动关心 / 渲染器 / 水印） ----------
     def _emit_tts_config(self) -> None:
         """TTS 任意控件变化 → 打包当前配置发信号。"""
         self.tts_config_changed.emit({
@@ -1705,7 +1760,6 @@ class SettingsWindow(QWidget):
         if data:
             self.renderer_changed.emit(str(data))
 
-    # ---------- Live2D 参数（发射当前控件值） ----------
     def _emit_sticker_options(self) -> None:
         # 同步滑条旁的数值标签
         self.lbl_sticker_size.setText(f"{self.slider_sticker_size.value()} px")
@@ -1758,21 +1812,37 @@ class SettingsWindow(QWidget):
         self.frame_ms_label.setText(f"{ms} ms  ({fps:.1f} fps)")
         self._highlight_fps_preset(ms)
 
-    # ============================================================
     #  状态条刷新
-    # ============================================================
+    _MODE_CN = {"Happy": "开心", "Normal": "正常",
+                "PoorCondition": "状态不佳", "Ill": "生病"}
+
+    def _status_summary_plain(self, s) -> str:
+        mode_cn = self._MODE_CN.get(getattr(s.mode, "value", str(s.mode)), "正常")
+        return f"Lv.{int(s.level)}    金币 {s.money:.0f}    状态 {mode_cn}"
+
     def refresh_state(self) -> None:
         s = self._attached_state
         if s is None:
             self.lbl_summary.setText("（未连接 state）")
             return
-        self.bar_strength.setValue(int(s.strength))
-        self.bar_food.setValue(int(s.strength_food))
-        self.bar_drink.setValue(int(s.strength_drink))
-        self.bar_feeling.setValue(int(s.feeling))
-        self.bar_health.setValue(int(s.health))
-        self.bar_likability.setValue(int(s.likability))
-        self.lbl_summary.setText(s.stats_summary())
+        like_max = float(getattr(s, "likability_max", 100.0))
+        vals = {
+            "strength": min(100.0, max(0.0, float(s.strength))),
+            "strength_food": min(100.0, max(0.0, float(s.strength_food))),
+            "strength_drink": min(100.0, max(0.0, float(s.strength_drink))),
+            "feeling": min(100.0, max(0.0, float(s.feeling))),
+            "health": min(100.0, max(0.0, float(s.health))),
+            "likability": min(like_max, max(0.0, float(s.likability))),
+        }
+        for attr, bar in self._stat_bars:
+            v = vals[attr]
+            bar.setRange(0, int(like_max) if attr == "likability" else 100)
+            bar.setValue(int(v))
+            lbl = self._stat_value_labels.get(attr)
+            if lbl is not None:
+                lbl.setText(f"{v:.0f}/{like_max:.0f}" if attr == "likability"
+                            else f"{v:.0f}")
+        self.lbl_summary.setText(self._status_summary_plain(s))
 
     def is_lock_first_idle(self) -> bool:
         return self.cb_lock_first_idle.isChecked()

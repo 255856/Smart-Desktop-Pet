@@ -1,10 +1,4 @@
-"""PetRenderer 工厂：根据配置选 sprite / live2d。
-
-调用方（PetWindow）通过 create_renderer(cfg, ...) 拿到 PetRenderer 接口实现，
-不用关心具体是 sprite 还是 live2d。
-
-如果选了 live2d 但 PyQtWebEngine 没装，自动 fallback 到 sprite 并打 WARNING。
-"""
+"""PetRenderer 工厂：根据配置选 sprite / live2d。"""
 from __future__ import annotations
 
 import logging

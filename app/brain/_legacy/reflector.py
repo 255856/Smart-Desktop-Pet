@@ -1,21 +1,4 @@
-"""Reflector：评估一步执行结果，决定 done / retry / replan。
-
-设计：
-    - 评估三件事：
-        1. 工具是否报错 / 返回错误？
-        2. 工具结果是否满足步骤 thought 想要的目标？
-        3. 是否需要更多步骤（plan 还需扩展）？
-    - 两种模式：
-        a) heuristic：基于规则的快速判断（默认开启，零 LLM 开销）
-        b) llm：调用 LLM 做语义判断（更准确，多一次小模型调用）
-    - 输出 Reflection { verdict: "ok"|"retry"|"replan"|"fail", comment: str }
-
-【抗幻觉】意图-行为一致性检查：
-    如果用户原始目标（plan.goal）明显需要工具（打开/提醒/记住/查询等），
-    但 plan 里**没有任何 tool 步骤**（且 final 步骤直接给文字答复），
-    HeuristicReflector 会判定为「replan」而不是「ok」——
-    强制 Planner 重新规划，给模型第二次机会去构造 tool 步骤。
-"""
+"""Reflector：评估一步执行结果，决定 done / retry / replan。"""
 from __future__ import annotations
 
 import json
@@ -43,9 +26,7 @@ class Reflection:
                 "confidence": self.confidence}
 
 
-# ---------------------------------------------------------------------------
 #  Heuristic 评估
-# ---------------------------------------------------------------------------
 
 _ERROR_KEYWORDS = ("错误", "失败", "Error", "error", "Exception", "exception",
                    "找不到", "无法", "未知工具", "未配置")
@@ -141,9 +122,7 @@ class HeuristicReflector:
         )
 
 
-# ---------------------------------------------------------------------------
 #  LLM-based Reflector（更准确，但有 LLM 开销）
-# ---------------------------------------------------------------------------
 
 
 _REFLECT_SYSTEM = """你是「Reflector」评估模块。给定一个步骤的目标（thought）、它调用的工具和工具返回，
@@ -210,9 +189,7 @@ def _extract_json(text: str) -> Optional[dict]:
         return None
 
 
-# ---------------------------------------------------------------------------
 #  统一接口
-# ---------------------------------------------------------------------------
 
 
 def make_reflector(mode: str = "heuristic", llm_client: Optional[LLMClient] = None):

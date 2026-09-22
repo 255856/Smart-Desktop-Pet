@@ -193,7 +193,6 @@ class MemoryDialog(QDialog):
         cl.setSpacing(0)
         root.addWidget(card)
 
-        # ---- 标题栏 ----
         header = QFrame(card)
         header.setObjectName("titlebar")
         header.setStyleSheet(ui_style.TITLEBAR_QSS)
@@ -225,7 +224,6 @@ class MemoryDialog(QDialog):
         body.setSpacing(10)
         cl.addLayout(body, 1)
 
-        # ---- 搜索 + 类别筛选 ----
         row = QHBoxLayout()
         row.setSpacing(8)
         self.search_edit = QLineEdit()
@@ -242,7 +240,6 @@ class MemoryDialog(QDialog):
         row.addWidget(self.cat_combo)
         body.addLayout(row)
 
-        # ---- 记忆列表（滚动）----
         self.scroll = QScrollArea()
         self.scroll.setObjectName("mem_scroll")
         self.scroll.setWidgetResizable(True)
@@ -263,7 +260,6 @@ class MemoryDialog(QDialog):
         self.empty_label.hide()
         body.addWidget(self.empty_label)
 
-        # ---- 新增区 ----
         add_card = QFrame()
         add_card.setObjectName("add_card")
         av = QVBoxLayout(add_card)

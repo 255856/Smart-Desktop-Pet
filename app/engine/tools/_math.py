@@ -7,7 +7,6 @@ import json
 from ._core import Tool, ToolRegistry
 
 
-# ---------- 数学计算 ----------
 def _calc(expression: str) -> str:
     """安全计算数学表达式。支持 + - * / ( ) . ** sqrt sin cos tan log。"""
     import math
@@ -28,7 +27,6 @@ def _calc(expression: str) -> str:
         return f"计算错误：{e}"
 
 
-# ---------- 单位换算 ----------
 def _convert(value: float, from_unit: str, to_unit: str) -> str:
     """单位换算：长度(cm/m/ft/inch)、重量(kg/g/lb/oz)、温度(C/F/K)、速度(km/h/m/s/mph)。"""
     u = from_unit.lower().strip()
@@ -100,7 +98,6 @@ def _convert(value: float, from_unit: str, to_unit: str) -> str:
     return f"不支持的换算：{from_unit} → {to_unit}。支持：长度(cm/m/ft/inch)、重量(kg/g/lb/oz)、温度(C/F/K)、速度(km/h/m/s/mph)"
 
 
-# ---------- 日期信息 ----------
 def _date_info(date_str: str = "") -> str:
     """获取日期信息：公历、农历、星期、生肖、节日。"""
     target = dt.datetime.now() if not date_str else None

@@ -24,7 +24,6 @@ EMPTY = 0
 BLACK = 1
 WHITE = 2
 
-# ---- 棋型分值（越大越优先） ----
 S_FIVE = 1_000_000          # 五连（直接获胜）
 S_LIVE_FOUR = 100_000       # 活四 / 双四（下一手必胜）
 S_RUSH_FOUR = 10_000        # 冲四（一个必杀点）
@@ -62,7 +61,6 @@ class GomokuGame:
         self.winner = 0
         self.history = []
 
-    # ---- 状态查询 ----
     def in_board(self, r: int, c: int) -> bool:
         return 0 <= r < SIZE and 0 <= c < SIZE
 
@@ -73,7 +71,6 @@ class GomokuGame:
     def last_move(self) -> Optional[Tuple[int, int]]:
         return self.history[-1] if self.history else None
 
-    # ---- 落子 ----
     def play(self, r: int, c: int) -> bool:
         """落子；成功返回 True，并轮换/判定胜负。"""
         if not self.is_legal(r, c):
@@ -121,9 +118,7 @@ class GomokuGame:
         return sorted(marked) or [self.history[-1]]
 
 
-# ============================================================
 #  AI 评估
-# ============================================================
 def _winning_moves(game: GomokuGame, player: int,
                    candidates: Optional[List[Tuple[int, int]]] = None
                    ) -> List[Tuple[int, int]]:

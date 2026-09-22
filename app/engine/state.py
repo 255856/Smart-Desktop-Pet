@@ -1,23 +1,4 @@
-"""VPet 同款核心状态机（平衡版）。
-
-数值设计原则：
-    1. 数值不会「一下子就掉完」——基础衰减慢（100→0 约 60-100 分钟）
-    2. 数值可以「被动回复」——当某项 >70 时缓慢恢复，不会无限下降
-    3. 睡觉时全部快速回复（体力 +0.20/s, 饱食/口渴 +0.10/s, 心情 +0.05/s）
-    4. 吃饭/喝水/抚摸等互动能大幅提升数值（吃饭 +30 饱食 +15 体力）
-    5. 夜间（22:00-06:00）衰减仅 ×1.3（不是 ×1.5，避免过于惩罚性）
-
-衰减速率（per second, 白天，四项统一）：
-    - 体力 / 饱食 / 口渴 / 心情：0.007/s（100→0 纯衰减 ≈ 4 h；
-      高值因被动回复实际略慢；夜间 ×1.3 ≈ 3 h）
-    - 寂寞：   10 分钟未互动 → 心情衰减 ×2（≈ 2 h）
-    - 健康：   不自动衰减，仅当饱食/口渴/心情 全部 < 15 时才下降
-
-被动回复速率（per second）：
-    - 当某项 > 70 时：每秒回复 +0.0035（约抵消一半白天衰减）
-    - 当某项 < 30 时：不回复（需要用户主动喂食）
-    - 三项都 > 50 且心情 > 60 时：健康每秒 +0.020
-"""
+"""VPet 同款核心状态机（平衡版）。"""
 from __future__ import annotations
 
 import logging
@@ -65,43 +46,34 @@ class PetState:
     likability: float = 0.0
     mode: Mode = Mode.NORMAL
 
-    # ---- 衰减速率（per second） ----
     decay_strength: float = 0.007
     decay_strength_food: float = 0.007
     decay_strength_drink: float = 0.007
     decay_feeling: float = 0.007
 
-    # ---- 被动回复速率（per second，当该项 >70 时） ----
     regen_strength: float = 0.0035
     regen_strength_food: float = 0.0035
     regen_strength_drink: float = 0.0035
     regen_feeling: float = 0.0035
 
-    # ---- 被动回复阈值：> regen_threshold 才开始回复 ----
     regen_threshold: float = 70.0
 
-    # ---- 健康恢复阈值：所有项 > healthy_min 时才回复健康 ----
     healthy_min: float = 40.0
 
-    # ---- 报警阈值 ----
     food_low: float = 25.0
     drink_low: float = 25.0
     feeling_low: float = 25.0
 
-    # ---- 夜间倍数（从 1.5 降到 1.3，避免太惩罚性） ----
     night_multiplier: float = 1.3
 
     _last_interact_ts: float = 0.0
 
-    # ---- 投喂好感每日上限（每次有效投喂 +1，每天最多 5 点，跨自然日重置） ----
     feed_like_daily_cap: float = 5.0
     feed_like_date: str = ""
     feed_like_count: float = 0.0
 
-    # ---- 每日签到（每天一次，签到得金币，跨自然日重置） ----
     checkin_date: str = ""
 
-    # ---- 小游戏金币每日上限（防刷，跨自然日重置） ----
     game_coin_daily_cap: float = 100.0
     game_coin_date: str = ""
     game_coin_count: float = 0.0
@@ -112,11 +84,22 @@ class PetState:
 
     @property
     def likability_max(self) -> float:
-        return 90 + self.level * 10
+        return 100.0
 
     @property
     def feeling_max(self) -> float:
         return 100.0
+
+    def normalize(self) -> None:
+        # 把存档读入的数值钳制到合法范围（兼容旧版本越界值，如好感度曾随等级到 110）
+        for _k in ("strength", "strength_food", "strength_drink",
+                   "feeling", "health", "likability"):
+            _hi = self.likability_max if _k == "likability" else 100.0
+            setattr(self, _k, min(_hi, max(0.0, float(getattr(self, _k)))))
+        for _k in ("store_strength", "store_strength_food", "store_strength_drink",
+                   "money", "exp", "feed_like_count", "game_coin_count"):
+            setattr(self, _k, max(0.0, float(getattr(self, _k))))
+        self.level = max(1, int(self.level))
 
     def level_up_need(self) -> int:
         return int(math.pow(self.cal_level() * 10, 2))
@@ -268,7 +251,6 @@ class PetState:
             self._fire_change()
             return
 
-        # ---- 白天正常衰减 ----
         for stat_name, decay_val, regen_val in [
             ("strength", self.decay_strength, self.regen_strength),
             ("strength_food", self.decay_strength_food, self.regen_strength_food),
@@ -290,7 +272,6 @@ class PetState:
             decayed = max(0.0, min(100.0, decayed))
             setattr(self, stat_name, decayed)
 
-        # ---- 健康 ----
         food = self.strength_food
         drink = self.strength_drink
         feeling = self.feeling
@@ -302,7 +283,6 @@ class PetState:
             # 三项都 >40 且心情 >60 → 健康缓慢恢复
             self.health = min(100.0, self.health + 0.02 * dt_seconds)
 
-        # ---- 寂寞计时 ----
         self._last_interact_ts = max(self._last_interact_ts, 0.0)
 
         # Store 回收
@@ -467,6 +447,7 @@ class PetState:
             s.game_coin_count = float(d["game_coin_count"])
         if v < 3:
             log.info("存档 v=%d 已升级到 v3（含 level 保存 + 平衡数值）", v)
+        s.normalize()
         return s
 
     def stats_summary(self) -> str:

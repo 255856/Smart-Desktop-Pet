@@ -1,13 +1,4 @@
-"""语音识别（ASR）模块 —— 麦克风录音 + faster-whisper 转文字。
-
-设计：
-    - 录音走独立线程（sounddevice.InputStream），不阻塞 Qt 主循环
-    - 语音识别走独立线程（faster-whisper），首次加载模型较慢
-    - 模型惰性加载且只加载一次，后续复用
-
-依赖（可选安装，未安装时对应按钮/功能优雅降级）：
-    pip install sounddevice faster-whisper
-"""
+"""语音识别（ASR）模块 —— 麦克风录音 + faster-whisper 转文字。"""
 from __future__ import annotations
 
 import logging
@@ -69,7 +60,6 @@ class SpeechRecognizer(QObject):
         self._model = None
         self._model_lock = threading.Lock()
 
-    # ---------------- 录音 ----------------
     def start_recording(self) -> None:
         """开始采集麦克风。若已有录音线程则先停掉。"""
         if self._recorder_thread and self._recorder_thread.is_alive():
@@ -127,7 +117,6 @@ class SpeechRecognizer(QObject):
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(self._samples).reshape(-1).astype(np.float32)
 
-    # ---------------- 识别 ----------------
     def _recognize_loop(self, audio: np.ndarray) -> None:
         """识别线程体：惰性加载模型 + 转文字。"""
         try:

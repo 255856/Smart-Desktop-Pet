@@ -103,7 +103,6 @@ class WerewolfDirector(QThread):
         self._npc_remain = NPC_PHASE_TIMEOUT
         self._human_waiting = False
 
-    # ---------------- 玩家操作回填（主线程调用） ----------------
     def submit_action(self, payload: object) -> None:
         self._human_action = payload
         self._human_event.set()
@@ -120,7 +119,6 @@ class WerewolfDirector(QThread):
             except RuntimeError:
                 pass
 
-    # ---------------- 线程主流程 ----------------
     def run(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -161,7 +159,6 @@ class WerewolfDirector(QThread):
             except Exception:
                 pass
 
-    # ---------------- 完整一局 ----------------
     async def _play(self) -> None:
         g = self.game
         # 全局 LLM 并发限流（所有 agent/host 共享一个信号量），
@@ -203,7 +200,6 @@ class WerewolfDirector(QThread):
             return
         await self._finish(winner)
 
-    # ---------------- 夜晚 ----------------
     async def _night(self) -> None:
         g = self.game
         night_no = g.day + 1
@@ -217,7 +213,6 @@ class WerewolfDirector(QThread):
         is_human_wolf = human_seat in wolves
         non_wolf = [s for s in alive if s not in wolves]
 
-        # ---- 狼队：独立狼频道讨论 + 提名（频道与公共频道隔离） ----
         nominations: Dict[int, int] = {}
         npc_wolves = [s for s in wolves if s != human_seat]
         if npc_wolves:
@@ -251,7 +246,6 @@ class WerewolfDirector(QThread):
                 nominations[human_seat] = ti
         wolf_target = self._majority(list(nominations.values()))
 
-        # ---- 预言家查验 ----
         seer = g.seat_of_role(SEER)
         seer_target = None
         if seer is not None and g.player(seer).alive:
@@ -267,7 +261,6 @@ class WerewolfDirector(QThread):
             elif unchecked:
                 seer_target = await self.agents[seer].seer_check(unchecked)
 
-        # ---- 女巫 ----
         witch = g.seat_of_role(WITCH)
         witch_save = False
         witch_poison = None
@@ -305,7 +298,6 @@ class WerewolfDirector(QThread):
         if not is_human_wolf and seer != human_seat and witch != human_seat:
             self.private_channel.emit(f"【夜晚】第 {night_no} 夜，你闭上了眼睛……")
 
-    # ---------------- 白天 ----------------
     async def _day(self) -> None:
         g = self.game
         out = g.last_outcome
@@ -359,7 +351,6 @@ class WerewolfDirector(QThread):
         # 投票（含平票 PK）
         await self._vote_phase()
 
-    # ---------------- 警长竞选 ----------------
     async def _campaign_sheriff(self) -> None:
         g = self.game
         alive = g.alive_seats()
@@ -473,7 +464,6 @@ class WerewolfDirector(QThread):
                 votes[human] = ti
         return votes
 
-    # ---------------- 白天投票 + PK ----------------
     async def _vote_phase(self) -> None:
         g = self.game
         await self._host("发言结束，开始投票！")
@@ -558,7 +548,6 @@ class WerewolfDirector(QThread):
         await self._maybe_transfer_sheriff()
         self._emit_state()
 
-    # ---------------- 警徽移交 ----------------
     async def _maybe_transfer_sheriff(self) -> None:
         """若警长已死亡，让其移交（或撕掉）警徽。"""
         g = self.game
@@ -593,7 +582,6 @@ class WerewolfDirector(QThread):
             await self._public("警长撕掉了警徽，本局不再有警长。")
         self._emit_state()
 
-    # ---------------- 遗言 / 猎人 ----------------
     async def _last_words(self, seat: int) -> None:
         g = self.game
         if seat == g.human_seat:
@@ -630,7 +618,6 @@ class WerewolfDirector(QThread):
             self._emit_state()
             await self._last_words(target)
 
-    # ---------------- 结束 ----------------
     async def _finish(self, winner: Optional[str]) -> None:
         g = self.game
         g.reveal_all()       # 游戏结束，亮出全部身份
@@ -649,7 +636,6 @@ class WerewolfDirector(QThread):
             "days": g.day,
         })
 
-    # ---------------- 工具 ----------------
     def _vote_candidates(self, seat: int) -> List[int]:
         return [s for s in self.game.alive_seats() if s != seat]
 
@@ -723,7 +709,6 @@ class WerewolfDirector(QThread):
                 poison = self._as_int(payload.get("target"))
         return save, poison
 
-    # ---------------- 信号 / 玩家等待 ----------------
     async def _host(self, text: str) -> None:
         if text:
             self.host_message.emit(text)

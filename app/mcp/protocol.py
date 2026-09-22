@@ -1,12 +1,4 @@
-"""MCP（Model Context Protocol）stdio JSON-RPC 客户端。
-
-极简实现：
-    - 走 stdio 与 MCP server 通信（一行一个 JSON）
-    - 实现了 initialize / tools/list / tools/call 三个核心方法
-    - 把 MCP tools 桥接到本地 ToolRegistry（自动转 OpenAI schema）
-
-启动 server 的命令在 mcp_servers/<name>.json 里配。
-"""
+"""MCP（Model Context Protocol）stdio JSON-RPC 客户端。"""
 from __future__ import annotations
 
 import asyncio
@@ -22,9 +14,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 #  MCP 协议常量
-# ---------------------------------------------------------------------------
 
 PROTOCOL_VERSION = "2024-11-05"
 CLIENT_NAME = "desktop-pet"
@@ -53,9 +43,7 @@ class MCPTool:
     dangerous: bool = False
 
 
-# ---------------------------------------------------------------------------
 #  stdio JSON-RPC 客户端
-# ---------------------------------------------------------------------------
 
 
 class MCPStdioClient:
@@ -210,9 +198,7 @@ class MCPStdioClient:
         return self.proc is not None and self.proc.poll() is None
 
 
-# ---------------------------------------------------------------------------
 #  MCPClientRegistry：管理多个 MCP server 客户端
-# ---------------------------------------------------------------------------
 
 
 class MCPClientRegistry:
@@ -300,7 +286,6 @@ class MCPClientRegistry:
                 ))
         return out
 
-    # ---- 桥接到 ToolRegistry ----
     def bridge_to(self, registry, dangerous_tools: Optional[set[str]] = None) -> int:
         """把 MCP tools 注册到本地 ToolRegistry，返回注册数量。
 

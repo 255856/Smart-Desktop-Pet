@@ -1,31 +1,4 @@
-"""Live2DRenderer：用 QWebEngineView + Cubism Web SDK 渲染 Live2D 模型。
-
-实现 PetRenderer 接口的 Live2D 版本。所有方法（set_idle / set_emotion /
-play_animation 等）都通过 QWebEngineView 调到 JS 桥层。
-
-模型专属知识（表情分类、触发映射、睡眠参数、水印形式、动作文件等）不在本文件
-硬编码，而是来自每个模型目录下的 ``*.model.yaml``（见 live2d_model_profile.py）；
-没有 YAML 的模型按文件名启发式自动解析。
-
-依赖（可选）：
-    - PyQtWebEngine 5.15+
-    - app/animation/cubism-sdk/live2dcubismcore.min.js  （官方 Cubism 4 Core）
-    - app/animation/cubism-sdk/pixi.min.js               （pixi.js v7）
-    - app/animation/cubism-sdk/cubism4.min.js            （pixi-live2d-display，Cubism4）
-
-资源加载：
-    Chromium 禁止 file:// 页面跨目录 XHR 加载模型（moc3 / json / 纹理），
-    这里在 127.0.0.1 随机端口起一个本地 HTTP 服务，同时提供 bridge.html、
-    SDK 脚本和模型目录（/model/*），页面与模型同源，彻底绕开 CORS。
-
-    很多模型（冰糖/超频猫猫）的 model3.json 没有注册 Motions/Expressions
-    （全靠 VTube Studio 热键驱动）。本服务在回传 model3.json 时动态注入
-    这两段（原模型文件一字不动），让官方 ExpressionManager / MotionManager
-    直接接管表情与待机动作。
-
-如果 PyQtWebEngine 未安装，本类直接 ImportError，PetWindow 会 fallback 到
-SpriteRenderer。
-"""
+"""Live2DRenderer：用 QWebEngineView + Cubism Web SDK 渲染 Live2D 模型。"""
 from __future__ import annotations
 
 import json
@@ -52,7 +25,6 @@ from app.animation.live2d_scene import (
 from app.animation.pet_renderer import PetRenderer
 from app.core.qt_compat import QObject, QTimer, QUrl
 
-# PR-fix-WebEngine-OpenGL: 在 import QWebEngineView 之前设置 AA_ShareOpenGLContexts，
 # 否则 PyQtWebEngine 会在模块加载时初始化 OpenGL plugin 并报错
 from PyQt5.QtCore import Qt, QCoreApplication, pyqtSlot as Slot
 QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
@@ -70,7 +42,6 @@ mimetypes.add_type("application/json", ".json")
 mimetypes.add_type("application/octet-stream", ".moc3")
 mimetypes.add_type("application/octet-stream", ".vbridger")
 
-# 可选 Qt 依赖：失败就抛 ImportError，让 PetWindow 知道要走 sprite fallback
 try:
     from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
     try:
@@ -155,13 +126,11 @@ def _build_settings_payload(model_dir: Path, settings_name: str,
 
     fr = settings.setdefault("FileReferences", {})
 
-    # ---- Expressions 注入 ----
     expr_defs = profile.expression_defs()
     if expr_defs and not fr.get("Expressions"):
         fr["Expressions"] = expr_defs
         log.info("Live2D: 注入 %d 个表情注册", len(expr_defs))
 
-    # ---- Motions 注入 ----
     if not fr.get("Motions"):
         motions: dict[str, list[dict]] = {}
         idle_file = _motion_file(model_dir, profile.motions_cfg, "idle_file")
@@ -348,7 +317,6 @@ class Live2DRenderer(PetRenderer):
         self.view = QWebEngineView()
         self.view.setFixedSize(*widget_size)
         self.view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        # PR-fix-drag-menu: 让 QWebEngineView 不吞鼠标事件。
         # 1) WA_TransparentForMouseEvents=False 显式声明（虽然默认值就是 False，但明确写出来更稳）
         # 2) NoContextMenu 策略：不让 WebView 弹自己的右键菜单，让 PetWindow 的 _show_context_menu 处理
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
@@ -385,7 +353,6 @@ class Live2DRenderer(PetRenderer):
         self._random_timer.setSingleShot(True)
         self._random_timer.timeout.connect(self._on_random_timeout)
 
-        # ---- 触发场景动作配置（按模型一份 JSON，覆盖 YAML triggers 默认）----
         self._scene_dir = Path(scene_dir) if scene_dir else None
         self.scene_store: Optional[SceneStore] = None
         self._scene_toggles: list[str] = []      # 持续场景叠加的 toggle 条目
@@ -396,7 +363,6 @@ class Live2DRenderer(PetRenderer):
             scene_path = self._scene_dir / f"{self.model_dir.name}.json"
             self.scene_store = SceneStore(scene_path, self.profile)
 
-    # ----- 生命周期 -----
     def _on_page_loaded(self, ok: bool) -> None:
         """WebView 页面加载完成 → 触发 JS loadModel。"""
         if not ok or self._load_attempted:
@@ -486,7 +452,6 @@ class Live2DRenderer(PetRenderer):
     def is_ready(self) -> bool:
         return self._ready
 
-    # ---------- 参数 / 条目播放底层 ----------
     def _apply_params(self, reset_ids: list[str], param_map: dict[str, float]) -> None:
         """直接写一组 core 参数（先复位 reset_ids，再设置 param_map），持久、不被表情切换撤销。"""
         js = (
@@ -549,7 +514,6 @@ class Live2DRenderer(PetRenderer):
             return target
         return None
 
-    # ---------- 挂机随机表情 ----------
     def _arm_random_timer(self) -> None:
         lo = max(1, self.profile.random_min_s)
         delay = random.randint(lo, max(lo, self.profile.random_max_s)) * 1000
@@ -619,7 +583,6 @@ class Live2DRenderer(PetRenderer):
     def is_random_expressions_enabled(self) -> bool:
         return self._random_enabled
 
-    # ---------- 表情包贴纸（桌宠右上角随机弹出） ----------
     def get_sticker_config(self) -> Optional[dict]:
         """模型表情包贴纸配置；无配置或目录不存在返回 None。
 
@@ -646,7 +609,6 @@ class Live2DRenderer(PetRenderer):
             "size": self.profile.stickers_size,
         }
 
-    # ---------- PetRenderer 接口实现 ----------
     def set_idle(self) -> None:
         """待机：头身姿态回正、临时姿态参数复位，并恢复当前情绪（发型保持）。
 
@@ -936,7 +898,6 @@ class Live2DRenderer(PetRenderer):
     def list_expressions(self) -> list[str]:
         return list(self._expressions)
 
-    # ---------- 情绪表情 ----------
     def get_emotion_options(self) -> list[tuple[str, str]]:
         """情绪菜单：自然表情 + 模型情绪组条目。"""
         options = self.profile.emotion_options()
@@ -965,7 +926,6 @@ class Live2DRenderer(PetRenderer):
         self._current_emotion = "natural"
         self._js("window.live2d.resetExpressionState();")
 
-    # ---------- 分类外观（右键菜单 / 设置页驱动） ----------
     def get_menu_groups(self) -> list[dict]:
         """Live2D 分类子菜单数据：五大类条目（菜单据此动态生成）。
 
@@ -1051,9 +1011,7 @@ class Live2DRenderer(PetRenderer):
             active.add(self._current_emotion)
         return active
 
-    # ============================================================
     #  触发场景动作（设置面板「触发场景配置」可视化驱动）
-    # ============================================================
     # 一次性场景集合（播放后恢复当前持续外观）
     _TRANSIENT_SCENES = {sid for sid, _, kind, _ in BUILTIN_SCENES
                          if kind == "transient"}
@@ -1167,7 +1125,6 @@ class Live2DRenderer(PetRenderer):
         added = self._add_toggle_items(b.toggles)
         QTimer.singleShot(hold_ms + 300, lambda: self._end_transient(added))
 
-    # ---- 固定场景编辑 API（设置面板用）----
     def get_scene_bundle(self, scene_id: str) -> SceneBundle:
         if self.scene_store is None:
             return SceneBundle()
@@ -1184,7 +1141,6 @@ class Live2DRenderer(PetRenderer):
     def scene_is_overridden(self, scene_id: str) -> bool:
         return bool(self.scene_store and self.scene_store.is_overridden(scene_id))
 
-    # ---- 自定义动作（用户命名、可绑工具动作键，初始为空）----
     def get_custom_actions(self) -> list:
         return list(self.scene_store.custom_actions) if self.scene_store else []
 
@@ -1209,7 +1165,6 @@ class Live2DRenderer(PetRenderer):
         self._play_transient_bundle(
             b, int(a.get("hold_ms") or DEFAULT_TRANSIENT_HOLD_MS))
 
-    # ---------- 玩一下（一次性动作菜单） ----------
 
     def get_play_options(self) -> list[tuple[str, str]]:
         """玩一下菜单数据：[(动作名, 标签)]（profile 已配置的动作）。"""
@@ -1228,7 +1183,6 @@ class Live2DRenderer(PetRenderer):
             out.append((name, label))
         return out
 
-    # ---------- 兼容旧接口（发型） ----------
     def supports_hairstyles(self) -> bool:
         """模型是否自带可切换发型（菜单据此决定是否显示“发型”子菜单）。"""
         return self.profile.hairstyle_category() is not None

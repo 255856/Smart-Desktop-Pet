@@ -1,16 +1,4 @@
-"""Sprite 渲染器：高层"我想做什么"语义 + QLabel 显示 + PetRenderer 接口实现。
-
-模块布局：
-    - `PetAnimator`：继承 `PetRenderer`，实现所有高层动作（set_idle / set_emotion /
-      set_sleep / play_eat / ...）+ 一次性 idle 定时器 + 拖动链 + 一次性情绪反应等。
-    - `SpriteRenderer`：继承 `PetAnimator`，负责资源加载（`SpriteAtlas.prescale`）
-      与显示控件（`QLabel`），并把 PetAnimator 的初始化参数从外面传进来。
-    - `SpriteAtlas`：资源加载器，独立于本模块，但 PetAnimator 在动画组访问前会调用其
-      `ensure_loaded()`。当前 `SpriteAtlas` 仍放在 `app.animation.sprite_atlas`，保留
-      `from app.animation.sprite_atlas import PetAnimator` 旧 import 路径的兼容。
-
-性能优化：构造时一次性 prescale 所有帧到目标尺寸，切换动画不卡顿。
-"""
+"""Sprite 渲染器：高层"我想做什么"语义 + QLabel 显示 + PetRenderer 接口实现。"""
 from __future__ import annotations
 
 import logging
@@ -338,7 +326,6 @@ class PetAnimator(PetRenderer):
             self.player.back_to_idle()
             self._notify_anim_changed()
 
-    # ---------- PetRenderer 接口实现 ----------
 
     def play_animation(self, anim_name: str) -> None:
         """通用一次性动作（按名字分发到对应方法）。"""

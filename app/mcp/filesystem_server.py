@@ -1,22 +1,4 @@
-"""示例 MCP server：filesystem 沙箱访问。
-
-实现 MCP 协议的极简子集：
-    - initialize
-    - tools/list
-    - tools/call
-
-提供工具：
-    - fs_read_file(path: str) -> str
-    - fs_list_dir(path: str) -> str
-    - fs_search_files(pattern: str) -> str
-
-约束：
-    - 只能访问 config["allowed_roots"] 下的路径
-    - 写操作（fs_write_file）默认禁用
-
-启动：
-    python -m app.mcp.filesystem_server --root ./data --root ./tmp
-"""
+"""示例 MCP server：filesystem 沙箱访问。"""
 from __future__ import annotations
 
 import argparse

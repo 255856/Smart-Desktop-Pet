@@ -1,22 +1,4 @@
-"""配置加载与默认值（基于 pydantic-settings）。
-
-支持从 YAML 和 .env 加载，未提供的字段用 BaseModel 默认值兜底。
-
-外部用法：
-    cfg = load_config("config.yaml")        # 优先 YAML，再叠加环境变量
-    cfg.has_api_key()                       # 判断是否填了真实 key
-    cfg.llm.api_key                          # 嵌套字段访问
-
-YAML 结构：
-    llm: { base_url, api_key, model, stream, temperature, max_tokens, timeout }
-    character: { name, persona, tts_enabled, tts_voice }
-    window: { start_x, start_y, scale, always_on_top, show_in_taskbar }
-    reminder: { enabled, data_file }
-    app: { open_chat_on_start, start_minimized, log_level }
-    sprite: { directory, fallback }
-    asr: { enabled, model_size, language }
-    brain: { backend, tools_enabled, memory_file, proactive_*, agent_*, langchain_* }
-"""
+"""配置加载与默认值（基于 pydantic-settings）。"""
 from __future__ import annotations
 
 import os
@@ -28,7 +10,6 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings
 
 
-# ---------------- LLM ----------------
 class LLMConfig(BaseModel):
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
@@ -39,7 +20,6 @@ class LLMConfig(BaseModel):
     timeout: int = 60
 
 
-# ---------------- Character ----------------
 class CharacterConfig(BaseModel):
     name: str = "鲸鱼娘"
     persona: str = ""
@@ -61,7 +41,6 @@ class CharacterConfig(BaseModel):
     gptsovits_prompt_text: str = ""  # 参考音频对应的文本
 
 
-# ---------------- Window ----------------
 class WindowConfig(BaseModel):
     start_x: int = 200
     start_y: int = 200
@@ -70,33 +49,28 @@ class WindowConfig(BaseModel):
     show_in_taskbar: bool = False
 
 
-# ---------------- Reminder ----------------
 class ReminderConfig(BaseModel):
     enabled: bool = True
     data_file: str = "reminders.json"
 
 
-# ---------------- App ----------------
 class AppConfig(BaseModel):
     open_chat_on_start: bool = False
     start_minimized: bool = False
     log_level: str = "INFO"
 
 
-# ---------------- Sprite ----------------
 class SpriteConfig(BaseModel):
     directory: str = "assets/sprites"
     fallback: str = "assets/sprites/body_front.png"
 
 
-# ---------------- ASR ----------------
 class ASRConfig(BaseModel):
     enabled: bool = True
     model_size: str = "base"       # tiny/base/small/medium/large-v3
     language: str = "zh"
 
 
-# ---------------- Brain（智能中枢）----------------
 AgentBackend = Literal["lightweight", "standard"]     # 后端选择
 
 
@@ -155,7 +129,6 @@ class PetConfig(BaseModel):
     live2d: Live2DConfig = Live2DConfig()
 
 
-# ---------------- 顶层 Config（BaseSettings，自动读 .env）----------------
 class Config(BaseSettings):
     """桌宠总配置。
 

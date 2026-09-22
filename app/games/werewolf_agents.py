@@ -30,7 +30,6 @@ from app.games.werewolf import (
 
 log = logging.getLogger(__name__)
 
-# ---------------- NPC 人格（8 席） ----------------
 PERSONAS: List[Dict[str, str]] = [
     {"name": "阿橘", "style": "大大咧咧、爱打抱不平，说话直来直去，口头禅“我说啊”。"},
     {"name": "小豆子", "style": "胆小谨慎、说话带犹豫，容易随大流，口头禅“那个……”。"},
@@ -43,7 +42,6 @@ PERSONAS: List[Dict[str, str]] = [
 ]
 
 
-# ---------------- 结构化输出解析 ----------------
 JSON_SPEECH = '{"speech": "你的发言"}'
 JSON_LAST = '{"speech": "遗言"}'
 JSON_TARGET = '{"target": 座位号}'
@@ -108,7 +106,6 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
             raise
     raise last_exc
 
-# ---------------- 上下文文本 ----------------
 def _perspective_text(view: dict) -> str:
     lines = []
     lines.append(f"现在是第 {view['day']} 天。你是 {view['self_role']}"
@@ -164,7 +161,6 @@ def _speech_text(view: dict) -> str:
     return "\n".join(f"{s['name']}：{s['text']}" for s in sp[-20:])
 
 
-# ---------------- NPC Agent ----------------
 class WerewolfAgent:
     """一个独立 NPC 玩家。绑定 client 前或失败时走脚本决策。"""
 
@@ -235,7 +231,6 @@ class WerewolfAgent:
             return obj
         return (raw or "").strip().strip("“”\"'") or None
 
-    # ---------------- 白天发言 ----------------
     async def day_speech(self, already: str) -> str:
         prompt = (
             f"现在轮到你白天发言（座位 {self.seat} 号 {self.name}）。\n"
@@ -250,7 +245,6 @@ class WerewolfAgent:
         # 兼容模型直接吐纯文本
         return self._scripted_speech()
 
-    # ---------------- 遗言 ----------------
     async def last_words(self) -> str:
         prompt = ("你出局了，请说一句简短遗言（符合你的性格，可表水、可点出怀疑对象）。\n"
                   f"输出 JSON：{JSON_LAST}")
@@ -259,7 +253,6 @@ class WerewolfAgent:
             return str(obj["speech"]).strip()
         return self._scripted_last_words()
 
-    # ---------------- 投票 ----------------
     async def vote(self, candidates: List[int]) -> Optional[int]:
         prompt = (
             "白天发言结束，现在投票。你必须基于上面『公开事件与结果』和『公共频道发言』里的真实信息判断，禁止凭空怀疑：\n"
@@ -275,7 +268,6 @@ class WerewolfAgent:
             return int(obj["target"])
         return self._scripted_vote(candidates)
 
-    # ---------------- 狼：夜晚提名击杀 ----------------
     async def wolf_nominate(self, candidates: List[int]) -> Tuple[int, str]:
         prompt = (
             "夜晚降临，你是狼人。请从下列存活的非狼人玩家中提名今晚击杀目标：\n"
@@ -288,7 +280,6 @@ class WerewolfAgent:
             return int(obj["target"]), str(obj.get("reason", "")).strip() or "直觉"
         return self._scripted_wolf_nominate(candidates)
 
-    # ---------------- 预言家：查验 ----------------
     async def seer_check(self, unchecked: List[int]) -> Optional[int]:
         prompt = (
             "你是预言家，请选择今晚要查验身份的存活玩家座位（不要重复查验）：\n"
@@ -300,7 +291,6 @@ class WerewolfAgent:
             return int(obj["target"])
         return self._scripted_seer_check(unchecked)
 
-    # ---------------- 女巫：救 / 毒 ----------------
     async def witch_decide(self, killed: Optional[int],
                            poison_candidates: List[int]) -> Dict[str, object]:
         me = self.player
@@ -324,7 +314,6 @@ class WerewolfAgent:
                 return {"use": "none"}
         return self._scripted_witch(killed, poison_candidates)
 
-    # ---------------- 猎人：开枪 ----------------
     async def hunter_shoot(self, candidates: List[int]) -> Optional[int]:
         prompt = (
             "你是猎人，现在出局可以开枪带走一人。请从存活且非自己的座位中选：\n"
@@ -335,7 +324,6 @@ class WerewolfAgent:
             return int(obj["target"])
         return self._scripted_hunter(candidates)
 
-    # ---------------- 警长竞选 ----------------
     async def run_for_sheriff(self) -> bool:
         prompt = (
             "第一天白天，现在竞选警长。警长有 1.5 票、负责归票，出局前可移交，"
@@ -394,7 +382,6 @@ class WerewolfAgent:
                 return int(t)
         return self._scripted_transfer_badge(candidates)
 
-    # ---------------- 狼频道 ----------------
     async def wolf_chat_message(self, targets: List[int]) -> Tuple[str, Optional[int]]:
         """夜晚狼频道讨论：返回 (频道发言, 建议击杀目标)。"""
         prompt = (
@@ -411,7 +398,6 @@ class WerewolfAgent:
             return text, t
         return self._scripted_wolf_chat(targets)
 
-    # ================= 脚本降级（无 key / 解析失败） =================
     def _alive_non_self(self) -> List[int]:
         return [p.seat for p in self.game.alive_players()
                 if p.seat != self.seat]
@@ -486,7 +472,6 @@ class WerewolfAgent:
         pool = [w for w in known if w in candidates] or candidates
         return self.rng.choice(pool) if pool else None
 
-    # ---------- 警长 / PK / 狼频道 降级 ----------
     def _scripted_run_sheriff(self) -> bool:
         r = self.player.role
         if r == SEER:
@@ -543,7 +528,6 @@ class WerewolfAgent:
         return "今晚听你们的，我跟着刀。", None
 
 
-# ---------------- 主持人 Agent（桌宠） ----------------
 class HostAgent:
     """主持人上帝：桌宠扮演。流程播报用模板（确定性、不阻塞），
     开场/串场/结算可由 LLM 生成；唯一会被 TTS 朗读的声音。"""

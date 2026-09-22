@@ -1,18 +1,4 @@
-"""桌面宠物主入口（启动横幅 + Ollama 自动检测 + Dashboard 一键启动）。
-
-启动顺序：
-    1. 打印彩色启动横幅（分阶段展示进度）
-    2. 读 config（无则用默认）
-    3. QApplication
-    4. StateManager（存档 + 状态 + 提醒）
-    5. TTS
-    6. PetWindow（透明/置顶/拖动/边沿隐藏）
-    7. MotionController（自走 + smartmove）
-    8. BrainController（记忆 + 工具 + 主动行为）
-    9. UIController（设置面板 + 托盘 + 聊天 + 信号连接）
-    10. 主 tick（每秒推进状态）
-    11. 启 main loop
-"""
+"""桌面宠物主入口（启动横幅 + Ollama 自动检测 + Dashboard 一键启动）。"""
 from __future__ import annotations
 
 import argparse
@@ -22,7 +8,6 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# PR-fix-WebEngine-OpenGL: 在 import Qt 任何东西之前先 setAttribute
 # 否则 PyQtWebEngine 在 headless 下会警告 "Please set Qt::AA_ShareOpenGLContexts"
 try:
     from PyQt5.QtCore import Qt as _Qt
@@ -50,9 +35,7 @@ from .ui.ui_controller import UIController
 log = logging.getLogger(__name__)
 
 
-# ============================================================================
 #  启动横幅
-# ============================================================================
 
 
 class _Banner:
@@ -116,9 +99,7 @@ class _Banner:
             print()
 
 
-# ============================================================================
 #  Ollama 自动检测
-# ============================================================================
 
 
 def detect_ollama(timeout: float = 1.5) -> dict | None:
@@ -140,9 +121,7 @@ def detect_ollama(timeout: float = 1.5) -> dict | None:
         return None
 
 
-# ============================================================================
 #  解析参数
-# ============================================================================
 
 
 def _parse_args() -> argparse.Namespace:
@@ -287,9 +266,7 @@ def _build_tts(cfg, root: Path) -> TTS:
     return tts
 
 
-# ============================================================================
 #  Dashboard 进程管理
-# ============================================================================
 
 
 # 本地服务端口：纯静态 Live2D Demo（主入口，8765）与 FastAPI Agent Trace（开发者，8766）
@@ -418,9 +395,7 @@ def open_in_browser(url: str) -> None:
         log.warning("打开浏览器失败：%s", e)
 
 
-# ============================================================================
 #  App 主类
-# ============================================================================
 
 
 class App:
@@ -686,7 +661,6 @@ class App:
         # 没启动：拉一个
         return self._start_dashboard()
 
-    # ---- 兼容旧接口的属性 ----
     @property
     def state(self):
         return self.state_mgr.state
@@ -752,9 +726,7 @@ class App:
         self.ui._on_about_to_quit()
 
 
-# ============================================================================
 #  全局异常处理
-# ============================================================================
 
 
 def _crash_handler(exc_type, exc, tb) -> None:
@@ -774,9 +746,7 @@ def _crash_handler(exc_type, exc, tb) -> None:
         pass
 
 
-# ============================================================================
 #  入口
-# ============================================================================
 
 # faulthandler 的输出文件句柄（模块级引用，防 GC 关闭文件）
 _crash_log_fh = None

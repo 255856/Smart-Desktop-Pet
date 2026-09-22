@@ -1,14 +1,4 @@
-"""自动运动系统：桌宠自己会沿屏走、探头、随机溜达。
-
-VPet 风格的 move 系统（PR4 增强）：
-    walk.left/right        沿屏幕水平走动
-    crawl.left/right       沿屏幕底部爬行
-    climb.top.left/right   沿屏幕顶部走（占位 —— 未启用的 sprite 子系统）
-    sidehide.left/right    探头到屏幕左/右边缘 → 5–10 秒后爬回
-    smartmove.toward       朝鼠标当前位置走两步（被吸引），不紧追
-
-跨屏：所有屏幕 availableGeometry 取并集，桌宠会跨屏走。
-"""
+"""自动运动系统：桌宠自己会沿屏走、探头、随机溜达。"""
 from __future__ import annotations
 
 import logging
@@ -58,7 +48,7 @@ class MotionController:
     cursor_pos_getter:    () -> QPoint (可选，默认走 QCursor.pos())
     """
 
-    # 概率分布（PR-mute-motion：让桌宠大多时间 IDLE，偶发小幅动作）
+
     # 用户已在桌宠附近时（is_user_interacting）→ 100 % IDLE，再加上「IDLE
     # 期内不重新抽签」的 guard，使"动一下→长时间停"成为主节奏。
     WEIGHTS = [
@@ -80,7 +70,6 @@ class MotionController:
     DECIDE_MIN_MS = 25_000
     DECIDE_MAX_MS = 45_000
 
-    # PR-settings-window: 运行时调参接口
     def apply_settings(self, *,
                        idle_seconds: Optional[int] = None,
                        walk_seconds: Optional[int] = None,
@@ -116,9 +105,7 @@ class MotionController:
         self.movement_enabled = bool(movement_enabled)
         self.cursor_pos_getter = cursor_pos_getter or self._default_cursor_pos
         # 用户是否在关注桌宠（鼠标位于桌面 / enter / drag 时为 True）。
-        # PR-mute-motion：进入此状态后强制 IDLE 15-30 s。
         self.is_user_interacting = is_user_interacting or (lambda: False)
-        # PR-settings-window: 实例级别的节拍常量（每个 pet 可独立调）
         self.user_near_idle_min_ms = self.USER_NEAR_IDLE_MIN_MS
         self.user_near_idle_max_ms = self.USER_NEAR_IDLE_MAX_MS
         self.idle_min_ms = self.IDLE_MIN_MS
@@ -130,7 +117,7 @@ class MotionController:
         self.current: MoveDecision = MoveDecision(MoveMode.IDLE, 5000, 0, None)
         self._decision_at = time.time()
 
-        # 决定新动作的定时器（PR-mute-motion：间隔拉大到 25-45 s 区间随机）
+
         self._decide_timer = QTimer()
         self._decide_timer.setInterval(random.randint(self.decide_min_ms,
                                                       self.decide_max_ms))
@@ -191,14 +178,12 @@ class MotionController:
             self._decision_at = time.time()
             return
 
-        # PR-mute-motion guard：如果当前还是 IDLE 且还没到 duration 末尾，
         # 就不要重新抽签 —— 保留"长时间不动"的节奏（用户反馈"动作太频繁"）。
         elapsed_ms = (time.time() - self._decision_at) * 1000
         if (self.current.mode == MoveMode.IDLE
                 and elapsed_ms < self.current.duration_ms):
             return
 
-        # PR-mute-motion：用户正在关注桌宠（鼠标进入 / 拖动中）→ 强 IDLE 20-45 s
         if self.is_user_interacting():
             self.current = MoveDecision(
                 MoveMode.IDLE,
@@ -360,7 +345,6 @@ class MotionController:
         ny = cur.y() + (dy / dist) * step
         win.move(int(nx), int(ny))
 
-    # -------------------- 跨屏合并 getter --------------------
     @staticmethod
     def merged_screen_geometry() -> Optional[QRect]:
         """所有屏幕的 availableGeometry 的并集（PR4）。

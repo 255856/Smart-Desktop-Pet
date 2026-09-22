@@ -1,29 +1,4 @@
-"""Planner / Reflector 数据模型：把用户目标拆成可执行计划。
-
-设计原则：
-    - Plan 是结构化的（不是自然语言），便于 Reflector / 程序化处理
-    - 单步原子操作：tool_call（带 name + arguments）或 final_answer
-    - 步骤可带 depends_on（依赖前序步骤的产出）
-    - Reflector 可以打回 Plan 让 Planner 修订（replan）
-
-数据流：
-    Plan {
-        goal: str                  # 用户的原始目标
-        steps: [Step]              # 按顺序的步骤
-        current: int               # 当前执行到的步骤下标
-    }
-    Step {
-        id: str
-        kind: "tool" | "final"     # tool = 调用工具；final = 直接给最终答案
-        thought: str               # 这一步为什么这么做
-        tool_name: str             # kind=tool 时
-        arguments: dict            # kind=tool 时
-        status: "pending"|"running"|"done"|"failed"|"skipped"
-        result: str | None         # 工具结果
-        reflection: str | None     # Reflector 的评注
-        retry_count: int
-    }
-"""
+"""Planner / Reflector 数据模型：把用户目标拆成可执行计划。"""
 from __future__ import annotations
 
 import json
@@ -91,9 +66,7 @@ class Plan:
         }
 
 
-# ---------------------------------------------------------------------------
 #  Plan parsing：从 LLM 输出里抽 JSON
-# ---------------------------------------------------------------------------
 
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)

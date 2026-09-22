@@ -1,8 +1,4 @@
-"""Qt 兼容垫片：让代码同时支持 PySide6 和 PyQt5。
-
-打包后（PyInstaller）使用 PyQt5（只有 PyQt5 插件被收集）。
-开发环境下优先 PyQt5（因为 PySide6 的插件路径和 PyInstaller 不一致）。
-"""
+"""Qt 兼容垫片：让代码同时支持 PySide6 和 PyQt5。"""
 from __future__ import annotations
 
 try:
@@ -86,7 +82,6 @@ except ImportError:
 BACKEND = _BACKEND
 
 
-# ---------------- 鼠标事件坐标兼容垫 ----------------
 # Qt 6 (PySide6 / PyQt6):  QMouseEvent 有 .position() / .globalPosition()，返回 QPointF
 # Qt 5 (PyQt5):           仅有 .pos() / .globalPos()，返回 QPoint
 # 业务代码里需要的是「event 里的位置」、规范到 QPoint —— 跨版本稳定的 helper：

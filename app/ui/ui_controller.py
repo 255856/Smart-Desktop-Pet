@@ -1,11 +1,4 @@
-"""UI 控制器：封装所有 UI 窗口管理和信号连接。
-
-职责：
-    - 管理 PetWindow、SettingsWindow、ChatWindow、TrayController
-    - 处理所有 UI 信号连接（设置面板、托盘、右键菜单等）
-    - 管理视觉设置应用（缩放、透明度、帧率等）
-    - 管理聊天窗口的打开和复用
-"""
+"""UI 控制器：封装所有 UI 窗口管理和信号连接。"""
 from __future__ import annotations
 
 import logging
@@ -59,8 +52,10 @@ class UIController(QObject):
         self.motion = motion
         self._chat_window = None
         self._last_food_warn = 0.0
+        from app.engine.game_actions import GameActionStore
+        self.game_actions = GameActionStore(root / 'data' / 'game_actions.json')
+        self._last_game_action_ts = 0.0
 
-        # --- 设置窗口（传入渲染器引用：live2d 时生成「Live2D」Tab）---
         _sticker_on = True
         _pet = getattr(self, "pet", None)
         if _pet is not None and hasattr(_pet, "is_random_stickers_enabled"):
@@ -91,6 +86,7 @@ class UIController(QObject):
         _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
+            game_action_store=self.game_actions,
             renderer=getattr(_pet, "renderer", None),
             sticker_enabled=_sticker_on,
             always_on_top=bool(getattr(self.cfg.window, "always_on_top", True)),
@@ -98,7 +94,6 @@ class UIController(QObject):
                 "sticker": _st,
                 "random_interval": (_ri_min, _ri_max),
                 "max_fps": _mf,
-                # —— 全量面板化初始值（store 已存值覆盖 cfg 默认）——
                 "tts": {
                     "engine": _store0.get("tts_engine", getattr(self.cfg.character, "tts_engine", "edge")),
                     "minimax_voice_id": _store0.get("minimax_voice_id", getattr(self.cfg.character, "minimax_voice_id", "")),
@@ -120,8 +115,8 @@ class UIController(QObject):
             },
         )
         self.settings_window.attach_state(self.state)
+        self.pet.food_money_fn = lambda: self.state.money
 
-        # --- 托盘 ---
         fallback_rel = self.cfg.sprite.fallback
         fallback_image = root / fallback_rel
         # 优先使用 ICO 文件（多尺寸，任务栏显示效果最佳）
@@ -135,10 +130,8 @@ class UIController(QObject):
             icon_path=tray_icon,
         )
 
-        # --- 连接所有信号 ---
         self._wire_all_signals()
 
-        # --- 模型配置初始化（从 cfg.llm 加载到 UI） ---
         self._init_model_config_ui()
         self._setup_lipsync()
         # 启动时应用 settings.json 里保存的窗口类设置（缩放/透明度/置顶/随机开关）
@@ -146,11 +139,8 @@ class UIController(QObject):
         # 闲置 30 分钟 / 深夜时段的 Live2D 场景
         self._setup_env_scenes()
 
-    # ============================================================
     #  信号连接
-    # ============================================================
     def _wire_all_signals(self) -> None:
-        # --- 设置面板信号 ---
         sw = self.settings_window
         sw.settings_changed.connect(self._apply_visual_settings_with_rescale)
         sw.persist_frames_requested.connect(self._do_retune_frames)
@@ -166,7 +156,6 @@ class UIController(QObject):
         sw.reset_to_defaults_requested.connect(self._reset_to_default_settings)
         sw.model_config_changed.connect(self._on_model_config_changed)
         sw.voice_changed.connect(self._on_voice_changed)
-        # --- Live2D 专属信号（设置窗口没有该 Tab 时不存在）---
         if hasattr(sw, "live2d_item_activated"):
             sw.live2d_item_activated.connect(self._on_live2d_item_activated)
             sw.live2d_reset_requested.connect(self._on_live2d_reset)
@@ -180,11 +169,9 @@ class UIController(QObject):
         sw.renderer_changed.connect(self._on_renderer_changed)
         sw.hide_watermark_changed.connect(self._on_hide_watermark_changed)
         sw.character_changed.connect(self._on_character_changed)
-        # --- 窗口 / 持久化 ---
         sw.always_on_top_changed.connect(self._on_always_on_top_changed)
         sw.save_settings_requested.connect(self._on_save_settings)
 
-        # --- 托盘信号 ---
         self.pet.quit_requested.connect(self._quit)
         self.tray.act_quit.triggered.connect(self._quit)
         self.tray.act_hide.triggered.connect(self.pet.hide)
@@ -195,7 +182,6 @@ class UIController(QObject):
         self.tray.act_trace.triggered.connect(self._open_trace)
         self.tray.act_memory.triggered.connect(self._show_memory_popup)
 
-        # --- PetWindow 右键菜单信号 ---
         self.pet.open_settings_requested.connect(self._show_settings)
         self.pet.retune_ms_requested.connect(self._do_retune_frames)
         self.pet.scale_changed.connect(self._on_pet_scale_changed)
@@ -210,30 +196,24 @@ class UIController(QObject):
         self.pet.eat_requested.connect(self._on_eat_requested)
         self.pet.food_selected.connect(self._on_food_selected)
         self.pet.chat_input_sent.connect(self._on_quick_chat_sent)
-        # --- 小游戏 / 每日签到 ---
         self.pet.game_requested.connect(self._on_game_requested)
         self.pet.checkin_requested.connect(self._on_checkin)
         self.pet.checkin_status_fn = lambda: self.state.has_checked_in_today()
         self._gomoku_window = None
         self._werewolf_window = None
 
-        # --- 状态管理器信号 ---
         self.state_mgr.food_low.connect(self._on_food_low)
         self.state_mgr.reminder_fired.connect(self._on_reminder_triggered)
 
-        # --- 智能中枢信号 ---
         self.brain.bubble_requested.connect(self.pet.show_bubble)
         self.brain.remark_ready.connect(self._on_proactive_remark)
         if hasattr(self.brain, "emotion_hint"):
             self.brain.emotion_hint.connect(self._on_proactive_emotion)
 
-        # --- 退出保证存档 ---
         from app.core.qt_compat import QApplication
         QApplication.instance().aboutToQuit.connect(self._on_about_to_quit)
 
-    # ============================================================
     #  状态 / 业务
-    # ============================================================
     def _on_food_low(self) -> None:
         """食物过低时弹气泡提醒。"""
         self.pet.show_bubble("我饿了喵~ 想吃点东西！")
@@ -252,10 +232,10 @@ class UIController(QObject):
         self.pet.show_bubble("🍚 吃饱啦~ 好满足！")
 
     def _on_food_selected(self, name: str) -> None:
-        """右键投喂具体食物：按 foods.json 数值变化（主人手动投喂，不扣金币）。
+        """右键投喂具体食物：按 foods.json 价格扣金币并应用数值变化。
 
-        图片贴纸 / desc 气泡由 PetWindow 负责；这里只改状态。
-        找不到食物库或物品时退回通用吃饭。
+        图片贴纸 / desc 气泡由 PetWindow 负责；这里只改状态（兜底，PetWindow 已预检）。
+        金币不足或找不到食物时退回通用吃饭。
         """
         items = getattr(self.brain, "items", None)
         item = items.by_name(name) if items is not None else None
@@ -264,14 +244,14 @@ class UIController(QObject):
             self.state_mgr.on_eat_requested()
             return
         from app.engine.works import apply_food
-        if apply_food(self.state, item, free=True):
+        if apply_food(self.state, item, free=False):
             # 投喂本身是陪伴：额外一点心情；好感已在 apply_food 内按每日上限处理
             self.state.on_interact(feeling_gain=2)
-            log.info("手动投喂「%s」：%s", name, self.state.stats_summary())
+            log.info("购买投喂「%s」：%s", name, self.state.stats_summary())
+        else:
+            self._pet_speak("金币不足，先去玩小游戏或签到赚金币吧～")
 
-    # ============================================================
     #  小游戏 / 每日签到
-    # ============================================================
     def _on_game_requested(self, game_id: str) -> None:
         """右键「小游戏」入口。"""
         if game_id == "gomoku":
@@ -310,9 +290,8 @@ class UIController(QObject):
         self.state.on_interact(feeling_gain=2)
         if granted:
             self.pet.show_bubble(f"本局金币 +{granted:.0f}", duration_ms=2500)
-        acts = ("jump", "spin", "cheek") if result.get("player_won") \
-            else ("stretch", "swim")
-        self._pet_react(acts)
+        self._game_react("game_win" if result.get("player_won")
+                         else "game_lose")
         log.info("狼人杀结束 winner=%s player_won=%s 金币 +%.0f",
                  result.get("winner"), result.get("player_won"), granted)
 
@@ -324,6 +303,7 @@ class UIController(QObject):
             gw = GomokuWindow()
             gw.game_finished.connect(self._on_gomoku_finished)
             gw.comment.connect(self._on_game_comment)
+            gw.action_event.connect(self._on_game_action_event)
             gw.show()
             self._gomoku_window = gw
         else:
@@ -342,14 +322,10 @@ class UIController(QObject):
         if gw is not None:
             gw.set_wallet(self.state.money, self.state.game_coin_remaining())
             gw.show_reward(granted, amount > 0 and granted <= 0)
-        acts = {
-            "win": ("tongue", "stretch", "swim"),
-            "lose": ("cheek", "jump", "spin"),
-            "draw": ("tongue", "stretch", "swim"),
-            "giveup": ("stretch", "swim"),
-        }
-        # 结算台词由窗口 comment 信号朗读（_on_game_comment），这里只做动作反馈
-        self._pet_react(acts.get(result, acts["draw"]))
+        # 结算动作：所有小游戏共用「Live2D → 游戏动作」配置（结算不受冷却）
+        _gomoku_ev = {"win": "game_win", "lose": "game_lose",
+                      "draw": "game_draw", "giveup": "game_lose"}
+        self._game_react(_gomoku_ev.get(result, "game_draw"))
         self.state.on_interact(feeling_gain=2)
         log.info("五子棋结束 result=%s difficulty=%s 金币 +%.0f",
                  result, difficulty, granted)
@@ -357,6 +333,25 @@ class UIController(QObject):
     def _on_game_comment(self, text: str) -> None:
         # 五子棋过程 / 结算解说：气泡 + TTS 朗读
         self._pet_speak(text)
+
+    def _on_game_action_event(self, event_id: str) -> None:
+        # 对局过程事件（形成攻势等）：受最小间隔限制，避免频繁打扰
+        import time as _time
+        cd = float(getattr(self.game_actions, 'cooldown_s', 0.0) or 0.0)
+        now = _time.time()
+        if self._last_game_action_ts and now - self._last_game_action_ts < cd:
+            return
+        self._last_game_action_ts = now
+        self._game_react(event_id)
+
+    def _game_react(self, event_id: str) -> None:
+        # 按游戏场景配置播放一个一次性动作（渲染器无关，sprite 有兜底）
+        cfg = getattr(self, 'game_actions', None)
+        if cfg is None or not getattr(cfg, 'enabled', True):
+            return
+        actions = cfg.for_event(event_id)
+        if actions:
+            self._pet_react(actions)
 
     def _pet_speak(self, text: str, duration_ms: int = 4000) -> None:
         # 非聊天场景统一发言：显示气泡，TTS 开启时朗读（口型自动同步）
@@ -440,7 +435,6 @@ class UIController(QObject):
         """主动搭话携带的情绪：复用聊天情绪场景。"""
         self._apply_chat_emotion(emotion)
 
-    # ---------- 环境场景（闲置 30 分钟 / 深夜） ----------
     def _setup_env_scenes(self) -> None:
         self._in_idle_lonely = False
         self._in_late_night = False
@@ -494,7 +488,6 @@ class UIController(QObject):
         self._update_talking()
         self.pet.stop_streaming_bubble()
 
-    # ---------------- 口型同步（TTS 播放 / 流式气泡 任一进行中即张嘴） ----------------
     def _setup_lipsync(self) -> None:
         self._tts_talking = False
         self._stream_talking = False
@@ -525,9 +518,7 @@ class UIController(QObject):
         """模型思考结束：回到待机。"""
         self.pet.animator.set_idle()
 
-    # ============================================================
     #  视觉设置
-    # ============================================================
     def _apply_visual_settings(self) -> None:
         """应用视觉设置（缩放、透明度、行为节拍）。"""
         sw = self.settings_window
@@ -652,9 +643,7 @@ class UIController(QObject):
         self.pet._fps_enabled = False
         self.settings_window._set_status("已重置默认值")
 
-    # ============================================================
     #  帧持久化
-    # ============================================================
     def _do_retune_frames(self, ms: int) -> None:
         """用户点了「应用帧时长」按钮 —— 重命名所有 PNG + 重新加载 atlas。"""
         if not self._is_sprite():
@@ -684,9 +673,7 @@ class UIController(QObject):
             log.error("retune 失败：%s", e)
             self.settings_window._set_status(f"retune 失败：{e}")
 
-    # ============================================================
     #  聊天窗口
-    # ============================================================
     def _show_chat_window(self) -> None:
         """打开聊天窗口（托盘菜单或右键菜单触发）。重复打开复用已存在的窗口。"""
         cw = self._chat_window
@@ -734,9 +721,7 @@ class UIController(QObject):
         if cw is not None:
             cw._quick_send(text)
 
-    # ============================================================
     #  设置窗口
-    # ============================================================
     def _show_settings(self) -> None:
         """打开设置窗口。"""
         sw = self.settings_window
@@ -796,9 +781,7 @@ class UIController(QObject):
         if cw is not None:
             cw._open_memory()
 
-    # ============================================================
     #  模型配置
-    # ============================================================
     def _on_model_config_changed(self, cfg: dict) -> None:
         """用户修改了模型配置，更新 cfg.llm 并重建 LLMClient。"""
         self.cfg.llm.base_url = cfg["base_url"]
@@ -824,9 +807,7 @@ class UIController(QObject):
             self.tts.set_enabled(False)
             log.info("TTS 已关闭")
 
-    # ============================================================
     #  Live2D 专属（设置窗口「Live2D」Tab）
-    # ============================================================
     def _live2d_renderer(self):
         r = getattr(self.pet, "renderer", None)
         return r if r is not None and hasattr(r, "activate_menu_item") else None
@@ -891,7 +872,6 @@ class UIController(QObject):
             r.set_max_fps(int(fps))
             self.settings_window.settings_store.set("max_fps", int(fps))
 
-    # ---------------- 全量面板化（TTS / 主动关心 / 渲染器 / 水印 / 角色） ----------------
     def _on_tts_config_changed(self, cfgd: dict) -> None:
         """TTS 引擎与参数：持久化 + 后台线程重建引擎（热切换）。"""
         store = self.settings_window.settings_store
@@ -1099,9 +1079,7 @@ class UIController(QObject):
             "tts_enabled": self.cfg.character.tts_enabled,
         })
 
-    # ============================================================
     #  退出
-    # ============================================================
     def _on_about_to_quit(self) -> None:
         """退出前最终存档。"""
         self.state_mgr.on_about_to_quit()

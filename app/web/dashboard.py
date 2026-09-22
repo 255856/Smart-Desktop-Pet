@@ -1,15 +1,4 @@
-"""Agent 可观测性 Dashboard（FastAPI）。
-
-提供：
-    - GET  /             —— HTML 主页（极简）
-    - GET  /api/runs     —— 最近 N 条 run（默认 50）
-    - GET  /api/runs/{id} —— 单条 run 的完整 trace
-    - GET  /api/stats    —— 总体统计
-    - GET  /api/memory   —— 当前 memory.json 内容
-
-启动：
-    python -m app.web.dashboard --port 8766
-"""
+"""Agent 可观测性 Dashboard（FastAPI）。"""
 from __future__ import annotations
 
 import argparse

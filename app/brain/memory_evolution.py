@@ -1,7 +1,4 @@
-"""记忆自动进化 / 整理（兼容旧入口，内部委托 MemoryCurator）。
-
-保留此模块名以保持向后兼容；新代码建议直接用 `app.brain.memory.MemoryCurator`。
-"""
+"""记忆自动进化 / 整理（兼容旧入口，内部委托 MemoryCurator）。"""
 from __future__ import annotations
 
 import logging

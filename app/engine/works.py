@@ -1,19 +1,4 @@
-"""打工 + 食物/礼物数据系统。
-
-设计：
-    - 两份 JSON：foods.json（吃的 + 礼物）、works.json（Work/Study/Play）
-    - 加载后保存为 Item / Job dataclass 列表
-    - 调用 apply_food / apply_job 直接改 PetState
-
-JSON 结构（与 VPet 同款字段）：
-    food: name, type, exp, strength, strength_food, strength_drink,
-          health, feeling, likability, price, graph, desc
-    job : name, type (Work/Study/Play), money_base, strength_food,
-          strength_drink, feeling, time_seconds, finish_bonus,
-          level_limit, graph, desc
-
-PR5: 这是 MVP 第一版的食物 + 打工系统，UI 在托盘菜单里挂入口即可。
-"""
+"""打工 + 食物/礼物数据系统。"""
 from __future__ import annotations
 
 import json
@@ -208,8 +193,6 @@ class JobStore:
     def eligible(self, level: int) -> list[Job]:
         return [j for j in self.jobs if j.eligible(level)]
 
-
-# ---------------- 应用 ----------------
 
 def apply_food(state: PetState, item: Item, *, free: bool = False) -> bool:
     """喂食。成功返回 True，钱不够返回 False。

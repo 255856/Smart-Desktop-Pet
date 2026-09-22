@@ -1,24 +1,4 @@
-"""精灵图集（Sprite Atlas）：把磁盘上的精灵组织成命名动画集合。
-
-新的英文目录结构：
-    sprites/
-    ├── Default/          (默认待机)
-    ├── Idle_shake/       (歪头)
-    ├── Idle_yawning/     (打哈欠)
-    ├── Idle_tail/        (摇尾巴)
-    ├── Touchhead/        (摸头反应)
-    ├── Touchbody/        (摸身体反应)
-    ├── Left/             (向左走)
-    ├── Right/            (向右走)
-    ├── Sleep/            (睡觉)
-    ├── Spinaround/       (转圈圈)
-    ├── Stretch/          (伸懒腰)
-    ├── Jump/             (起跳)
-    ├── Thinking/         (思考)
-    ├── Drag_1/           (拖动动画 1)
-    ├── Drag_2/           (拖动动画 2，紧跟 Drag_1)
-    └── Emotion_*/        (各种情绪)
-"""
+"""精灵图集（Sprite Atlas）：把磁盘上的精灵组织成命名动画集合。"""
 from __future__ import annotations
 
 import logging

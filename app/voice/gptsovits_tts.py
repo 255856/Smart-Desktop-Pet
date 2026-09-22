@@ -1,18 +1,4 @@
-"""GPT-SoVITS 本地 TTS 引擎（方案 B）——完全免费的自定义音色。
-
-前提：本地部署 GPT-SoVITS（官方整合包）并启动 api_v2.py：
-    runtime\\python api_v2.py -a 127.0.0.1 -p 9880
-    （整合包里可先用 WebUI 微调流萤数据集——你们的数据集自带 .lab 文本标注，
-      也可以不做微调，直接用零样本模式：给一段参考音频 + 它的文本）
-
-config.yaml（character: 段）：
-    tts_engine: gptsovits
-    gptsovits_url: "http://127.0.0.1:9880"
-    gptsovits_ref_audio: "流萤某段 wav 的路径（服务端本地可访问）"
-    gptsovits_prompt_text: "该参考音频对应的文本（.lab 文件里的内容）"
-
-播放/缓存/口型同步钩子全部复用基类 TTS。
-"""
+"""GPT-SoVITS 本地 TTS 引擎（方案 B）——完全免费的自定义音色。"""
 from __future__ import annotations
 
 import logging

@@ -26,9 +26,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # 固定场景：(scene_id, 中文标题, 类型 persist=持续 / transient=一次性, 分组)
-# ---------------------------------------------------------------------------
 SCENE_GROUP_CHAT = "聊天情绪"
 SCENE_GROUP_STATE = "状态"
 SCENE_GROUP_INTERACT = "互动"

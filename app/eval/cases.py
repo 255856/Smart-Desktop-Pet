@@ -1,24 +1,4 @@
-"""Agent 评估（Evaluator）。
-
-设计：
-    - EvalCase：单条评估用例（输入 + 期望 + 评分规则）
-    - Evaluator：用 mock LLM 客户端跑 AgentLoop / PlanExecutor，检查行为
-    - 评分维度：
-        * tool_called: 是否调了指定工具
-        * tool_args_match: 工具参数是否包含期望字段
-        * tool_count_le: 工具调用次数不超过 N
-        * final_text_match: 最终答案包含某些关键字
-        * success: 是否成功（无异常）
-
-输出：
-    - 控制台报告
-    - Markdown 报告（data/eval_report.md）
-    - CI 友好：pytest tests/eval/ -m eval
-
-注意：
-    - 这是「行为级」评估（不依赖真实 LLM），可离线稳定跑。
-    - 真实模型质量评估需要带 LLM API key 跑 e2e，不在本模块。
-"""
+"""Agent 评估（Evaluator）。"""
 from __future__ import annotations
 
 import asyncio
@@ -33,9 +13,7 @@ from typing import Awaitable, Callable, Optional
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 #  Mock LLM 客户端（按脚本回放）
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -102,9 +80,7 @@ def _strip_tool_markers(text: str) -> str:
     return _TOOL_MARKER_RE.sub("", text).strip()
 
 
-# ---------------------------------------------------------------------------
 #  EvalCase / EvalReport
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -148,9 +124,7 @@ class EvalResult:
         }
 
 
-# ---------------------------------------------------------------------------
 #  Evaluator 主体
-# ---------------------------------------------------------------------------
 
 
 class Evaluator:
@@ -200,7 +174,6 @@ class Evaluator:
             result.final_text = "".join(final_text_parts)
             result.duration_ms = int((time.time() - t0) * 1000)
 
-            # ---- 评分 ----
             notes: list[str] = []
             ok = True
             # 1. 必调工具检查
@@ -281,9 +254,7 @@ class Evaluator:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 #  内置 EvalCase 集
-# ---------------------------------------------------------------------------
 
 
 def builtin_cases() -> list[EvalCase]:
@@ -360,9 +331,7 @@ def builtin_cases() -> list[EvalCase]:
     ]
 
 
-# ---------------------------------------------------------------------------
 #  入口：跑评估并写报告
-# ---------------------------------------------------------------------------
 
 
 async def run_eval_suite(agent_factory, output_path: Optional[str] = None) -> dict:

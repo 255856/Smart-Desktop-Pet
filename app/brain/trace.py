@@ -1,30 +1,4 @@
-"""Agent Trace：把每一次 Agent 运行的完整决策过程落盘到 SQLite。
-
-设计：
-    - 每个 run（用户一次消息 → 完整回复）一条 Run 记录
-    - 每条 step（plan/reflection/tool/text）一条 Event 记录
-    - 数据可回放、可分析、可统计
-
-数据库结构（data/traces.db）：
-    runs:
-        id              TEXT PRIMARY KEY
-        goal            TEXT       -- 用户原始消息
-        mode            TEXT       -- 'react' | 'single'
-        final_answer    TEXT
-        started_at      REAL
-        finished_at     REAL
-        total_steps     INTEGER
-        tool_calls      INTEGER
-        status          TEXT       -- 'success' | 'failed' | 'cancelled'
-
-    events:
-        id              INTEGER PRIMARY KEY AUTOINCREMENT
-        run_id          TEXT
-        seq             INTEGER     -- 同一 run 内顺序
-        kind            TEXT        -- 'plan'|'reflection'|'tool'|'text'|'error'|'meta'
-        payload_json    TEXT        -- 事件 payload JSON
-        ts              REAL
-"""
+"""Agent Trace：把每一次 Agent 运行的完整决策过程落盘到 SQLite。"""
 from __future__ import annotations
 
 import json
@@ -118,7 +92,6 @@ class TraceRecorder:
                 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, seq);
             """)
 
-    # ---- run 生命周期 ----
     def begin_run(self, goal: str, mode: str = "react",
                   meta: Optional[dict] = None) -> str:
         rid = f"r{uuid.uuid4().hex[:12]}"
@@ -168,7 +141,6 @@ class TraceRecorder:
                  time.time()),
             )
 
-    # ---- 查询 ----
     _tool_calls: dict[str, int] = {}
 
     def list_runs(self, limit: int = 50) -> list[dict]:
@@ -255,7 +227,6 @@ class TraceRecorder:
         # 这里不直接读 memory，单独从 store 拿
         return []
 
-    # ---- context manager ----
     def trace(self, goal: str, mode: str = "react",
               meta: Optional[dict] = None) -> "_TraceCtx":
         return _TraceCtx(self, goal, mode, meta)

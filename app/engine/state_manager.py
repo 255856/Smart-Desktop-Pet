@@ -1,11 +1,4 @@
-"""状态管理器：封装 PetState + SaveStore + ReminderStore 的管理逻辑。
-
-职责：
-    - 创建和持有 PetState、SaveStore、ReminderStore
-    - 管理自动存档定时器
-    - 提供 state_tick_once 每秒推进状态
-    - 退出前确保存档
-"""
+"""状态管理器：封装 PetState + SaveStore + ReminderStore 的管理逻辑。"""
 from __future__ import annotations
 
 import logging
@@ -45,7 +38,6 @@ class StateManager(QObject):
         self.root = root
         self.cfg = cfg
 
-        # --- 存档 + 状态 ---
         self.save_store = SaveStore(path=default_save_path(), autosave_seconds=60)
         self._last_food_warn = 0.0
 
@@ -62,7 +54,6 @@ class StateManager(QObject):
         # mode 切换信号转发
         self.state.on_mode_change = self._forward_mode_change
 
-        # --- 提醒 ---
         # data_file 默认是 "reminders.json"（裸文件名）；若不带路径前缀，加 data/
         rem_file = self.cfg.reminder.data_file
         if rem_file.endswith(".json") and "/" not in rem_file and "\\" not in rem_file:
@@ -73,7 +64,6 @@ class StateManager(QObject):
         # 转发 reminder_triggered 信号
         self.reminders.reminder_triggered.connect(self.reminder_fired.emit)
 
-    # ----- 启动 / 关闭 -----
     def start(self) -> None:
         """启动自动存档定时器。"""
         self.save_store.start()
@@ -86,7 +76,6 @@ class StateManager(QObject):
         except Exception as e:  # noqa: BLE001
             log.warning("退出存档失败：%s", e)
 
-    # ----- 状态 tick -----
     def state_tick_once(self, is_sleeping: bool = False) -> None:
         """每秒推进一次状态（衰减 + 跨夜）。"""
         now = time.time()
@@ -109,7 +98,6 @@ class StateManager(QObject):
         )
         self.state.on_interact(feeling_gain=8, likability_gain=2)
 
-    # ----- 内部 -----
     def _forward_mode_change(self, old, new) -> None:
         """转发 mode 切换信号。"""
         self.mode_changed.emit(old, new)

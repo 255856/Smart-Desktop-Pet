@@ -1,19 +1,4 @@
-"""MiniMax TTS + 声音克隆（方案 A）——自定义音色，无需本地 GPU。
-
-使用流程（手动）：
-    1. python tools/clone_voice.py --voice-id my_voice --samples 样本1.mp3 ...
-    2. config.yaml:
-           character:
-             tts_engine: minimax
-             minimax_voice_id: my_voice
-       （minimax_api_key 留空则复用 llm.api_key，同账号）
-
-自动克隆：在 config.yaml 配 samples 目录后，桌宠启动时会自动执行克隆
-（样本指纹未变化时跳过，不会重复执行），见 ensure_voice_cloned()。
-
-接口：POST /v1/files（上传）、/v1/voice_clone（克隆）、/v1/t2a_v2（合成，
-返回 hex 编码的 mp3）。
-"""
+"""MiniMax TTS + 声音克隆（方案 A）——自定义音色，无需本地 GPU。"""
 from __future__ import annotations
 
 import hashlib

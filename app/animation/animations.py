@@ -1,16 +1,4 @@
-"""VPet 风格动画系统
-
-核心概念：
-    Frame       单张帧（QPixmap + duration_ms）
-    Animation   一组帧 + 循环策略
-    Player      帧序列播放器（按时间推进，自动循环/一次性）
-
-VPet 同款特性：
-    - 每帧独立 duration（125ms / 250ms / 500ms ...）
-    - 多循环变体（同一状态 3 个不同序列，避免重复感）
-    - 一次性动画（touch 反应）播完回到 idle
-    - 状态优先级：高优先级动画可打断低优先级
-"""
+"""VPet 风格动画系统"""
 from __future__ import annotations
 
 import logging
@@ -30,7 +18,7 @@ log = logging.getLogger(__name__)
 class Frame:
     """单张精灵帧。"""
     pixmap: QPixmap
-    duration_ms: int = 125          # VPet 同款命名约定 _125 表示 125ms
+    duration_ms: int = 125
     original: Optional[QPixmap] = None  # 原始未缩放的 pixmap（缩放桌宠时用此还原）
 
 
@@ -80,7 +68,7 @@ class AnimationPlayer:
         self._frame_elapsed = 0  # 当前帧已 elapsed 的时间（毫秒）
         self._direction = 1
         self._finished_cb: Optional[Callable] = None
-        # cross-fade 状态（PR-crossfade：豆包生成图 pose 不连贯时让切换不抖）
+
         self._crossfade_ms = 0
         self._prev_pixmap: Optional[QPixmap] = None
         self._prev_alpha: float = 0.0
@@ -90,7 +78,6 @@ class AnimationPlayer:
              on_finished: Optional[Callable] = None) -> None:
         if not anim or not anim.is_valid():
             return
-        # PR-crossfade：记下上一帧，让 paintEvent 在 crossfade_ms 内做淡出。
         # 同一 anim 不重设 prev（避免同一动画内帧间都做 crossfade——只有切换时做）。
         prev_anim = self._current
         prev_pix = self.current_pixmap()
@@ -100,7 +87,6 @@ class AnimationPlayer:
             self._crossfade_start_t = time.monotonic()
             self._prev_alpha = 1.0
         self._current = anim
-        # PR-bugfix："动画越来越快"——同动画不重置 frame_idx / _frame_elapsed。
         # 否则 set_idle() 每 30-75 s 调一次 play(idle[0]) 都会把动画从第 0 帧
         # 重启，看起来像"动画循环加速"。
         if not is_same:
@@ -199,8 +185,6 @@ class AnimationPlayer:
         alpha = max(0.0, 1.0 - elapsed_ms / self._crossfade_ms)
         return self._prev_pixmap, alpha
 
-
-# ========================= 精灵图加载器 =========================
 
 def load_animation_from_dir(directory: str | Path,
                               frame_duration_ms: int = 125,

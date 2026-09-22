@@ -1,16 +1,4 @@
-"""智能中枢控制器：封装 MemoryStore + ToolRegistry + ProactiveBrain + AgentLoop。
-
-职责：
-    - 创建和持有长期记忆、工具注册表、主动行为大脑
-    - 提供动态 chat_context 生成（时间 / 状态 / 记忆 / 工具说明）
-    - 处理工具触发的动画播放
-    - 处理主动行为回调
-
-Skill 加载：
-    - 优先读 `.agents/skills/desktop-pet-tool-usage/SKILL.md`（DSH 标准结构）
-    - 读不到就退到内置的 _FALLBACK_SKILL 字符串（保证不空）
-    - SKILL 注入到 chat_context → 系统 prompt，模型看得到
-"""
+"""智能中枢控制器：封装 MemoryStore + ToolRegistry + ProactiveBrain + AgentLoop。"""
 from __future__ import annotations
 
 import datetime
@@ -27,8 +15,6 @@ from app.engine.works import ItemStore
 
 log = logging.getLogger(__name__)
 
-
-# ---- SKILL 加载 ----
 
 # 多种可能的 skill 路径（DSH 默认结构 + 简化结构）
 _SKILL_PATH_CANDIDATES = [
@@ -130,17 +116,14 @@ class BrainController(QObject):
         # SKILL.md 加载（缓存到实例避免每轮重读）
         self._skill_text = _get_skill_text(root)
 
-        # --- 长期记忆 ---
         mem_path = cfg.brain.memory_file
         if not Path(mem_path).is_absolute():
             mem_path = root / mem_path
         self.memory = MemoryStore(mem_path)
 
-        # --- 食物库（feed_self 工具用）---
         foods_path = root / "data" / "foods.json"
         self.items = ItemStore.load(foods_path) if foods_path.is_file() else None
 
-        # --- 工具注册表 ---
         if cfg.brain.tools_enabled:
             # web_search 主用 Tavily：优先 cfg.brain.tavily_api_key，否则读环境变量
             tavily_key = getattr(getattr(cfg, "brain", None), "tavily_api_key", None) \
@@ -161,7 +144,6 @@ class BrainController(QObject):
         else:
             self.tool_registry = None
 
-        # --- 主动行为 ---
         self._sleeping_checker = None
         if cfg.brain.proactive_enabled:
             self.proactive = ProactiveBrain(
@@ -193,7 +175,6 @@ class BrainController(QObject):
         except Exception:  # noqa: BLE001
             return False
 
-    # ----- Chat context -----
     def chat_context(self) -> str:
         """每次发消息前生成动态 system 上下文：时间 / 状态 / 记忆 / SKILL。
 
@@ -233,7 +214,6 @@ class BrainController(QObject):
             "**何时调哪个工具**的规则见上面的 SKILL 文档。"
         )
 
-    # ----- 工具动画 -----
     def connect_tool_animation(self, pet) -> None:
         """连接工具动画信号到桌宠。"""
         self.animation_requested.connect(self._do_play_animation)
@@ -264,12 +244,10 @@ class BrainController(QObject):
         except Exception as e:  # noqa: BLE001
             log.warning("工具动画播放失败：%s", e)
 
-    # ----- 主动行为 -----
     def _on_proactive_remark(self, text: str) -> None:
         """转发主动发言信号。"""
         self.remark_ready.emit(text)
 
-    # ----- Agent 循环 -----
     def create_agent(self, client: LLMClient, confirm_tool=None) -> AgentLoop:
         """创建 AgentLoop 实例。"""
         return AgentLoop(

@@ -1,26 +1,4 @@
-"""应用程序路径映射注册表。
-
-用途：让 ``open_app("QQ")`` 能直接找到 QQ 的 exe 路径，
-不需要用户每次给完整路径。
-
-两层映射：
-    1. 内置映射（本文件）—— 覆盖 Windows 内置 + 常见软件 + 常见游戏
-    2. 用户自定义（data/app_registry.json）—— 用户可自由增删改，
-       同名时覆盖内置映射。
-
-JSON 文件格式（data/app_registry.json）：
-    {
-        "qq": "C:\\\\%PROGRAMFILES%\\\\Tencent\\\\QQ\\\\Bin\\\\QQ.exe",
-        "my custom app": "C:\\\\Path\\\\To\\\\App.exe",
-        "another app": [
-            "C:\\\\Path1\\\\App.exe",
-            "C:\\\\Path2\\\\App.exe"
-        ]
-    }
-
-    - 值为字符串：单一路径
-    - 值为列表：按顺序尝试，找到第一个存在的即用
-"""  # noqa: W605
+"""应用程序路径映射注册表。"""  # noqa: W605
 from __future__ import annotations
 
 import json
@@ -32,12 +10,9 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
 #  内置映射 —— 常见应用的可执行路径列表
 #  按顺序尝试，找到第一个存在的 exe 即返回
-# ------------------------------------------------------------------
 _BUILTIN_MAP: dict[str, list[str]] = {
-    # ===== Windows 内置 =====
     "notepad": ["notepad.exe"],
     "记事本": ["notepad.exe"],
     "calc": ["calc.exe"],
@@ -72,7 +47,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
     "services.msc": ["services.msc"],
     "msconfig": ["msconfig.exe"],
 
-    # ===== 腾讯系 =====
     "qq": [
         r"%PROGRAMFILES%\Tencent\QQ\Bin\QQ.exe",
         r"%PROGRAMFILES% (x86)\Tencent\QQ\Bin\QQ.exe",
@@ -112,7 +86,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Tencent\WeMeet\WeMeet.exe",
     ],
 
-    # ===== 办公软件 =====
     "wps": [
         r"%PROGRAMFILES%\Kingsoft\WPS Office\ksolaunch.exe",
         r"%PROGRAMFILES% (x86)\Kingsoft\WPS Office\ksolaunch.exe",
@@ -128,7 +101,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Feishu\Feishu.exe",
     ],
 
-    # ===== 浏览器 =====
     "360se": [
         r"%PROGRAMFILES%\360\360se\360se.exe",
         r"%PROGRAMFILES% (x86)\360\360se\360se.exe",
@@ -148,7 +120,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Sogou\SogouExplorer\browser.exe",
     ],
 
-    # ===== 音乐 =====
     "网易云音乐": [
         r"%PROGRAMFILES%\Netease\CloudMusic\CloudMusic.exe",
         r"%PROGRAMFILES% (x86)\Netease\CloudMusic\CloudMusic.exe",
@@ -170,7 +141,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\KuGou\Kgm.exe",
     ],
 
-    # ===== 视频 / 直播 =====
     "抖音": [
         r"%PROGRAMFILES%\Bytedance\Douyin\Douyin.exe",
         r"%PROGRAMFILES% (x86)\Byted 0586\Douyin\Douyin.exe",
@@ -188,10 +158,8 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\BiliBili\BiliBili.exe",
     ],
 
-    # ===== 开发工具 =====
     # 注意：VS Code 默认装到 %LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe
     # （即 C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code\Code.exe）
-    # 之前用相对路径 "AppData\Local\..." 在 _expand_path 里找不到，因为基路径只有
     # C:\、%PROGRAMFILES%、%LOCALAPPDATA%，拼出来就成了 %LOCALAPPDATA%\AppData\...
     # 用 %LOCALAPPDATA%\Programs\... 一步到位。
     "code": [
@@ -207,7 +175,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Notepad++\notepad++.exe",
     ],
 
-    # ===== 媒体播放器 =====
     "vlc": [
         r"%PROGRAMFILES%\VideoLAN\VLC\vlc.exe",
         r"%PROGRAMFILES% (x86)\VideoLAN\VLC\vlc.exe",
@@ -219,7 +186,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\DAUM\PotPlayer\PotPlayerMini.exe",
     ],
 
-    # ===== 截图 / 录屏 =====
     "snipaste": [
         r"%PROGRAMFILES%\Snipaste\Snipaste.exe",
         r"%PROGRAMFILES% (x86)\Snipaste\Snipaste.exe",
@@ -239,7 +205,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Everything\Everything.exe",
     ],
 
-    # ===== 压缩软件 =====
     "winrar": [
         r"%PROGRAMFILES%\WinRAR\Rar.exe",
         r"%PROGRAMFILES% (x86)\WinRAR\Rar.exe",
@@ -249,7 +214,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\WinZip\WINZIP.EXE",
     ],
 
-    # ===== 通讯 =====
     "skype": ["skype.exe"],
     "teams": [
         r"%PROGRAMFILES%\Microsoft\Teams\current\Teams.exe",
@@ -260,7 +224,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\Zoom\Zoom Workplace\Zoom.exe",
     ],
 
-    # ===== 游戏 =====
     "星露谷物语": [
         r"%PROGRAMFILES% (x86)\Steam\steamapps\common\Stardew Valley\StardewValley.exe",
         r"%PROGRAMFILES%\Steam\steamapps\common\Stardew Valley\StardewValley.exe",
@@ -302,7 +265,6 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\miHoYo\Genshin Impact\GenshinImpact.exe",
     ],
 
-    # ===== 网易 =====
     "网易": [
         r"%PROGRAMFILES%\NetEase\CloudMusic\CloudMusic.exe",
         r"%PROGRAMFILES% (x86)\NetEase\CloudMusic\CloudMusic.exe",
@@ -335,9 +297,7 @@ class AppRegistry:
         if self._user_file:
             self._load_user()
 
-    # ------------------------------------------------------------------
     #  构建索引
-    # ------------------------------------------------------------------
     def _build_index(self) -> None:
         """从内置映射构建索引。"""
         self._all.clear()
@@ -398,9 +358,7 @@ class AppRegistry:
         except Exception as e:  # noqa: BLE001
             log.warning("保存 app_registry 失败：%s", e)
 
-    # ------------------------------------------------------------------
     #  查询 / 修改
-    # ------------------------------------------------------------------
     def resolve(self, app_name: str) -> Optional[str]:
         """根据名称查找可执行文件路径。
 

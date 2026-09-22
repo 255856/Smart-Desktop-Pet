@@ -1,36 +1,4 @@
-"""Agent 循环：让大模型通过工具调用真正「做事」。
-
-这是一个真正的 ReAct 循环（与 LangChain `create_agent` 语义对齐）：
-
-    1. 流式请求 LLM（带 tools schema）；
-    2. 模型可以决定：
-       a) 直接给文字回复（闲聊 / 总结）→ 循环结束，文字即为 final answer
-       b) 调用工具 → 工具结果作为 ToolMessage 回传，循环回到步骤 1
-    3. 重复 1-2 直到：
-       a) 模型给出 final answer（不调工具），或
-       b) 达到 max_turns 上限，或
-       c) 连续多轮纯调工具没给文字 → 强制进入 final 阶段（去掉 tools，让模型必须总结）
-
-这是「真正的智能体」—— 模型自主决定调什么工具、调几次、什么时候给 final answer。
-不像 Planner+Executor 模式那样：先规划后执行、模型不再回头参与决策。
-
-产出事件（yield）：
-    ("text",  chunk)                       正文增量
-    ("tool",  name, args_str, result_str)  一次工具执行完成
-    ("meta",  {...})                       内部事件（force_retry / force_final 等）
-    ("done",  final_text)                  整个循环结束
-
-危险工具确认：
-    对 DANGEROUS_TOOLS 中的工具（如 open_app / open_website），
-    执行前会调用 confirm_tool 回调（由调用方注入），返回 False 则跳过执行。
-
-【抗幻觉】三层机制：
-    1. force_tool_use（首轮）→ 工具可解决的意图，第一轮带 tool_choice="required"
-       服务端不支持时降级为 user-prompt 强制（见 LLMClient）
-    2. force_retry（首轮）→ 首轮 force 后模型仍只回文字 → 注入强提示重试一次
-    3. force_final（连续多轮纯调工具）→ 去掉 tools，强制模型给出 final answer
-       避免「无限调工具不给最终回复」的退化行为
-"""
+"""Agent 循环：让大模型通过工具调用真正「做事」。"""
 from __future__ import annotations
 
 import asyncio
@@ -149,7 +117,6 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
             return "好的，我试着帮主人记提醒了，不过好像没成功，主人再说一遍？"
         return f"好的，我尝试{pretty}了，不过好像没成功……"
 
-    # —— 以下均为成功 ——
     if name == "open_app":
         target = _APP_NICE.get(str(a.get("app_name", "")).strip(),
                                str(a.get("app_name", "")).strip())
@@ -435,7 +402,6 @@ class AgentLoop:
 
             final_text = _sanitize_reply("".join(content_parts))
 
-            # 【抗幻觉】第 2 层：识别到工具意图 + 【从头到尾还没成功调过任何工具】
             # + 本轮仍只回文字 → 注入强提示重试。
             # 关键：tools_used == 0 才算「该调没调」。一旦已经调过工具，模型本轮不再
             # 调工具而给出文字，就是在做最终总结——此时必须放行（走下面的 not tool_calls
@@ -536,7 +502,6 @@ class AgentLoop:
             })
 
         # 兜底：final_text 为空（模型调完工具却没给最终文字）。
-        # 旧版直接取最后一条工具结果（常含 URL / JSON / 路径），会被输出清洗清空，
         # 主人看到空气泡。改为按「最后执行的工具」类型生成一句角色化确认。
         if not final_text.strip() and executed_tools:
             last_name, last_args, last_result = executed_tools[-1]

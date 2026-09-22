@@ -1,19 +1,4 @@
-"""多角色配置加载。
-
-约定：
-    characters/<name>.yaml  (在项目根目录下)
-        |--- name: 显示名（必填）
-        |--- persona: system prompt（必填）
-        |--- tts.enabled / tts.voice （可选，未填用全局）
-        |--- sprite.directory / sprite.fallback （可选，未填用全局）
-
-CLI：
-    python scripts/run.py --character=momo
-        → 若 characters/momo.yaml 存在，覆盖 CharacterConfig 的对应字段。
-
-设计理由：先做"角色文件夹 + 单 yaml 顶层覆盖"。二期把 sprite.directory 也读
-进来（同一角色支持多个 sprite 子目录切换——比如日常装 / 季节装）。
-"""
+"""多角色配置加载。"""
 from __future__ import annotations
 
 import logging

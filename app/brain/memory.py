@@ -1,20 +1,4 @@
-"""桌宠长期记忆库（增强版：向量检索 + 重要性 + 时间衰减 + 冲突检测）。
-
-设计：
-    - 每条记忆 = MemoryItem(id, content, category, importance, created_at, last_access_ts, access_count)
-    - 三种检索后端（按优先级）：
-        1. VectorBackend（sentence-transformers，可选）
-        2. TfidfBackend（numpy + 词袋 TF-IDF + 余弦，零依赖默认）
-        3. SubstringBackend（大小写不敏感的子串匹配，兜底）
-    - 自动按 availability 选最强者；可手动 lock。
-    - 注入 system prompt 时综合：类别优先级 × 时新度 × importance × 与 query 的相关度。
-    - MemoryCurator 后台线程：定期摘要/合并/归纳/清理过期。
-
-data/memory.json 结构：
-    [{"id":"m1731...","content":"主人喜欢喝冰美式","category":"preference",
-      "importance":0.8,"created_at":1731...,"last_access_ts":1731...,"access_count":3},
-     ...]
-"""
+"""桌宠长期记忆库（增强版：向量检索 + 重要性 + 时间衰减 + 冲突检测）。"""
 from __future__ import annotations
 
 import json
@@ -60,9 +44,7 @@ def _tokenize(text: str) -> list[str]:
     return out
 
 
-# ============================================================================
 #  MemoryItem
-# ============================================================================
 
 
 @dataclass
@@ -81,9 +63,7 @@ class MemoryItem:
         self.access_count += 1
 
 
-# ============================================================================
 #  向量检索后端（Strategy 模式）
-# ============================================================================
 
 
 class VectorBackend(Protocol):
@@ -258,9 +238,7 @@ def make_backend(name: str = "auto") -> VectorBackend:
     return TfidfBackend()
 
 
-# ============================================================================
 #  MemoryStore
-# ============================================================================
 
 
 class MemoryStore:
@@ -294,7 +272,6 @@ class MemoryStore:
         self._load()
         self._refit_backend()
 
-    # ----- 持久化 -----
     def _load(self) -> None:
         if not self.data_file.is_file():
             return
@@ -345,7 +322,6 @@ class MemoryStore:
             self.backend_name = backend_name
             self._refit_backend()
 
-    # ----- CRUD -----
     def add(self, content: str, category: str = "other",
             importance: float = 0.5) -> MemoryItem:
         """添加一条记忆。importance ∈ [0, 1]。"""
@@ -395,7 +371,6 @@ class MemoryStore:
         with self._lock:
             return len(self._items)
 
-    # ----- 检索 -----
     def search(
         self,
         keyword: str = "",
@@ -487,7 +462,6 @@ class MemoryStore:
         with self._lock:
             self._dirty = True
 
-    # ----- 重要 API（工具会调） -----
     def recall(self, keyword: str = "", category: str = "",
                limit: int = 5) -> list[MemoryItem]:
         """便捷接口：search 的简化版本，给 LLM tool 用。"""
@@ -538,7 +512,6 @@ class MemoryStore:
             return []
         return [(i, s) for i, s in zip(items, sims) if s >= threshold and i.category != "other"]
 
-    # ----- 生命周期 -----
     def forget_if_expired(self, max_age_days: int = 90,
                           min_importance: float = 0.3) -> int:
         """删除超过 max_age_days 天 且 importance < min_importance 的记忆。
@@ -615,7 +588,6 @@ class MemoryStore:
         items.sort(key=lambda i: i.created_at)
         return items[-(n or self.max_inject):]
 
-    # ----- 注入 system prompt -----
     def system_block(self) -> str:
         items = self._select_for_injection()
         if not items:
@@ -638,9 +610,7 @@ class MemoryStore:
         return pool[: self.max_inject]
 
 
-# ============================================================================
-#  MemoryCurator（升级版 memory_evolution）
-# ============================================================================
+# MemoryCurator
 
 
 class MemoryCurator:
@@ -713,9 +683,7 @@ class MemoryCurator:
         return stats
 
 
-# ============================================================================
 #  helpers
-# ============================================================================
 
 
 def _format_time(ts: float) -> str:

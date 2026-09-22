@@ -1,34 +1,4 @@
-"""枚举 Windows 系统已安装的应用（按需扫描 + 内存缓存）。
-
-扫描来源（按优先级排序）：
-    1. Windows App Paths 注册表（最权威）
-       HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\<exe>
-       HKCU\\...\\App Paths\\<exe>
-       → 这里的「应用名」就是 exe 文件名（如 Code.exe → 「Visual Studio Code」）
-    2. 开始菜单快捷方式（*.lnk）
-       C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\
-       %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\
-       → .lnk 文件名（去掉 .lnk 后缀）就是应用显示名
-    3. 桌面快捷方式（*.lnk）
-       %USERPROFILE%\\Desktop\\
-       %PUBLIC%\\Desktop\\
-    4. 控制面板「程序和功能」（Uninstall 注册表）
-       HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\
-       HKLM\\SOFTWARE\\WOW6432Node\\...\\Uninstall\\
-       HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\
-       → DisplayName + InstallLocation / DisplayIcon
-    5. Program Files 目录扫描（兜底，扫所有顶层 .exe）
-
-性能：
-    - 首次扫描较慢（1-3 秒，取决于磁盘），后台线程异步完成
-    - 后续查找走缓存（O(N) 字符串相似度计算，N ≈ 几百）
-    - 缓存 5 分钟过期（短到能反映新装的应用，长到不让磁盘一直忙）
-
-为什么单开这个模块：
-    app_registry 的内置映射只覆盖常见应用；用户装的小众软件 / 国产应用
-    在内置里没有。open_app 之前遇到这种场景只能返回「未找到」，体验差。
-    有了「扫描系统已装应用」兜底，相似度匹配可以命中 90%+ 的现实场景。
-"""
+"""枚举 Windows 系统已安装的应用（按需扫描 + 内存缓存）。"""
 from __future__ import annotations
 
 import logging
@@ -203,9 +173,7 @@ class InstalledAppsCache:
         return scored[:limit]
 
 
-# -----------------------------------------------------------
 #  归一化
-# -----------------------------------------------------------
 
 # 去常见后缀（用于去掉「VS Code.lnk」→「VS Code」）
 _LNK_SUFFIXES = (".lnk", ".url", ".exe")
@@ -225,9 +193,7 @@ def _normalize_for_search(name: str) -> str:
     return n.strip()
 
 
-# -----------------------------------------------------------
 #  扫描各来源
-# -----------------------------------------------------------
 
 
 def _scan_installed_apps() -> list[InstalledApp]:
@@ -496,9 +462,7 @@ def _scan_program_files_top_level() -> list[InstalledApp]:
     return out
 
 
-# -----------------------------------------------------------
 #  模块级单例
-# -----------------------------------------------------------
 
 _CACHE: Optional[InstalledAppsCache] = None
 _CACHE_LOCK = threading.Lock()

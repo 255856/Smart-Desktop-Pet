@@ -1,14 +1,4 @@
-"""Planner：把用户目标拆解为结构化步骤。
-
-使用方式：
-    planner = Planner(llm_client, tool_registry, persona)
-    plan = await planner.make_plan(user_message, history=[...])
-
-设计要点：
-    - 提示词使用 ReAct-style 模板 + JSON 输出约束
-    - 拆 plan 时告诉模型可用工具名 + 简短描述
-    - 失败/空 plan 自动降级为「final」单步
-"""
+"""Planner：把用户目标拆解为结构化步骤。"""
 from __future__ import annotations
 
 import json
@@ -77,7 +67,6 @@ class Planner:
         else:
             tool_list = "（无工具可用）"
 
-        # 历史（最近 5 条）
         hist_lines = []
         for h in history[-5:]:
             role = h.get("role", "user")

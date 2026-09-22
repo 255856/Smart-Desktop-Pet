@@ -1,15 +1,4 @@
-"""存档系统：把 PetState 持久化到磁盘 + 自动定时保存。
-
-设计：
-    - 存档位置：`~/.desktop-pet/save.json`（按 OS 走 home 目录，跨平台稳定）
-    - 备份位置：`~/.desktop-pet/save.bak.json`（写之前先 copy 到 .bak，万一崩了能回退）
-    - 自动保存间隔：默认 60 秒（与 VPet 同款 Setting.lps `autosave#60` 对齐）
-    - 序列化：直接用 PetState.to_dict / from_dict 自带版本号 v=1
-
-线程模型：
-    - save 操作可以放主线程或后台；这里用 QTimer 在主线程节拍触发，
-      write 过程 < 1 KB JSON 几乎无开销，无需异步。
-"""
+"""存档系统：把 PetState 持久化到磁盘 + 自动定时保存。"""
 from __future__ import annotations
 
 import json
@@ -49,7 +38,6 @@ class SaveStore(QObject):
         self._timer.timeout.connect(self._on_tick)
         self._dirty = False
 
-    # ---------------- 启动 / 关闭 ----------------
     def start(self) -> None:
         if self.autosave_seconds > 0:
             self._timer.start()
@@ -63,7 +51,6 @@ class SaveStore(QObject):
             except Exception as e:  # noqa: BLE001
                 log.warning("退出前存档失败：%s", e)
 
-    # ---------------- 读 / 写 ----------------
     def get_state(self) -> PetState:
         return self._state
 
@@ -133,7 +120,6 @@ class SaveStore(QObject):
         """外部在改 state 后调用，标记下次 tick 自动存。"""
         self._dirty = True
 
-    # ---------------- 内部 ----------------
     def _on_tick(self) -> None:
         if self._dirty and self._state is not None:
             try:

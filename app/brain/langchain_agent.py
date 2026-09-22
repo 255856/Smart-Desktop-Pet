@@ -1,21 +1,4 @@
-"""LangChain 标准后端（与轻量级后端并存）。
-
-设计目标：
-- 用 `langchain.agents.create_agent` 替代手写 ReAct（参考 `E:\\Python study\\agent`）
-- 用 `SqliteSaver` 替代自研 TraceRecorder 的部分功能
-- 保持与 `AgentLoopV2` **相同的事件协议**，ChatWindow 无需任何改动：
-    ("text", chunk)        流式文字
-    ("tool", name, args, result)    工具调用
-    ("done", text)         最终回复
-    ("error", exc)         出错
-
-启用方式：
-    yaml:
-      brain:
-        backend: standard     # "lightweight" / "standard"
-
-依赖：langchain>=1.0, langgraph-checkpoint-sqlite, langchain-openai
-"""
+"""LangChain 标准后端（与轻量级后端并存）。"""
 from __future__ import annotations
 
 import asyncio
@@ -61,9 +44,7 @@ from app.engine.tools import Tool, ToolRegistry
 log = logging.getLogger(__name__)
 
 
-# =====================================================================
 # 内部 Tool → LangChain StructuredTool 的适配器
-# =====================================================================
 def _internal_tool_to_langchain(tool: Tool) -> StructuredTool:
     """把桌宠的 Tool(name, description, parameters, fn) 包装为 LangChain StructuredTool。
 
@@ -83,9 +64,7 @@ def convert_tools(registry: ToolRegistry) -> list[StructuredTool]:
     return [_internal_tool_to_langchain(t) for t in registry._tools.values()]
 
 
-# =====================================================================
 # 主类
-# =====================================================================
 @dataclass
 class LangChainAgentConfig:
     """LangChain 后端运行参数（从 brain.langchain 段读取）。"""
@@ -182,7 +161,6 @@ class LangChainAgent:
         # 启动持久 loop（懒初始化）
         self._get_loop()
 
-    # ---------- 构建 LLM ----------
     def _build_model(self) -> ChatOpenAI:
         """OpenAI 兼容协议（DeepSeek / minimax / Ollama / 任何 base_url）。"""
         return ChatOpenAI(
@@ -195,7 +173,6 @@ class LangChainAgent:
             streaming=True,
         )
 
-    # ---------- 构建 checkpointer（可选）----------
     async def _build_checkpointer(self):
         """构建 AsyncSqliteSaver 实例（已 aenter，可直接给 create_agent 用）。
 
@@ -238,7 +215,6 @@ class LangChainAgent:
         # Qt 信号回调路径：仅做标记，真正释放由 worker 协程做
         # 不抛异常以保证 _on_done / _on_failed 不会中断 UI
 
-    # ---------- 构建 agent ----------
     async def _ensure_agent(self) -> None:
         """异步构建 agent（model + tools + checkpointer）。首次调用时构建，后续复用。
 
@@ -265,7 +241,6 @@ class LangChainAgent:
         log.info("LangChainAgent ready: tools=%d, checkpointer=%s",
                  len(tools), "on" if checkpointer else "off")
 
-    # ---------- 历史消息转换 ----------
     @staticmethod
     def _to_lc_history(messages: list[dict]) -> list:
         """把 [{role, content}, ...] 转成 LangChain messages（跳过 system——已经作为 system_prompt）。"""
@@ -280,7 +255,6 @@ class LangChainAgent:
             # system / tool: 跳过
         return out
 
-    # ---------- 主入口 ----------
     async def run(
         self,
         messages: list[dict],
@@ -297,7 +271,6 @@ class LangChainAgent:
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
 
-        # 历史（不含最新 user——直接作为 input）
         history = self._to_lc_history(messages[:-1] if messages else [])
         last_user = ""
         if messages and messages[-1].get("role") == "user":

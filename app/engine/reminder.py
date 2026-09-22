@@ -1,10 +1,4 @@
-"""提醒系统：把 LLM 输出的「XX 分钟后提醒我做 YY」类指令落盘定时触发。
-
-触发后会发出 reminder_triggered 信号（文本），由主程序弹出气泡。
-
-调度策略：按需调度（不固定 1s 轮询），找到最近的未触发提醒，
-设置单次定时器到该时间点，触发后重新调度。没有提醒时不启动定时器。
-"""
+"""提醒系统：把 LLM 输出的「XX 分钟后提醒我做 YY」类指令落盘定时触发。"""
 from __future__ import annotations
 
 import json
@@ -121,7 +115,6 @@ class ReminderStore(QObject):
         # 初始调度
         self._schedule_next()
 
-    # ----- 持久化 -----
     def _load(self) -> None:
         if not self.data_file.is_file():
             return
@@ -141,7 +134,6 @@ class ReminderStore(QObject):
         except Exception as e:  # noqa: BLE001
             log.warning("保存 reminders 失败：%s", e)
 
-    # ----- 公开方法 -----
     def add(self, delay_seconds: int, text: str) -> ReminderItem:
         rid = f"r{int(time.time() * 1000)}"
         item = ReminderItem(id=rid, text=text, fire_at=time.time() + delay_seconds)
@@ -175,7 +167,6 @@ class ReminderStore(QObject):
         delay, content = parsed
         return self.add(delay, content)
 
-    # ----- 按需调度 -----
     def _schedule_next(self) -> None:
         """找到最近的未触发提醒，设置单次定时器到那个时间点。
 

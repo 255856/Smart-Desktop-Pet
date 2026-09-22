@@ -1,12 +1,4 @@
-"""PlanExecutor：按 Plan 一步步执行（工具调用或 final），配合 Reflector 决定走向。
-
-对外的事件流（与 AgentLoop 兼容）：
-    ("text",  chunk)                       —— 暂无直接正文（plan-exec 不主动说话）
-    ("tool",  name, args_str, result_str)  —— 一次工具执行完成
-    ("plan",  plan_dict)                   —— 计划已生成 / 修订
-    ("reflection", reflection_dict)        —— 每一步的反思
-    ("done",  final_text)                  —— 最终答案（来自 final 步骤的 result 或拼接）
-"""
+"""PlanExecutor：按 Plan 一步步执行（工具调用或 final），配合 Reflector 决定走向。"""
 from __future__ import annotations
 
 import asyncio
@@ -138,7 +130,6 @@ class PlanExecutor:
             if step is None:
                 break
 
-            # ---- 并行组：同 group 的多个 step 用 gather 一起跑 ----
             parallel_steps: list[Step] = [step]
             if step.parallel_group:
                 # 收集连续的、同 group 的 step
@@ -148,7 +139,6 @@ class PlanExecutor:
                     i += 1
 
             if len(parallel_steps) > 1:
-                # 并行执行
                 reflections = await asyncio.gather(
                     *[self._run_step(s) for s in parallel_steps])
             else:
@@ -201,7 +191,6 @@ class PlanExecutor:
             # 推进 plan.current（跳过所有并行 step）
             plan.current += len(parallel_steps)
 
-        # ---- 【抗幻觉】plan 跑完后整体检查：意图是工具动作但没成功调工具 → 强制 replan ----
         hallucination_refl: Optional[Reflection] = None
         if hasattr(self.reflector, "detect_plan_hallucination"):
             try:

@@ -1,15 +1,4 @@
-"""网络搜索工具：web_search（主用 Tavily / 降级 DuckDuckGo）。
-
-主备策略：
-    1. 如果 llm.api_key 看起来是 Tavily 风格（且配置里启用了 tavily） → 调 Tavily API
-       （Tavily 专为 AI 设计，质量高；免费 1000 次/月，访问 tavily.com 注册）
-    2. 否则 → 降级到 DuckDuckGo（通过 ddgs 包；零 key 永久免费；不保证可用性）
-
-策略由 main.py 装配工具时根据 llm_cfg.tavily_api_key（可空，缺则走 DDG）传入。
-两个后端都不可用时返回友好提示 + 给出 web_search 替代（用 open_website 打开 Bing 搜索）。
-
-不把结果原样返回给模型 —— 文本通常太长，先压缩成"标题 + 摘录 + URL"列表。
-"""
+"""网络搜索工具：web_search（主用 Tavily / 降级 DuckDuckGo）。"""
 from __future__ import annotations
 
 import json
@@ -93,8 +82,6 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
         fn=web_search,
     ))
 
-
-# ---------- 后端实现 ----------
 
 def _tavily_search(query: str, n: int, api_key: str, timeout_s: float) -> list[dict]:
     """调 Tavily /search API。返回 [{title, url, content}, ...]。

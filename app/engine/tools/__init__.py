@@ -1,24 +1,4 @@
-"""桌宠工具系统（Function Calling）。
-
-让大模型不只是「说」，还能「做」。所有工具按领域拆分到独立模块：
-
-    _core        Tool / ToolRegistry 核心类型
-    _time        get_current_time / get_pet_status / 绝对时间解析
-    _reminder    add_reminder / list_reminders / delete_reminder
-    _memory      remember_fact / recall_memory / forget_memory
-    _pet         feed_self / play_animation / change_pet_emotion / say_to_user
-    _system      open_website / open_app / system_info / screenshot / clipboard / notification
-    _math        calculate / convert_units / date_info
-    _file        list_desktop_files / read_text_file
-    _shortcuts   taskmgr / control / settings / explorer / terminal / notepad / calculator
-    _search      web_search（主用 Tavily / 降级 DuckDuckGo）
-
-主程序只需调用 build_default_tools(state, reminders, memory, items, hooks) 即可获得
-一个完整 ToolRegistry。
-
-fn 签名：fn(**kwargs) -> str（返回给模型的工具结果，尽量是简洁中文/JSON）。
-所有 fn 都在聊天 worker 线程同步执行，必须快速返回，不要在里面开 GUI。
-"""
+"""桌宠工具系统（Function Calling）。"""
 from __future__ import annotations
 
 from typing import Callable, Optional

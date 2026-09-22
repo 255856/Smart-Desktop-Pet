@@ -1,19 +1,4 @@
-"""Sub-agent 多智能体框架。
-
-设计：
-    - BaseAgent：抽象基类（system_prompt + 工具子集 + 专属 LLMClient）
-    - LifeAgent：默认桌宠 Agent（关心主人 + 桌宠自身状态 + 提醒 + 记忆）
-    - ResearchAgent：检索 / 问答 / 计算
-    - CodeAgent：写代码 / 运行代码（隔离环境）
-    - Orchestrator：根据用户输入分派到合适 agent；agent 可调其他 agent（白名单）
-
-启动方式（在 main.py 注入）：
-    orchestrator = Orchestrator(llm_client, ...)
-    orchestrator.register(LifeAgent(...))
-    orchestrator.register(ResearchAgent(...))
-    orchestrator.register(CodeAgent(...))
-    reply = await orchestrator.dispatch(user_msg, history)
-"""
+"""Sub-agent 多智能体框架。"""
 from __future__ import annotations
 
 import asyncio
@@ -125,7 +110,6 @@ class BaseAgent:
                 if not tool_calls:
                     break
 
-                # 追加 assistant 消息
                 messages.append({
                     "role": "assistant", "content": full_text or "",
                     "tool_calls": [
@@ -136,7 +120,6 @@ class BaseAgent:
                         for i, tc in enumerate(tool_calls)
                     ],
                 })
-                # 并行执行
                 async def run_one(tc):
                     name = tc["name"]
                     args = tc["arguments"] or "{}"
@@ -168,9 +151,7 @@ class BaseAgent:
             self.client.system_prompt = old_system
 
 
-# ---------------------------------------------------------------------------
 #  内置专家 agents
-# ---------------------------------------------------------------------------
 
 
 class LifeAgent(BaseAgent):
@@ -238,9 +219,7 @@ class CodeAgent(BaseAgent):
         )
 
 
-# ---------------------------------------------------------------------------
 #  Orchestrator
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -299,7 +278,6 @@ class Orchestrator:
             for kw in keywords:
                 if kw.lower() in text:
                     scores[agent_name] += 1
-        # 取最高分
         best = max(scores.items(), key=lambda x: x[1])
         if best[1] == 0 or best[0] not in self._agents:
             return "life"
@@ -353,9 +331,7 @@ class Orchestrator:
         return await agent.run(ctx)
 
 
-# ---------------------------------------------------------------------------
 #  暴露为工具：让主桌宠 Agent 把任务分给 sub-agents
-# ---------------------------------------------------------------------------
 
 
 def make_dispatch_tool(orchestrator: Orchestrator) -> Tool:

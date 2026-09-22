@@ -1,8 +1,4 @@
-"""屏幕感知：获取当前活跃窗口信息，让桌宠了解用户正在做什么。
-
-Windows 专用模块，通过 ctypes 调用 user32.dll / kernel32.dll 的
-API 获取前台窗口标题和进程名。
-"""
+"""屏幕感知：获取当前活跃窗口信息，让桌宠了解用户正在做什么。"""
 from __future__ import annotations
 
 import ctypes

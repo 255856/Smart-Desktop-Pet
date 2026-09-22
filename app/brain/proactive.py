@@ -1,12 +1,4 @@
-"""桌宠主动行为：空闲时主动找主人说话（时间/状态/记忆驱动的主动关怀）。
-
-节奏：
-    - 每隔 [min, max] 分钟随机触发一次（QTimer.singleShot 自递归调度）
-    - 触发条件：桌宠没在睡觉；且冷却时间（上次触发后至少 min 分钟）已过
-    - 生成：小 LLM 调用，输入 = 当前时间 + 桌宠数值 + 记忆样本，
-      输出 = 一句话（带 [emotion] 标签）；模型返回 [skip] 则本次沉默
-    - 产出 remark_ready(text) 信号，主程序接气泡 + TTS
-"""
+"""桌宠主动行为：空闲时主动找主人说话（时间/状态/记忆驱动的主动关怀）。"""
 from __future__ import annotations
 
 import asyncio
@@ -112,7 +104,6 @@ class ProactiveBrain(QObject):
         self._last_remarks: list[str] = []
         # 注：worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
-    # ----- 调度 -----
     def start(self) -> None:
         self._schedule()
 
@@ -146,7 +137,6 @@ class ProactiveBrain(QObject):
         self._timer.start(delay_ms)
         log.info("ProactiveBrain: 下一次主动发言在 %.1f 分钟后", delay_ms / 60000)
 
-    # ----- 生成 -----
     def _fire(self) -> None:
         try:
             self._schedule()   # 先排下一轮，本轮失败也不影响节奏

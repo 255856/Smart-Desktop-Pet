@@ -1,17 +1,4 @@
-"""PetRenderer 抽象基类 —— sprite / live2d 双渲染器共享接口。
-
-设计目标：把现有的 PetAnimator（sprite 实现）抽成接口，让 Live2DRenderer（QWebEngineView
-+ Cubism Web SDK）实现同一套方法。PetWindow 持有 PetRenderer 引用，对两种实现无感知。
-
-接口覆盖：
-    - set_idle / set_emotion / set_sleep / set_wake / set_thinking
-    - play_animation / play_reaction / play_eat / play_file / play_spin / play_stretch / play_jump / play_swim
-    - start_drag / end_drag / set_walk
-    - get_widget() —— 返回要嵌入到 PetWindow 的子 QWidget
-    - shutdown() —— 清理资源
-
-调用方 (PetWindow) 只用 PetRenderer 类型，不 import 具体实现。
-"""
+"""PetRenderer 抽象基类 —— sprite / live2d 双渲染器共享接口。"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -23,7 +10,6 @@ from app.core.qt_compat import QWidget
 class PetRenderer(ABC):
     """所有桌宠渲染器的统一接口。"""
 
-    # ----- 状态切换 -----
     @abstractmethod
     def set_idle(self) -> None:
         """切到主待机（呼吸/眨眼由渲染器内部处理）。"""
@@ -49,7 +35,6 @@ class PetRenderer(ABC):
         # sprite 默认实现调 set_emotion；Live2D 可重写
         self.set_emotion(emotion)
 
-    # ----- 渲染器能力查询（菜单自适应用） -----
     def get_emotion_options(self) -> list[tuple[str, str]]:
         """返回当前渲染器支持的 (id, 标签) 情绪选项。
 
@@ -78,7 +63,6 @@ class PetRenderer(ABC):
     def set_hairstyle(self, name: str) -> None:
         """切换发型（Live2D 模型自带发型预设）。sprite 默认 no-op。"""
 
-    # ----- 分类外观菜单（Live2D 专属能力，sprite 返回空 = 菜单不渲染这部分） -----
     def get_menu_groups(self) -> list[dict]:
         """分类外观子菜单数据：[{"id","label","mode","items":[(id,label)]}, ...]。"""
         return []
@@ -98,7 +82,6 @@ class PetRenderer(ABC):
         """「玩一下」菜单数据：[(动作名, 标签)]。sprite 无默认实现（菜单自己列）。"""
         return []
 
-    # ----- 触发场景动作（Live2D 可视化配置；sprite 仅把情绪场景映射到 set_emotion） -----
     # 聊天情绪场景 → sprite 情绪键
     _SPRITE_CHAT_EMOTION = {
         "chat_happy": "happy", "chat_sad": "sad", "chat_angry": "angry",
@@ -127,7 +110,6 @@ class PetRenderer(ABC):
     def play_custom_action(self, cid: str) -> None:
         """播放一个自定义动作（sprite 无此能力，no-op）。"""
 
-    # ----- 挂机随机表情（Live2D 专属，sprite 默认不支持） -----
     def set_random_expressions(self, enabled: bool) -> None:
         """开关挂机随机表情。sprite 默认 no-op。"""
 
@@ -144,7 +126,6 @@ class PetRenderer(ABC):
         """当前渲染器类型（'sprite' | 'live2d'）——给菜单显示。"""
         return type(self).__name__.replace('Renderer', '').lower()
 
-    # ----- 一次性动作 -----
     @abstractmethod
     def play_reaction(self, where: str) -> None:
         """对触摸反应（'head' 或 'body'）。播完后回到之前状态。"""
@@ -177,7 +158,6 @@ class PetRenderer(ABC):
     def play_swim(self) -> None:
         """游泳。"""
 
-    # ----- 拖动 / 行走 -----
     @abstractmethod
     def start_drag(self) -> None:
         """开始拖动（持续中循环显示拖动动画）。"""
@@ -190,7 +170,6 @@ class PetRenderer(ABC):
     def set_walk(self, direction: str) -> None:
         """切到走路动画（direction='left'/'right'）。"""
 
-    # ----- 表情参数（Live2D 专用，sprite 用 set_emotion 即可） -----
     def set_parameter(self, name: str, value: float, duration_ms: int = 0) -> None:
         """设置 Live2D 参数。sprite 实现可以 no-op。
 
@@ -210,17 +189,14 @@ class PetRenderer(ABC):
         # sprite 默认实现调 set_emotion；Live2D 可重写
         self.set_emotion(emotion)
 
-    # ----- Qt 集成 -----
     @abstractmethod
     def get_widget(self) -> QWidget:
         """返回要嵌入到 PetWindow 的子 QWidget。"""
 
-    # ----- 生命周期 -----
     @abstractmethod
     def shutdown(self) -> None:
         """清理资源（停止动画 timer / 释放 WebView 等）。"""
 
-    # ----- 状态查询 / 控制（默认实现；子类按需重写） -----
     def is_sleeping(self) -> bool:
         """是否在睡觉（用于 state.tick 跳过衰减等逻辑）。默认 False。"""
         return False
@@ -233,7 +209,6 @@ class PetRenderer(ABC):
         """锁定第一帧 idle。默认 no-op（sprite 的 PetAnimator 实际 no-op）。"""
         pass
 
-    # ----- 可选能力 -----
     def supports_expression_listing(self) -> bool:
         """是否支持列出模型可用 expression（Live2D 是，sprite 一般不是）。"""
         return False

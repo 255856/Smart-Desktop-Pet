@@ -1,8 +1,4 @@
-"""角色情绪状态机。
-
-8 种表情 + thinking/idle/talking 共 11 个状态。
-对话时，模型回复末尾会带一个 [emotion] 标签，我们据此切换表情。
-"""
+"""角色情绪状态机。"""
 from __future__ import annotations
 
 import re

@@ -1,19 +1,4 @@
-"""统一 UI 皮肤：聊天面板 / 设置面板 / 右键菜单 / 托盘菜单共用。
-
-设计语言（v2 美化版）：
-    - 柔和浅紫灰渐变底 + 卡片式分组（白卡、大圆角、细边框、轻阴影）
-    - 主色：紫罗兰 #7c6cf0（hover 加深），辅助粉紫渐变
-    - 全控件统一圆角：输入框 / 按钮 / 滑块 / 进度条 / 菜单项 / Tab
-    - 无边框窗口：窗口透明，内部白色圆角卡片（16px）+ 自绘标题栏
-    - 字体：Microsoft YaHei UI
-
-用法：
-    widget.setStyleSheet(ui_style.CHAT_QSS)      # 聊天窗
-    widget.setStyleSheet(ui_style.SETTINGS_QSS)  # 设置面板
-    ui_style.style_menu(menu)                    # 右键/托盘菜单（含子菜单）
-    # 无边框圆角窗口：窗口透明（WA_TranslucentBackground），
-    # 内部套一个 objectName="window_card" 的白色圆角卡片 + QGraphicsDropShadowEffect 阴影
-"""
+"""统一 UI 皮肤：聊天面板 / 设置面板 / 右键菜单 / 托盘菜单共用。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,7 +11,6 @@ _ICON_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "icons"
 _ARROW_URL = (_ICON_DIR / "arrow_down.png").as_posix()
 _CHECK_URL = (_ICON_DIR / "check.png").as_posix()
 
-# ---- 调色板 ----
 BG        = "#f5f5fb"   # 窗口底色（浅紫灰）
 CARD      = "#ffffff"   # 卡片
 CARD_GRAD = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ffffff, stop:1 #fbfaff)"
@@ -41,9 +25,7 @@ DANGER    = "#ef5f7e"   # 停止/退出
 FONT      = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 
 
-# ============================================================
 #  无边框窗口卡片容器（透明窗口内部的白色圆角卡片）
-# ============================================================
 WINDOW_CARD_QSS = f"""
 QFrame#window_card {{
     background: {CARD_GRAD};
@@ -95,9 +77,7 @@ QToolButton#win_btn_close:hover {{ background: #ef5f7e; color: #ffffff; }}
 QToolButton#win_btn_close:pressed {{ background: #d64d6b; }}
 """
 
-# ============================================================
 #  聊天窗
-# ============================================================
 CHAT_QSS = f"""
 QWidget {{
     font-family: {FONT};
@@ -236,9 +216,7 @@ CHAT_BUBBLE_CSS = (
     "margin:6px 0;}"
 )
 
-# ============================================================
 #  设置面板
-# ============================================================
 SETTINGS_QSS = f"""
 QWidget {{
     font-family: {FONT};
@@ -452,26 +430,27 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 """
 
 # 状态条配色（体力/饱食/口渴/心情/健康/好感）
+# 状态条渐变配色（左浅右深）：体力/饱食/口渴/心情/健康/好感
 STAT_BAR_COLORS = {
-    "strength":  "#f59e0b",
-    "food":      "#10b981",
-    "drink":     "#3b82f6",
-    "feeling":   "#f472b6",
-    "health":    "#ef4444",
-    "likability": "#a78bfa",
+    "strength":   ("#fbbf24", "#f59e0b"),
+    "food":       ("#34d399", "#10b981"),
+    "drink":      ("#60a5fa", "#3b82f6"),
+    "feeling":    ("#f9a8d4", "#ec4899"),
+    "health":     ("#f87171", "#ef4444"),
+    "likability": ("#c4b5fd", "#8b5cf6"),
 }
 
 
-def stat_bar_qss(color: str) -> str:
+def stat_bar_qss(light: str, dark: str) -> str:
     return (
-        f"QProgressBar {{ background: #ecebf3; border: none; border-radius: 8px; }}"
-        f" QProgressBar::chunk {{ background: {color}; border-radius: 8px; }}"
+        "QProgressBar { background:#ecebf3; border:1px solid #e4e3ee; border-radius:8px; }"
+        " QProgressBar::chunk { border-radius:8px; background:"
+        "qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+        f" stop:0 {light}, stop:1 {dark}); }}"
     )
 
 
-# ============================================================
 #  菜单（右键 / 托盘）
-# ============================================================
 MENU_QSS = f"""
 QMenu {{
     background: {CARD};

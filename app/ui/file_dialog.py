@@ -1,10 +1,4 @@
-"""文件拖入桌宠时的弹窗：吃掉（回收站）/ 转换（格式转换）。
-
-设计：
-    - 拖入任意文件 → 弹出文件操作弹窗
-    - 「吃掉」：文件移到回收站 + 播放吃饭动画
-    - 「转换」：弹出格式转换菜单，支持常见格式转换
-"""
+"""文件拖入桌宠时的弹窗：吃掉（回收站）/ 转换（格式转换）。"""
 from __future__ import annotations
 
 import logging
@@ -238,7 +232,6 @@ class FileOperationDialog(QDialog):
 
         layout.addLayout(btn_row)
 
-        # 取消
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setStyleSheet(
             "border: 1px solid #ddd; border-radius: 8px; padding: 8px; color: #666;")

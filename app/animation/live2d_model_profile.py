@@ -1,23 +1,4 @@
-"""Live2D 模型映射配置（profile）—— 每个模型一份 YAML，渲染器按它动态生成能力。
-
-背景：不同 Live2D 模型自带的能力差异很大（表情分类、发型开关、配件、手势、
-睡眠参数、水印形式、动作文件……），早期这些知识全部硬编码在 live2d_renderer.py
-里（只适配了冰糖）。本模块把"模型专属知识"抽成 YAML 模板：
-
-    <模型目录>/*.model.yaml
-
-渲染器启动时加载 profile，右键菜单 / 设置页 / 触发规则映射（聊天情绪→表情、
-工具动作→手势、睡觉、随机表情）全部由它驱动。换模型 = 换一份 YAML。
-
-YAML 里没写、而模型目录里能扫到的信息（如 ``Expressions/类别 名称.exp3.json``
-的文件名分类）会自动补全；完全没有 YAML 的模型也能以"文件名启发式"跑起来。
-
-表达式来源两种模式：
-    * ``auto``  ：扫描模型目录（Expressions/*.exp3.json 与根目录 *.exp3.json），
-                  文件名 ``类别 名称.exp3.json`` 的"类别"前缀决定分组；
-    * ``model3``：按 model3.json 的 FileReferences.Expressions 注册表解析
-                  （冰糖这种根目录平铺、无类别前缀的老模型）。
-"""
+"""Live2D 模型映射配置（profile）—— 每个模型一份 YAML，渲染器按它动态生成能力。"""
 from __future__ import annotations
 
 import json
@@ -141,7 +122,6 @@ class Live2DModelProfile:
     pose_angle_params: list[str] = field(default_factory=lambda: [
         "ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleY"])
 
-    # ---------- 查询辅助 ----------
     def category(self, cid: str) -> Optional[Category]:
         for c in self.categories:
             if c.id == cid:
@@ -203,8 +183,6 @@ class Live2DModelProfile:
         cat = self.emotion_category()
         return [it.name for it in cat.items] if cat else []
 
-
-# ---------- 解析 ----------
 
 def _load_yaml(model_dir: Path) -> dict:
     """查找并加载模型映射配置。
@@ -305,7 +283,6 @@ def _parse_categories(cfg: dict, scanned: list[tuple[str, str, dict[str, float],
     mode = (cfg.get("expressions_from") or "auto").lower()
     exclude_params = profile.watermark_exclude_params
 
-    # ---- 建分类骨架 ----
     cats: dict[str, Category] = {}
     order: list[str] = []
     for cc in cat_cfgs:
@@ -321,7 +298,6 @@ def _parse_categories(cfg: dict, scanned: list[tuple[str, str, dict[str, float],
         cats[cid] = cat
         order.append(cid)
 
-    # ---- 填条目 ----
     if mode == "model3":
         # model3.json 注册表（冰糖）：Name -> File
         registered: list[tuple[str, str]] = []

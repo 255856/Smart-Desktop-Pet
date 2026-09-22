@@ -1,15 +1,4 @@
-"""AgentLoopV2：在原 AgentLoop 之上提供「是否启用 ReAct Plan-Execute-Reflect」的开关。
-
-接口与 AgentLoop 兼容：run(messages, cancel_check) → AsyncIterator[event]。
-两种模式：
-    - mode="react"（默认）：Planner + Executor + Reflector，多步规划 + 反思
-    - mode="single"：原 AgentLoop 行为，单轮最多 N 步工具调用
-
-产出事件保持兼容：
-    ("text", chunk) / ("tool", name, args, result) / ("done", text)
-新增事件：
-    ("plan", plan_dict) / ("reflection", reflection_dict)
-"""
+"""AgentLoopV2：在原 AgentLoop 之上提供「是否启用 ReAct Plan-Execute-Reflect」的开关。"""
 from __future__ import annotations
 
 import asyncio

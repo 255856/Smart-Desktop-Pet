@@ -1,12 +1,4 @@
-"""Tool / ToolRegistry 核心类型。
-
-所有工具模块都基于这两个原语：
-    Tool(name, description, parameters, fn)
-    Registry: 注册 + to_openai()（请求体里的 tools 字段）+ execute()
-
-fn 签名：fn(**kwargs) -> str（返回给模型的工具结果，尽量是简洁中文/JSON）。
-所有 fn 都在聊天 worker 线程同步执行，必须快速返回，不要在里面开 GUI。
-"""
+"""Tool / ToolRegistry 核心类型。"""
 from __future__ import annotations
 
 import json
