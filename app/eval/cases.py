@@ -133,7 +133,7 @@ class Evaluator:
     def __init__(self, agent_factory: Callable[[MockLLMClient], object]):
         """
         Args:
-            agent_factory: 接受 mock_client，返回一个 AgentLoop/PlanExecutor-like 对象，
+            agent_factory: 接受 mock_client，返回一个 AgentLoop-like 对象，
                            该对象必须有 `run(messages)` 异步生成器。
         """
         self.factory = agent_factory

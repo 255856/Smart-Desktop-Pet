@@ -985,7 +985,7 @@ class ChatWindow(QWidget):
         else:
             self._append_system_msg("Live2D Demo 启动失败，查看 data/demo.log")
 
-    def _open_trace(self) -> None:
+    def _open_dashboard(self) -> None:
         """打开 FastAPI Agent Trace（开发者，8766）。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_dashboard"):
@@ -1180,7 +1180,7 @@ class ChatWindow(QWidget):
             self._open_demo()
             return
         if cmd == "/调试":
-            self._open_trace()
+            self._open_dashboard()
             return
 
         # /打开
@@ -1350,7 +1350,7 @@ class ChatWindow(QWidget):
                 #   1. force_tool_use=True（首轮）+ 服务端降级（user-prompt 强制）
                 #   2. 第一轮没调工具 → 注入强提示 + force_retry 重试
                 #   3. 连续 N 轮纯调工具 → 强制进入 final 阶段让模型总结
-                # 这样比 AgentLoopV2（Planner→Executor 静态规划）更智能：
+                # 这样更智能：
                 #   模型可以自己决定调几次工具、什么时候给 final answer。
                 self._worker = _AgentWorker(
                     AgentLoop(client, self.registry),

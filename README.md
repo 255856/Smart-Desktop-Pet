@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-382%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-341%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-93%2F94-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -108,7 +108,7 @@ python -m app.web.dashboard
 ### ✅ 验证安装（独立步骤，确认环境 OK）
 
 ```bash
-python -m pytest tests/ -q              # 382 个测试通过，6 个 skip（约 30s）
+python -m pytest tests/ -q              # 341 个测试通过，6 个 skip（约 30s）
 python scripts/verify_features.py --no-gui    # 93 项功能冒烟通过
 python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
 ```
@@ -146,7 +146,7 @@ Smart-Desktop-Pet/
 ├── docs/                    # 详细文档（10 篇 1000+ 行）
 ├── data/                    # 运行时数据（memory / reminders / traces.db 等，gitignore）
 ├── scripts/                 # run.py / verify_features.py（513 行验证脚本）
-├── tests/                   # 33 个测试文件，382 个用例（git tracked）
+├── tests/                   # 29 个测试文件，341 个用例（git tracked）
 ├── voice/                   # GPT-SoVITS 训练音频（gitignore，仅 .gitkeep）
 └── GPT-SoVITS-v2pro-*/      # 整合包（gitignore，仅 .gitkeep）
 ```
@@ -247,7 +247,7 @@ python -m app.web.dashboard
 ### ✅ Verify
 
 ```bash
-python -m pytest tests/ -q                 # 382 passed, 6 skipped
+python -m pytest tests/ -q                 # 341 passed, 6 skipped
 python scripts/verify_features.py --no-gui # 93/94 OK
 ```
 

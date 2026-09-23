@@ -105,6 +105,8 @@ class WerewolfWindow(QDialog):
     host_spoke = Signal(str)
     # 一局结束：result dict（winner / player_won / player_role / days）
     game_finished = Signal(dict)
+    # 对局会话状态：点开始/再来一局=True（保持游戏动作），关闭=False（回默认）
+    game_session_active = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None,
                  llm_cfg=None, enable_llm: bool = False,
@@ -341,6 +343,7 @@ class WerewolfWindow(QDialog):
         if self._started:
             return
         self._started = True
+        self.game_session_active.emit(True)
         self.director = WerewolfDirector(
             llm_cfg=self.llm_cfg, enable_llm=self.enable_llm,
             player_name=self.player_name, pet_name=self.pet_name, parent=self)
@@ -686,4 +689,5 @@ class WerewolfWindow(QDialog):
 
     def closeEvent(self, event):  # noqa: N802
         self._stop_director()
+        self.game_session_active.emit(False)
         super().closeEvent(event)

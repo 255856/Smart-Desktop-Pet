@@ -1,10 +1,8 @@
 # 桌面宠物运行时依赖
 # 安装：pip install -r requirements.txt
 #
-# GUI：PySide6（首选，LGPL）与 PyQt5 二选一即可。
-#   pip install PySide6
-#   或 pip install PyQt5
-# 程序会自动检测哪个可用。
+# GUI：PyQt5（程序当前仅验证过 PyQt5 路径）。
+#   pip install PyQt5 PyQtWebEngine
 
 # 图像处理（裁剪表情/立绘）
 Pillow>=10.0.0
@@ -32,3 +30,8 @@ langchain>=1.0.0
 langchain-openai>=0.3.0
 langgraph>=1.0.0
 langgraph-checkpoint-sqlite>=3.0.0
+
+# ---- 开发与测试 ----
+# pytest 覆盖率（CI 用，本地可装可不装）
+pytest>=8.0.0
+pytest-cov>=4.1.0

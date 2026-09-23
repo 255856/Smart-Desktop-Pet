@@ -54,7 +54,6 @@ class UIController(QObject):
         self._last_food_warn = 0.0
         from app.engine.game_actions import GameActionStore
         self.game_actions = GameActionStore(root / 'data' / 'game_actions.json')
-        self._last_game_action_ts = 0.0
 
         _sticker_on = True
         _pet = getattr(self, "pet", None)
@@ -116,6 +115,7 @@ class UIController(QObject):
         )
         self.settings_window.attach_state(self.state)
         self.pet.food_money_fn = lambda: self.state.money
+        self.pet.pet_name_fn = lambda: self.cfg.character.name
 
         fallback_rel = self.cfg.sprite.fallback
         fallback_image = root / fallback_rel
@@ -273,6 +273,7 @@ class UIController(QObject):
                 player_name="你", pet_name=pet_name)
             ww.host_spoke.connect(self._on_werewolf_host)
             ww.game_finished.connect(self._on_werewolf_finished)
+            ww.game_session_active.connect(self._on_game_session)
             ww.show()
             self._werewolf_window = ww
         else:
@@ -303,9 +304,10 @@ class UIController(QObject):
             gw = GomokuWindow()
             gw.game_finished.connect(self._on_gomoku_finished)
             gw.comment.connect(self._on_game_comment)
-            gw.action_event.connect(self._on_game_action_event)
+            gw.game_session_active.connect(self._on_game_session)
             gw.show()
             self._gomoku_window = gw
+            self._game_enter()
         else:
             gw.raise_()
             gw.activateWindow()
@@ -322,10 +324,10 @@ class UIController(QObject):
         if gw is not None:
             gw.set_wallet(self.state.money, self.state.game_coin_remaining())
             gw.show_reward(granted, amount > 0 and granted <= 0)
-        # 结算动作：所有小游戏共用「Live2D → 游戏动作」配置（结算不受冷却）
+        # 结算动作：胜利 / 失败（和棋、认输都归入失败反馈）
         _gomoku_ev = {"win": "game_win", "lose": "game_lose",
-                      "draw": "game_draw", "giveup": "game_lose"}
-        self._game_react(_gomoku_ev.get(result, "game_draw"))
+                      "draw": "game_lose", "giveup": "game_lose"}
+        self._game_react(_gomoku_ev.get(result, "game_lose"))
         self.state.on_interact(feeling_gain=2)
         log.info("五子棋结束 result=%s difficulty=%s 金币 +%.0f",
                  result, difficulty, granted)
@@ -334,24 +336,45 @@ class UIController(QObject):
         # 五子棋过程 / 结算解说：气泡 + TTS 朗读
         self._pet_speak(text)
 
-    def _on_game_action_event(self, event_id: str) -> None:
-        # 对局过程事件（形成攻势等）：受最小间隔限制，避免频繁打扰
-        import time as _time
-        cd = float(getattr(self.game_actions, 'cooldown_s', 0.0) or 0.0)
-        now = _time.time()
-        if self._last_game_action_ts and now - self._last_game_action_ts < cd:
-            return
-        self._last_game_action_ts = now
-        self._game_react(event_id)
+    def _on_game_session(self, active: bool) -> None:
+        # 进入一局→保持游戏动作；关闭退出→恢复默认待机
+        if active:
+            self._game_enter()
+        else:
+            self._game_exit()
 
-    def _game_react(self, event_id: str) -> None:
-        # 按游戏场景配置播放一个一次性动作（渲染器无关，sprite 有兜底）
+    def _game_enter(self) -> None:
+        """进入游戏：保持配置的默认动作（Live2D 表情/手势类动作会持续保持）。"""
+        self._game_hold_action("game_start")
+
+    def _game_exit(self) -> None:
+        """退出游戏：恢复默认待机动作。"""
+        anim = getattr(self.pet, 'animator', None)
+        try:
+            if anim is not None and hasattr(anim, 'set_idle'):
+                anim.set_idle()
+        except Exception as e:  # noqa: BLE001
+            log.warning("游戏退出恢复动作失败：%s", e)
+
+    def _game_hold_action(self, event_id: str) -> None:
+        # 先清掉之前保持的动作，再播放并保持新动作（Live2D item 动作持久）
         cfg = getattr(self, 'game_actions', None)
         if cfg is None or not getattr(cfg, 'enabled', True):
             return
         actions = cfg.for_event(event_id)
-        if actions:
-            self._pet_react(actions)
+        if not actions:
+            return
+        anim = getattr(self.pet, 'animator', None)
+        try:
+            if anim is not None and hasattr(anim, 'set_idle'):
+                anim.set_idle()
+        except Exception as e:  # noqa: BLE001
+            log.warning("游戏动作切换失败：%s", e)
+        self._pet_react(actions)
+
+    def _game_react(self, event_id: str) -> None:
+        # 胜负结算：播放并保持对应动作（配置关闭时不动作）
+        self._game_hold_action(event_id)
 
     def _pet_speak(self, text: str, duration_ms: int = 4000) -> None:
         # 非聊天场景统一发言：显示气泡，TTS 开启时朗读（口型自动同步）

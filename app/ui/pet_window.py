@@ -215,6 +215,8 @@ class PetWindow(QWidget):
         self._last_food_ts = 0.0
         # 投喂前金币余额查询回调（控制器注入，返回当前金币）；None 表示不预检
         self.food_money_fn = None
+        # 桌宠名字查询回调（控制器注入，右键菜单标题/聊天项实时读取）
+        self.pet_name_fn = None
         if foods_path:
             try:
                 from app.engine.works import ItemStore
@@ -1427,16 +1429,29 @@ class PetWindow(QWidget):
             pass
         return self.width(), 0
 
+    def _pet_name(self) -> str:
+        """当前桌宠名字（实时读取配置，改名后右键菜单立即同步）。"""
+        fn = getattr(self, "pet_name_fn", None)
+        try:
+            if callable(fn):
+                n = str(fn()).strip()
+                if n:
+                    return n
+        except Exception:  # noqa: BLE001
+            pass
+        return "桌宠"
+
     def _show_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
 
         rtype = self.renderer.get_renderer_type() if self.renderer else "?"
-        title = QAction(f"🐳 桌宠 ({rtype})", self)
+        pet_name = self._pet_name()
+        title = QAction(f"🐳 {pet_name} ({rtype})", self)
         title.setEnabled(False)
         menu.addAction(title)
         menu.addSeparator()
 
-        a1 = QAction("和鲸鱼娘聊聊", self)
+        a1 = QAction(f"和{pet_name}聊聊", self)
         a1.triggered.connect(self.chat_requested.emit)
         menu.addAction(a1)
         menu.addSeparator()
@@ -1554,16 +1569,6 @@ class PetWindow(QWidget):
         a_checkin.setEnabled(not _checked)
         a_checkin.triggered.connect(self.checkin_requested.emit)
         menu.addAction(a_checkin)
-        menu.addSeparator()
-
-        act_status = QAction("显示状态栏"if not self._status_visible else "隐藏状态栏", self)
-        act_status.triggered.connect(lambda _: self.toggle_status_bar(not self._status_visible))
-        menu.addAction(act_status)
-
-        quick_chat_visible = getattr(self, '_chat_input_visible', False)
-        act_quick_chat = QAction(f"{'快速输入'if not quick_chat_visible else '隐藏输入'}", self)
-        act_quick_chat.triggered.connect(self._toggle_quick_chat_menu)
-        menu.addAction(act_quick_chat)
 
         ui_style.style_menu(menu)   # 圆角卡片皮肤
         menu.exec(global_pos)

@@ -38,65 +38,7 @@ log = logging.getLogger(__name__)
 #  启动横幅
 
 
-class _Banner:
-    """彩色启动横幅：分阶段展示「正在做什么」「结果如何」。"""
-
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BLUE = "\033[94m"
-    GRAY = "\033[90m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-
-    def __init__(self, enabled: bool = True):
-        self.enabled = enabled and sys.stdout.isatty()
-        # Windows Terminal / 现代 PowerShell 支持 ANSI
-        if os.name == "nt":
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-            except Exception:
-                self.enabled = False
-
-    def _c(self, color: str, text: str) -> str:
-        return f"{color}{text}{self.RESET}" if self.enabled else text
-
-    def title(self, char_name: str) -> None:
-        bar = "═" * 60
-        print()
-        print(self._c(self.CYAN + self.BOLD, f"╔{bar}╗"))
-        print(self._c(self.CYAN + self.BOLD, f"║{'🐳 桌面宠物 · ' + char_name:^60}║"))
-        print(self._c(self.CYAN + self.BOLD, f"╚{bar}╝"))
-        print(self._c(self.GRAY, "  v3.0 · Multi-Agent Desktop Companion\n"))
-
-    def section(self, title: str) -> None:
-        print(self._c(self.BLUE + self.BOLD, f"▶ {title}"))
-
-    def ok(self, label: str, detail: str = "") -> None:
-        icon = self._c(self.GREEN, "✓")
-        print(f"  {icon} {label}" + (self._c(self.GRAY, f"  · {detail}") if detail else ""))
-
-    def info(self, label: str, detail: str = "") -> None:
-        icon = self._c(self.BLUE, "·")
-        print(f"  {icon} {label}" + (self._c(self.GRAY, f"  · {detail}") if detail else ""))
-
-    def warn(self, label: str, detail: str = "") -> None:
-        icon = self._c(self.YELLOW, "!")
-        print(f"  {icon} {label}" + (self._c(self.GRAY, f"  · {detail}") if detail else ""))
-
-    def fail(self, label: str, detail: str = "") -> None:
-        icon = self._c(self.RED, "✗")
-        print(f"  {icon} {label}" + (self._c(self.GRAY, f"  · {detail}") if detail else ""))
-
-    def done(self, msg: str = "") -> None:
-        if msg:
-            print(self._c(self.GREEN + self.BOLD, f"\n✓ {msg}\n"))
-        else:
-            print()
+from app.core.terminal import Banner as _Banner
 
 
 #  Ollama 自动检测
@@ -184,6 +126,48 @@ def _ensure_config(root: Path) -> None:
     log.warning("config.example.yaml 不存在，将使用默认配置")
 
 
+def _apply_settings_overrides(cfg, cfg_path: Path) -> None:
+    """设置面板保存的 renderer / 水印开关优先于 config.yaml。
+
+    规则：cfg.yaml 里**显式写出**时，cfg.yaml 优先（用户改文件就生效）；
+    cfg.yaml 没写或被注释，保持 settings.json 的值。
+    """
+    import yaml as _yaml
+    from app.core.settings_store import SettingsStore
+    try:
+        _yaml_raw = {}
+        if Path(cfg_path).is_file():
+            with Path(cfg_path).open("r", encoding="utf-8") as _f:
+                _yaml_raw = _yaml.safe_load(_f) or {}
+        _pet_yaml = (_yaml_raw.get("pet") or {}) if isinstance(_yaml_raw, dict) else {}
+
+        _yaml_has_renderer = (
+            "renderer" in _pet_yaml and _pet_yaml["renderer"] in ("sprite", "live2d")
+        )
+        _sstore = SettingsStore()
+        _saved_r = _sstore.get("renderer", None)
+        if _yaml_has_renderer:
+            if _saved_r and _saved_r != cfg.pet.renderer:
+                log.info("以 config.yaml 为准 (%s)，忽略 settings.json 中的 %s",
+                         cfg.pet.renderer, _saved_r)
+        else:
+            if _saved_r in ("sprite", "live2d"):
+                cfg.pet.renderer = _saved_r
+
+        _live2d_yaml = (_yaml_raw.get("pet") or {}).get("live2d") or {}
+        _yaml_has_hw = "hide_watermark" in _live2d_yaml
+        _saved_hw = _sstore.get("hide_watermark", None)
+        if _yaml_has_hw:
+            if _saved_hw is not None and _saved_hw != cfg.pet.live2d.hide_watermark:
+                log.info("Live2D 水印：以 config.yaml 为准 (%s)，忽略 settings.json",
+                         cfg.pet.live2d.hide_watermark)
+        else:
+            if _saved_hw is not None:
+                cfg.pet.live2d.hide_watermark = bool(_saved_hw)
+    except Exception:
+        log.debug("settings overrides 应用失败，沿用 cfg.yaml", exc_info=True)
+
+
 def _build_tts(cfg, root: Path) -> TTS:
     # 启动时应用设置面板保存的 TTS 配置（settings.json 优先于 config.yaml）
     try:
@@ -207,8 +191,8 @@ def _build_tts(cfg, root: Path) -> TTS:
         _te = _store.get("tts_enabled", None)
         if _te is not None:
             cfg.character.tts_enabled = bool(_te)
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.debug("ignored: %s", e)
     tts_cache = root / "assets" / "tts_cache"
     engine = getattr(cfg.character, "tts_engine", "edge")
     if engine == "gptsovits":
@@ -485,18 +469,8 @@ class App:
         else:
             fallback_image = root / fallback_rel
         # live2d 模型目录：支持相对路径（相对项目根解析）
-        # 设置面板保存的 renderer / 水印开关优先于 config.yaml（重启生效项）
-        try:
-            from app.core.settings_store import SettingsStore as _SS
-            _sstore = _SS()
-            _saved_r = _sstore.get("renderer", None)
-            if _saved_r in ("sprite", "live2d"):
-                cfg.pet.renderer = _saved_r
-            _saved_hw = _sstore.get("hide_watermark", None)
-            if _saved_hw is not None:
-                cfg.pet.live2d.hide_watermark = bool(_saved_hw)
-        except Exception:
-            pass
+        # cfg.yaml 显式值优先于 settings.json（重启生效项）
+        _apply_settings_overrides(cfg, cfg_path)
         _l2d_dir = None
         if getattr(cfg, "pet", None) and getattr(cfg.pet, "live2d", None):
             _l2d_dir = Path(getattr(cfg.pet.live2d, "model_dir", "") or "")
@@ -742,8 +716,8 @@ def _crash_handler(exc_type, exc, tb) -> None:
             f.write("\n" + "=" * 60 + "\n")
             f.write(msg)
         print(f"  [CRASH] 崩溃日志已写入: {crash_path}", file=_sys.stderr)
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.debug("ignored: %s", e)
 
 
 #  入口
@@ -753,12 +727,10 @@ _crash_log_fh = None
 
 
 def _enable_crash_diagnostics() -> None:
-    """让"不走 Python 钩子"的死亡也能留下现场：
+    """记录原生崩溃与子线程异常到 crash.log。
 
-    * faulthandler → crash.log：Qt/Chromium 原生层段错误（access violation）
-      会带全部线程栈落盘——这类崩溃此前静默退出、无任何日志；
-    * threading.excepthook → 子线程异常写 crash.log：静默启动
-      （start_silent.vbs）时 stderr 丢失，子线程崩溃同样死得无声无息。
+    软轮转：启动时若 crash.log > 5MB，重命名为 crash.log.old，新文件从 0 开始。
+    faulthandler 需要稳定 file 句柄，因此不能用 RotatingFileHandler。
     """
     global _crash_log_fh
     import faulthandler
@@ -766,6 +738,11 @@ def _enable_crash_diagnostics() -> None:
     import traceback
     try:
         crash_path = _resolve_root() / "crash.log"
+        if crash_path.is_file() and crash_path.stat().st_size > 5 * 1024 * 1024:
+            old = crash_path.with_suffix(".log.old")
+            if old.exists():
+                old.unlink()
+            crash_path.rename(old)
         _crash_log_fh = crash_path.open("a", encoding="utf-8")
         _crash_log_fh.write("\n" + "=" * 60 + "\n[session start]\n")
         _crash_log_fh.flush()
@@ -777,13 +754,13 @@ def _enable_crash_diagnostics() -> None:
             try:
                 _crash_log_fh.write(f"\n[THREAD {args.thread.name}] {msg}")
                 _crash_log_fh.flush()
-            except Exception:
-                pass
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                log.debug("ignored: %s", e)
             logging.getLogger(__name__).error(
                 "子线程异常 [%s]: %s", args.thread.name, msg)
         threading.excepthook = _thread_hook
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.debug("ignored: %s", e)
 
 
 def main() -> int:
@@ -817,8 +794,8 @@ def _main_inner() -> int:
         fh.setFormatter(fmt)
         fh.setLevel(_logging.INFO)
         _logging.getLogger().addHandler(fh)
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.debug("ignored: %s", e)
     # 降噪：第三方库的常规噪音不进控制台/文件（保留 WARNING+）
     for noisy in ("urllib3", "httpx", "httpcore", "asyncio", "websockets"):
         _logging.getLogger(noisy).setLevel(_logging.WARNING)
@@ -831,8 +808,8 @@ def _main_inner() -> int:
                 d = yaml.safe_load(f) or {}
             log_level = (d.get("app", {}) or {}).get("log_level", "INFO")
             _logging.getLogger().setLevel(getattr(_logging, log_level.upper(), _logging.INFO))
-        except Exception:
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.debug("ignored: %s", e)
 
     # 启动横幅
     banner = _Banner(enabled=not args.no_banner)
@@ -842,8 +819,8 @@ def _main_inner() -> int:
     try:
         cfg = load_config(cfg_path)
         char_name = cfg.character.name or char_name
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.debug("ignored: %s", e)
     banner.title(char_name)
 
     app = QApplication.instance() or QApplication(sys.argv)

@@ -167,41 +167,15 @@ class Config(BaseSettings):
         return bool(self.llm.api_key) and self.llm.api_key not in placeholders
 
 
-def _merge_yaml(target: Config, raw: dict[str, Any]) -> Config:
-    """把 YAML 字典按 key 路径合并到 pydantic model 上（保留 env 优先权）。"""
-    if not raw:
-        return target
-
-    # 逐个 section 深拷贝后用 model_validate 重建
-    sections = ("llm", "character", "window", "reminder", "app",
-                "sprite", "asr", "brain", "pet")
-    new_data = target.model_dump()
-    for sec in sections:
-        if sec in raw and isinstance(raw[sec], dict):
-            cur = new_data.get(sec, {})
-            cur.update(raw[sec])
-            new_data[sec] = cur
-
-    # brain 内嵌的 agent / langchain 也需要递归
-    if "brain" in raw and isinstance(raw["brain"], dict):
-        b = dict(new_data["brain"])
-        for sub in ("agent", "langchain"):
-            if sub in raw["brain"] and isinstance(raw["brain"][sub], dict):
-                cur = dict(b.get(sub, {}))
-                cur.update(raw["brain"][sub])
-                b[sub] = cur
-        new_data["brain"] = b
-
-    # pet 内嵌的 live2d 也要递归
-    if "pet" in raw and isinstance(raw["pet"], dict):
-        p = dict(new_data["pet"])
-        if "live2d" in raw["pet"] and isinstance(raw["pet"]["live2d"], dict):
-            cur = dict(p.get("live2d", {}))
-            cur.update(raw["pet"]["live2d"])
-            p["live2d"] = cur
-        new_data["pet"] = p
-
-    return Config.model_validate(new_data)
+def _deep_merge(base: dict, override: dict) -> dict:
+    """递归合并 override 到 base，返回新 dict（base / override 都不被改）。"""
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:
@@ -215,11 +189,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         with p.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
-    # 1) 先用 BaseSettings 构造（含 env 自动加载）
     cfg = Config(_env_file=os.environ.get("DSH_DOTENV_PATH", ".env") if p.is_file() else None)
-    # 2) 再用 YAML 覆盖（YAML 优先于 .env 但低于显式环境变量已生效部分）
-    cfg = _merge_yaml(cfg, raw)
-    return cfg
+    merged = _deep_merge(cfg.model_dump(), raw)
+    return Config.model_validate(merged)
 
 
 __all__ = [

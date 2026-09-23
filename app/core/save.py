@@ -102,8 +102,8 @@ class SaveStore(QObject):
                 f.flush()
                 try:
                     os.fsync(f.fileno())
-                except Exception:
-                    pass
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    log.debug("ignored: %s", e)
             os.replace(tmp, self.path)
             self._dirty = False
             self.saved.emit()

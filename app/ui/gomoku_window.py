@@ -279,9 +279,8 @@ class GomokuWindow(QDialog):
     game_finished = Signal(str, str)
     # 桌宠局势解说（控制器负责气泡 + TTS 朗读）
     comment = Signal(str)
-    # 对局过程动作事件（所有小游戏共用场景，控制器按配置播放动作）：
-    # game_pet_threat=桌宠形成攻势 / game_own_threat=玩家形成攻势
-    action_event = Signal(str)
+    # 对局会话状态：True=进入一局（保持游戏动作），False=关闭退出（回默认）
+    game_session_active = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None,
                  difficulty: str = "normal"):
@@ -436,6 +435,7 @@ class GomokuWindow(QDialog):
     # ------------------------------------------------------------ 游戏流程
     def _new_game(self) -> None:
         self._ai_timer.stop()
+        self.game_session_active.emit(True)
         self.game = GomokuGame()
         self.ai = GomokuAI(self.difficulty, WHITE)
         self.over = False
@@ -521,10 +521,6 @@ class GomokuWindow(QDialog):
             key = "idle"
         if key:
             self._say(self.rng.choice(COMMENTS[key]))
-            if key.startswith("ai_"):
-                self.action_event.emit("game_pet_threat")
-            elif key.startswith("player_"):
-                self.action_event.emit("game_own_threat")
 
     def _say(self, text: str) -> None:
         if text and text != self._last_comment:
@@ -583,4 +579,5 @@ class GomokuWindow(QDialog):
 
     def closeEvent(self, event):  # noqa: N802
         self._ai_timer.stop()
+        self.game_session_active.emit(False)
         super().closeEvent(event)

@@ -260,7 +260,7 @@ class LangChainAgent:
         messages: list[dict],
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> AsyncIterator[tuple]:
-        """与 AgentLoopV2 兼容的事件协议。
+        """事件协议。
 
         生命周期：
             1) await _ensure_agent() —— 构建 model + tools + checkpointer

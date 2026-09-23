@@ -754,8 +754,8 @@ class SettingsWindow(QWidget):
         vl.setContentsMargins(12, 22, 12, 12)
         vl.setSpacing(6)
         hint = QLabel(
-            "对局达到对应情形时做一个一次性动作；所有小游戏共用这一套场景配置，"
-            "同时兼容 Live2D 与帧动画。")
+            "开始游戏后保持默认动作，胜利/失败时播放对应动作，退出游戏恢复默认；"
+            "五子棋、狼人杀共用这一套，同时兼容 Live2D 与帧动画。")
         hint.setWordWrap(True)
         hint.setStyleSheet(
             "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
@@ -765,12 +765,6 @@ class SettingsWindow(QWidget):
         self.cb_game_action.toggled.connect(self._on_game_action_enabled)
         vl.addWidget(self.cb_game_action)
         row = QHBoxLayout()
-        row.addWidget(QLabel("动作最小间隔（秒）"))
-        self.spin_game_cd = QSpinBox()
-        self.spin_game_cd.setRange(0, 30)
-        self.spin_game_cd.setValue(int(self._game_store.cooldown_s))
-        self.spin_game_cd.valueChanged.connect(self._on_game_action_cooldown)
-        row.addWidget(self.spin_game_cd)
         row.addStretch(1)
         self.btn_game_reset = QPushButton("恢复默认")
         self.btn_game_reset.setObjectName("more_btn")
@@ -805,52 +799,30 @@ class SettingsWindow(QWidget):
         btn.setFixedWidth(54)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(
-            lambda _=False, b=btn, e=event_id: self._open_game_action_menu(b, e))
+            lambda _=False, e=event_id, t=title: self._open_game_action_dialog(e, t))
         h.addWidget(btn)
         return row
 
-    def _open_game_action_menu(self, anchor: QPushButton, event_id: str) -> None:
-        from app.engine.game_actions import GAME_ACTION_CHOICES
-        menu = QMenu(self)
-        cur = set(self._game_store.actions.get(event_id, []))
-        for key, label in GAME_ACTION_CHOICES:
-            act = QAction(label, menu)
-            act.setCheckable(True)
-            act.setChecked((key == "none" and not cur)
-                           or (key != "none" and key in cur))
-            act.triggered.connect(
-                lambda _=False, k=key, e=event_id:
-                self._on_game_action_toggle(e, k))
-            menu.addAction(act)
-        ui_style.style_menu(menu)
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+    def _open_game_action_dialog(self, event_id: str, title: str) -> None:
+        # 与「触发场景配置」同款无边框弹窗，编辑该情形保持的动作
+        from app.ui.live2d_scene_dialog import GameActionEditDialog
+        dlg = GameActionEditDialog(
+            self._game_store, event_id, title,
+            renderer=self._renderer, parent=self)
+        dlg.saved.connect(self._refresh_game_action_labels)
+        dlg.show()
+        self._scene_dlgs.append(dlg)
 
-    def _on_game_action_toggle(self, event_id: str, key: str) -> None:
-        from app.engine.game_actions import GAME_ACTION_CHOICES
-        cur = list(self._game_store.actions.get(event_id, []))
-        if key == "none":
-            new = []
-        elif key in cur:
-            new = [a for a in cur if a != key]
-        else:
-            new = cur + [key]
-        order = [k for k, _ in GAME_ACTION_CHOICES]
-        new = [a for a in order if a in new]
-        self._game_store.set_event(event_id, new)
-        lbl = self._game_action_labels.get(event_id)
-        if lbl is not None:
-            lbl.setText(self._game_store.summary(event_id))
+    def _refresh_game_action_labels(self) -> None:
+        for eid, lbl in self._game_action_labels.items():
+            lbl.setText(self._game_store.summary(eid))
 
     def _on_game_action_enabled(self, on: bool) -> None:
         self._game_store.set_enabled(on)
 
-    def _on_game_action_cooldown(self, val: int) -> None:
-        self._game_store.set_cooldown(float(val))
-
     def _on_game_action_reset(self) -> None:
         self._game_store.reset()
         self.cb_game_action.setChecked(self._game_store.enabled)
-        self.spin_game_cd.setValue(int(self._game_store.cooldown_s))
         for _eid, _lbl in self._game_action_labels.items():
             _lbl.setText(self._game_store.summary(_eid))
 

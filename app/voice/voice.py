@@ -227,8 +227,8 @@ class TTS:
                             cache_path.name)
                 try:
                     cache_path.unlink()
-                except Exception:
-                    pass
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    log.debug("ignored: %s", e)
                 asyncio.run(self._synthesize(text, cache_path))
                 if not cache_path.is_file():
                     return False
@@ -259,8 +259,8 @@ class TTS:
                             cache_path.name, self.cache_ext)
                 try:
                     cache_path.unlink()
-                except Exception:
-                    pass
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    log.debug("ignored: %s", e)
                 log.info("TTS: 重新合成 → %s", cache_name)
                 asyncio.run(self._synthesize(text, cache_path))
                 if not cache_path.is_file():

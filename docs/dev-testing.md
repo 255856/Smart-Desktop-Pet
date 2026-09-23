@@ -6,7 +6,7 @@
 
 ```powershell
 # 全部
-python -m pytest tests/ -q            # 325 个
+python -m pytest tests/ -q            # 341 个
 
 # 单独跑
 python -m pytest tests/test_planner.py -v

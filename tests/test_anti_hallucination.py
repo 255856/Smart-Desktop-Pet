@@ -13,8 +13,8 @@ Bug 背景（v3.1+）：
        服务端不识别 tool_choice 时降级为 user-prompt 强制。
     3. 【强制重试】AgentLoop.run() 检测「意图是工具 + 第一轮未调工具」→
        注入强烈 user prompt 走第二轮，给模型第二次机会。
-    4. 【Plan/Reflect 兜底】PlanExecutor 跑完后用
-       HeuristicReflector.detect_plan_hallucination() 跨步检查：
+    4. 【Plan/Reflect 兜底】Plan 跑完后用
+       detect_plan_hallucination() 跨步检查：
        「意图是工具动作 + 整个 plan 没成功执行任何 tool」= 幻觉 → 触发 replan。
 """
 from __future__ import annotations
@@ -412,57 +412,6 @@ class TestAgentLoopForceTool:
 #  Reflector：意图-行为一致性检查（detect_plan_hallucination）
 # ============================================================================
 
-class TestHeuristicReflectorHallucination:
-    """HeuristicReflector 检测「意图是工具但没调工具」幻觉。"""
-
-    def test_detects_hallucination_when_no_tool_called(self):
-        from app.brain._legacy.plan import Plan, Step
-        from app.brain._legacy.reflector import HeuristicReflector
-        # 用户意图：open_app
-        refl = HeuristicReflector(plan_goal="帮我打开 QQ")
-        # plan 里只有一个 final 步骤，没有任何 tool 步骤
-        plan = Plan(goal="帮我打开 QQ", steps=[
-            Step(id="1", kind="final",
-                 thought="直接回答", result="已打开 QQ 啦~ [happy]"),
-        ])
-        result = refl.detect_plan_hallucination(plan)
-        assert result is not None
-        assert result.verdict == "replan"
-        assert "open_app" in result.comment or "open" in result.comment.lower()
-
-    def test_no_hallucination_when_tool_was_called(self):
-        from app.brain._legacy.plan import Plan, Step
-        from app.brain._legacy.reflector import HeuristicReflector
-        refl = HeuristicReflector(plan_goal="帮我打开 QQ")
-        plan = Plan(goal="帮我打开 QQ", steps=[
-            Step(id="1", kind="tool", tool_name="open_app",
-                 arguments={"app_name": "QQ"},
-                 status="done", result="已启动 QQ"),
-            Step(id="2", kind="final", result="QQ 已经打开啦~"),
-        ])
-        result = refl.detect_plan_hallucination(plan)
-        assert result is None, "工具真调了就不该判幻觉"
-
-    def test_no_hallucination_for_chitchat_intent(self):
-        """意图不是工具动作（闲聊）→ 不应误判。"""
-        from app.brain._legacy.plan import Plan, Step
-        from app.brain._legacy.reflector import HeuristicReflector
-        refl = HeuristicReflector(plan_goal="陪我聊聊天")
-        plan = Plan(goal="陪我聊聊天", steps=[
-            Step(id="1", kind="final", result="好呀~ 主人想聊什么？"),
-        ])
-        result = refl.detect_plan_hallucination(plan)
-        assert result is None, "闲聊不应判幻觉"
-
-    def test_set_plan_goal_updates_intent(self):
-        from app.brain._legacy.reflector import HeuristicReflector
-        refl = HeuristicReflector(plan_goal="随便聊聊")
-        assert refl._cached_intent is None
-        refl.set_plan_goal("帮我打开 QQ")
-        assert refl._cached_intent == "open_app"
-
-
-# ============================================================================
 #  Mock 工具 / Spy Client
 # ============================================================================
 

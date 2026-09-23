@@ -433,3 +433,119 @@ class ActionEditDialog(_BaseAppearanceDialog):
             self.renderer.remove_custom_action(self.action["id"])
         self.saved.emit()
         self.close()
+
+
+class GameActionEditDialog(_BaseAppearanceDialog):
+    """编辑一个游戏场景（开始 / 胜利 / 失败）要保持的动作。
+
+    与固定场景弹窗共用同一套外观骨架，但内容是一组候选动作复选框
+    （渲染器无关：jump / spin / stretch / swim 为通用动作，其余视模型而定）。
+    运行时按固定顺序取第一个当前模型可用的动作；全部不选 = 该情形不做动作。
+    """
+
+    def __init__(self, store, event_id: str, title: str,
+                 renderer=None, parent: Optional[QWidget] = None):
+        super().__init__(renderer, parent)
+        self.store = store
+        self.event_id = event_id
+        self.resize(460, 430)
+        self._action_checks: dict[str, QCheckBox] = {}
+        short = title.split("（")[0].split("(")[0]
+        cl, body = self._build_shell(
+            f"配置游戏动作 · {short}",
+            "该情形下播放并保持所选动作；按固定顺序取第一个当前模型可用的动作，"
+            "全部不选则不做动作。")
+        self._build_action_form(body)
+        self._build_footer(cl)
+
+    # ------------------------------------------------------------ 表单
+    def _build_action_form(self, body: QVBoxLayout) -> None:
+        from app.engine.game_actions import GAME_ACTION_CHOICES
+        cur = set(self.store.actions.get(self.event_id, []))
+        box = QGroupBox("候选动作（按顺序取第一个可用）")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        acts = [(k, t) for k, t in GAME_ACTION_CHOICES if k != "none"]
+        for i, (key, label) in enumerate(acts):
+            cb = QCheckBox(label)
+            cb.setChecked(key in cur)
+            cb.toggled.connect(lambda on, k=key: self._on_action(k, on))
+            self._action_checks[key] = cb
+            grid.addWidget(cb, i // 3, i % 3)
+        body.addWidget(box)
+
+        self.cb_none = QCheckBox("不做动作（该情形下不切换动作）")
+        self.cb_none.setChecked(not cur)
+        self.cb_none.toggled.connect(self._on_none)
+        body.addWidget(self.cb_none)
+        body.addStretch(1)
+
+    def _build_footer(self, cl: QVBoxLayout) -> None:
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        btn_preview = QPushButton("试穿预览")
+        btn_preview.clicked.connect(self._on_preview)
+        bar.addWidget(btn_preview)
+        btn_reset = QPushButton("恢复默认")
+        btn_reset.clicked.connect(self._on_reset)
+        bar.addWidget(btn_reset)
+        bar.addStretch(1)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.close)
+        bar.addWidget(btn_cancel)
+        btn_save = QPushButton("保存")
+        btn_save.setObjectName("primary_btn")
+        btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save.clicked.connect(self._on_save)
+        bar.addWidget(btn_save)
+        bar.setContentsMargins(16, 8, 16, 12)
+        cl.addLayout(bar)
+
+    # ------------------------------------------------------------ 交互
+    def _on_none(self, on: bool) -> None:
+        if on:
+            for cb in self._action_checks.values():
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+
+    def _on_action(self, _key: str, on: bool) -> None:
+        if on:
+            self.cb_none.blockSignals(True)
+            self.cb_none.setChecked(False)
+            self.cb_none.blockSignals(False)
+
+    def _selected(self) -> list[str]:
+        from app.engine.game_actions import GAME_ACTION_CHOICES
+        return [k for k, _ in GAME_ACTION_CHOICES
+                if k != "none" and self._action_checks[k].isChecked()]
+
+    def _on_preview(self) -> None:
+        r = self.renderer
+        if r is None or not hasattr(r, "play_animation"):
+            return
+        for k in self._selected():
+            try:
+                r.play_animation(k)
+                break
+            except Exception:  # noqa: BLE001
+                log.exception("游戏动作试穿失败")
+
+    def _on_reset(self) -> None:
+        from app.engine.game_actions import DEFAULT_ACTIONS
+        default = DEFAULT_ACTIONS.get(self.event_id, [])
+        self.cb_none.blockSignals(True)
+        self.cb_none.setChecked(not default)
+        self.cb_none.blockSignals(False)
+        for k, cb in self._action_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(k in default)
+            cb.blockSignals(False)
+
+    def _on_save(self) -> None:
+        self.store.set_event(self.event_id, self._selected())
+        self.saved.emit()
+        self.close()
