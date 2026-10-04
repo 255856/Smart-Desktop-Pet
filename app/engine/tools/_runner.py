@@ -6,25 +6,28 @@ import platform
 import subprocess
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry
+from ._core import Tool, ToolRegistry, is_under_any
 
 log = logging.getLogger(__name__)
 
 IS_WINDOWS = platform.system() == "Windows"
 
-# 沙箱：仅允许在 _SANDBOX_ROOT 目录树下运行脚本
-# 默认 = 用户家目录 + ~/scripts/ 目录
+# 沙箱：仅允许在 _HOME 目录树下运行脚本（家目录本身 + ~/scripts/）
 _HOME = Path.home()
-_SANDBOX_ROOTS = [_HOME, _HOME / "scripts"]
+
+
+def _sandbox_roots() -> list[Path]:
+    """沙箱根目录（每次调用时读 _HOME，便于测试注入临时家目录）。"""
+    return [_HOME, _HOME / "scripts"]
 
 
 def _is_under_sandbox(p: Path) -> bool:
-    try:
-        p_resolved = p.resolve()
-    except (OSError, RuntimeError):
-        return False
-    p_str = str(p_resolved)
-    return any(p_str.startswith(str(s.resolve())) for s in _SANDBOX_ROOTS)
+    """脚本路径是否在沙箱内。
+
+    用 relative_to 做路径语义比较；早先的 str.startswith 会让
+    C:\\Users\\alice-backup\\x.py 通过 C:\\Users\\alice 的沙箱检查。
+    """
+    return is_under_any(p, _sandbox_roots())
 
 
 def _command_for(script: Path) -> list[str]:

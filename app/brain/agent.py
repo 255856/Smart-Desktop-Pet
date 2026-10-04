@@ -50,6 +50,10 @@ def _sanitize_reply(text: str) -> str:
     return sanitize_text(text or "")
 
 
+# 模型输出被清洗规则剥光、且无工具结果可兜底时说的话术。
+# 沉默会让主人以为桌宠坏了，宁可给一句自然的「再来一次」也不要空气泡。
+_EMPTY_REPLY_FALLBACK = "唔……刚刚没想好怎么说，主人再说一遍好不好？"
+
 # 工具结果工具名 → 中文（用于空总结时的角色化兜底）
 _TOOL_PRETTY = {
     "open_app": "打开应用",
@@ -85,6 +89,20 @@ _APP_NICE = {
 }
 
 
+# 「用户主动取消」的判定标记。
+# 不能用裸「取消」子串：正常结果里也会出现「已取消静音」「取消静音定时」
+# 这类词，早先会被误判成用户取消，于是桌宠回「好的主人，那就不弄啦~」，
+# 和实际发生的事完全对不上。
+_CANCEL_MARKERS = (
+    "用户取消", "取消了此操作", "取消了该操作", "已取消操作",
+    "被取消", "取消执行", "用户拒绝", "主人拒绝", "拒绝执行",
+)
+
+
+def _is_user_cancel(result: str) -> bool:
+    return any(k in (result or "") for k in _CANCEL_MARKERS)
+
+
 def _tool_ack_sentence(name: str, args: str, result: str) -> str:
     """工具执行成功但模型没给文字时，按工具类型生成一句角色化确认。
 
@@ -98,8 +116,8 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
         a = {}
     pretty = _TOOL_PRETTY.get(name, name)
 
-    # 用户取消
-    if "取消" in result:
+    # 用户主动取消
+    if _is_user_cancel(result):
         return "好的主人，那就不弄啦~"
 
     # 工具失败 / 无结果：诚实告知，绝不假装成功
@@ -156,7 +174,7 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
 def _tool_result_state(result: str) -> str:
     """根据工具结果文本判定 'cancel' / 'fail' / 'ok'。"""
     r = result or ""
-    if "取消" in r:
+    if _is_user_cancel(r):
         return "cancel"
     if any(k in r for k in ("失败", "错误", "无法", "未安装", "未找到",
                             "没有找到", "找不到", "没找到", "未能", "为空")):
@@ -353,6 +371,8 @@ class AgentLoop:
         tools_used = 0
         executed_tools: list[tuple[str, str, str]] = []
         verify_corrections = 0   # 「工具失败却报喜」的纠正次数（最多 1 次）
+        # 模型的原始输出被清洗规则全部剥掉（过度清洗）时置 True
+        over_sanitized = False
 
         # 【抗幻觉】第 1 层：意图识别 → 第一轮 force_tool_use
         intent = detect_action_intent(self._first_user_text(messages))
@@ -395,13 +415,24 @@ class AgentLoop:
                     # 否则多轮独白会拼成一条精神污染回复。确认本轮是最终回复后
                     # 在轮末一次性发出。
                     content_parts.append(data)
+                elif ev == "reasoning":
+                    # 推理模型思考内容 → UI 折叠的「思考过程」块
+                    if data:
+                        yield ("meta", {"kind": "thought", "text": str(data)})
                 elif ev == "finish":
                     if data.get("content") and not content_parts:
                         # 模型没走流式正文（罕见），兜底拿 finish 里的完整 content
                         content_parts.append(data["content"])
                     tool_calls = data.get("tool_calls") or []
 
-            final_text = _sanitize_reply("".join(content_parts))
+            raw_text = "".join(content_parts)
+            final_text = _sanitize_reply(raw_text)
+            # 清洗规则把模型输出全剥掉了（过度清洗）。记录下来，循环结束后
+            # 不能让主人面对空气泡——这是最伤的 UX 失败模式。
+            if raw_text.strip() and not final_text.strip():
+                over_sanitized = True
+                log.info("AgentLoop: 模型输出被清洗规则全部剥离（过度清洗），"
+                         "raw=%r", raw_text[:120])
 
             # + 本轮仍只回文字 → 注入强提示重试。
             # 关键：tools_used == 0 才算「该调没调」。一旦已经调过工具，模型本轮不再
@@ -509,5 +540,13 @@ class AgentLoop:
             final_text = _tool_ack_sentence(last_name, last_args, last_result)
             if final_text:
                 yield "text", final_text
+
+        # 兜底二：模型确实吐了字，但全是 prompt 复读 / 工具独白，被清洗规则剥光，
+        # 且本轮没执行任何工具（拿不到 _tool_ack_sentence 兜底）。
+        # 这种情况下沉默 = 主人对着空气泡，以为桌宠坏了。给一句自然的重试话术。
+        if not final_text.strip() and over_sanitized:
+            final_text = _EMPTY_REPLY_FALLBACK
+            log.warning("AgentLoop: 输出被过度清洗且无工具兜底，使用空回复话术")
+            yield "text", final_text
 
         yield "done", final_text

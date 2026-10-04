@@ -160,6 +160,8 @@ class Message:
     emotion: Optional[Emotion] = None
     ts: float = field(default_factory=time.time)
     tools: list[tuple[str, str, str]] = field(default_factory=list)  # (工具名, args_json, 结果)
+    thoughts: list[str] = field(default_factory=list)  # 思考文本（按时间累积）
+    execs: list[dict] = field(default_factory=list)  # 命令执行：{cmd, output, exit_code}
 
 
 class _AgentWorker(QThread):
@@ -220,9 +222,12 @@ class _AgentWorker(QThread):
                     elif kind == "meta":
                         # payload = (dict)
                         self.meta.emit("meta", payload[0] if payload else {})
-                    elif kind in ("plan", "reflection"):
-                        # 透传到 Trace
-                        self.meta.emit(kind, payload[0] if payload else {})
+                    elif kind in ("plan", "reflection", "reasoning"):
+                        # 透传到 Trace + UI 折叠「思考过程」块
+                        payload_dict = payload[0] if payload else {}
+                        if not isinstance(payload_dict, dict):
+                            payload_dict = {"text": str(payload_dict)}
+                        self.meta.emit("meta", {"kind": "thought", "text": payload_dict.get("text", "")})
                     elif kind == "done":
                         # 防御：如果之前没收到任何 text，把 done payload 当兜底
                         if payload and payload[0]:
@@ -1575,9 +1580,12 @@ class ChatWindow(QWidget):
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""
         if self._current_bot_msg is None:
             return
-        summary = result.replace("\n", " ")[:80]
-        # 保留完整 args / result，渲染时解析中文名、动作目标与成败状态
-        self._current_bot_msg.tools.append((name, args or "", result or ""))
+        # run_script：把 [OK] path\n--- stdout ---\n…\n--- stderr ---\n… 的结构化结果
+        # 拆成命令块（meta）和简化结果，渲染端识别后展示终端风格块
+        if name == "run_script" and "--- stdout ---" in result:
+            self._parse_run_script_into_blocks(name, args, result)
+        else:
+            self._current_bot_msg.tools.append((name, args or "", result or ""))
         # Trace
         if self.trace is not None and self._trace_run_id:
             try:
@@ -1585,19 +1593,57 @@ class ChatWindow(QWidget):
                 self.trace.record(self._trace_run_id, "tool", {
                     "name": name,
                     "args": _json.loads(args) if isinstance(args, str) else args,
-                    "result": summary,
+                    "result": result.replace("\n", " ")[:80],
                 })
             except Exception:  # noqa: BLE001
                 pass
         self._refresh_streaming_message()
 
+    def _parse_run_script_into_blocks(self, name: str, args: str, result: str) -> None:
+        """run_script 结果拆成：命令块（execs）+ 简化结果（tools）。"""
+        import re as _re
+        cmd = ""
+        output = result
+        ec = 0
+        m = _re.search(r"\[([^\]]+)\]\s*(.+?)(?=\n---\s*stdout|$)", result, _re.DOTALL)
+        if m:
+            status = m.group(1).strip()
+            try:
+                if status.startswith("exit="):
+                    ec = int(status.split("=")[1])
+                else:
+                    ec = 0
+            except ValueError:
+                ec = 0
+        # 命令：args 里 path + args
+        try:
+            import json as _json
+            a = _json.loads(args) if isinstance(args, str) else (args or {})
+        except Exception:
+            a = {}
+        if isinstance(a, dict):
+            cmd = a.get("script_path", "") or ""
+            if a.get("args"):
+                cmd = f"{cmd} {a['args']}".strip()
+        # stdout：取 "--- stdout ---\n" 之后到 "--- stderr ---\n" 之前
+        sm = _re.search(r"---\s*stdout\s*---\n(.+?)(?=\n---\s*stderr|$)", result, _re.DOTALL)
+        if sm:
+            output = sm.group(1).rstrip()
+        # 存到 execs 块（命令块 UI 渲染）
+        self._current_bot_msg.execs.append({
+            "cmd": cmd or "(run_script)",
+            "output": output or "(无输出)",
+            "exit_code": ec,
+        })
+        # 同时保留简化结果（不进 TTS）
+        simple = f"[{'OK' if ec == 0 else f'exit={ec}'}] "
+        self._current_bot_msg.tools.append((name, args or "", simple))
+
     def _on_meta(self, kind: str, payload: dict) -> None:
-        """内部事件（plan / reflection / meta）。当前主要做两件事：
-            1. Trace 记录（Dashboard 可回放决策过程）
-            2. force_retry 时给主人一个轻提示（不打断流式输出）
+        """内部事件（plan / reflection / meta / thought / exec）。
 
         Args:
-            kind: "plan" | "reflection" | "meta"
+            kind: "plan" | "reflection" | "meta" | "thought" | "exec"
             payload: 事件载荷
         """
         if self.trace is not None and self._trace_run_id:
@@ -1605,11 +1651,30 @@ class ChatWindow(QWidget):
                 self.trace.record(self._trace_run_id, kind, payload or {})
             except Exception:  # noqa: BLE001
                 pass
+
+        # 思考块累积（推理模型的 planning / 反思）
+        if self._current_bot_msg is not None and kind in ("plan", "reflection", "thought"):
+            text = (payload or {}).get("text", "")
+            if text and text not in self._current_bot_msg.thoughts:
+                self._current_bot_msg.thoughts.append(text)
+                self._refresh_streaming_message()
+                return
+
+        # 命令块累积（run_script 之类的外部执行结果）
+        if self._current_bot_msg is not None and kind == "exec":
+            entry = {
+                "cmd": (payload or {}).get("cmd", ""),
+                "output": (payload or {}).get("output", ""),
+                "exit_code": int((payload or {}).get("exit_code", 0)),
+            }
+            self._current_bot_msg.execs.append(entry)
+            self._refresh_streaming_message()
+            return
+
         # force_retry 给一个小提示（避免主人误以为模型已经做完）
         if kind == "meta" and isinstance(payload, dict):
             ev = payload.get("event")
             if ev == "force_retry":
-                # 在 chat 末尾追加一条灰色提示（小气泡，不抢戏）
                 self._append_system_msg(
                     "⚙️ 模型刚才回了文字但没调用工具——自动重试一次，主人稍等~"
                 )
@@ -1903,6 +1968,103 @@ class ChatWindow(QWidget):
         )
         return '<div class="tools">' + head + "".join(rows) + '</div>'
 
+    def _thoughts_html(self, thoughts: list) -> str:
+        """思考块：折叠展示（默认收起，主人点开看推理过程）。"""
+        if not thoughts:
+            return ""
+        joined = "\n".join(f"> {t.strip()}" for t in thoughts if t.strip())
+        # 折叠（<details>）：最多 6 行可折叠，避免铺满屏幕
+        return (
+            '<details style="margin:2px 0;background:#fafafa;border:1px solid #e5e7eb;'
+            'border-radius:4px;padding:2px 8px;font-size:9pt;color:#6b7280;">'
+            '<summary style="cursor:pointer;font-weight:500;color:#7c3aed;">'
+            f'思考过程（{len(thoughts)} 步）</summary>'
+            '<pre style="margin:4px 0 2px 0;white-space:pre-wrap;font-family:'
+            'Consolas, Menlo, monospace;font-size:9pt;color:#374151;">'
+            + _html_escape(joined) + '</pre>'
+            '</details>'
+        )
+
+    def _execs_html(self, execs: list) -> str:
+        """命令执行块：终端风格（深色背景 + monospace 字体 + exit_code 标记）。"""
+        if not execs:
+            return ""
+        rows = []
+        for i, e in enumerate(execs):
+            cmd = _html_escape(e.get("cmd", ""))
+            output = _html_escape(e.get("output", ""))
+            ec = int(e.get("exit_code", 0))
+            ec_color = "#16a34a" if ec == 0 else "#dc2626"
+            ec_icon = "✓" if ec == 0 else "✕"
+            rows.append(
+                '<div style="margin:3px 0;background:#0f172a;border-radius:6px;'
+                'padding:6px 10px;font-family:Consolas,Menlo,monospace;font-size:9pt;'
+                'color:#e2e8f0;">'
+                f'<div style="color:#94a3b8;">$ {cmd}</div>'
+                f'<pre style="margin:3px 0 0 0;white-space:pre-wrap;color:#cbd5e1;'
+                f'overflow-x:auto;">{output}</pre>'
+                f'<div style="margin-top:3px;font-size:8pt;color:{ec_color};">'
+                f'{ec_icon} exit_code={ec}</div>'
+                '</div>'
+            )
+        head = (
+            '<div style="color:#0891b2;font-size:8pt;font-weight:bold;'
+            'margin:3px 0 2px;letter-spacing:0.5px;">执行命令 · '
+            + str(len(execs)) + '</div>'
+        )
+        return '<div class="execs">' + head + "".join(rows) + '</div>'
+
+    def _file_edits_html(self, tools: list) -> str:
+        """文件编辑块：从工具调用结果里抽 path 变更。
+        只展示 write_file / edit_file / shell 类工具触发的"文件改动"。
+        """
+        if not tools:
+            return ""
+        edits = []
+        for t in tools:
+            # 容错：tests/legacy 可能传 (name, args) 二元组；生产是三元
+            if len(t) == 3:
+                name, args, _result = t
+            else:
+                name, args = t[:2]
+            try:
+                import json as _json
+                a = _json.loads(args) if isinstance(args, str) else (args or {})
+            except Exception:
+                continue
+            if not isinstance(a, dict):
+                continue
+            path = a.get("path") or a.get("file_path") or a.get("filepath") or a.get("file")
+            content = a.get("content")
+            if not path or not isinstance(path, str):
+                continue
+            if name not in ("write_file", "edit_file", "replace_in_file"):
+                continue
+            edits.append({
+                "path": path,
+                "size": len(content) if isinstance(content, str) else 0,
+                "preview": (content[:120] + "…") if isinstance(content, str) and len(content) > 120
+                           else (content if isinstance(content, str) else ""),
+            })
+        if not edits:
+            return ""
+        rows = []
+        for e in edits:
+            rows.append(
+                '<div style="margin:2px 0;background:#fef3c7;border:1px solid #fbbf24;'
+                'border-radius:4px;padding:4px 8px;font-size:9pt;color:#78350f;">'
+                '<span style="color:#d97706;">📝</span> '
+                f'<b>{_html_escape(e["path"])}</b>'
+                f'&nbsp;<span style="color:#92400e;">· {e["size"]} 字节</span>'
+                '</div>'
+            )
+        head = (
+            '<div style="color:#d97706;font-size:8pt;font-weight:bold;'
+            'margin:3px 0 2px;letter-spacing:0.5px;">文件编辑 · '
+            + str(len(edits)) + '</div>'
+        )
+        return '<div class="file_edits">' + head + "".join(rows) + '</div>'
+
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
         """按已完成的 Message 渲染成 HTML 字符串（气泡式聊天）。
 
@@ -1949,10 +2111,16 @@ class ChatWindow(QWidget):
                 f'margin-left:6px;">· {meta_safe}</span>'
             )
 
-        # 工具调用（bot 消息专用）：Claude Code 风格步骤卡片，置于最终结果上方
+        # AI Coding 风格多块渲染：思考（折叠）→ 命令（终端）→ 文件编辑（黄色）→ 工具步骤 → 正文
+        thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
+        execs_html = self._execs_html(getattr(msg, "execs", []) or [])
+        file_edits_html = self._file_edits_html(msg.tools)
         tools_html = self._tool_steps_html(msg.tools) if msg.tools else ""
-        if tools_html:
-            safe = tools_html + safe
+        prepend_html = (
+            (thoughts_html + execs_html + file_edits_html + tools_html) if not is_user else ""
+        )
+        if prepend_html:
+            safe = prepend_html + safe
 
         time_str = _format_time_short(msg.ts)
 

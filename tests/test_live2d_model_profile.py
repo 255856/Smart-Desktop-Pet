@@ -2,17 +2,16 @@
 
 不依赖 QWebEngine 渲染；真实模型目录存在时额外做真实解析校验。
 """
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import sys
-sys.path.insert(0, r'E:\study\desktop-pet')
-sys.path.insert(0, r'E:\study\desktop-pet\.local-packages')
-
 import json
+import os
+import sys
 from pathlib import Path
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 项目根目录（按文件位置推导，不再硬编码本地绝对路径）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest  # noqa: E402
 
 from app.animation.live2d_model_profile import (
     Category,
@@ -20,13 +19,30 @@ from app.animation.live2d_model_profile import (
     load_model_profile,
 )
 
-_BINGTANG_DIR = Path(r"E:\study\live2d\bingtang\bingtang")
-_CHAOPIN_DIR = Path(r"E:\study\live2d\超频猫猫完整版\超频猫猫")
+# 真实 Live2D 模型是版权资源、不入库（见 .gitignore / docs/资源下载说明.md），
+# 所以这里不写死任何人的本地路径。指向本地模型即可额外跑真实解析校验：
+#   set PET_TEST_BINGTANG_DIR=E:\path\to\bingtang
+#   set PET_TEST_CHAOPIN_DIR=E:\path\to\chaopin
+# 不设置则这些用例自动 skip（CI 上恒 skip）。
+def _env_dir(name: str) -> Path:
+    """读环境变量目录；未设置时返回必定不存在的路径。
+
+    不能写 Path(os.environ.get(X, ""))：空串会被规范化成 Path(".")，
+    而 Path(".").is_dir() 是 True，守卫会失效，用例会拿项目根当模型目录去解析。
+    """
+    raw = (os.environ.get(name) or "").strip()
+    return Path(raw) if raw else Path("<unset>") / name
+
+
+_BINGTANG_DIR = _env_dir("PET_TEST_BINGTANG_DIR")
+_CHAOPIN_DIR = _env_dir("PET_TEST_CHAOPIN_DIR")
 
 requires_bingtang = pytest.mark.skipif(
-    not _BINGTANG_DIR.is_dir(), reason=f"冰糖模型目录不存在: {_BINGTANG_DIR}")
+    not _BINGTANG_DIR.is_dir(),
+    reason="未设置 PET_TEST_BINGTANG_DIR（冰糖模型为版权资源，不入库）")
 requires_chaopin = pytest.mark.skipif(
-    not _CHAOPIN_DIR.is_dir(), reason=f"超频猫猫模型目录不存在: {_CHAOPIN_DIR}")
+    not _CHAOPIN_DIR.is_dir(),
+    reason="未设置 PET_TEST_CHAOPIN_DIR（超频猫猫模型为版权资源，不入库）")
 
 
 # ---------- 合成模型目录（不依赖真实模型） ----------
@@ -161,8 +177,7 @@ def test_chaopin_settings_payload_injection():
     assert len(exprs) == 52
     motions = fr.get("Motions", {})
     assert "Idle" in motions and "Sleep" in motions
-    assert (Path(r"E:\study\live2d\超频猫猫完整版\超频猫猫")
-            / motions["Idle"][0]["File"]).is_file()
+    assert (_CHAOPIN_DIR / motions["Idle"][0]["File"]).is_file()
     # 原文件不被修改
     raw = json.loads((_CHAOPIN_DIR / "超频猫猫.model3.json").read_text(encoding="utf-8"))
     assert "Expressions" not in raw["FileReferences"]

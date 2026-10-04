@@ -8,6 +8,15 @@ from ._core import Tool, ToolRegistry
 
 log = logging.getLogger(__name__)
 
+# 动画 / 情绪白名单：与下面各工具 description 里列的一致。
+# 之前不校验直接 fire hook 并回报「已触发」，导致传入不存在的名字时
+# 桌宠会理直气壮地说「好的，已经帮你跳舞啦~」——实际什么都没发生，
+# 而且 ToolRegistry 返回值不含失败词，agent 的矛盾检测也拦不住。
+ANIMATIONS = ("happy", "sad", "angry", "shy", "think", "pride", "fear",
+              "doubt", "surprise", "stretch", "jump", "spin", "swim", "file")
+EMOTIONS = ("happy", "sad", "angry", "shy", "think", "pride", "fear",
+            "doubt", "surprise")
+
 
 def _fire_hook(hooks: dict, key: str, arg: str) -> None:
     cb = hooks.get(key)
@@ -43,18 +52,32 @@ def register(
 
     def play_animation(anim_name: str) -> str:
         """触发表情动画。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise, stretch, jump, spin, swim, file"""
-        name = anim_name.strip().lower()
+        name = (anim_name or "").strip().lower()
+        if not name:
+            return f"错误：动画名不能为空。可选：{', '.join(ANIMATIONS)}"
+        if name not in ANIMATIONS:
+            # 如实报错：不要假装触发成功，否则 agent 会顺着报喜
+            return (f"错误：没有叫「{name}」的动画，未触发任何动作。"
+                    f"可选：{', '.join(ANIMATIONS)}")
         _fire_hook(hooks, "animation", name)
         return f"已触发「{name}」动画"
 
     def change_pet_emotion(emotion: str) -> str:
         """切换桌宠情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise"""
-        name = emotion.strip().lower()
+        name = (emotion or "").strip().lower()
+        if not name:
+            return f"错误：情绪名不能为空。可选：{', '.join(EMOTIONS)}"
+        if name not in EMOTIONS:
+            return (f"错误：没有「{name}」这种情绪，未切换。"
+                    f"可选：{', '.join(EMOTIONS)}")
         _fire_hook(hooks, "animation", f"emotion_{name}")
         return f"已切换到「{name}」情绪"
 
     def say_to_user(text: str) -> str:
-        _fire_hook(hooks, "bubble", text.strip())
+        content = (text or "").strip()
+        if not content:
+            return "错误：要说的内容不能为空"
+        _fire_hook(hooks, "bubble", content)
         return "已对主人说。"
 
     reg.register(Tool(

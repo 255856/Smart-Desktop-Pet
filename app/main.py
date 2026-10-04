@@ -408,6 +408,36 @@ def open_in_browser(url: str) -> None:
 #  App 主类
 
 
+def _config_error_summary(e: BaseException) -> str:
+    """把配置加载异常压成一句人话（尽量带行列号）。
+
+    yaml 的 str(e) 首行往往是 "while parsing a flow sequence" 这种
+    内部术语，真正有用的是 problem + problem_mark（行/列）。
+    pydantic 的 ValidationError 则要取第一条 error 的字段名。
+    """
+    # yaml 语法错误
+    problem = getattr(e, "problem", None)
+    if problem:
+        mark = getattr(e, "problem_mark", None)
+        where = f"（第 {mark.line + 1} 行，第 {mark.column + 1} 列）" if mark else ""
+        ctx = getattr(e, "context", None)
+        ctx = f"，{ctx}" if ctx else ""
+        return f"{problem}{ctx}{where}"
+    # pydantic 字段校验错误
+    errors = getattr(e, "errors", None)
+    if callable(errors):
+        try:
+            errs = errors()
+            if errs:
+                first = errs[0]
+                loc = ".".join(str(x) for x in (first.get("loc") or ())) or "配置"
+                return f"字段「{loc}」不合法：{first.get('msg', '')}"
+        except Exception:  # noqa: BLE001
+            pass
+    first_line = str(e).strip().splitlines()
+    return first_line[0] if first_line else type(e).__name__
+
+
 class App:
     """聚合所有资源 + 组装各控制器。"""
 
@@ -422,7 +452,22 @@ class App:
         cfg_path = Path(args.config)
         if not cfg_path.is_absolute():
             cfg_path = root / cfg_path
-        cfg = load_config(cfg_path)
+        try:
+            cfg = load_config(cfg_path)
+        except Exception as e:  # noqa: BLE001
+            # 配置是上手第一步要手改的文件（填 api_key），一个多余空格 /
+            # 制表符就会让整个桌宠起不来。不能只抛裸 traceback 给用户。
+            hint = (f"配置文件：{cfg_path}\n"
+                    f"原因：{_config_error_summary(e)}\n\n"
+                    f"怎么修：\n"
+                    f"  1) 对照 {root / 'config.example.yaml'} 检查格式"
+                    f"（YAML 不能用 Tab 缩进，冒号后要有空格）\n"
+                    f"  2) 想重新来过：删掉该文件后重启，会自动生成默认配置")
+            log.error("配置加载失败 %s: %s", cfg_path, e)
+            # Banner 在非 tty（重定向 / CI / start_silent.vbs）下会自动静默，
+            # 但配置错误必须无条件让用户看到，所以直接 print。
+            print(f"\n✗ 配置文件有问题，桌宠无法启动\n\n{hint}\n", file=sys.stderr)
+            raise SystemExit(2) from e
         if args.character:
             names = list_characters(root)
             if args.character in names:
@@ -834,7 +879,10 @@ def _main_inner() -> int:
                 d = yaml.safe_load(f) or {}
             log_level = (d.get("app", {}) or {}).get("log_level", "INFO")
             _logging.getLogger().setLevel(getattr(_logging, log_level.upper(), _logging.INFO))
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except Exception as e:  # noqa: BLE001
+            # 只是想提前读个日志级别，属于尽力而为：yaml 语法错误
+            # （ParserError 不在 ValueError 分支里）不能让程序在这里崩掉。
+            # 真正的配置校验在 AppContext，那里会给出可操作的提示。
             log.debug("ignored: %s", e)
 
     # 启动横幅
@@ -845,7 +893,10 @@ def _main_inner() -> int:
     try:
         cfg = load_config(cfg_path)
         char_name = cfg.character.name or char_name
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except Exception as e:  # noqa: BLE001
+        # 这里只是为了横幅拿个角色名，属于「尽力而为」：任何配置问题都不该在这里
+        # 崩掉（yaml.ParserError / pydantic.ValidationError 都不在原捕获列表里）。
+        # 真正的加载在 AppContext 里做，那里会给出可操作的错误提示。
         log.debug("ignored: %s", e)
     banner.title(char_name)
 

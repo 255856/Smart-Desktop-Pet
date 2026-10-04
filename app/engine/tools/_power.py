@@ -133,16 +133,26 @@ def register(reg: ToolRegistry) -> None:
         if not IS_WINDOWS:
             return "非 Windows 平台未实现"
         action = "enable" if enable else "disable"
+        verb = "Enable-NetAdapter" if enable else "Disable-NetAdapter"
+        # 早先这里无视 enable 参数，脚本里写死 Disable-NetAdapter，
+        # 于是「打开WiFi」实际把 Wi-Fi 关了，而返回文案还报 enable —— 行为与承诺相反。
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Get-NetAdapter | Where-Object {{$_.Name -like '*Wi-Fi*'}} | "
-                 f"ForEach-Object {{ Disable-NetAdapter -Name $_.Name -Confirm:$false }}"],
-                capture_output=True, timeout=10, check=False,
+                 f"ForEach-Object {{ {verb} -Name $_.Name -Confirm:$false }}"],
+                capture_output=True, timeout=10, check=False, text=True,
             )
-            return f"已尝试 {action} Wi-Fi（可能需要管理员）"
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip().splitlines()
+                log.warning("set_wifi %s 失败: %s", action, proc.stderr)
+                return (f"错误：{action} Wi-Fi 失败（可能需要管理员权限运行）"
+                        + (f"：{err[-1][:80]}" if err else ""))
+            return f"已尝试 {action} Wi-Fi（可能需要管理员权限）"
         except Exception as e:  # noqa: BLE001
-            return f"错误：{e}"
+            # 不把 str(e) 回给模型：subprocess 异常里含完整命令行
+            log.exception("set_wifi 异常")
+            return f"错误：{action} Wi-Fi 失败（{type(e).__name__}），可能需要管理员权限"
 
     def set_bluetooth(enable: bool = True) -> str:
         """开 / 关蓝牙（危险工具，需要管理员）。"""
@@ -152,18 +162,24 @@ def register(reg: ToolRegistry) -> None:
         try:
             ps = (
                 f"$dev = Get-PnpDevice | Where-Object {{$_.Class -eq 'Bluetooth'}}; "
-                f"if ($dev) {{ $dev | Disable-PnpDevice -Confirm:$false "
-                f"if (-not ${'true' if enable else 'false'}) {{ "
-                f"$dev | Enable-PnpDevice -Confirm:$false }} }} else "
-                f"{{ '无蓝牙设备' }}"
+                f"if ($dev) {{ $dev | "
+                f"{'Enable' if enable else 'Disable'}-PnpDevice -Confirm:$false "
+                f"}} else {{ '无蓝牙设备' }}"
             )
-            subprocess.run(
+            proc = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, timeout=10, check=False,
+                capture_output=True, timeout=10, check=False, text=True,
             )
-            return f"已尝试 {action} 蓝牙"
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip().splitlines()
+                log.warning("set_bluetooth 失败: %s", proc.stderr)
+                return (f"错误：{action}蓝牙失败（可能需要管理员权限运行）"
+                        + (f"：{err[-1][:80]}" if err else ""))
+            return f"已尝试 {action}蓝牙"
         except Exception as e:  # noqa: BLE001
-            return f"错误：{e}"
+            # 不把 str(e) 回给模型：subprocess 异常里含完整 PowerShell 命令
+            log.exception("set_bluetooth 异常")
+            return f"错误：{action}蓝牙失败（{type(e).__name__}），可能需要管理员权限"
 
     def get_clipboard() -> str:
         """读取当前剪贴板文本（区别 clipboard_copy 写）。"""

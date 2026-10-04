@@ -1,15 +1,14 @@
 """Live2D renderer 单元测试（不依赖 PyQtWebEngine 实际加载）。"""
 import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import sys
-sys.path.insert(0, r'E:\study\desktop-pet')
-sys.path.insert(0, r'E:\study\desktop-pet\.local-packages')
-
 import tempfile
 from pathlib import Path
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 项目根目录（按文件位置推导，不再硬编码本地绝对路径）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest  # noqa: E402
 
 
 # ---------- 抽象基类：每个 abstract 方法都必须被覆盖 ----------
@@ -147,13 +146,26 @@ def test_factory_live2d_no_model_json_falls_back(qapp):
 
 
 # ---------- Live2D 模型 profile 动作映射完整性 ----------
-_BINGTANG_DIR = Path(r"E:\study\live2d\bingtang\bingtang")
-_CHAOPIN_DIR = Path(r"E:\study\live2d\超频猫猫完整版\超频猫猫")
+def _env_dir(name: str) -> Path:
+    """读环境变量目录；未设置时返回必定不存在的路径。
+
+    不能写 Path(os.environ.get(X, ""))：空串会变成 Path(".")，而它 is_dir() 为 True，
+    守卫失效后用例会拿项目根目录当 Live2D 模型目录去解析而失败。
+    """
+    raw = (os.environ.get(name) or "").strip()
+    return Path(raw) if raw else Path("<unset>") / name
+
+
+# 真实模型为版权资源、不入库；设置环境变量指向本地模型即可跑真实校验
+_BINGTANG_DIR = _env_dir("PET_TEST_BINGTANG_DIR")
+_CHAOPIN_DIR = _env_dir("PET_TEST_CHAOPIN_DIR")
 
 requires_bingtang = pytest.mark.skipif(
-    not _BINGTANG_DIR.is_dir(), reason=f"冰糖模型目录不存在: {_BINGTANG_DIR}")
+    not _BINGTANG_DIR.is_dir(),
+    reason="未设置 PET_TEST_BINGTANG_DIR（冰糖模型为版权资源，不入库）")
 requires_chaopin = pytest.mark.skipif(
-    not _CHAOPIN_DIR.is_dir(), reason=f"超频猫猫模型目录不存在: {_CHAOPIN_DIR}")
+    not _CHAOPIN_DIR.is_dir(),
+    reason="未设置 PET_TEST_CHAOPIN_DIR（超频猫猫模型为版权资源，不入库）")
 
 
 def _profile_actions(model_dir: Path):
@@ -210,9 +222,14 @@ def test_chaopin_action_map_format():
 
 
 # ---------- Live2D SDK 文件已下载 ----------
+# 注意：这里必须按项目根推导。早先写死 E:\study\desktop-pet\... 这样的本地
+# 绝对路径，CI（windows-latest 的 D:\a\...）上路径不存在，这三个用例必挂。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def test_cubism_sdk_files_exist():
     """PixiJS + Cubism 4 Core + pixi-live2d-display 插件已下载到项目本地。"""
-    sdk_dir = Path(r'E:\study\desktop-pet\app\animation\cubism-sdk')
+    sdk_dir = _PROJECT_ROOT / "app" / "animation" / "cubism-sdk"
     pixi = sdk_dir / 'pixi.min.js'
     core = sdk_dir / 'live2dcubismcore.min.js'
     plugin = sdk_dir / 'cubism4.min.js'
@@ -227,7 +244,7 @@ def test_cubism_sdk_files_exist():
 # ---------- Live2D bridge HTML 关键加载逻辑 ----------
 def test_bridge_html_uses_cubism4_stack():
     """bridge 必须加载官方 Cubism4 Core + 纯 cubism4 插件，并处理 process polyfill。"""
-    bridge = Path(r'E:\study\desktop-pet\app\animation\live2d_bridge.html')
+    bridge = _PROJECT_ROOT / "app" / "animation" / "live2d_bridge.html"
     content = bridge.read_text(encoding='utf-8')
     assert 'live2dcubismcore.min.js' in content
     assert 'cubism4.min.js' in content
@@ -240,7 +257,7 @@ def test_bridge_html_uses_cubism4_stack():
 
 # ---------- Live2D bridge HTML 存在 ----------
 def test_bridge_html_exists():
-    bridge = Path(r'E:\study\desktop-pet\app\animation\live2d_bridge.html')
+    bridge = _PROJECT_ROOT / "app" / "animation" / "live2d_bridge.html"
     assert bridge.exists()
     content = bridge.read_text(encoding='utf-8')
     assert "loadModel" in content

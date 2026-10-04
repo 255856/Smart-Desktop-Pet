@@ -7,8 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-341%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
-[![Verify](https://img.shields.io/badge/verify_features-93%2F94-blueviolet)](scripts/verify_features.py)
+[![Tests](https://img.shields.io/badge/tests-464%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
+[![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
 [中文](#-5-分钟跑起来) · [English](#-5-min-quick-start) · [**Live2D 在线 Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
@@ -18,7 +18,7 @@
 ## 它能做什么？
 
 - **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 max_turns → 工具结果直接总结），可选 **LangChain** 后端
-- **32个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
+- **52 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
 - **真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
@@ -48,11 +48,13 @@ python -m venv .venv
 source .venv/bin/activate        # Windows PowerShell: .\.venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
-pip install PyQtWebEngine        # Live2D 渲染依赖（GUI 必需）
 ```
 
-> **依赖说明**：基础栈（httpx + edge-tts + pygame + Pillow + PyYAML）即可跑通桌宠本体。
-> **LangChain 后端**（`requirements.txt` 末尾）是 **可选** 的，`brain.backend: standard` 时才用。
+> **依赖说明**：`requirements.txt` 已分四层标注（必需 / 建议 / 可选 / 开发）。
+> 基础栈（PyQt5 + httpx + edge-tts + pygame + Pillow + PyYAML）即可跑通桌宠本体。
+> - 想要 **Live2D 渲染**（不装则自动降级为 PNG 帧动画）：`pip install PyQtWebEngine`
+> - 想要 **按住说话（ASR）**：`pip install faster-whisper sounddevice`，并在 `config.yaml` 开 `asr.enabled`
+> - **LangChain 后端** 仅在 `brain.backend: standard` 时才用到（默认 `lightweight` 手写 ReAct）
 
 ### 第 3 步：配置 LLM API Key
 
@@ -108,8 +110,8 @@ python -m app.web.dashboard
 ### ✅ 验证安装（独立步骤，确认环境 OK）
 
 ```bash
-python -m pytest tests/ -q              # 341 个测试通过，6 个 skip（约 30s）
-python scripts/verify_features.py --no-gui    # 93 项功能冒烟通过
+python -m pytest tests/ -q              # 464 个测试通过，6 个 skip（约 35s）
+python scripts/verify_features.py --no-gui    # 82 项功能冒烟通过
 python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
 ```
 
@@ -124,7 +126,7 @@ Smart-Desktop-Pet/
 ├── requirements.txt         # Python 依赖
 ├── pytest.ini
 │
-├── app/                     # 94 个源文件（10 个子模块）
+├── app/                     # 92 个源文件（12 个子模块）
 │   ├── main.py              # 真正入口（横幅 + Ollama 探测 + 装配）
 │   ├── core/                # config / settings / save / tray / qt_compat
 │   ├── brain/               # agent / llm_client / memory / proactive / trace
@@ -133,7 +135,7 @@ Smart-Desktop-Pet/
 │   │   └── cubism-sdk/      # 桌面 SDK（QWebEngineView 内嵌用）
 │   ├── voice/               # TTS 3 引擎 + ASR + 角色情绪
 │   ├── engine/              # state / tools(32) / chat_store / reminder / screenshot
-│   │   └── tools/           # 51 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts _audio _weather _timer _power _filesearch _webfetch _ocr _runner _tts_mute 分组
+│   │   └── tools/           # 52 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts _audio _weather _timer _power _filesearch _webfetch _ocr _runner _tts_mute 分组
 │   ├── games/               # gomoku + werewolf + werewolf_agents + director
 │   ├── ui/                  # 桌宠本体 + 聊天窗 + 设置 + 5 子游戏窗口 + UI 控制器
 │   ├── mcp/                 # MCP stdio JSON-RPC 协议 + filesystem server
@@ -146,7 +148,7 @@ Smart-Desktop-Pet/
 ├── docs/                    # 详细文档（10 篇 1000+ 行）
 ├── data/                    # 运行时数据（memory / reminders / traces.db 等，gitignore）
 ├── scripts/                 # run.py / verify_features.py（513 行验证脚本）
-├── tests/                   # 29 个测试文件，341 个用例（git tracked）
+├── tests/                   # 36 个测试文件，464 个用例（git tracked）
 ├── voice/                   # GPT-SoVITS 训练音频（gitignore，仅 .gitkeep）
 └── GPT-SoVITS-v2pro-*/      # 整合包（gitignore，仅 .gitkeep）
 ```
@@ -161,7 +163,7 @@ Smart-Desktop-Pet/
 | [docs/quickstart.md](docs/quickstart.md) | 5 分钟极简版（跳过 README 的炫技部分） |
 | [docs/architecture.md](docs/architecture.md) | 启动时序 + Live2D 渲染子图 + Agent 流程图 |
 | [docs/config-reference.md](docs/config-reference.md) | `config.yaml` 全部字段（默认/范围/说明） |
-| [docs/tools-reference.md](docs/tools-reference.md) | 51 个工具完整说明（触发方式 / 沙箱 / host 校验）+ 如何加新工具 |
+| [docs/tools-reference.md](docs/tools-reference.md) | 52 个工具完整说明（触发方式 / 沙箱 / host 校验）+ 如何加新工具 |
 | [docs/tts-integration.md](docs/tts-integration.md) | edge / gptsovits / minimax 三引擎 + 自愈逻辑 |
 | [docs/live2d-integration.md](docs/live2d-integration.md) | `.model3.json` + profile YAML + cubism-sdk 来源 + fallback 触发 |
 | [docs/emotion-system.md](docs/emotion-system.md) | 11 个 Emotion 枚举 + 标签解析 + 关键词兜底 |
@@ -220,7 +222,10 @@ cd Smart-Desktop-Pet
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+# 可选：Live2D 渲染（不装自动降级为 PNG 帧动画）
 pip install PyQtWebEngine
+# 可选：按住说话 ASR
+pip install faster-whisper sounddevice
 ```
 
 ### 3. Configure LLM
@@ -247,8 +252,8 @@ python -m app.web.dashboard
 ### ✅ Verify
 
 ```bash
-python -m pytest tests/ -q                 # 341 passed, 6 skipped
-python scripts/verify_features.py --no-gui # 93/94 OK
+python -m pytest tests/ -q                 # 464 passed, 6 skipped
+python scripts/verify_features.py --no-gui # 82 checks OK
 ```
 
 For details see [`docs/`](docs/) or try the **zero-install [Live2D demo](https://255856.github.io/Smart-Desktop-Pet/)**.

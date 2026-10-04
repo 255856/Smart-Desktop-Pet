@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 本项目是 Windows 桌面应用：Live2D/Qt 窗口、锁屏、Wi-Fi/蓝牙开关、
+    # 剪贴板（pywin32）、WMI 亮度/电量、ASR 唤醒词等都依赖 Windows 专有 API。
+    # 早先跑在 ubuntu-latest 上，约 1/3 测试直接导入失败，导致 CI 长期全红
+    # （历史两次运行均为 failure）。改到真实目标平台上跑，不做任何跳过。
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -23,28 +27,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install system deps (PyQt5 offscreen)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxcb-xinerama0 libxkbcommon-x11-0 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-            libxcb-randr0 libxcb-render-util0 libxcb-render0 libxcb-shape0 \
-            libxcb-shm0 libxcb-sync1 libxcb-util1 libxcb-xfixes0
-
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # requirements.txt 已分四层（必需/建议/Windows/可选/开发）：
+          # PyQt5、pydantic-settings、numpy 等必需项都在里面
           pip install -r requirements.txt
-          pip install PyQt5 PyQtWebEngine pytest pytest-cov
+          # 建议层：Live2D 渲染，不装会自动降级为 PNG 帧动画
+          pip install PyQtWebEngine
 
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: |
-          pytest tests/ -q --no-header \
-            --cov=app --cov-report=term-missing \
-            --cov-fail-under=25
+        run: pytest tests/ -q --no-header --cov=app --cov-report=term-missing --cov-fail-under=25
 
       - name: Verify features (no GUI)
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           python scripts/verify_features.py --no-gui

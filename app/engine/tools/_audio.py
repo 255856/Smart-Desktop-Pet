@@ -48,11 +48,20 @@ def _get_volume_windows() -> str:
 
 
 def _mute_via_mmsysvol_windows(level: float) -> str:
-    """无 pycaw 的 fallback：只支持 0/1 静音切换。"""
+    """无 pycaw 的 fallback：只支持 0/1 静音切换。
+
+    注意：非 0 音量**并没有真正被设置**。早先这里直接返回
+    「已取消静音（不支持细粒度音量调节）」，看起来像成功，
+    于是 set_volume(50) 会让桌宠对主人说「音量已调到 50%」，
+    实际只是取消了静音。必须如实说明没设成。
+    """
     import ctypes
     mute = 1 if level == 0 else 0
     ctypes.windll.winmm.waveOutSetVolume(0, 0 if mute else 0xFFFFFFFF)
-    return "已静音" if mute else "已取消静音（不支持细粒度音量调节）"
+    if mute:
+        return "已静音（音量 0%）"
+    return (f"无法设置音量到 {int(level * 100)}%：缺少 pycaw，当前只能静音/取消静音，"
+            f"已取消静音。安装 pycaw 后可精确调节。")
 
 
 def _set_brightness_windows(level: int) -> str:
@@ -93,8 +102,18 @@ def register(reg: ToolRegistry) -> None:
 
     def set_volume(level: int) -> str:
         """把系统主音量调到 0~100。0=静音，100=最大。"""
-        return _set_volume_windows(level / 100.0) if IS_WINDOWS else (
-            "非 Windows 平台：调音量未实现（Linux 用 amixer / pactl）")
+        if not IS_WINDOWS:
+            return "非 Windows 平台：调音量未实现（Linux 用 amixer / pactl）"
+        try:
+            lvl = float(level)
+        except (TypeError, ValueError):
+            return f"错误：level 必须是数字（收到 {level!r}）"
+        # 越界在工具层就夹取并说明，别让 999% 这种值静默变成 100%
+        if not 0 <= lvl <= 100:
+            clamped = max(0, min(100, int(round(lvl))))
+            log.info("set_volume level=%s 越界，夹取到 %d", level, clamped)
+            return _set_volume_windows(clamped / 100.0) + f"（{level} 已按 0~100 夹取）"
+        return _set_volume_windows(lvl / 100.0)
 
     def get_volume() -> str:
         """查询当前系统主音量（百分比）。"""

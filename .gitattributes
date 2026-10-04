@@ -1,0 +1,50 @@
+# 统一行尾：仓库内一律 LF，Windows 检出时转 CRLF
+# 之前仓库 CRLF / LF 混用（README 与 CI 是 LF，app/brain/agent.py 是纯 CRLF），
+# 导致跨平台 diff 噪声。显式声明后由 Git 统一处理。
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 可能解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 明确按二进制处理，禁止行尾转换 / diff
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.mp4 binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.ttf binary
+*.otf binary
+*.moc3 binary
+*.moc binary
+*.physics.json binary
+*.cdi3d.binary binary
+
+# Live2D / 前端 vendor
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.json text eol=lf
+
+# 文档与源码统一 LF
+*.md text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+*.spec text eol=lf
+*.ini text eol=lf

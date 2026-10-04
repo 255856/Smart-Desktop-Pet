@@ -42,6 +42,9 @@ save.json
 settings.json
 crash.log
 
+# 运行时日志目录（pet.log + 轮转备份，随会话不断增长）
+logs/
+
 # 根目录的提醒存档（state_manager 默认路径）
 reminders.json
 

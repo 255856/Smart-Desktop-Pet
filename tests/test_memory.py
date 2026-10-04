@@ -240,3 +240,79 @@ class TestMemoryPersistence:
             assert store.all()[0].importance == 0.5   # 兜底默认
         finally:
             os.unlink(tmp.name)
+
+
+class TestMemoryRelevance:
+    """检索相关度回归：无关 query 不应召回任何记忆。
+
+    历史 bug：命中阈值只对 SubstringBackend 生效，向量后端完全不过滤，
+    综合分（语义分 × 权重）让语义分为 0 的记忆也被顶进结果，
+    于是查任何词都返回全部记忆 —— recall_memory 会把这些塞进 prompt，
+    LLM 可能因此声称「我记得你说过…」，而主人从没说过。
+    """
+
+    def setup_method(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False)
+        self.tmpfile.close()
+        self.store = MemoryStore(self.tmpfile.name, backend_name="tfidf")
+        for content, cat in (
+            ("主人喜欢喝冰美式", "preference"),
+            ("主人的猫叫团子", "fact"),
+            ("主人讨厌香菜", "preference"),
+            ("每周三加班到很晚", "fact"),
+            ("孩子在读小学三年级", "fact"),
+        ):
+            self.store.add(content, cat)
+
+    def teardown_method(self):
+        os.unlink(self.tmpfile.name)
+
+    @pytest.mark.parametrize("query", [
+        "股票", "天气", "zzzz不存在的词", "asdkjhqwe", "123456",
+    ])
+    def test_unrelated_query_returns_nothing(self, query):
+        results = self.store.search(query)
+        assert results == [], (
+            f"无关 query {query!r} 召回了 {[r.content for r in results]}，"
+            f"会导致 LLM 凭空声称记得")
+
+    @pytest.mark.parametrize("query,expect", [
+        ("团子", "团子"),
+        ("猫", "团子"),
+        ("加班", "加班"),
+        ("香菜", "香菜"),
+    ])
+    def test_related_query_still_hits(self, query, expect):
+        results = self.store.search(query)
+        assert any(expect in r.content for r in results), (
+            f"相关 query {query!r} 没召回含「{expect}」的记忆："
+            f"{[r.content for r in results]}")
+
+    def test_tokenizer_emits_cjk_bigrams(self):
+        """中文检索必须带二元组，否则「量子力学」会因共享单字命中「小学」。"""
+        toks = _tokenize("量子力学")
+        assert "量子" in toks and "力学" in toks
+        toks2 = _tokenize("孩子在读小学三年级")
+        assert "小学" in toks2
+        # 两个词不应共享任何二元组
+        bigrams_a = {t for t in toks if len(t) == 2}
+        bigrams_b = {t for t in toks2 if len(t) == 2}
+        assert not (bigrams_a & bigrams_b), (
+            f"伪命中来源：共享二元组 {bigrams_a & bigrams_b}")
+
+    def test_quantum_mechanics_does_not_match_elementary_school(self):
+        """回归：单字切分会让「量子力学」和「孩子」拿到完全相同的分数。"""
+        a = self.store.search("量子力学")
+        b = self.store.search("孩子")
+        # 「孩子」应命中小学那条；「量子力学」不应
+        assert any("小学" in r.content for r in b)
+        assert not any("小学" in r.content for r in a), (
+            f"「量子力学」误召回小学记忆：{[r.content for r in a]}")
+
+    def test_empty_keyword_still_lists_by_importance(self):
+        """空关键词走 importance×时新度 排序，不受相关度阈值影响。"""
+        self.store.add("低优先级", "fact", importance=0.1)
+        self.store.add("高优先级", "preference", importance=0.95)
+        results = self.store.search("", limit=2)
+        assert results[0].content == "高优先级"

@@ -9,6 +9,11 @@ from pathlib import Path
 
 from ._core import Tool, ToolRegistry
 
+# cmd.exe / POSIX shell 的元字符。open_app 的兜底 PATH 搜索不允许出现这些字符，
+# 否则会被 shell 当成命令分隔符 / 引号逃逸，形成命令注入
+# （app_name 来自 LLM，可经提示词注入构造）。
+_SHELL_METACHARS = frozenset('&|<>^"\'%!()\n\r`$*?;#')
+
 
 def _collect_suggestions(query: str, limit: int = 5) -> list[tuple[str, str, float]]:
     """收集「内置映射相似」+「已装应用相似」的 top-N 候选。
@@ -104,6 +109,17 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
         if not name:
             return "错误：应用名为空。用法：open_app(app_name='notepad')"
 
+        # 0) 入参白名单校验：拒绝 shell 元字符。
+        #    app_name 来自 LLM，可被提示词注入构造成 "notepad&calc"。
+        #    必须放在最前面——否则注册表的模糊匹配会把它解析成 notepad，
+        #    静默启动一个用户没要求的应用（既是安全问题也是体验问题）。
+        bad = _SHELL_METACHARS & set(name)
+        if bad:
+            return (
+                f"错误：应用名「{name}」含非法字符 {' '.join(sorted(bad))}。\n"
+                f"提示：只传应用名或完整路径，不要拼接命令。"
+            )
+
         # 1) 完整路径（绝对 / 相对）
         p = Path(name)
         if p.is_file():
@@ -153,21 +169,29 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
             )
             return "\n".join(lines)
 
-        # 5) 完全找不到：兜底「Shell PATH 搜索」（仅 ASCII 短串）
+        # 5) 完全找不到：兜底「PATH 搜索」（仅 ASCII 短串）
+        #    不用 shell=True：CreateProcess 本身就会按 PATH 找可执行文件；
+        #    而 shell=True 会让 & | " 等字符成为命令分隔符 → 命令注入。
+        #    （shell 元字符已在函数入口统一拒绝，这里无需重复判断。）
         looks_like_exe = name.replace(" ", "").isascii()
         if looks_like_exe:
             try:
                 subprocess.Popen(
                     [name],
-                    shell=True,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
                 return (
                     f"已尝试启动 {name}（未在已装应用中找到，"
-                    f"已让 Windows Shell 在 PATH 中搜索。"
+                    f"已在系统 PATH 中搜索。"
                     f"若未弹出窗口，可能未安装。）"
+                )
+            except FileNotFoundError:
+                return (
+                    f"未找到应用「{name}」，系统 PATH 里也没有这个程序。\n"
+                    f"提示：用英文名（如 notepad / mspaint / explorer）、"
+                    f"或完整路径（如 C:\\Program Files\\...\\app.exe）"
                 )
             except Exception as e:  # noqa: BLE001
                 return f"错误：启动 {name} 失败：{e}"

@@ -156,6 +156,33 @@ def test_tool_calls_display():
     print("[OK] Tool calls rendered as step card")
 
 
+def test_ai_coding_blocks_rendered():
+    """AI Coding 风格：思考（折叠）+ 命令块（终端）+ 文件编辑块 + 工具步骤同时出现。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    msg = Message(
+        role="assistant",
+        content="已完成文件写入。",
+        tools=[("write_file", '{"path": "/tmp/test.py", "content": "print(1)"}', "OK")],
+        thoughts=["需要先排查依赖", "方案：用国内镜像"],
+        execs=[{"cmd": "pip install requests", "output": "Successfully installed",
+                "exit_code": 0}],
+    )
+    html = cw._msg_html(msg)
+    assert "思考过程" in html
+    assert "需要先排查依赖" in html
+    assert "执行命令" in html
+    assert "pip install requests" in html
+    assert "exit_code=0" in html
+    assert "文件编辑" in html
+    assert "/tmp/test.py" in html
+    assert "<details" in html
+    assert "background:#0f172a" in html
+    print("[OK] AI coding blocks (思考/命令/文件/工具) rendered")
+
+
 def test_user_emoji_in_content_escaped():
     """用户消息里的 emoji 应该被原样保留（在 QTextBrowser 里可见，不转义）。"""
     char_cfg = CharacterConfig(name="测试")

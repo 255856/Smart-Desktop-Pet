@@ -17,9 +17,18 @@ log = logging.getLogger(__name__)
 
 CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "other")
 
-# Tokenize：CJK 单字 + 英文整词（够用且零依赖）
+# Tokenize：英文整词 + CJK 单字与二元组（够用且零依赖）
+#
+# 为什么加二元组：只切单字会让中文检索产生大量伪命中。实测语料
+# 「孩子在读小学三年级」下，查询「量子力学」会因为共享单字「学」
+# 而命中（子/学 都在词表里），「量子力学」这种完全无关的词也能召回。
+# 中文没有空格，不引入分词器时「单字 + 相邻二元组」是标准折中：
+#   「量子力学」→ 量 子 力 学 / 量子 子力 力学
+#   「小学三年级」→ 小 学 三 年 级 / 小学 学年 三年 年级
+# 二元组不再共享，伪命中消失；真实词（「团子」「小学」）仍能精确命中。
+# 二元组在向量里出现 2 次，权重天然高于单字。
 _TOKEN_RE = re.compile(
-    r"[A-Za-z]+|[\u4e00-\u9fff]",
+    r"[A-Za-z]+|[\u4e00-\u9fff]+",
 )
 # 简单停用词（中英混合）
 _STOPWORDS = frozenset({
@@ -33,15 +42,31 @@ _STOPWORDS = frozenset({
 
 
 def _tokenize(text: str) -> list[str]:
-    """CJK 单字 + 英文小写词；过滤停用词；过滤单字符英文。"""
+    """英文小写词 + CJK 单字 & 相邻二元组；过滤停用词与单字符英文。"""
     out: list[str] = []
-    for tok in _TOKEN_RE.findall(text.lower()):
-        if tok in _STOPWORDS:
+    for chunk in _TOKEN_RE.findall(text.lower()):
+        if re.match(r"[A-Za-z]", chunk):
+            if len(chunk) == 1 or chunk in _STOPWORDS:
+                continue
+            out.append(chunk)
             continue
-        if len(tok) == 1 and not re.match(r"[\u4e00-\u9fff]", tok):
-            continue
-        out.append(tok)
+        # CJK 连续串：单字 + 相邻二元组（二元组重复一次以提高权重）
+        chars = [c for c in chunk]
+        for c in chars:
+            if c not in _STOPWORDS:
+                out.append(c)
+        for i in range(len(chars) - 1):
+            bi = chars[i] + chars[i + 1]
+            if not (chars[i] in _STOPWORDS and chars[i + 1] in _STOPWORDS):
+                out.append(bi)
+                out.append(bi)
     return out
+
+
+def _bigrams(text: str) -> set[str]:
+    """CJK 相邻二元组集合（用于判定两个词是否真的相关）。"""
+    chars = re.findall(r"[\u4e00-\u9fff]", text)
+    return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
 
 
 #  MemoryItem
@@ -427,13 +452,37 @@ class MemoryStore:
                 idx = i.content.lower().find(kw_l)
                 scores.append(1.0 if idx >= 0 else 0.0)
 
+        # 多字中文 query 必须共享至少一个二元组才算命中。
+        #
+        # 光靠相似度阈值区分不了「量子力学」和「孩子在读小学三年级」这种
+        # 伪命中：前者靠共享单字「子」「学」拿到 0.23 的相似度，
+        # 调阈值会连带误杀真实命中（「学校」只有 0.18）。
+        # 规则更可解释：两个词要算相关，至少得共享一个相邻字组合。
+        q_bigrams = _bigrams(kw)
+        if len(q_bigrams) >= 1:
+            scores = [
+                (s if (_bigrams(i.content) & q_bigrams) else 0.0)
+                for s, i in zip(scores, items)
+            ]
+
+        # 命中阈值（按「原始语义分」过滤，不是综合分）
+        #
+        # 早先只对 SubstringBackend 过滤，向量后端完全不设阈值：
+        # 综合分 = 语义分 × 各类权重，语义分为 0 的记忆也会被
+        # importance/时新度顶进结果，于是查任何词都把全部记忆返回一遍。
+        # recall_memory 工具会照单全收塞进 prompt，LLM 可能因此
+        # 声称「我记得你说过…」，而主人从没说过。
+        #
+        # 0.10 是实测折中（见 docs/ 或 commit）：
+        #   真实命中（团子 .47 / 加班 .42 / 孩子 .39 / 猫 .22 / 学校 .18）都保留；
+        #   「股票 / 天气 / 12345」这类完全无关的词召回 0 条。
+        # 调高会漏召回（学校 .18 就没了），调低会把 0.05 量级的噪音放进来。
+        _MIN_HIT = 0.0 if isinstance(self.backend, SubstringBackend) else 0.10
+        scored = [(s, i) for s, i in zip(scores, items) if s > _MIN_HIT]
         # 综合排序
-        scored = [(self._score(i, s), i) for s, i in zip(scores, items)]
+        scored = [(self._score(i, s), i) for s, i in scored]
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # 命中阈值（substring 模式：要求至少子串命中）
-        if isinstance(self.backend, SubstringBackend):
-            scored = [(s, i) for s, i in scored if s > 0.0]
         # 取 top
         top = [i for _, i in scored[:limit]]
         for r in top:

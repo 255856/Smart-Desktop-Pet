@@ -9,7 +9,7 @@ import logging
 import os
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry
+from ._core import Tool, ToolRegistry, is_under_any
 
 log = logging.getLogger(__name__)
 
@@ -18,12 +18,12 @@ _MAX_BYTES = 8000   # 读文本的最大字符数
 
 
 def _is_safe_path(p: Path) -> bool:
-    """路径必须在用户主目录下。"""
-    try:
-        p_resolved = p.resolve()
-        return str(p_resolved).startswith(str(_HOME.resolve()))
-    except (OSError, RuntimeError):
-        return False
+    """路径必须在用户主目录下。
+
+    用 relative_to 做路径语义比较，避免 str.startswith 的前缀绕过
+    （C:\\Users\\alice-backup 不属于 C:\\Users\\alice）。
+    """
+    return is_under_any(p, [_HOME])
 
 
 def register(reg: ToolRegistry) -> None:

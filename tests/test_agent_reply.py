@@ -2,12 +2,13 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, r"E:\study\desktop-pet")
-sys.path.insert(0, r"E:\study\desktop-pet\.local-packages")
+# 项目根目录（按文件位置推导，不再硬编码本地绝对路径）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.brain.agent import AgentLoop, _sanitize_reply
+from app.brain.agent import AgentLoop, _sanitize_reply  # noqa: E402
 
 NL = chr(10)
 
