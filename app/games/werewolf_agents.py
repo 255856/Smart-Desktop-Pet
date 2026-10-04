@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 PERSONAS: List[Dict[str, str]] = [
     {"name": "阿橘", "style": "大大咧咧、爱打抱不平，说话直来直去，口头禅“我说啊”。"},
     {"name": "小豆子", "style": "胆小谨慎、说话带犹豫，容易随大流，口头禅“那个……”。"},
-    {"name": "糖糖", "style": "机灵古怪、喜欢带节奏，爱观察细节，口头禅“嘿嘿”。"},
+    {"name": "糖糖", "style": "机灵古怪、喜欢带节奏，爱观察细节，口头禅“哈哈”。"},
     {"name": "铁柱", "style": "憨厚直爽、认死理、投票凭直觉，口头禅“俺觉得”。"},
     {"name": "小满", "style": "冷静理性、爱盘逻辑、注重发言漏洞，口头禅“从逻辑上讲”。"},
     {"name": "布丁", "style": "软萌可爱、容易紧张，被怀疑会慌，口头禅“呜……”。"},
@@ -42,10 +42,12 @@ PERSONAS: List[Dict[str, str]] = [
 ]
 
 
-JSON_SPEECH = '{"speech": "你的发言"}'
-JSON_LAST = '{"speech": "遗言"}'
+JSON_SPEECH = ('{"analysis": "简短内部推理：结合哪些发言/查验/投票决定怎么说（不显示给玩家）", '
+               '"speech": "你要说的话"}')
+JSON_LAST = JSON_SPEECH
 JSON_TARGET = '{"target": 座位号}'
-JSON_VOTE = ('{"target": 座位号, "reason": "一两句话理由，必须引用具体发言、查验结果或上一轮投票站队"}')
+JSON_VOTE = ('{"analysis": "简短内部推理：回顾起跳/查验/站队/投票，锁定疑点（不显示）", '
+             '"target": 座位号, "reason": "对外的一两句话理由，必须引用具体发言、查验或投票站队"}')
 JSON_WOLF = '{"target": 座位号, "reason": "一句话理由"}'
 JSON_WITCH = ('{"use": "antidote 或 poison 或 none", '
               '"target": 座位号(仅毒需要)}')
@@ -82,6 +84,7 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
     - 服务端过载/限流/超时退避重试最多 3 次；
     - asyncio.CancelledError 必须直接抛出（关闭线程时中断用）。
     """
+    import httpx
     last_exc = None
     for attempt in range(3):
         async def _do():
@@ -96,10 +99,14 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
         except Exception as e:  # noqa: BLE001
             last_exc = e
             m = str(e)
+            # httpx.ConnectTimeout 等异常的 str() 为空字符串，字符串匹配全部
+            # 失效——必须按类型判断。ConnectTimeout / ReadTimeout /
+            # WriteTimeout / PoolTimeout 都是 httpx.TimeoutException 子类。
             retryable = (
                 '529' in m or '429' in m or 'overloaded' in m.lower()
                 or 'rate' in m.lower()
-                or isinstance(e, (asyncio.TimeoutError, TimeoutError)))
+                or isinstance(e, (asyncio.TimeoutError, TimeoutError,
+                                  httpx.TimeoutException, httpx.ConnectError)))
             if retryable:
                 await asyncio.sleep(1.2 * (attempt + 1))
                 continue
@@ -108,8 +115,8 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
 
 def _perspective_text(view: dict) -> str:
     lines = []
-    lines.append(f"现在是第 {view['day']} 天。你是 {view['self_role']}"
-                 f"（{ROLE_LABEL[view['self_role']]}，阵营："
+    lines.append(f"现在是第 {view['day']} 天。你的座位是 {view['self_seat']} 号，"
+                 f"身份：{ROLE_LABEL[view['self_role']]}（阵营："
                  f"{'狼人' if view['self_camp'] == CAMP_WOLF else '好人'}）。")
     lines.append("座位信息：")
     for s in view["seats"]:
@@ -235,18 +242,22 @@ class WerewolfAgent:
         prompt = (
             f"现在轮到你白天发言（座位 {self.seat} 号 {self.name}）。\n"
             f"今天此前的发言记录：\n{already}\n\n"
-            "请结合上面的公开事件、查验结果与此前各位玩家的发言，说一段符合当前局势的话：\n"
-            "可以回应、质疑或附和某位玩家的具体发言，指出明确疑点或给出判断依据；\n"
-            "不要在没有任何依据时凭空说『我觉得某某有问题』。1-3 句，口语化。\n"
-            f"输出 JSON：{JSON_SPEECH}")
+            "请先在 analysis 里基于上面的公开事件、查验结果与各位发言做简短推理，再用 speech 说一段符合局势的话：\n"
+            "可以回应、质疑或附和某位玩家的具体发言，指出明确疑点或给出依据；不要凭空说『我觉得某某有问题』。1-3 句，口语化。\n"
+            + ("你是狼人：发言必须完全基于公开信息、像好人一样推理，绝不能提及狼频道、夜晚刀人或狼队友。\n"
+               if self.player.role == WOLF else "")
+            + f"输出 JSON：{JSON_SPEECH}")
         obj = await self._ask(prompt, want_json=True)
         if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
             return str(obj["speech"]).strip()
-        # 兼容模型直接吐纯文本
+        # 兼容模型直接吐纯文本；JSON 解析失败/LLM 超时 → 台词兜底（记日志便于诊断）
+        log.warning("狼人杀 agent %d 白天发言降级到脚本台词", self.seat)
         return self._scripted_speech()
 
     async def last_words(self) -> str:
         prompt = ("你出局了，请说一句简短遗言（符合你的性格，可表水、可点出怀疑对象）。\n"
+                  "本局为暗牌，遗言绝不能说出自己的真实身份（你是狼人更要伪装到底、也别卖队友）；\n"
+                  "先在 analysis 想清楚该表水还是点谁，再给 speech。\n"
                   f"输出 JSON：{JSON_LAST}")
         obj = await self._ask(prompt, want_json=True)
         if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
@@ -259,7 +270,7 @@ class WerewolfAgent:
             "1. 回顾预言家起跳/查验、各人发言与站队、上一轮投票明细；\n"
             "2. 找出具体疑点：谁的发言前后矛盾、谁在划水、谁被查杀、谁的投票可疑；\n"
             "3. 狼人要伪装好人逻辑、保护队友并把嫌疑引向好人；好人力争投出狼人。\n"
-            "请在 reason 里写清推理依据（引用具体座位/发言），再给出 target。\n"
+            "请先在 analysis 里完成上述推理（不对外），再在 reason 写清对外依据（引用具体座位/发言）、给出 target。\n"
             f"候选（存活且非自己）：{candidates}\n"
             f"输出 JSON：{JSON_VOTE}")
         obj = await self._ask(prompt, want_json=True)
@@ -422,25 +433,63 @@ class WerewolfAgent:
         return [w for w in wolves if w != self.seat and
                 self.game.player(w).alive]
 
-    def _scripted_speech(self) -> str:
-        p = self.player
+    def _outward_suspect(self) -> Optional[int]:
+        """对外可指控的座位：好人指控已知狼；狼人嫁祸好人（绝不卖队友）。"""
+        if self.player.role == WOLF:
+            goods = [p.seat for p in self.game.alive_players()
+                     if p.role != WOLF and p.seat != self.seat]
+            return self.rng.choice(goods) if goods else None
         known = self._known_wolves()
+        return known[0] if known else None
+
+    def _scripted_speech(self) -> str:
+        """LLM 失败时的兜底台词。多候选随机 + 尽量带真实局势信息
+        （最近死亡/警长/存活人数），避免全场 NPC 说同一句。"""
+        v = self.game.perspective(self.seat)
+        p = self.player
+        # 先验身份的特例保持不变
         if p.role == SEER and self.game.seer_history:
             d, t, is_wolf = self.game.seer_history[-1]
             verdict = "狼人" if is_wolf else "好人"
-            return f"我是预言家！我昨晚查验了 {t} 号，是{verdict}！"
-        if known:
-            return f"我觉得 {known[0]} 号很可疑，大家重点盯一下。"
+            return self.rng.choice([
+                f"我是预言家！我昨晚查验了 {t} 号，是{verdict}！大家听我的。",
+                f"听好了，我是预言家，{t} 号验出来是{verdict}，别投错了。",
+            ])
+        sus = self._outward_suspect()
+        sus_txt = f"{sus} 号" if sus is not None else None
+        # 局势上下文：从最近事件提取死亡座位，生成自然引述（不照抄事件原文）
+        ctx_prefix = ""
+        for e in reversed(v.get("public_events", [])):
+            m = re.search(r"(\d+)号.*(?:死亡|出局)", e)
+            if m:
+                ctx_prefix = f"昨晚 {m.group(1)} 号出事后，"
+                break
         if p.role == WOLF:
-            return "我是铁好人啊，这把先别出我，听预言家报验人。"
-        return "我是好人，目前信息不多，先听预言家的。"
+            pool = [
+                f"{ctx_prefix}我看了一圈发言，{sus_txt or '几个可疑的'} 最不对劲，大家品品。",
+                f"{ctx_prefix}我是铁好人啊，先别急着出我，{sus_txt or '先听预言家的'}。",
+                f"{ctx_prefix}这轮信息还不多，我倾向先听后置位怎么说再定。",
+            ]
+        else:
+            pool = [
+                f"{ctx_prefix}目前信息不多，{sus_txt or '先听预言家报验人'}再定。",
+                f"{ctx_prefix}我站 {sus_txt or '发言最像好人的那位'}，欢迎反驳。",
+                f"{ctx_prefix}我是好人，这轮先跟大部队，{sus_txt or '重点听后面的人怎么说'}。",
+            ]
+        return self.rng.choice(pool)
 
     def _scripted_last_words(self) -> str:
-        return f"我是 {ROLE_LABEL[self.player.role]}，大家加油，别投错人……"
+        # 暗牌局：遗言不公开身份（猎人开枪等特殊情况已在其他流程处理）
+        if self.player.role == WOLF:
+            return "我是好人出局，你们后面会后悔的，预言家的话再好好听听。"
+        sus = self._outward_suspect()
+        if sus is not None:
+            return f"我是好人，我走后盯紧 {sus} 号，别投错了。"
+        return "我确实是好人，大家冷静盘逻辑，别被带节奏。"
 
     def _scripted_vote(self, candidates: List[int]) -> int:
-        known = self._known_wolves()
-        pool = [w for w in known if w in candidates] or candidates
+        sus = self._outward_suspect()
+        pool = [sus] if sus in candidates else list(candidates)
         return self.rng.choice(pool)
 
     def _scripted_wolf_nominate(self, candidates: List[int]) -> Tuple[int, str]:
@@ -497,9 +546,9 @@ class WerewolfAgent:
         return self.rng.choice(candidates) if candidates else None
 
     def _scripted_pk_speech(self) -> str:
-        known = self._known_wolves()
-        if known:
-            return f"我是好人，出我就亏了，我怀疑 {known[0]} 号，我们一起投他！"
+        sus = self._outward_suspect()
+        if sus is not None:
+            return f"我是好人，出我就亏了，我更怀疑 {sus} 号，我们一起投他！"
         return "我真的是好人，大家别冲动，给我个机会，先投真狼！"
 
     def _scripted_transfer_badge(self, candidates: List[int]) -> Optional[int]:

@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 HUMAN_NAME = "你"
 ACTION_TIMEOUT = 120          # 玩家操作倒计时（秒）
 NPC_PHASE_TIMEOUT = 120       # 等待 NPC 集体行动的阶段倒计时（秒）
-LLM_CONCURRENCY = 2           # 同时进行的 LLM 请求上限（避免服务端 529 限流）
+LLM_CONCURRENCY = 4           # 同时进行的 LLM 请求上限（独立阶段并发；529 自动退避）
 
 # 发言 kind → 中文标签
 _KIND_LABEL = {

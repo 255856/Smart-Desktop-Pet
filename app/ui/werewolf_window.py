@@ -16,7 +16,7 @@ from app.core.qt_compat import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
     QColor, QObject, QEvent, QPushButton, Qt, QToolButton, QVBoxLayout,
     QGridLayout, QWidget, QDialog, Signal, QScrollArea, QSizePolicy,
-    QTimer,
+    QTimer, QComboBox,
 )
 from app.ui import ui_style
 from app.games.werewolf import ROLE_LABEL
@@ -101,8 +101,10 @@ class _DragFilter(QObject):
 class WerewolfWindow(QDialog):
     """狼人杀弹窗。"""
 
-    # 主持人台词（控制器负责气泡 + TTS）
-    host_spoke = Signal(str)
+    # 主持人台词（控制器负责气泡；voice 空=默认音色，否则按该音色朗读）
+    host_spoke = Signal(str, str)
+    # NPC 发言朗读（控制器负责 TTS；voice 空=不朗读）
+    speak_line = Signal(str, str)
     # 一局结束：result dict（winner / player_won / player_role / days）
     game_finished = Signal(dict)
     # 对局会话状态：点开始/再来一局=True（保持游戏动作），关闭=False（回默认）
@@ -110,7 +112,8 @@ class WerewolfWindow(QDialog):
 
     def __init__(self, parent: Optional[QWidget] = None,
                  llm_cfg=None, enable_llm: bool = False,
-                 player_name: str = "你", pet_name: str = "桌宠"):
+                 player_name: str = "你", pet_name: str = "桌宠",
+                 voices: Optional[list] = None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -119,6 +122,8 @@ class WerewolfWindow(QDialog):
         self.enable_llm = enable_llm
         self.player_name = player_name
         self.pet_name = pet_name
+        self.voices = list(voices or [])
+        self._voice_cfg = self._load_voice_cfg()
 
         self.director: Optional[WerewolfDirector] = None
         self._seats: Dict[int, QFrame] = {}
@@ -164,6 +169,11 @@ class WerewolfWindow(QDialog):
         tb.addWidget(sub)
         hl.addLayout(tb)
         hl.addStretch(1)
+        btn_voice = QPushButton("配音")
+        btn_voice.setFixedHeight(28)
+        btn_voice.setToolTip("为每个角色选择音色")
+        btn_voice.clicked.connect(self._open_voice_dialog)
+        hl.addWidget(btn_voice)
         btn_close = QToolButton()
         btn_close.setObjectName("win_btn_close")
         btn_close.setText("✕")
@@ -215,7 +225,7 @@ class WerewolfWindow(QDialog):
         self.feed.setObjectName("feed")
         self.feed.setWidgetResizable(True)
         self.feed.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.feed.setFixedHeight(250)
+        self.feed.setFixedHeight(330)
         feed_host = QWidget()
         feed_host.setObjectName("feed_host")
         self.feed_layout = QVBoxLayout(feed_host)
@@ -235,20 +245,20 @@ class WerewolfWindow(QDialog):
         self.action_layout.setSpacing(6)
         body.addWidget(self.action_box)
 
-        self.resize(560, 812)
+        self.resize(680, 920)
 
     def _make_seat(self, seat: int) -> QFrame:
         f = QFrame()
         f.setObjectName("seat")
         v = QVBoxLayout(f)
-        v.setContentsMargins(6, 5, 6, 5)
-        v.setSpacing(0)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(2)
         top = QLabel(f"{seat}号")
-        top.setStyleSheet("font-size: 8pt; color: #9a97b8;")
+        top.setStyleSheet("font-size: 9pt; color: #9a97b8;")
         name = QLabel("—")
-        name.setStyleSheet("font-weight: 700; font-size: 10pt;")
+        name.setStyleSheet("font-weight: 700; font-size: 11pt;")
         role = QLabel("")
-        role.setStyleSheet("font-size: 8pt; color: #7c6cf0;")
+        role.setStyleSheet("font-size: 9pt; color: #7c6cf0;")
         role.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -343,6 +353,11 @@ class WerewolfWindow(QDialog):
         if self._started:
             return
         self._started = True
+        # 清空介绍页的欢迎消息（保留末尾 stretch），游戏开始后 feed 干净
+        while self.feed_layout.count() > 1:
+            item = self.feed_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
         self.game_session_active.emit(True)
         self.director = WerewolfDirector(
             llm_cfg=self.llm_cfg, enable_llm=self.enable_llm,
@@ -372,7 +387,7 @@ class WerewolfWindow(QDialog):
 
     def _on_host(self, text: str) -> None:
         self._append_message("host", f"🎤 {self.pet_name}（上帝）", text)
-        self.host_spoke.emit(text)
+        self.host_spoke.emit(text, self._voice_cfg.get("host", ""))
 
     def _on_speech(self, seat: int, name: str, text: str, kind: str) -> None:
         if kind == "last_words":
@@ -382,6 +397,11 @@ class WerewolfWindow(QDialog):
             tag = "（你）" if seat == 0 else f"（{seat}号）"
             color = "#7c6cf0" if seat == 0 else ui_style.TEXT
             self._append_message("plain", f"💬 {name}{tag}", text, color=color)
+        # NPC 发言按配音音色朗读（seat=0 是玩家自己，不朗读）
+        if seat != 0:
+            voice = self._voice_cfg.get(str(seat), "")
+            if voice:
+                self.speak_line.emit(text, voice)
 
     def _on_private(self, text: str) -> None:
         self._append_message("private", "🌙 夜晚（仅你可见）", text)
@@ -691,3 +711,103 @@ class WerewolfWindow(QDialog):
         self._stop_director()
         self.game_session_active.emit(False)
         super().closeEvent(event)
+
+    # ------------------------------------------------------------ 角色配音
+    def _npc_names(self) -> List[str]:
+        from app.games.werewolf_agents import PERSONAS
+        return [p["name"] for p in PERSONAS]
+
+    def _default_voice_cfg(self) -> dict:
+        names = [v.name for v in self.voices if getattr(v, "name", "")]
+        cfg = {"host": ""}
+        for i in range(1, 9):
+            cfg[str(i)] = names[(i - 1) % len(names)] if names else ""
+        return cfg
+
+    def _load_voice_cfg(self) -> dict:
+        try:
+            import json
+            p = os.path.join("data", "werewolf_voices.json")
+            if os.path.isfile(p):
+                with io.open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:  # noqa: BLE001
+            log.debug("配音配置加载失败：%s", e)
+        return self._default_voice_cfg()
+
+    def _save_voice_cfg(self) -> None:
+        import json
+        p = os.path.join("data", "werewolf_voices.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with io.open(p, "w", encoding="utf-8") as f:
+            json.dump(self._voice_cfg, f, ensure_ascii=False, indent=2)
+
+    def _open_voice_dialog(self) -> None:
+        dlg = VoiceCastDialog(
+            self._voice_cfg, self.voices, self.pet_name,
+            self._npc_names(), parent=self)
+        if dlg.exec_() == QDialog.DialogCode.Accepted:
+            self._voice_cfg = dlg.result_cfg()
+            self._save_voice_cfg()
+            self.phase_lbl.setText("角色配音已保存")
+
+
+class VoiceCastDialog(QDialog):
+    """角色配音对话框：主持人 + 8 个 NPC 各选一个音色。"""
+
+    def __init__(self, cfg: dict, voices, pet_name: str,
+                 npc_names: List[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("角色配音")
+        self.setMinimumWidth(400)
+        self._combos: Dict[str, QComboBox] = {}
+        names = [v.name for v in (voices or []) if getattr(v, "name", "")]
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(10)
+
+        title = QLabel("角色配音")
+        title.setStyleSheet("font-weight: 800; font-size: 13pt;")
+        lay.addWidget(title)
+        sub = QLabel("为每个角色选择音色：主持人默认使用桌宠音色；其他角色选择「静音」则不朗读。")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: #8a8a99; font-size: 9pt;")
+        lay.addWidget(sub)
+
+        self._add_row(lay, "host", f"{pet_name}（主持人·上帝）",
+                       cfg.get("host", ""),
+                       [("默认（桌宠音色）", "")] + [(n, n) for n in names])
+        for i in range(1, 9):
+            nm = npc_names[i - 1] if i - 1 < len(npc_names) else f"{i}号"
+            self._add_row(lay, str(i), f"{i}号 {nm}",
+                           cfg.get(str(i), ""),
+                           [("静音", "")] + [(n, n) for n in names])
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_ok = QPushButton("确定")
+        btn_ok.setObjectName("primary_btn")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        row.addWidget(btn_ok)
+        row.addWidget(btn_cancel)
+        lay.addLayout(row)
+
+    def _add_row(self, lay, key, label, current, options) -> None:
+        r = QHBoxLayout()
+        lb = QLabel(label)
+        lb.setMinimumWidth(160)
+        cb = QComboBox()
+        for text, data in options:
+            cb.addItem(text, data)
+        idx = cb.findData(current)
+        cb.setCurrentIndex(idx if idx >= 0 else 0)
+        r.addWidget(lb)
+        r.addWidget(cb, 1)
+        lay.addLayout(r)
+        self._combos[key] = cb
+
+    def result_cfg(self) -> dict:
+        return {k: str(cb.currentData() or "") for k, cb in self._combos.items()}
