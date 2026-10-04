@@ -133,7 +133,7 @@ Smart-Desktop-Pet/
 │   │   └── cubism-sdk/      # 桌面 SDK（QWebEngineView 内嵌用）
 │   ├── voice/               # TTS 3 引擎 + ASR + 角色情绪
 │   ├── engine/              # state / tools(32) / chat_store / reminder / screenshot
-│   │   └── tools/           # 32 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts 分组
+│   │   └── tools/           # 51 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts _audio _weather _timer _power _filesearch _webfetch _ocr _runner _tts_mute 分组
 │   ├── games/               # gomoku + werewolf + werewolf_agents + director
 │   ├── ui/                  # 桌宠本体 + 聊天窗 + 设置 + 5 子游戏窗口 + UI 控制器
 │   ├── mcp/                 # MCP stdio JSON-RPC 协议 + filesystem server
@@ -161,7 +161,7 @@ Smart-Desktop-Pet/
 | [docs/quickstart.md](docs/quickstart.md) | 5 分钟极简版（跳过 README 的炫技部分） |
 | [docs/architecture.md](docs/architecture.md) | 启动时序 + Live2D 渲染子图 + Agent 流程图 |
 | [docs/config-reference.md](docs/config-reference.md) | `config.yaml` 全部字段（默认/范围/说明） |
-| [docs/tool-catalog.md](docs/tool-catalog.md) | 32 个工具完整说明 + 如何加新工具 |
+| [docs/tools-reference.md](docs/tools-reference.md) | 51 个工具完整说明（触发方式 / 沙箱 / host 校验）+ 如何加新工具 |
 | [docs/tts-integration.md](docs/tts-integration.md) | edge / gptsovits / minimax 三引擎 + 自愈逻辑 |
 | [docs/live2d-integration.md](docs/live2d-integration.md) | `.model3.json` + profile YAML + cubism-sdk 来源 + fallback 触发 |
 | [docs/emotion-system.md](docs/emotion-system.md) | 11 个 Emotion 枚举 + 标签解析 + 关键词兜底 |
@@ -181,7 +181,7 @@ Smart-Desktop-Pet/
 - **切换 Live2D？** `config.yaml` → `pet.renderer: live2d` + `pet.live2d.model_dir`；不可用自动 fallback sprite
 - **切换 TTS？** `config.yaml` → `character.tts_engine: edge | gptsovits | minimax`
 - **GPT-SoVITS 启动失败？** 看 `data/tts_api.log`；确认 `voice/<角色>/` 有参考音频
-- **想加自己的工具？** 参考 [docs/tool-catalog.md](docs/tool-catalog.md) 末尾"如何添加新工具"
+- **想加自己的工具？** 参考 [docs/tools-reference.md](docs/tools-reference.md) 末尾"添加工具（开发者指南）"
 - **想加自己的角色？** 复制 `characters/jingyuniang.yaml`，改 `system_prompt` / `tts_engine` / `live2d_model_dir`
 
 ---

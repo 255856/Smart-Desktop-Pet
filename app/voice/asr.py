@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Callable, Optional
 
@@ -10,6 +11,14 @@ import numpy as np
 from app.core.qt_compat import QObject, Signal
 
 log = logging.getLogger(__name__)
+
+# 必须在 import torch / faster_whisper / ctranslate2 之前设（这些库在 import 时加载 OpenMP/MKL）。
+# 解决 Windows 上 c10.dll "DLL 初始化失败" + faster-whisper 模型下载 SSL 失败两个常见坑。
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("KMP_WARNINGS", "0")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_DISABLE_SSL_VERIFICATION", "1")
 
 
 def asr_available() -> bool:
@@ -42,6 +51,7 @@ class SpeechRecognizer(QObject):
     recording_finished = Signal()
     text_ready = Signal(str)
     error = Signal(str)
+    model_loaded = Signal(object)   # WhisperModel 实例就绪后 emit 一次（wake_word 等可订阅）
 
     SAMPLE_RATE = 16000          # whisper 标准采样率
     _AVERAGE_MAX_SECONDS = 20.0  # 单次最长录音（超过自动截断）
@@ -132,29 +142,83 @@ class SpeechRecognizer(QObject):
             self.error.emit(f"语音识别失败：{e}")
 
     def _get_model(self):
-        with self._model_lock:
-            if self._model is None:
-                _patch_hf_download()
-                from faster_whisper import WhisperModel
-                log.info("加载 faster-whisper 模型 %s (首次较慢)…", self.model_size)
-                self._model = WhisperModel(
-                    self.model_size, device="cpu", compute_type="int8")
-            return self._model
+        if self._model is None:
+            with self._model_lock:
+                if self._model is None:    # 双重检查
+                    _patch_hf_download()
+                    # 优先用本地 cache（避免 hf-mirror 间歇性卡死 / SSL 报错）
+                    local_path = _resolve_local_model_path(self.model_size)
+                    if local_path is not None:
+                        log.info("加载 faster-whisper 模型 %s (本地缓存: %s)",
+                                 self.model_size, local_path)
+                        from faster_whisper import WhisperModel
+                        self._model = WhisperModel(
+                            local_path, device="cpu", compute_type="int8")
+                    else:
+                        log.info("加载 faster-whisper 模型 %s (首次较慢，需下载)…",
+                                 self.model_size)
+                        from faster_whisper import WhisperModel
+                        self._model = WhisperModel(
+                            self.model_size, device="cpu", compute_type="int8",
+                            local_files_only=True)
+                    self.model_loaded.emit(self._model)
+        return self._model
+
+
+_LOCAL_MODEL_NAMES = {
+    "tiny": "faster-whisper-tiny",
+    "tiny.en": "faster-whisper-tiny.en",
+    "base": "faster-whisper-base",
+    "base.en": "faster-whisper-base.en",
+    "small": "faster-whisper-small",
+    "small.en": "faster-whisper-small.en",
+    "medium": "faster-whisper-medium",
+    "medium.en": "faster-whisper-medium.en",
+    "large-v1": "faster-whisper-large-v1",
+    "large-v2": "faster-whisper-large-v2",
+    "large-v3": "faster-whisper-large-v3",
+}
+
+
+def _resolve_local_model_path(model_size_or_id: str):
+    """从 HF Hub 本地 cache 找 faster-whisper 模型 snapshot 目录。
+
+    返回 snapshot 目录路径（model.bin 所在目录），或 None（cache miss）。
+    """
+    from pathlib import Path
+    # 直接路径
+    p = Path(model_size_or_id).expanduser()
+    if p.is_dir() and (p / "model.bin").is_file():
+        return str(p)
+    # 映射 tiny → faster-whisper-tiny
+    repo_id = _LOCAL_MODEL_NAMES.get(model_size_or_id, model_size_or_id)
+    if "/" not in repo_id:
+        repo_id = f"Systran/{repo_id}"
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+    repo_dir = cache_root / f"models--{repo_id.replace('/', '--')}"
+    if not repo_dir.is_dir():
+        return None
+    snapshots = repo_dir / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    # 取最新 snapshot（按 mtime）
+    candidates = [d for d in snapshots.iterdir() if d.is_dir()]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda d: d.stat().st_mtime)
+    if not (latest / "model.bin").is_file():
+        return None
+    return str(latest)
 
 
 def _patch_hf_download() -> None:
-    """HuggingFace 国内下载补丁（仅影响 HF 下载，不影响全局 SSL 验证）。
+    """HuggingFace 环境变量补丁（**不要 monkey-patch hf_hub_download**）。
 
-    修复：不再修改 ssl._create_default_https_context（会禁用整个进程的 HTTPS 验证），
-    改为只让 huggingface_hub 的内部 Session 关闭验证。
+    只设环境变量。之前试过 monkey-patch `huggingface_hub.hf_hub_download`，
+    反而让 WhisperModel 构造内部死循环（patch 破坏了其本地 cache 解析路径）。
+    本地 cache 命中由 _get_model 的 _resolve_local_model_path 显式处理——
+    本地有就直接传本地路径给 WhisperModel，根本不进下载流程。
     """
     import os
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    # 不再禁用全局 SSL 验证 —— 改为局部处理
-    import urllib3
-    urllib3.disable_warnings()
-    try:
-        from huggingface_hub.utils._http import get_session
-        get_session().verify = False
-    except Exception:  # noqa: BLE001
-        pass
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")

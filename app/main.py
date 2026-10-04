@@ -8,6 +8,23 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# 必须在 import torch / faster_whisper / Qt 之前设：
+# 1) OMP_NUM_THREADS=1：避免 torch OpenMP 与 Qt 线程冲突导致 c10.dll 初始化失败
+# 2) KMP_DUPLICATE_LIB_OK=TRUE：避免 Intel MKL 重复加载报错
+# 3) KMP_WARNINGS=0：屏蔽 KMP 警告噪音
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("KMP_WARNINGS", "0")
+
+# 关键顺序：ctranslate2 必须在 PyQt5 **之前** import。
+# 实测（Windows / RTX 4060）：Qt 先加载时，ctranslate2 的 OpenMP DLL 与 Qt 冲突，
+# 之后 WhisperModel(...) 构造会永久卡死（30s+ 无响应）；
+# ctranslate2 先加载则全链路 <1s。ctranslate2 import 仅 ~0.1s，代价可忽略。
+try:
+    import ctranslate2  # noqa: F401
+except Exception:  # noqa: BLE001
+    pass
+
 # 否则 PyQtWebEngine 在 headless 下会警告 "Please set Qt::AA_ShareOpenGLContexts"
 try:
     from PyQt5.QtCore import Qt as _Qt
@@ -191,6 +208,9 @@ def _build_tts(cfg, root: Path) -> TTS:
         _te = _store.get("tts_enabled", None)
         if _te is not None:
             cfg.character.tts_enabled = bool(_te)
+        _cv = _store.get("current_voice", None)
+        if _cv:
+            cfg.character.current_voice = str(_cv)
     except (OSError, ValueError, KeyError, TypeError) as e:
         log.debug("ignored: %s", e)
     tts_cache = root / "assets" / "tts_cache"
@@ -198,10 +218,16 @@ def _build_tts(cfg, root: Path) -> TTS:
     if engine == "gptsovits":
         # 方案 B：本地 GPT-SoVITS（完全免费，需先启动本地 api_v2 服务）
         from app.voice.gptsovits_tts import GPTSoVITSTTS
+        _av = cfg.character.active_voice()
+        if _av is not None:
+            _ref, _pt = _av.ref_audio, _av.prompt_text
+        else:
+            _ref = getattr(cfg.character, "gptsovits_ref_audio", "")
+            _pt = getattr(cfg.character, "gptsovits_prompt_text", "")
         tts = GPTSoVITSTTS(
             url=getattr(cfg.character, "gptsovits_url", "http://127.0.0.1:9880"),
-            ref_audio=getattr(cfg.character, "gptsovits_ref_audio", ""),
-            prompt_text=getattr(cfg.character, "gptsovits_prompt_text", ""),
+            ref_audio=_ref,
+            prompt_text=_pt,
             cache_dir=tts_cache,
         )
         log.info("TTS 引擎：GPT-SoVITS 本地（%s）", tts.url)

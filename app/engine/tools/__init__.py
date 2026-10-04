@@ -3,8 +3,12 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from ._core import Tool, ToolRegistry
-from . import _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search
+from ._core import Tool, ToolRegistry, is_safe_url
+from . import (
+    _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search,
+    _audio, _weather, _timer, _power, _filesearch, _webfetch, _ocr, _runner,
+    _tts_mute,
+)
 
 
 def build_default_tools(
@@ -36,8 +40,17 @@ def build_default_tools(
     _file.register(reg)
     _shortcuts.register(reg)
     _search.register(reg, tavily_api_key=tavily_api_key)
+    _audio.register(reg)
+    _weather.register(reg)
+    _timer.register(reg)
+    _power.register(reg)
+    _filesearch.register(reg)
+    _webfetch.register(reg)
+    _ocr.register(reg)
+    _runner.register(reg)
+    _tts_mute.register(reg)
 
     return reg
 
 
-__all__ = ["Tool", "ToolRegistry", "build_default_tools"]
+__all__ = ["Tool", "ToolRegistry", "build_default_tools", "is_safe_url"]

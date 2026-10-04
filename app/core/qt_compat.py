@@ -5,7 +5,7 @@ try:
     from PyQt5 import QtCore, QtGui, QtWidgets
     from PyQt5.QtCore import (
         pyqtSignal as Signal, pyqtSlot as Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
-        QStringListModel, QEvent, QUrl, QBuffer, QByteArray,
+        QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray,
     )
     from PyQt5.QtCore import Qt as _Qt
     if not hasattr(Qt, "AlignmentFlag"):
@@ -61,7 +61,7 @@ try:
 except ImportError:
     # PySide6 fallback（开发环境备用）
     from PySide6 import QtCore, QtGui, QtWidgets
-    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEvent, QUrl, QBuffer, QByteArray
+    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray
     from PySide6.QtGui import (
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
@@ -109,7 +109,7 @@ def event_local_pos(evt) -> "QPoint":
 
 __all__ = [
     "BACKEND", "Signal", "Slot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
-    "QEvent", "QUrl", "QBuffer", "QByteArray",
+    "QEventLoop", "QEvent", "QUrl", "QBuffer", "QByteArray",
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
     "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",

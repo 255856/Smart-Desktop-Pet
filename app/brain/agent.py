@@ -15,7 +15,8 @@ log = logging.getLogger(__name__)
 MAX_TURNS = 6
 
 # 需要用户确认的危险工具集合
-DANGEROUS_TOOLS = {"open_app", "open_website"}
+DANGEROUS_TOOLS = {"open_app", "open_website", "lock_screen", "kill_process", "run_script",
+                   "set_wifi", "set_bluetooth", "shutdown_computer"}
 
 # 连续多少轮纯调工具（无文字）后强制进入 final 阶段
 MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3

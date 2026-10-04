@@ -42,11 +42,23 @@ if TYPE_CHECKING:
 from app.voice.character import Emotion, guess_emotion, parse_reply
 from app.core.config import CharacterConfig, LLMConfig
 from app.brain.llm_client import ChatMessage, LLMClient, LLMError
-from app.brain.agent import AgentLoop
+from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
 from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
 from app.engine.tools import ToolRegistry
 from app.voice.asr import SpeechRecognizer, asr_available
 from app.engine.chat_store import ChatStore
+
+# 危险工具的中文标签（弹窗里给主人看）
+_DANGEROUS_LABELS = {
+    "open_app": "打开应用",
+    "open_website": "打开网址",
+    "lock_screen": "锁屏",
+    "kill_process": "杀进程",
+    "run_script": "执行脚本",
+    "set_wifi": "开关 Wi-Fi",
+    "set_bluetooth": "开关蓝牙",
+    "shutdown_computer": "关机 / 重启",
+}
 from app.brain.trace import TraceRecorder
 from app.ui import ui_style
 from app.ui.memory_panel import MemoryDialog
@@ -563,8 +575,29 @@ class ChatWindow(QWidget):
             self.asr.error.connect(self._on_asr_error)
             self.asr.recording_started.connect(self._on_recording_start)
             self.asr.recording_finished.connect(self._on_recording_finish)
+            # ASR 模型加载完（首次较慢），共享给 wake_word 避免重复加载
+            self.asr.model_loaded.connect(self._share_asr_model_to_wake_word)
+            # 预热：延迟 1s 在主线程调度 _get_model()，让首次说话瞬时返回
+            self._warmup_asr_model()
         else:
             log.warning("ASR 不可用（未安装 sounddevice / faster-whisper，或配置关闭），语音输入按钮将隐藏")
+
+        # 语音唤醒（WakeWord）：后台始终监听麦克风
+        # 默认未启动；用户设置面板里勾选后由 ui_controller 调 start()
+        self.wake_word = None
+        if asr_available():
+            try:
+                from app.voice.wake_word import WakeWordRecognizer, wake_available
+                if wake_available():
+                    self.wake_word = WakeWordRecognizer(
+                        model_size=self.asr_model or "tiny",
+                        language=self.asr_language or "zh",
+                    )
+                    self.wake_word.command_ready.connect(self._on_speech_text)
+                    log.info("WakeWordRecognizer 已实例化（未启动，由 ui_controller 决定）")
+            except Exception:  # noqa: BLE001
+                log.exception("WakeWordRecognizer 初始化失败")
+                self.wake_word = None
 
         self.setWindowTitle(f"和 {char_cfg.name} 聊天")
         # 设置窗口图标
@@ -1257,6 +1290,119 @@ class ChatWindow(QWidget):
         """录音已停止（等待识别结果）。"""
         # 已在 _on_mic_released 处理
 
+    def _share_asr_model_to_wake_word(self, model) -> None:
+        """ASR 模型加载完（首次较慢），共享给 wake_word 避免重复加载。"""
+        ww = getattr(self, "wake_word", None)
+        if ww is None:
+            return
+        try:
+            ww.set_shared_model(model)
+            log.info("WakeWord 共享 ASR 模型")
+        except Exception:  # noqa: BLE001
+            log.exception("WakeWord set_shared_model failed")
+
+    def _warmup_asr_model(self) -> None:
+        """预热 ASR 模型（ctranslate2 首次初始化 3~5s）。
+
+        用 QTimer.singleShot 延迟 1s 调度到主线程，避免 chat_window 构造时立刻抢 CPU。
+        主线程通过 _do_warmup 跑 self.asr._get_model()，让首次说话瞬时返回。
+        失败时仅 debug log（首次说话仍可触发加载）。
+        """
+        if self.asr is None:
+            return
+        try:
+            from app.core.qt_compat import QTimer
+
+            def _do_warmup():
+                model = None
+                # 重试一次：首次加载容易受 OpenMP/MKL 初始化影响
+                for attempt in (1, 2):
+                    try:
+                        model = self.asr._get_model()    # noqa: SLF001
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("ASR 模型预热第 %d 次失败：%s", attempt, e)
+                if model is not None:
+                    log.info("ASR 模型预热完成（首次加载已缓存）")
+                    self._share_asr_model_to_wake_word(model)
+                else:
+                    log.debug("ASR 模型预热 2 次都失败（首次说话时会再尝试）")
+
+            QTimer.singleShot(1000, _do_warmup)
+        except Exception as e:  # noqa: BLE001
+            log.debug("ASR 模型预热启动失败：%s", e)
+
+    def _confirm_dangerous_tool(self, name: str, args_json: str) -> bool:
+        """危险工具执行前的 UI 确认弹窗。
+
+        线程模型（PyQt5 modal dialog 必须主线程）：
+          1. AgentLoop 通过 asyncio.to_thread 在子线程调到这里
+          2. 子线程把"显示弹窗"任务用 QTimer.singleShot(0, ...) 投递到主线程 event queue
+          3. 子线程起 QEventLoop.exec() 阻塞等结果
+          4. 主线程 event loop 调度 → _show_confirm_box 弹 QMessageBox.exec()
+          5. 用户点 Yes/No → 写 holder + 子线程 QEventLoop.quit()
+          6. 子线程退出循环 → 返回结果
+
+        注意：QTimer.singleShot + chat_window 作为 receiver，会让槽函数自动跑在
+        chat_window 所在线程 = 主线程。这是 Qt 跨线程 UI 的官方推荐做法。
+        """
+        # 嵌套防御（防弹窗套弹窗）
+        if getattr(self, "_confirm_in_progress", False):
+            log.warning("嵌套危险工具确认，自动通过（避免套弹窗）")
+            return True
+        if name not in DANGEROUS_TOOLS:
+            # 非危险工具不需要确认
+            return True
+
+        # 解析参数（子线程做，没 Qt 依赖）
+        try:
+            import json as _json
+            args_obj = _json.loads(args_json) if isinstance(args_json, str) else args_json
+        except Exception:  # noqa: BLE001
+            args_obj = {"raw": args_json}
+        args_pretty = "\n".join(f"  {k}: {v}" for k, v in (args_obj or {}).items())
+
+        # 子线程：起本地 QEventLoop + 创建 holder
+        from PyQt5.QtCore import QEventLoop, QTimer
+        loop = QEventLoop()
+        holder = {"ok": False}
+
+        def _on_result(ok: bool):
+            holder["ok"] = ok
+            self._confirm_in_progress = False
+            loop.quit()
+
+        self._confirm_in_progress = True
+        # 投递到主线程执行 _show_confirm_box（Qt 默认 QueuedConnection）
+        QTimer.singleShot(
+            0,
+            lambda: self._show_confirm_box(name, args_pretty, _on_result))
+        # 子线程阻塞等
+        loop.exec()
+        return holder.get("ok", False)
+
+    def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
+        """主线程槽：弹 QMessageBox → 写结果 → 让子线程 QEventLoop 退出。"""
+        from app.core.qt_compat import QMessageBox
+        try:
+            label = _DANGEROUS_LABELS.get(name, name)
+            text = (f"桌宠想要调用危险工具：\n\n"
+                    f"工具：{label}\n"
+                    f"参数：\n{args_pretty or '  (无)'}\n\n"
+                    f"是否允许？")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("危险工具确认")
+            box.setText(text)
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            result = box.exec()
+            on_done(result == QMessageBox.StandardButton.Yes)
+        except Exception:  # noqa: BLE001
+            log.exception("confirm dialog failed")
+            on_done(False)
+
     def _on_speech_text(self, text: str) -> None:
         """语音识别完成：填入输入框并自动发送。"""
         self._mic_busy = False
@@ -1353,7 +1499,7 @@ class ChatWindow(QWidget):
                 # 这样更智能：
                 #   模型可以自己决定调几次工具、什么时候给 final answer。
                 self._worker = _AgentWorker(
-                    AgentLoop(client, self.registry),
+                    AgentLoop(client, self.registry, confirm_tool=self._confirm_dangerous_tool),
                     [{"role": m.role, "content": m.content} for m in msgs])
                 self._worker.chunk.connect(self._on_chunk)
                 self._worker.tool_used.connect(self._on_tool)
@@ -1528,7 +1674,9 @@ class ChatWindow(QWidget):
             if sentence:
                 self._launch_sentence_prepare(sentence)
         self._tts_sent_tail = sent_tail + last_end
-        self._tts_tail = ""
+        # 保留无句末标点的尾部；_on_done 时 _flush_tts_tail_to_prepare 会
+        # 为它启动 prepare（否则尾部丢失 → 只能靠 reply_ready 整段补播 → 重复播报）
+        self._tts_tail = scan[last_end:]
 
     def _launch_sentence_prepare(self, sentence: str) -> None:
         """为单句启动后台 QThread 调 tts.prepare(sentence)，完成后 emit sentence_ready。"""
@@ -1672,8 +1820,10 @@ class ChatWindow(QWidget):
         # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
         self.thinking_stopped.emit()
         self.streaming_done.emit()
-        # 通知外部（pet 窗口）切表情（TTS 已通过 _tts_drain_sentences / _flush_tts_tail 启动播放）
-        self.reply_ready.emit(parsed.text, parsed.emotion, bool(self.char_cfg.tts_enabled))
+        # 通知外部（pet 窗口）切表情。TTS 由本类逐句链路负责（流式期间逐句
+        # prepare+speak + _flush_tts_tail_to_prepare 补尾部），这里必须传 False：
+        # 若传 True，ui_controller 会把整段文本再 speak 一遍 → 重复播报。
+        self.reply_ready.emit(parsed.text, parsed.emotion, False)
         # 清理状态
         self._current_bot_msg = None
         self._streaming_anchor_pos = None

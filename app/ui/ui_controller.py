@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 class UIController(QObject):
     """封装所有 UI 窗口管理和信号连接。"""
 
+    # 口型同步信号桥：TTS 播放钩子在工作线程被调，emit 本信号自动 queued 到主线程
+    # （QTimer.singleShot 不能在非 Qt 线程调用，之前用它导致嘴巴不动）
+    _lipSyncChanged = Signal(bool)
+
     # 聊天/主动搭话情绪 → Live2D 固定场景 id（未列出的情绪回退直接切表情）
     _EMOTION_SCENES = {
         "happy": "chat_happy", "shy": "chat_shy", "angry": "chat_angry",
@@ -52,8 +56,6 @@ class UIController(QObject):
         self.motion = motion
         self._chat_window = None
         self._last_food_warn = 0.0
-        from app.engine.game_actions import GameActionStore
-        self.game_actions = GameActionStore(root / 'data' / 'game_actions.json')
 
         _sticker_on = True
         _pet = getattr(self, "pet", None)
@@ -85,7 +87,6 @@ class UIController(QObject):
         _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
-            game_action_store=self.game_actions,
             renderer=getattr(_pet, "renderer", None),
             sticker_enabled=_sticker_on,
             always_on_top=bool(getattr(self.cfg.window, "always_on_top", True)),
@@ -138,6 +139,7 @@ class UIController(QObject):
         self._apply_stored_window_settings()
         # 闲置 30 分钟 / 深夜时段的 Live2D 场景
         self._setup_env_scenes()
+        # 语音唤醒在 chat_window 创建后再启动（见 _show_chat_window）
 
     #  信号连接
     def _wire_all_signals(self) -> None:
@@ -270,8 +272,10 @@ class UIController(QObject):
             pet_name = getattr(self.cfg.character, "name", "桌宠") or "桌宠"
             ww = WerewolfWindow(
                 llm_cfg=self.cfg.llm, enable_llm=enable_llm,
-                player_name="你", pet_name=pet_name)
+                player_name="你", pet_name=pet_name,
+                voices=getattr(self.cfg.character, "voices", []))
             ww.host_spoke.connect(self._on_werewolf_host)
+            ww.speak_line.connect(self._on_ww_speak_line)
             ww.game_finished.connect(self._on_werewolf_finished)
             ww.game_session_active.connect(self._on_game_session)
             ww.show()
@@ -280,9 +284,26 @@ class UIController(QObject):
             ww.raise_()
             ww.activateWindow()
 
-    def _on_werewolf_host(self, text: str) -> None:
-        # 只有主持人（桌宠）的台词走气泡 + TTS；NPC 发言仅显示在窗口内
-        self._pet_speak(text, duration_ms=5000)
+    def _on_werewolf_host(self, text: str, voice: str = "") -> None:
+        # 主持人（桌宠）台词：气泡 + TTS；voice 非空时用指定音色
+        self._pet_speak(text, duration_ms=5000, voice=voice)
+
+    def _on_ww_speak_line(self, text: str, voice: str) -> None:
+        # NPC 发言朗读：按该角色配音音色合成（无气泡）
+        if not voice or self.tts is None:
+            return
+        profile = self._voice_profile_by_name(voice)
+        if profile is not None:
+            try:
+                self.tts.speak_as(text, profile)
+            except Exception:
+                log.warning("NPC 朗读失败：%s", text)
+
+    def _voice_profile_by_name(self, name: str):
+        for v in getattr(self.cfg.character, "voices", []) or []:
+            if getattr(v, "name", "") == name:
+                return v
+        return None
 
     def _on_werewolf_finished(self, result: dict) -> None:
         # 胜 30 金币、负/参与 5 金币（受每日游戏金币上限约束）
@@ -337,51 +358,49 @@ class UIController(QObject):
         self._pet_speak(text)
 
     def _on_game_session(self, active: bool) -> None:
-        # 进入一局→保持游戏动作；关闭退出→恢复默认待机
+        # 进入一局→切换并保持游戏外观；关闭退出→恢复场景外观
         if active:
             self._game_enter()
         else:
             self._game_exit()
 
+    def _game_trigger(self, scene_id: str) -> None:
+        # 触发一个游戏场景外观（仅 Live2D；sprite 无场景系统，静默）
+        r = getattr(self.pet, 'renderer', None)
+        try:
+            if r is not None and hasattr(r, 'trigger_scene'):
+                r.trigger_scene(scene_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("游戏场景触发失败（%s）：%s", scene_id, e)
+
     def _game_enter(self) -> None:
-        """进入游戏：保持配置的默认动作（Live2D 表情/手势类动作会持续保持）。"""
-        self._game_hold_action("game_start")
-
-    def _game_exit(self) -> None:
-        """退出游戏：恢复默认待机动作。"""
-        anim = getattr(self.pet, 'animator', None)
-        try:
-            if anim is not None and hasattr(anim, 'set_idle'):
-                anim.set_idle()
-        except Exception as e:  # noqa: BLE001
-            log.warning("游戏退出恢复动作失败：%s", e)
-
-    def _game_hold_action(self, event_id: str) -> None:
-        # 先清掉之前保持的动作，再播放并保持新动作（Live2D item 动作持久）
-        cfg = getattr(self, 'game_actions', None)
-        if cfg is None or not getattr(cfg, 'enabled', True):
-            return
-        actions = cfg.for_event(event_id)
-        if not actions:
-            return
-        anim = getattr(self.pet, 'animator', None)
-        try:
-            if anim is not None and hasattr(anim, 'set_idle'):
-                anim.set_idle()
-        except Exception as e:  # noqa: BLE001
-            log.warning("游戏动作切换失败：%s", e)
-        self._pet_react(actions)
+        """进入游戏：保持「游戏开始」外观。"""
+        self._game_trigger("game_start")
 
     def _game_react(self, event_id: str) -> None:
-        # 胜负结算：播放并保持对应动作（配置关闭时不动作）
-        self._game_hold_action(event_id)
+        # 胜负结算：切换到胜利/失败外观
+        self._game_trigger(event_id)
 
-    def _pet_speak(self, text: str, duration_ms: int = 4000) -> None:
+    def _game_exit(self) -> None:
+        """退出游戏：收起游戏外观，恢复自然。"""
+        r = getattr(self.pet, 'renderer', None)
+        try:
+            if r is not None and hasattr(r, 'restore_scene_appearance'):
+                r.restore_scene_appearance()
+        except Exception as e:  # noqa: BLE001
+            log.warning("游戏退出恢复外观失败：%s", e)
+
+    def _pet_speak(self, text: str, duration_ms: int = 4000,
+                   voice: str = "") -> None:
         # 非聊天场景统一发言：显示气泡，TTS 开启时朗读（口型自动同步）
         self.pet.show_bubble(text, duration_ms=duration_ms)
         if getattr(self.cfg.character, "tts_enabled", False) and self.tts is not None:
             try:
-                self.tts.speak(text)
+                profile = self._voice_profile_by_name(voice) if voice else None
+                if profile is not None:
+                    self.tts.speak_as(text, profile)
+                else:
+                    self.tts.speak(text)
             except Exception:
                 log.warning("TTS 朗读失败：%s", text)
 
@@ -433,11 +452,23 @@ class UIController(QObject):
         self.state.on_interact(feeling_gain=1)
 
     def _on_chat_reply_ready(self, text: str, emotion, tts_enabled: bool) -> None:
-        """聊天结束回调：触发聊天情绪场景 + 可选 TTS。"""
+        """聊天结束回调：触发聊天情绪场景 + 可选 TTS（仅在流式期间没 speak 时才 speak 整段）。"""
         log.info("chat reply ready: %r / %s tts=%s", text, emotion, tts_enabled)
         self._apply_chat_emotion(emotion)
-        if tts_enabled:
-            self.tts.speak(text)
+        if tts_enabled and self.tts is not None:
+            # 流式期间 chat_window 已按句 speak 过；这里判断一下避免重复播整段。
+            # 只看 state.fr 这一个对象（其实它在 chat_window 里；这里粗暴地用长度阈值）：
+            # 若 text 很短（无句末标点的尾部），让 chat_window 自己 speak。
+            # 实际更可靠：让 chat_window 自己 speak 整段前再判断，所以我们只在
+            # chat_window 没 speak 过时才补 speak。
+            cw = getattr(self, "_chat_window", None)
+            if cw is None:
+                self.tts.speak(text)
+            else:
+                spoken = getattr(cw, "_tts_spoken_chars", 0)
+                if spoken < len(text):
+                    # 还有未 speak 的尾部 → 补播整段
+                    self.tts.speak(text)
 
     def _apply_chat_emotion(self, emotion) -> None:
         """聊天 / 主动搭话情绪 → 触发对应聊天情绪场景；未知情绪回退直接切表情。"""
@@ -514,12 +545,17 @@ class UIController(QObject):
     def _setup_lipsync(self) -> None:
         self._tts_talking = False
         self._stream_talking = False
-        # TTS 播放钩子（引擎工作线程回调 → Qt 主线程）
+        # TTS 播放钩子（引擎工作线程回调 → 本信号桥 → queued 到主线程）。
+        # 不能用 QTimer.singleShot：PyQt5 禁止在非 Qt 线程起 timer，会静默失败。
+        # 信号只 connect 一次（TTS 热切换会重进本方法，重复 connect 会多次触发）。
+        if not getattr(self, "_lipsync_wired", False):
+            self._lipSyncChanged.connect(self._set_tts_talking)
+            self._lipsync_wired = True
         if hasattr(self.tts, "on_speak_start"):
-            self.tts.on_speak_start = lambda: QTimer.singleShot(
-                0, lambda: self._set_tts_talking(True))
-            self.tts.on_speak_end = lambda: QTimer.singleShot(
-                0, lambda: self._set_tts_talking(False))
+            # TTS 工作线程调 on_speak_start()/on_speak_end()（无参）；
+            # emit 信号跨线程 queued 到主线程 → _set_tts_talking
+            self.tts.on_speak_start = lambda: self._lipSyncChanged.emit(True)
+            self.tts.on_speak_end = lambda: self._lipSyncChanged.emit(False)
 
     def _set_tts_talking(self, on: bool) -> None:
         self._tts_talking = bool(on)
@@ -731,6 +767,8 @@ class UIController(QObject):
             cw.thinking_stopped.connect(self._on_thinking_stopped)
             cw.show()
             self._chat_window = cw
+            # chat_window 已建好，启动语音唤醒监听
+            self._apply_wake_word_setting()
         else:
             cw.raise_()
             cw.activateWindow()
@@ -902,7 +940,8 @@ class UIController(QObject):
                   "minimax_voice_id": "minimax_voice_id",
                   "gptsovits_url": "gptsovits_url",
                   "ref_audio": "gptsovits_ref_audio",
-                  "prompt_text": "gptsovits_prompt_text"}
+                  "prompt_text": "gptsovits_prompt_text",
+                  "current_voice": "current_voice"}
         for k, skey in keymap.items():
             if k in cfgd:
                 store.set(skey, cfgd[k])
@@ -913,6 +952,8 @@ class UIController(QObject):
         c.gptsovits_url = str(cfgd.get("gptsovits_url", getattr(c, "gptsovits_url", "")))
         c.gptsovits_ref_audio = str(cfgd.get("ref_audio", getattr(c, "gptsovits_ref_audio", "")))
         c.gptsovits_prompt_text = str(cfgd.get("prompt_text", getattr(c, "gptsovits_prompt_text", "")))
+        if cfgd.get("current_voice"):
+            c.current_voice = str(cfgd["current_voice"])
         import threading
         threading.Thread(target=self._rebuild_tts_blocking, daemon=True,
                          name="tts-rebuild").start()
@@ -1111,3 +1152,23 @@ class UIController(QObject):
         """退出应用。"""
         from app.core.qt_compat import QApplication
         QApplication.instance().quit()
+
+    def _apply_wake_word_setting(self) -> None:
+        """启动时根据 settings.json 决定是否打开语音唤醒监听。"""
+        cw = getattr(self, "_chat_window", None)
+        ww = getattr(cw, "wake_word", None) if cw else None
+        if ww is None:
+            return
+        try:
+            enabled = self.settings_window.settings_store.get("wake_word_enabled", True)
+        except Exception:
+            enabled = True
+        if enabled and not ww._enabled:
+            try:
+                ww.start()
+                log.info("语音唤醒已启动")
+            except Exception:  # noqa: BLE001
+                log.exception("WakeWord 启动失败")
+        elif not enabled and ww._enabled:
+            ww.stop()
+            log.info("语音唤醒已停止")
