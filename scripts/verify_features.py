@@ -33,6 +33,17 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     results.append((name, status, detail))
 
 
+def note(name: str, detail: str = "") -> None:
+    """纯信息项：不计入 OK / FAIL，也不影响退出码。
+
+    用于「运行时数据存在哪」这类参考信息。data/ 与 settings.json 都是
+    .gitignore 的运行时产物，全新检出的机器上不存在才是正常状态 ——
+    早先把它们算成 FAIL，导致 verify_features 在 CI（干净检出）上
+    必然失败，而本地因为跑过应用有这些文件所以一直显示通过。
+    """
+    results.append((name, "NOTE", detail))
+
+
 def _parse_tool_markers(text):
     return [
         {"id": f"c{i}", "name": m.group(1), "arguments": m.group(2)}
@@ -273,9 +284,10 @@ def main() -> int:
     for path, desc in data_files:
         if path.exists():
             size = path.stat().st_size
-            check(f"  {path}", True, f"{desc} · {size} bytes")
+            note(f"  {path}", f"{desc} · {size} bytes")
         else:
-            check(f"  {path}", False, f"{desc} · 未生成")
+            # 未生成是全新机器的正常状态，不是失败
+            note(f"  {path}", f"{desc} · 未生成（运行时产物，首次启动后出现）")
 
     # ===== 四、Eval 套件静态校验 =====
     print("\n[四] Eval 套件")
@@ -387,7 +399,8 @@ def main() -> int:
     print("\n" + "=" * 70)
     ok = sum(1 for r in results if r[1] == "OK")
     fail = sum(1 for r in results if r[1] == "FAIL")
-    print(f"总计：{ok} OK, {fail} FAIL, {len(results)} 项")
+    notes = sum(1 for r in results if r[1] == "NOTE")
+    print(f"总计：{ok} OK, {fail} FAIL, {notes} 信息项, 共 {len(results)} 项")
     if fail:
         print("\n失败项：")
         for n, s, d in results:

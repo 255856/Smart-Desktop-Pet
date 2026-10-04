@@ -43,10 +43,36 @@ jobs:
           # stdout 的代码都会 UnicodeEncodeError。显式钉死 UTF-8，
           # 避免依赖 runner 的本地化设置。
           PYTHONIOENCODING: utf-8
-        run: pytest tests/ -q --no-header --cov=app --cov-report=term-missing --cov-fail-under=25
+        shell: pwsh
+        # 失败时把 pytest 摘要写进 run 页面顶部的 Job Summary：
+        # Actions 的完整日志需要登录才能下载，而 run 页面是公开可读的，
+        # 挂在 summary 里才能一眼看到是哪个用例挂了。
+        run: |
+          pytest tests/ -q --no-header --tb=short -rf `
+            --cov=app --cov-report=term-missing --cov-fail-under=25 2>&1 |
+            Tee-Object -FilePath pytest.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            "## pytest 失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Get-Content pytest.log -Tail 80 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          exit $code
 
       - name: Verify features (no GUI)
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONIOENCODING: utf-8
-        run: python scripts/verify_features.py --no-gui
+        shell: pwsh
+        run: |
+          python scripts/verify_features.py --no-gui 2>&1 |
+            Tee-Object -FilePath verify.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            "## verify_features 失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Get-Content verify.log -Tail 40 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          exit $code
