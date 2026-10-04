@@ -54,9 +54,9 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             "## pytest 失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             Get-Content pytest.log -Tail 80 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
           exit $code
 
@@ -71,8 +71,8 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             "## verify_features 失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             Get-Content verify.log -Tail 40 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "```" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
           exit $code
