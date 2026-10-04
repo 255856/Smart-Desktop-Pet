@@ -12,6 +12,26 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdin/stdout 强制成 UTF-8。
+
+    MCP stdio 传输规定 JSON-RPC 用 UTF-8。Python 在 Windows 上默认按
+    locale 编码读写管道（控制台可能是 cp1252/charmap），子进程里
+    ``json.dumps(..., ensure_ascii=False)`` 输出中文文件名就会
+    UnicodeEncodeError，父进程收到的是坏数据 → tools/list 返回空。
+    这里在写任何东西之前先把标准流 reconfig 掉。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            # 已被替换成不支持 reconfigure 的对象（少见），忽略即可
+            pass
+
+
+_force_utf8_stdio()
+
+
 # MCP server 注册的工具列表
 TOOLS = [
     {

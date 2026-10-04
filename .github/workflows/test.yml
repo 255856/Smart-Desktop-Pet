@@ -39,10 +39,14 @@ jobs:
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
+          # Windows runner 控制台默认是 cp1252（charmap），任何把中文写到
+          # stdout 的代码都会 UnicodeEncodeError。显式钉死 UTF-8，
+          # 避免依赖 runner 的本地化设置。
+          PYTHONIOENCODING: utf-8
         run: pytest tests/ -q --no-header --cov=app --cov-report=term-missing --cov-fail-under=25
 
       - name: Verify features (no GUI)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: |
-          python scripts/verify_features.py --no-gui
+          PYTHONIOENCODING: utf-8
+        run: python scripts/verify_features.py --no-gui

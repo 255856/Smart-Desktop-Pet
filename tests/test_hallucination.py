@@ -180,6 +180,8 @@ class TestToolUsagePrompt:
                 skill_dst / "SKILL.md",
             )
             # 写一个最小 config.yaml
+            # 必须显式 encoding="utf-8"：内容含中文角色名，不指定时会走
+            # locale 编码，Windows CI runner（cp1252）上直接 UnicodeEncodeError
             (tmp_path / "config.yaml").write_text("""
 llm:
   base_url: "http://localhost:1/v1"
@@ -189,7 +191,7 @@ character:
   name: "测试"
 window:
   scale: 0.4
-""")
+""", encoding="utf-8")
             from app.core.config import load_config
             from app.engine.state_manager import StateManager
 

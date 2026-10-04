@@ -17,7 +17,7 @@ from app.brain.memory import (
 class TestMemoryBasic:
     def setup_method(self):
         self.tmpfile = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         self.tmpfile.close()
         self.store = MemoryStore(self.tmpfile.name, backend_name="tfidf")
 
@@ -74,7 +74,7 @@ class TestSemanticSearch:
 
     def setup_method(self):
         self.tmpfile = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         self.tmpfile.close()
         self.store = MemoryStore(self.tmpfile.name, backend_name="tfidf")
 
@@ -119,7 +119,7 @@ class TestSemanticSearch:
 class TestMemoryLifecycle:
     def setup_method(self):
         self.tmpfile = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         self.tmpfile.close()
         self.store = MemoryStore(self.tmpfile.name, backend_name="tfidf")
 
@@ -210,7 +210,7 @@ class TestVectorBackends:
 class TestMemoryPersistence:
     def test_persistence_round_trip(self):
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         tmp.close()
         try:
             store = MemoryStore(tmp.name, backend_name="tfidf")
@@ -227,7 +227,7 @@ class TestMemoryPersistence:
         """旧版 memory.json 没有 importance 字段也应能加载。"""
         import json
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         legacy = [
             {"id": "m1", "content": "旧记录", "category": "fact",
              "created_at": time.time()},
@@ -253,7 +253,7 @@ class TestMemoryRelevance:
 
     def setup_method(self):
         self.tmpfile = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False)
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
         self.tmpfile.close()
         self.store = MemoryStore(self.tmpfile.name, backend_name="tfidf")
         for content, cat in (

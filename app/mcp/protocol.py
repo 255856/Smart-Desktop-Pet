@@ -72,6 +72,12 @@ class MCPStdioClient:
                 env=env,
                 cwd=self.config.cwd,
                 text=True,
+                # MCP stdio 传输规定为 UTF-8。text=True 只默认取
+                # locale.getpreferredencoding()，Windows CI runner 上是 cp1252
+                # （charmap），子进程写中文 JSON 会 UnicodeEncodeError，
+                # 表现为 tools/list 拿不到任何工具。
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,           # 行缓冲
             )
         except FileNotFoundError as e:
