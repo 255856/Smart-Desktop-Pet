@@ -70,7 +70,7 @@ def test_tts_speak_queue_serialization():
             self.played: list[str] = []
             self._lock = threading.Lock()
 
-        def _speak_blocking(self, text):  # type: ignore[override]
+        def _speak_blocking(self, text, profile=None):  # type: ignore[override]
             with self._lock:
                 self.played.append(text)
 

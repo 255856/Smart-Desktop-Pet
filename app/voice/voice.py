@@ -51,13 +51,13 @@ def _strip_emojis(text: str) -> str:
     return cleaned
 
 
-def _cache_key(text: str) -> str:
-    """生成**进程重启稳定**的缓存 key。
+def _cache_key(text: str, tag: str = "") -> str:
+    """生成进程重启稳定、且区分音色的缓存 key。
 
-    原实现用 ``hash(text)``，受 PYTHONHASHSEED 影响，每次启动结果不同，
-    缓存命中率会被打掉。这里换成 MD5（不需要加密，只要稳定 + 低碰撞）。
+    用 MD5（不需要加密，只要稳定 + 低碰撞），并把音色 tag 一并纳入：
+    否则同一段文本切换音色后会命中旧缓存、播错声音。
     """
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    return hashlib.md5((tag + "\x00" + text).encode("utf-8")).hexdigest()
 
 
 # pygame.mixer 是进程级单例，**只 init 一次**，否则每次 init/quit 抖动大且会和
@@ -159,14 +159,17 @@ class TTS:
     cache_ext: str = ".mp3"
 
     def speak(self, text: str) -> None:
-        """把 text 入朗读队列；daemon worker 顺序消费 + 合成 + 播放。
-
-        流式场景下：每收完一句话就调一次 speak()，文字逐句出现在 UI，声音顺序播放。
-        内部用 pygame.mixer.music 单 channel —— 单 worker 才能避免互相打断。
-        """
+        """把 text 按当前默认音色入朗读队列；worker 顺序合成 + 播放。"""
         if not self._enabled or not text.strip():
             return
-        self._speak_queue.put(text)
+        self._speak_queue.put((text, None))
+        self._ensure_speak_worker()
+
+    def speak_as(self, text: str, profile=None) -> None:
+        """用指定音色（VoiceProfile）朗读；profile=None 即当前默认音色。"""
+        if profile is None or not self._enabled or not text.strip():
+            return self.speak(text)
+        self._speak_queue.put((text, profile))
         self._ensure_speak_worker()
 
     def _ensure_speak_worker(self) -> None:
@@ -184,11 +187,12 @@ class TTS:
         import queue as _queue
         while True:
             try:
-                text = self._speak_queue.get(timeout=0.5)
+                item = self._speak_queue.get(timeout=0.5)
             except _queue.Empty:
                 continue
+            text, profile = item
             try:
-                self._speak_blocking(text)
+                self._speak_blocking(text, profile)
             except Exception as e:  # noqa: BLE001
                 log.warning("TTS worker 单句失败：%s", e)
             finally:
@@ -212,13 +216,13 @@ class TTS:
         clean_text = _strip_emojis(text or "")
         if not clean_text:
             return False
-        cache_name = _cache_key(clean_text) + self.cache_ext
+        cache_name = _cache_key(clean_text, self._voice_tag()) + self.cache_ext
         cache_path = self.cache_dir / cache_name
         try:
             if not cache_path.is_file():
                 log.info("TTS: prepare 合成 → %s (引擎=%s)",
                          cache_name, type(self).__name__)
-                asyncio.run(self._synthesize(text, cache_path))
+                asyncio.run(self._synthesize(text, cache_path, None))
             if not cache_path.is_file():
                 log.warning("TTS: prepare 合成后文件不存在 %s", cache_path)
                 return False
@@ -229,7 +233,7 @@ class TTS:
                     cache_path.unlink()
                 except (OSError, ValueError, KeyError, TypeError) as e:
                     log.debug("ignored: %s", e)
-                asyncio.run(self._synthesize(text, cache_path))
+                asyncio.run(self._synthesize(text, cache_path, None))
                 if not cache_path.is_file():
                     return False
             return True
@@ -237,23 +241,39 @@ class TTS:
             log.warning("TTS: prepare 失败：%s", e)
             return False
 
-    def _speak_blocking(self, text: str) -> None:
+    def _voice_tag(self) -> str:
+        """当前默认音色的缓存区分标记（edge 用音色名；GPT-SoVITS 子类覆盖）。"""
+        return str(self.voice or "")
+
+    def _profile_tag(self, profile) -> str:
+        """指定音色的缓存标记。"""
+        if profile is None:
+            return self._voice_tag()
+        return str(getattr(profile, "ref_audio", "")
+                   or getattr(profile, "name", "") or "")
+
+    def set_voice(self, profile=None) -> None:
+        """运行时切换默认音色（edge 用 edge_voice；GPT-SoVITS 子类覆盖）。"""
+        if profile is not None and getattr(profile, "edge_voice", ""):
+            self.voice = profile.edge_voice
+
+    def _speak_blocking(self, text: str, profile=None) -> None:
+        tag = self._profile_tag(profile)
         try:
             # 移除 emoji 和装饰性符号，避免 TTS 朗读字符名称
             clean_text = _strip_emojis(text)
             if not clean_text:
                 log.info("TTS: text 被 sanitize 为空，跳过朗读")
                 return
-            cache_name = _cache_key(clean_text) + self.cache_ext
+            cache_name = _cache_key(clean_text, tag) + self.cache_ext
             cache_path = self.cache_dir / cache_name
             if not cache_path.is_file():
                 log.info("TTS: 合成并缓存 → %s (引擎=%s)", cache_name, type(self).__name__)
-                asyncio.run(self._synthesize(text, cache_path))
+                asyncio.run(self._synthesize(text, cache_path, profile))
             if not cache_path.is_file():
                 log.warning("TTS: 合成后文件不存在 %s", cache_path)
                 return
             # 校验缓存文件与引擎格式一致：避免历史 .mp3 文件名实际是 wav 内容
-            # （修复 GPT-SoVITS 早期 cache_ext 写错时的遗留文件）
             if not _cache_format_matches(cache_path, self.cache_ext):
                 log.warning("TTS: 缓存 %s 与引擎格式 %s 不匹配，删除重合成",
                             cache_path.name, self.cache_ext)
@@ -262,7 +282,7 @@ class TTS:
                 except (OSError, ValueError, KeyError, TypeError) as e:
                     log.debug("ignored: %s", e)
                 log.info("TTS: 重新合成 → %s", cache_name)
-                asyncio.run(self._synthesize(text, cache_path))
+                asyncio.run(self._synthesize(text, cache_path, profile))
                 if not cache_path.is_file():
                     return
             # 口型同步：播放开始（工作线程回调，UI 层自行保证线程安全）
@@ -285,10 +305,13 @@ class TTS:
             log.warning("  ▸ 当前引擎=%s；可在设置面板切换或参考 docs/资源下载说明.md",
                         type(self).__name__)
 
-    async def _synthesize(self, text: str, out_path: Path) -> None:
+    async def _synthesize(self, text: str, out_path: Path, profile=None) -> None:
         # 延迟 import，避免启动时无 pygame/edge-tts 也能跑程序
         import edge_tts
-        communicate = edge_tts.Communicate(text, voice=self.voice)
+        voice = self.voice
+        if profile is not None and getattr(profile, "edge_voice", ""):
+            voice = profile.edge_voice
+        communicate = edge_tts.Communicate(text, voice=voice)
         await communicate.save(str(out_path))
 
     def _play(self, mp3_path: Path) -> None:

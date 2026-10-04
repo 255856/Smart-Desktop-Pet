@@ -96,8 +96,7 @@ class SettingsWindow(QWidget):
                  renderer: Optional[object] = None,
                  sticker_enabled: bool = True,
                  always_on_top: bool = True,
-                 live2d_state: Optional[dict] = None,
-                 game_action_store: Optional[object] = None) -> None:
+                 live2d_state: Optional[dict] = None) -> None:
         super().__init__(parent)
         self.setObjectName("settings_root")
         self.setWindowTitle("桌宠设置")
@@ -134,14 +133,6 @@ class SettingsWindow(QWidget):
             "hide_watermark": bool(st.get("hide_watermark", True)),
             "character": st.get("character", {}),
         }
-        # 小游戏动作反馈配置（必须在 _build_ui 前就绪，Live2D Tab 构建时会用到）
-        if game_action_store is not None:
-            self._game_store = game_action_store
-        else:
-            from app.engine.game_actions import GameActionStore
-            self._game_store = GameActionStore(
-                Path(__file__).resolve().parent.parent.parent / 'data' / 'game_actions.json')
-        self._game_action_labels: dict = {}
         self._build_ui()
         self._wire_signals()
         self._load_defaults()
@@ -738,93 +729,48 @@ class SettingsWindow(QWidget):
         v.addWidget(self._scene_card)
         self._custom_action_card = self._build_custom_action_card(renderer)
         v.addWidget(self._custom_action_card)
-        # 游戏动作反馈（所有小游戏共用一套场景配置）
-        self._game_action_card = self._build_game_action_card()
+        # 游戏外观反馈（所有小游戏共用一套场景配置）
+        self._game_action_card = self._build_game_action_card(renderer)
         v.addWidget(self._game_action_card)
 
         v.addStretch(1)
         return page
 
-    # ---------- 游戏动作反馈（所有小游戏共用一套场景） ----------
-    def _build_game_action_card(self) -> QGroupBox:
-        from app.engine.game_actions import GAME_EVENTS
-        box = QGroupBox("游戏动作反馈（五子棋 / 狼人杀通用）")
+    # ---------- 游戏外观反馈（所有小游戏共用一套场景） ----------
+    def _build_game_action_card(self, renderer) -> QGroupBox:
+        from app.animation.live2d_scene import GAME_SCENES
+        box = QGroupBox("游戏外观反馈（五子棋 / 狼人杀通用）")
         box.setObjectName("live2d_card")
         vl = QVBoxLayout(box)
         vl.setContentsMargins(12, 22, 12, 12)
-        vl.setSpacing(6)
+        vl.setSpacing(5)
         hint = QLabel(
-            "开始游戏后保持默认动作，胜利/失败时播放对应动作，退出游戏恢复默认；"
-            "五子棋、狼人杀共用这一套，同时兼容 Live2D 与帧动画。")
+            "开始游戏后保持该外观，胜利/失败时切换对应外观，退出游戏恢复；"
+            "可搭配表情、发型、配件或手势，全部留空表示不改变。")
         hint.setWordWrap(True)
         hint.setStyleSheet(
             "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
         vl.addWidget(hint)
-        self.cb_game_action = QCheckBox("启用游戏动作反馈")
-        self.cb_game_action.setChecked(bool(self._game_store.enabled))
-        self.cb_game_action.toggled.connect(self._on_game_action_enabled)
-        vl.addWidget(self.cb_game_action)
         row = QHBoxLayout()
         row.addStretch(1)
-        self.btn_game_reset = QPushButton("恢复默认")
-        self.btn_game_reset.setObjectName("more_btn")
-        self.btn_game_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_game_reset.clicked.connect(self._on_game_action_reset)
-        row.addWidget(self.btn_game_reset)
+        btn_reset = QPushButton("恢复默认")
+        btn_reset.setObjectName("more_btn")
+        btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_reset.clicked.connect(self._on_game_reset)
+        row.addWidget(btn_reset)
         vl.addLayout(row)
-        for eid, title, _default in GAME_EVENTS:
-            vl.addWidget(self._build_game_action_row(eid, title))
+        # 三个游戏场景行（复用固定场景行：外观摘要 + 配置弹窗）
+        for sid, title, kind in GAME_SCENES:
+            vl.addWidget(self._build_scene_row(renderer, sid, title, kind))
         return box
 
-    def _build_game_action_row(self, event_id: str, title: str) -> QFrame:
-        row = QFrame()
-        row.setObjectName("scene_row")
-        row.setStyleSheet(self._ROW_QSS)
-        h = QHBoxLayout(row)
-        h.setContentsMargins(10, 5, 8, 5)
-        h.setSpacing(8)
-        name = QLabel(title)
-        name.setMinimumWidth(200)
-        name.setStyleSheet(
-            "color:#2c2c38; font-size:9pt; border:none; background:transparent;")
-        h.addWidget(name)
-        summ = QLabel(self._game_store.summary(event_id))
-        summ.setStyleSheet(
-            "color:#9a9aad; font-size:8pt; border:none; background:transparent;")
-        summ.setWordWrap(False)
-        h.addWidget(summ, 1)
-        self._game_action_labels[event_id] = summ
-        btn = QPushButton("配置")
-        btn.setObjectName("more_btn")
-        btn.setFixedWidth(54)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.clicked.connect(
-            lambda _=False, e=event_id, t=title: self._open_game_action_dialog(e, t))
-        h.addWidget(btn)
-        return row
-
-    def _open_game_action_dialog(self, event_id: str, title: str) -> None:
-        # 与「触发场景配置」同款无边框弹窗，编辑该情形保持的动作
-        from app.ui.live2d_scene_dialog import GameActionEditDialog
-        dlg = GameActionEditDialog(
-            self._game_store, event_id, title,
-            renderer=self._renderer, parent=self)
-        dlg.saved.connect(self._refresh_game_action_labels)
-        dlg.show()
-        self._scene_dlgs.append(dlg)
-
-    def _refresh_game_action_labels(self) -> None:
-        for eid, lbl in self._game_action_labels.items():
-            lbl.setText(self._game_store.summary(eid))
-
-    def _on_game_action_enabled(self, on: bool) -> None:
-        self._game_store.set_enabled(on)
-
-    def _on_game_action_reset(self) -> None:
-        self._game_store.reset()
-        self.cb_game_action.setChecked(self._game_store.enabled)
-        for _eid, _lbl in self._game_action_labels.items():
-            _lbl.setText(self._game_store.summary(_eid))
+    def _on_game_reset(self) -> None:
+        from app.animation.live2d_scene import GAME_SCENES
+        if self._renderer is None:
+            return
+        for sid, _t, _k in GAME_SCENES:
+            self._renderer.reset_scene_bundle(sid)
+        self._refresh_scene_summaries()
 
     #  触发场景配置（Live2D）
     _ROW_QSS = (
@@ -1157,6 +1103,17 @@ class SettingsWindow(QWidget):
         self.cmb_voice.currentTextChanged.connect(self._on_voice_changed)
         vform.addRow("语音音色：", self.cmb_voice)
 
+        # GPT-SoVITS 多音色：默认音色（桌宠平时说话用；候选在 config.yaml voices 配置）
+        self.cmb_default_voice = QComboBox()
+        for _vp in getattr(self.char_cfg, "voices", []) or []:
+            if getattr(_vp, "name", ""):
+                self.cmb_default_voice.addItem(_vp.name, _vp.name)
+        _cv0 = getattr(self.char_cfg, "current_voice", "")
+        _ci0 = self.cmb_default_voice.findData(_cv0)
+        if self.cmb_default_voice.count():
+            self.cmb_default_voice.setCurrentIndex(_ci0 if _ci0 >= 0 else 0)
+        vform.addRow("默认音色：", self.cmb_default_voice)
+
         self.cb_tts_enabled = QCheckBox("启用语音朗读")
         self.cb_tts_enabled.setChecked(True)
         self.cb_tts_enabled.toggled.connect(self._on_tts_enabled_changed)
@@ -1219,6 +1176,8 @@ class SettingsWindow(QWidget):
 
         # 新控件 → 统一发射（放在控件创建之后连接）
         self.cmb_tts_engine.currentIndexChanged.connect(self._emit_tts_config)
+        if hasattr(self, "cmb_default_voice"):
+            self.cmb_default_voice.currentIndexChanged.connect(self._emit_tts_config)
         self.edit_minimax_voice_id.editingFinished.connect(self._emit_tts_config)
         self.edit_gptsovits_url.editingFinished.connect(self._emit_tts_config)
         self.edit_gptsovits_ref.editingFinished.connect(self._emit_tts_config)
@@ -1710,6 +1669,8 @@ class SettingsWindow(QWidget):
             "gptsovits_url": self.edit_gptsovits_url.text().strip(),
             "ref_audio": self.edit_gptsovits_ref.text().strip(),
             "prompt_text": self.edit_gptsovits_prompt.text().strip(),
+            "current_voice": (str(self.cmb_default_voice.currentData() or "")
+                              if hasattr(self, "cmb_default_voice") else ""),
         })
 
     def _emit_character(self) -> None:

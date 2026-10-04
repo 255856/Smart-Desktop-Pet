@@ -56,6 +56,20 @@ BUILTIN_SCENES: list[tuple[str, str, str, str]] = [
     ("dragging",       "拖拽中",                "persist",   SCENE_GROUP_INTERACT),
 ]
 
+# 游戏会话场景：由小游戏会话状态触发（进入保持 / 胜负切换），在单独的
+# 「游戏外观反馈」卡片配置；不放进 BUILTIN_SCENES（不参与普通触发）。
+GAME_SCENES: list[tuple[str, str, str]] = [
+    ("game_start", "游戏开始（进入后保持）", "persist"),
+    ("game_win",   "游戏胜利（获胜 / 夺冠）", "persist"),
+    ("game_lose",  "游戏失败（落败 / 认输）", "persist"),
+]
+# 游戏场景默认外观：按顺序取第一个可用的内置 item 动作
+_GAME_DEFAULT_ACTIONS: dict[str, tuple[str, ...]] = {
+    "game_start": ("jump", "spin"),
+    "game_win": ("jump", "spin", "cheek"),
+    "game_lose": ("cheek", "stretch"),
+}
+
 # chat 场景 → 模型 emotion_aliases 的通用情绪键
 _CHAT_ALIAS_KEY = {
     "chat_happy": "happy",
@@ -198,6 +212,11 @@ class SceneStore:
                 return self._bundle_from_action(spec)
             return None
 
+        # 游戏会话：从内置动作推导默认外观（候选取第一个 item 动作）
+        if scene_id in _GAME_DEFAULT_ACTIONS:
+            return self._bundle_from_first_action(
+                _GAME_DEFAULT_ACTIONS[scene_id])
+
         # 睡觉/醒来/待机/拖拽/开机/提醒/深夜/闲置：默认不额外改变外观
         # （睡觉由 sleep_params 专门处理；待机/醒来回自然）。
         return None
@@ -215,6 +234,19 @@ class SceneStore:
         else:
             b.toggles = [spec.item]
         return b
+
+    def _bundle_from_first_action(self, keys) -> Optional[SceneBundle]:
+        """按顺序取第一个可用的 item 动作，转成外观组合（游戏场景默认值）。"""
+        p = self.profile
+        if p is None:
+            return None
+        for k in keys:
+            spec = p.actions.get(k)
+            if spec is not None and spec.kind == "item":
+                b = self._bundle_from_action(spec)
+                if b is not None:
+                    return b
+        return None
 
     # ------------------------------------------------------------ 读取
     def effective_bundle(self, scene_id: str) -> Optional[SceneBundle]:

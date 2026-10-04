@@ -36,18 +36,35 @@ class GPTSoVITSTTS(TTS):
         root = Path(__file__).resolve().parent.parent.parent
         return str((root / ref).resolve())
 
-    async def _synthesize(self, text: str, out_path: Path) -> None:
+    def _voice_tag(self) -> str:
+        """缓存区分：GPT-SoVITS 的 voice 名是固定的，要用当前参考音频区分音色。"""
+        return str(self.ref_audio or "")
+
+    def set_voice(self, profile=None) -> None:
+        """运行时切换默认音色：换参考音频 + 参考文本。"""
+        if profile is not None:
+            if getattr(profile, "ref_audio", ""):
+                self.ref_audio = profile.ref_audio
+            if getattr(profile, "prompt_text", ""):
+                self.prompt_text = profile.prompt_text
+
+    async def _synthesize(self, text: str, out_path: Path, profile=None) -> None:
         import httpx
         clean = _strip_emojis(text)
         if not clean:
             raise ValueError("empty text")
-        if not self.ref_audio:
-            raise RuntimeError("未配置 gptsovits_ref_audio（参考音频路径）")
+        ref_audio = self.ref_audio
+        prompt_text = self.prompt_text
+        if profile is not None:
+            ref_audio = getattr(profile, "ref_audio", "") or ref_audio
+            prompt_text = getattr(profile, "prompt_text", "") or prompt_text
+        if not ref_audio:
+            raise RuntimeError("未配置参考音频路径（gptsovits ref_audio）")
         payload = {
             "text": clean,
             "text_lang": self.text_lang,
-            "ref_audio_path": self._resolve_ref(self.ref_audio),
-            "prompt_text": self.prompt_text,
+            "ref_audio_path": self._resolve_ref(ref_audio),
+            "prompt_text": prompt_text,
             "prompt_lang": self.prompt_lang,
             "text_split_method": "cut5",
             "speed_factor": 1.0,

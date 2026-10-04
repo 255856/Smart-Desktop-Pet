@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict
@@ -18,6 +18,20 @@ class LLMConfig(BaseModel):
     temperature: float = 0.8
     max_tokens: int = 1024
     timeout: int = 60
+
+
+class VoiceProfile(BaseModel):
+    """一个可切换的 TTS 音色（GPT-SoVITS 参考音频）。
+
+    - name：音色显示名（设置面板 / 狼人杀配音下拉里展示）；
+    - ref_audio：GPT-SoVITS 参考音频路径（服务端本地可访问）；
+    - prompt_text：参考音频对应的文本；
+    - edge_voice：可选，edge 引擎下对应的音色名（留空则用全局 tts_voice）。
+    """
+    name: str = ""
+    ref_audio: str = ""
+    prompt_text: str = ""
+    edge_voice: str = ""
 
 
 class CharacterConfig(BaseModel):
@@ -39,6 +53,19 @@ class CharacterConfig(BaseModel):
     gptsovits_url: str = "http://127.0.0.1:9880"
     gptsovits_ref_audio: str = ""    # 参考音频路径（服务端本地可访问）
     gptsovits_prompt_text: str = ""  # 参考音频对应的文本
+    # 多音色候选（GPT-SoVITS）：默认用第一个，可在设置面板切换默认；
+    # 狼人杀里可给每个角色单独指定音色。
+    voices: List[VoiceProfile] = []
+    current_voice: str = ""       # 当前默认音色 name；空 = voices[0]
+
+    def active_voice(self) -> Optional[VoiceProfile]:
+        """当前默认音色：current_voice 命中则用，否则第一个；都没有返回 None。"""
+        if self.voices:
+            for v in self.voices:
+                if v.name and v.name == self.current_voice:
+                    return v
+            return self.voices[0]
+        return None
 
 
 class WindowConfig(BaseModel):
