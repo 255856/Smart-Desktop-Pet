@@ -48,14 +48,18 @@ jobs:
         # Actions 的完整日志需要登录才能下载，而 run 页面是公开可读的，
         # 挂在 summary 里才能一眼看到是哪个用例挂了。
         run: |
-          pytest tests/ -q --no-header --tb=short -rf `
+          pytest tests/ -q --no-header --tb=short -rA `
             --cov=app --cov-report=term-missing --cov-fail-under=25 2>&1 |
             Tee-Object -FilePath pytest.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             "## pytest 失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            Get-Content pytest.log -Tail 80 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            # 显式抓 FAILED / ERROR 行：只取 tail 会被末尾的覆盖率报表挤掉
+            Select-String -Path pytest.log -Pattern '^(FAILED|ERROR)\s+\S+\.py::' |
+              ForEach-Object { $_.Line } |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Get-Content pytest.log -Tail 5 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
           exit $code

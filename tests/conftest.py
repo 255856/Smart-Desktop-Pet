@@ -40,7 +40,12 @@ def qapp():
     """提供 QApplication 单例（Qt 测试需要）。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from app.core.qt_compat import QApplication
-    app = QApplication.instance() or QApplication(sys.argv)
+    # 只传程序名，不把 pytest 自己的 argv 喂给 Qt：Qt 会解析命令行参数，
+    # --cov-report / --tb 之类它不认识的参数在不同 PyQt5/Python 组合下
+    # 行为不一致（轻则打 usage，重则直接 abort），会让用到本 fixture 的用例
+    # 在 setup 阶段整片 error。应用自身 main.py 传 sys.argv 是对的，
+    # 那里 argv 本来就是桌宠自己的参数。
+    app = QApplication.instance() or QApplication(sys.argv[:1])
     yield app
     # 不退出 app，让 pytest 收尾
 
