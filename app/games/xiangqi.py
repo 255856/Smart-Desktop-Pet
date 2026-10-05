@@ -360,6 +360,69 @@ class XiangqiGame:
         # 飞将：走到这一步后双方是否照面
         return self._generals_face()
 
+    def attacker_summary(self, side: int) -> str:
+        """调试用：返回哪类 / 哪个敌子正在攻击己方的将，便于排错假将军。
+
+        返回 "" 表示未被将。"""
+        ksq = self.find_king(side)
+        if ksq < 0:
+            return "<no-king>"
+        r, c = divmod(ksq, COLS)
+        # 直线（车/炮/将）
+        for dr, dc in _ORTHO:
+            nr, nc = r + dr, c + dc
+            first = None
+            while on_board(nr, nc):
+                p = self.board[nr * COLS + nc]
+                if p != EMPTY:
+                    if side_of(p) == -side and abs(p) in (R, K):
+                        return f"{name_of(p)}({nr},{nc}) 车/将 直线"
+                    first = p
+                    break
+                nr, nc = nr + dr, nc + dc
+            if first is not None and side_of(first) == -side and abs(first) == C:
+                nr, nc = nr + dr, nc + dc
+                while on_board(nr, nc):
+                    p = self.board[nr * COLS + nc]
+                    if p != EMPTY:
+                        if side_of(p) == -side:
+                            return f"{name_of(p)}({nr},{nc}) 经炮架 first={name_of(first)}({(nr-nr)//1},{(nc-nc)//1})"
+                        break
+                    nr, nc = nr + dr, nc + dc
+        # 马
+        for dr, dc in _ORTHO:
+            lr, lc = r + dr, c + dc
+            if not on_board(lr, lc) or self.board[lr * COLS + lc] != EMPTY:
+                continue
+            if dr:
+                cands = ((r + 2 * dr, c - 1), (r + 2 * dr, c + 1))
+            else:
+                cands = ((r - 1, c + 2 * dc), (r + 1, c + 2 * dc))
+            for nr, nc in cands:
+                if on_board(nr, nc) and self.board[nr * COLS + nc] == (-N if side > 0 else N):
+                    return f"马({nr},{nc}) 蹩腿 ({lr},{lc})"
+        # 士/象/兵
+        for dr, dc in _DIAG:
+            nr, nc = r + dr, c + dc
+            if on_board(nr, nc) and self.board[nr * COLS + nc] == (-A if side > 0 else A):
+                return f"士({nr},{nc})"
+            tr, tc = r + 2 * dr, c + 2 * dc
+            if on_board(tr, tc) and self.board[tr * COLS + tc] == (-B if side > 0 else B) \
+                    and self.board[(r + dr) * COLS + (c + dc)] == EMPTY:
+                return f"象({tr},{tc})"
+        fwd = -1 if side > 0 else 1
+        pr, pc = r - fwd, c
+        if on_board(pr, pc) and self.board[pr * COLS + pc] == (-P if side > 0 else P):
+            return f"卒({pr},{pc}) 前"
+        for dc in (-1, 1):
+            pr, pc = r - fwd, c + dc
+            if on_board(pr, pc) and self.board[pr * COLS + pc] == (-P if side > 0 else P):
+                if (side > 0 and pr <= 4) or (side < 0 and pr >= 5):
+                    return f"卒({pr},{pc}) 横"
+        if self._generals_face():
+            return "飞将"
+        return ""
+
     # ---------------------------------------------------------- 走法
     def legal_moves(self, side: Optional[int] = None) -> List[Move]:
         """side 的全部合法走法（已排除送将 / 飞将的棋）。"""
@@ -443,9 +506,15 @@ class XiangqiGame:
     def _update_result(self) -> None:
         side = self.to_move
         if not self.legal_moves(side):
-            # 将死与困毙在象棋里都判负
-            self.winner = -side
-            self.result = "checkmate" if self.in_check(side) else "stalemate"
+            # 将死：被将军且无合法着法 → 输
+            # 困毙：未被将军但无合法着法 → 本引擎按和棋处理（多数用户/对局软件
+            # 的现代约定；传统象棋规则困毙判负，但对局体验差、易引争议）。
+            if self.in_check(side):
+                self.winner = -side
+                self.result = "checkmate"
+            else:
+                self.winner = 0
+                self.result = "stalemate_draw"
 
     def resign(self) -> None:
         """认输。"""

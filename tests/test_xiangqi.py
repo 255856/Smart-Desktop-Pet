@@ -303,8 +303,11 @@ class TestCheckAndMate:
         assert g.winner == RED
         assert g.result == "checkmate"
 
-    def test_stalemate_is_also_loss(self):
-        """困毙：轮到谁走谁输（象棋规则，不是和棋）。
+    def test_stalemate_is_draw(self):
+        """困毙：本引擎按和棋处理（多数用户/对局软件的约定）。
+
+        严格象棋规则困毙判负，但对局体验差、易引争议；
+        故这里把困毙归为和棋（winner 不变，result 标记为 stalemate_draw）。
 
         合成局面（只为验证困毙判定，棋子摆位不追求可实战）：
         黑将孤身困在 (0,4)，九宫内三个可走格全被红方控制，且黑将本身并未被将军——
@@ -323,8 +326,8 @@ class TestCheckAndMate:
         assert g.legal_moves(BLACK) == [], "黑方应无任何合法着法"
         assert not g.in_check(BLACK), "这里应是困毙而不是将死"
         g._update_result()
-        assert g.winner == RED
-        assert g.result == "stalemate"
+        assert g.winner == 0, "困毙按和棋处理，winner 不应有值"
+        assert g.result == "stalemate_draw"
 
     def test_cannot_move_into_self_check(self):
         """送将的棋必须被过滤。

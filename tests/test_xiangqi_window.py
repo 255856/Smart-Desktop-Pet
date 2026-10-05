@@ -228,6 +228,32 @@ class TestFinishEventAndRewards:
             for r in ("win", "draw", "lose"):
                 assert r in REWARDS[d]
 
+    def test_stalemate_emits_stalemate_not_loss(self):
+        """困毙按和棋处理 → game_finished 收到 'stalemate'，不是 'lose'。"""
+        from app.games.xiangqi import XiangqiGame, BLACK
+        w = _new_window()
+        captured = []
+        w.game_finished.connect(
+            lambda r, d: captured.append((r, d)))
+        g = XiangqiGame()
+        g.board = [0] * 90
+        g.board[9 * 9 + 0] = 1     # 红帅
+        g.board[0 * 9 + 4] = -1    # 黑将
+        g.board[1 * 9 + 8] = 5     # 红车
+        g.board[2 * 9 + 2] = 4     # 红马
+        g.board[2 * 9 + 6] = 4     # 红马
+        g.history = []
+        g.to_move = BLACK
+        g.winner = 0
+        w.game = g
+        w.board.game = g
+        g._update_result()
+        # 引擎标记为 stalemate_draw（winner 仍 0）
+        assert g.result == "stalemate_draw"
+        # 触发 finish
+        w._finish(force="stalemate")
+        assert captured and captured[-1][0] == "stalemate"
+
 
 class TestBoardDrawMethods:
     def test_paint_runs_without_error(self):
@@ -239,3 +265,77 @@ class TestBoardDrawMethods:
         w = _new_window()
         w.resize(680, 760)
         assert w.board.size().width() > 0
+
+    def test_check_highlight_appears_on_king(self):
+        """被将军时棋盘给将帅格外红框 + 攻击子位红点，便于玩家一眼看见。"""
+        w = _new_window()
+        # 构造一个「必气将」的局面：黑将 (0,4)，红车 (1,4) 直接将军。
+        from app.games.xiangqi import XiangqiGame, BLACK, RED
+        g = XiangqiGame()
+        g.board = [0] * 90
+        g.board[9 * 9 + 4] = 1     # 红帅
+        g.board[0 * 9 + 4] = -1    # 黑将
+        g.board[1 * 9 + 4] = 5     # 红车
+        g.history = []
+        g.to_move = BLACK
+        g.winner = 0
+        w.game = g
+        w.board.game = g
+        assert g.in_check(BLACK)
+        w._update_check_highlight()
+        # 将帅格与攻击子格都被记录
+        assert w.board._check_king_sq is not None
+        assert w.board._check_attacker_sq is not None
+        assert w.board._check_attacker_sq == 1 * 9 + 4   # 红车在 (1,4)
+        # 清除场景
+        w.board.set_check_highlight(None, None)
+        assert w.board._check_king_sq is None
+
+    def test_no_highlight_when_safe(self):
+        w = _new_window()
+        w._update_check_highlight()
+        assert w.board._check_king_sq is None
+        assert w.board._check_attacker_sq is None
+
+
+class TestPlayerCommentary:
+    """双向嘴炮：玩家走棋后桌宠也应点评。"""
+
+    def test_comment_emitted_after_player_move(self):
+        w = _new_window()
+        captured = []
+        w.comment.connect(captured.append)
+        # 强制让 rand 必触发闲谈
+        w.rng.random = lambda: 0.0      # < 0.45 → 走闲谈分支
+        # 走一开红子闲棋（不会将军 AI）
+        w._on_player_click(9, 0)
+        w._on_player_click(8, 0)
+        # _comment_after_player 是同步调用，应至少有一条评论
+        assert len(captured) >= 1
+        assert any("嗯" in t or "好" in t or "哦" in t or "思考" in t or "看看" in t
+                   for t in captured), f"应发出玩家侧的闲谈评论，实际: {captured}"
+
+    def test_comment_after_fire_moves_when_player_checks_ai(self):
+        """玩家走到把 AI 气到的位置 → 应发 `player_check` 类评论。"""
+        from app.games.xiangqi import XiangqiGame, BLACK, RED
+        w = _new_window()
+        captured = []
+        w.comment.connect(captured.append)
+        # 摆出「玩家走红车在 (1,4) 直接气到黑将 (0,4)」的格局
+        g = XiangqiGame()
+        g.board = [0] * 90
+        g.board[9 * 9 + 4] = 1     # 红帅
+        g.board[0 * 9 + 4] = -1    # 黑将
+        g.board[1 * 9 + 4] = 5     # 红车在 (1,4) 同行将军
+        g.history = []
+        g.to_move = RED
+        g.winner = 0
+        w.game = g
+        w.board.game = g
+        assert g.in_check(BLACK)
+        # 直接调 _comment_after_player（模拟 AI 走完回到玩家回合）
+        w._comment_after_player()
+        # 必有「小心你的将」类评论
+        assert any("小心" in t or "将军" in t or "被" in t
+                   for t in captured), \
+            f"玩家将到 AI 应发评论，实际: {captured}"

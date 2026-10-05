@@ -47,8 +47,20 @@ SETTLE_COMMENTS = {
     "win": ["啊！怎么会……你居然赢了我！", "诶？！输了输了，你好厉害！"],
     "lose": ["哼哼，承让承让～这局是我赢啦～", "哈哈，赢了赢了！再来一局？"],
     "draw": ["和棋啦，势均力敌～", "平局平局，不分胜负！"],
+    "stalemate": ["哎，车轮战也下不出胜负～", "这局谁都没招，和了和了～"],
     "giveup": ["诶，别灰心呀，再来一局嘛～", "这局先到这里，要再来一局吗？"],
     "resign": ["我认输啦，别太得意哦～", "今天就让让你～"],
+}
+
+# 玩家走出威胁 / 送将 / 闲谈时，桌宠也能插嘴（不再只让 AI 走完后单边说话）
+PLAYER_COMMENTS = {
+    # 玩家刚把军/将气了的瞬间
+    "player_check": ["哎，小心你的将！", "哦豁，要被将军了哦～"],
+    # 玩家走闲棋 / 一般推进
+    "player_idle": ["嗯，这步我看看～", "哦，你走这边～", "嗯嗯，思考中～",
+                   "好棋好棋，让我看看怎么应～"],
+    # 玩家送将（自己被将军）——这种一般是失误，桌宠嘴炮一下
+    "player_self_check": ["哎呀，你这步自己被将了呢～", "噢，你这一送……我可不客气啦！"],
 }
 
 # 棋盘配色（与五子棋接近的木纹暖色，但更浅更通透）
@@ -173,7 +185,20 @@ class XiangqiBoardWidget(QWidget):
         self._selected: Optional[Tuple[int, int]] = None
         # 缓存当前选中后能走到的落点（空位 = 显示绿点，对方子 = 显示红圈）
         self._legal_targets: List[Tuple[int, int]] = []
+        # 被将军时，缓存将被的格子与攻击者位置（用于红框高亮）
+        self._check_king_sq: Optional[int] = None
+        self._check_attacker_sq: Optional[int] = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_check_highlight(self, king_sq: Optional[int],
+                            attacker_sq: Optional[int]) -> None:
+        """外部通知当前是否在被将军（用于红框高亮）。
+
+        king_sq 为红/黑将的线性 index；任一为空则清除高亮。
+        """
+        self._check_king_sq = king_sq
+        self._check_attacker_sq = attacker_sq
+        self.update()
 
     def set_interactive(self, ok: bool) -> None:
         self.interactive = ok
@@ -300,6 +325,10 @@ class XiangqiBoardWidget(QWidget):
                 if v != EMPTY:
                     self._draw_piece(p, r, c, v)
 
+        # 被将军时的红框高亮（在棋子之上、最后一步标记之下，避免覆盖棋子字）
+        if self._check_king_sq is not None:
+            self._draw_check_highlight(p)
+
         # 最后一步标记（最近一步的「方框角标」）
         last = self.game.last_move()
         if last is not None:
@@ -396,6 +425,32 @@ class XiangqiBoardWidget(QWidget):
         # 右下
         p.drawLine(x + rad, y + rad - L, x + rad, y + rad)
         p.drawLine(x + rad, y + rad, x + rad - L, y + rad)
+
+    def _draw_check_highlight(self, p: QPainter) -> None:
+        """被将军时的视觉提示：将帅格子外红框 + 攻击子格子内红点。
+
+        仅在被将军时调用，确保玩家能直观看出「为什么是负」「下一步该怎么挡」。
+        """
+        king_sq = self._check_king_sq
+        if king_sq is None:
+            return
+        kr, kc = divmod(king_sq, COLS)
+        kx, ky = self._pixel(kr, kc)
+        rad = self.cell // 2
+        # 将帅格子外加粗红框（强调「这格被将」）
+        p.setPen(QPen(QColor(MOVE_CAPTURE), 3.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(kx - rad + 2, ky - rad + 2, (rad - 2) * 2, (rad - 2) * 2)
+        # 攻击子位置（若有）画一个红色实心圆点，便于指认「是哪个子在将」
+        atk = self._check_attacker_sq
+        if atk is not None and 0 <= atk < len(self.game.board) \
+                and self.game.board[atk] != EMPTY:
+            ar, ac = divmod(atk, COLS)
+            ax, ay = self._pixel(ar, ac)
+            p.setPen(QPen(QColor(MOVE_CAPTURE), 2))
+            p.setBrush(QBrush(QColor(255, 80, 80)))
+            rad2 = 5
+            p.drawEllipse(ax - rad2, ay - rad2, rad2 * 2, rad2 * 2)
 
     def _draw_corner_mark(self, p: QPainter, r: int, c: int) -> None:
         """炮位/兵位的小角标（L 形短杠）。"""
@@ -707,12 +762,17 @@ class XiangqiWindow(QDialog):
         self._after_move()
 
     def _after_move(self) -> None:
+        if self.game.result == "stalemate_draw":
+            self._finish(force="stalemate")
+            return
         if self.game.winner != 0:
             self._finish()
             return
-        # 红方落子后播报闲谈一句（避免棋局冷场）
-        if self.rng.random() < 0.18:
-            self._say(self.rng.choice(COMMENTS["idle"]))
+        # 红方落子后：双向嘴炮——若走完当前棋路、对方被气到，桌宠点评一下；
+        # 若这步自送将军，桌宠嘴炮一下；否则闲谈一句。
+        self._comment_after_player()
+        # 立即把"被将军"红框更新（如果 AI 当前就被将）
+        self._update_check_highlight()
         self.board.set_interactive(False)
         self.turn_lbl.setObjectName("turn_lbl")
         self.turn_lbl.setStyleSheet("")
@@ -720,6 +780,100 @@ class XiangqiWindow(QDialog):
         # AI 难度越大延迟越久（视觉上让玩家感知思考深度）
         delay = {"easy": 250, "normal": 420, "hard": 620}.get(self.difficulty, 420)
         self._ai_timer.start(delay)
+
+    def _comment_after_player(self) -> None:
+        """玩家走完一步 → 桌宠插嘴。基于局势（玩家送将 / AI 被气 / 闲棋）选话术。"""
+        # AI 已被将军：嘴炮「小心你的将！」类（提醒玩家）
+        if self.game.in_check(BLACK):
+            self._say(self.rng.choice(PLAYER_COMMENTS["player_check"]))
+            return
+        # 玩家送将（自己这步让对方能直接攻将）：嘴炮一句
+        last = self.game.last_move()
+        if last is not None:
+            # 撤销上一步看 AI 是否被将 → 若撤销后没将，说明这步送将了
+            self.game._undo(last)
+            ai_was_in_check_before = self.game.in_check(BLACK)
+            self.game._apply(last)
+            self.game.to_move = BLACK     # _undo 会翻转 to_move，需恢复
+            if ai_was_in_check_before and not self.game.in_check(BLACK):
+                self._say(self.rng.choice(PLAYER_COMMENTS["player_self_check"]))
+                return
+        # 闲棋闲谈
+        if self.rng.random() < 0.45:
+            self._say(self.rng.choice(PLAYER_COMMENTS["player_idle"]))
+
+    def _update_check_highlight(self) -> None:
+        """根据当前 to_move 方向决定是否高亮将帅格 / 攻击子。"""
+        side_to_move = self.game.to_move
+        # 当前轮到谁走，谁就可能是被将的受害方
+        if self.game.winner != 0:
+            self.board.set_check_highlight(None, None)
+            return
+        if not self.game.in_check(side_to_move):
+            self.board.set_check_highlight(None, None)
+            return
+        king_sq = self.game.find_king(side_to_move)
+        attacker_sq = self._find_attacker_square(king_sq, -side_to_move)
+        self.board.set_check_highlight(king_sq, attacker_sq)
+
+    def _find_attacker_square(self, king_sq: Optional[int],
+                              by_side: int) -> Optional[int]:
+        """找攻击将帅的那个敌子位置，用于红框 + 红点高亮。找不到返回 None。"""
+        if king_sq is None or king_sq < 0:
+            return None
+        from app.games.xiangqi import _ORTHO as _ORTHO_, _DIAG as _DIAG_, \
+            side_of as sf, R, N, A, B, P, K, on_board as ob, COLS as CL
+        r, c = divmod(king_sq, CL)
+        for dr, dc in _ORTHO_:
+            nr, nc = r + dr, c + dc
+            first = None
+            while ob(nr, nc):
+                p = self.game.board[nr * CL + nc]
+                if p != 0:
+                    if sf(p) == by_side and abs(p) in (R, K):
+                        return nr * CL + nc
+                    first = p
+                    break
+                nr, nc = nr + dr, nc + dc
+            if first is not None and sf(first) == by_side and abs(first) == 6:   # C=6
+                nr, nc = nr + dr, nc + dc
+                while ob(nr, nc):
+                    p = self.game.board[nr * CL + nc]
+                    if p != 0:
+                        if sf(p) == by_side:
+                            return nr * CL + nc
+                        break
+                    nr, nc = nr + dr, nc + dc
+        for dr, dc in _ORTHO_:
+            lr, lc = r + dr, c + dc
+            if not ob(lr, lc) or self.game.board[lr * CL + lc] != 0:
+                continue
+            if dr:
+                cands = ((r + 2 * dr, c - 1), (r + 2 * dr, c + 1))
+            else:
+                cands = ((r - 1, c + 2 * dc), (r + 1, c + 2 * dc))
+            for nr, nc in cands:
+                if ob(nr, nc) and self.game.board[nr * CL + nc] == (N if by_side > 0 else -N):
+                    return nr * CL + nc
+        for dr, dc in _DIAG_:
+            nr, nc = r + dr, c + dc
+            if ob(nr, nc) and self.game.board[nr * CL + nc] == (A if by_side > 0 else -A):
+                return nr * CL + nc
+        for dr, dc in _DIAG_:
+            tr, tc = r + 2 * dr, c + 2 * dc
+            if ob(tr, tc) and self.game.board[tr * CL + tc] == (B if by_side > 0 else -B) \
+                    and self.game.board[(r + dr) * CL + (c + dc)] == 0:
+                return tr * CL + tc
+        fwd = -1 if by_side > 0 else 1
+        pr, pc = r - fwd, c
+        if ob(pr, pc) and self.game.board[pr * CL + pc] == (P if by_side > 0 else -P):
+            return pr * CL + pc
+        for dc in (-1, 1):
+            pr, pc = r - fwd, c + dc
+            if ob(pr, pc) and self.game.board[pr * CL + pc] == (P if by_side > 0 else -P):
+                if (by_side > 0 and pr <= 4) or (by_side < 0 and pr >= 5):
+                    return pr * CL + pc
+        return None
 
     def _ai_move(self) -> None:
         if self.over or self.game.winner != 0 or self.game.to_move != BLACK:
@@ -733,6 +887,10 @@ class XiangqiWindow(QDialog):
             self.game.play_move(mv)
         self.board.update()
         self._update_history()
+        # 困毙：判和
+        if self.game.result == "stalemate_draw":
+            self._finish(force="stalemate")
+            return
         if self.game.winner != 0:
             self._finish()
             return
@@ -741,7 +899,8 @@ class XiangqiWindow(QDialog):
         self.board.set_interactive(True)
         self.turn_lbl.setObjectName("turn_lbl")
         self.turn_lbl.setStyleSheet("")
-        # 如果黑方已将军红方
+        # 如果轮到红方且被将 → 红框高亮 + 标题提示
+        self._update_check_highlight()
         if self.game.in_check(RED):
             self.turn_lbl.setObjectName("turn_check")
             self.turn_lbl.setText("将军！你的回合")
@@ -793,9 +952,12 @@ class XiangqiWindow(QDialog):
         self.btn_undo.setEnabled(False)
         self.diff_combo.setEnabled(True)
         self.turn_lbl.hide()
+        self.board.set_check_highlight(None, None)
 
         if force == "giveup":
             result, text, obj = "giveup", "你认输了，再来一局吧～", "result_lose"
+        elif force == "stalemate":
+            result, text, obj = "stalemate", "和棋，势均力敌～", "result_draw"
         elif self.game.winner == RED:
             result, text, obj = "win", "🎉 你赢了！", "result_win"
         elif self.game.winner == BLACK:

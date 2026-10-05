@@ -378,16 +378,21 @@ class UIController(QObject):
         from app.ui.xiangqi_window import REWARDS
         xw = self._xiangqi_window
         amount = 0
+        # 困毙/和棋：不发金币（按 draw 处理）
         if result in ("win", "lose", "draw"):
             amount = REWARDS.get(difficulty, REWARDS["normal"]).get(result, 0)
         granted = self.state.add_game_reward(amount) if amount else 0
         if xw is not None:
             xw.set_wallet(self.state.money, self.state.game_coin_remaining())
             xw.show_reward(granted, amount > 0 and granted <= 0)
+        # 困毙/和棋都判 draw → 不触发胜负外观（保持平静）
         _xq_ev = {"win": "game_win", "lose": "game_lose",
                   "draw": "game_lose", "giveup": "game_lose",
-                  "resign": "game_win"}
-        self._game_react(_xq_ev.get(result, "game_lose"))
+                  "resign": "game_win",
+                  "stalemate": None}
+        ev = _xq_ev.get(result)
+        if ev is not None:
+            self._game_react(ev)
         self.state.on_interact(feeling_gain=2)
         log.info("象棋结束 result=%s difficulty=%s 金币 +%.0f",
                  result, difficulty, granted)
