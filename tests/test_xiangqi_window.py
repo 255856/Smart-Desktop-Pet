@@ -236,15 +236,16 @@ class TestFinishEventAndRewards:
         w.game_finished.connect(
             lambda r, d: captured.append((r, d)))
         g = XiangqiGame()
-        g.board = [0] * 90
-        g.board[9 * 9 + 0] = 1     # 红帅
-        g.board[0 * 9 + 4] = -1    # 黑将
-        g.board[1 * 9 + 8] = 5     # 红车
-        g.board[2 * 9 + 2] = 4     # 红马
-        g.board[2 * 9 + 6] = 4     # 红马
-        g.history = []
-        g.to_move = BLACK
-        g.winner = 0
+        # 红帅 (9,4)、黑将 (0,4)、col 4 挡飞将 → 黑将 3 个逃路被红方控制,
+        # 黑将本身并未被将军(没有红子沿 col 4 攻击)。
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅
+        flat[0 * 9 + 4] = -1    # 黑将
+        flat[9 * 9 + 5] = 5     # 红车 → 攻击 (0, 5)
+        flat[1 * 9 + 1] = 4     # 红马 → 攻击 (0, 3)
+        flat[1 * 9 + 5] = 5     # 红车 → 攻击 (1, 4)
+        flat[4 * 9 + 4] = 7     # 红兵 → 挡飞将(项目 (4,4) = cchess (4,5))
+        g.setup_board(flat, to_move=BLACK)
         w.game = g
         w.board.game = g
         g._update_result()
@@ -272,13 +273,11 @@ class TestBoardDrawMethods:
         # 构造一个「必气将」的局面：黑将 (0,4)，红车 (1,4) 直接将军。
         from app.games.xiangqi import XiangqiGame, BLACK, RED
         g = XiangqiGame()
-        g.board = [0] * 90
-        g.board[9 * 9 + 4] = 1     # 红帅
-        g.board[0 * 9 + 4] = -1    # 黑将
-        g.board[1 * 9 + 4] = 5     # 红车
-        g.history = []
-        g.to_move = BLACK
-        g.winner = 0
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅
+        flat[0 * 9 + 4] = -1    # 黑将
+        flat[1 * 9 + 4] = 5     # 红车
+        g.setup_board(flat, to_move=BLACK)
         w.game = g
         w.board.game = g
         assert g.in_check(BLACK)
@@ -323,13 +322,11 @@ class TestPlayerCommentary:
         w.comment.connect(captured.append)
         # 摆出「玩家走红车在 (1,4) 直接气到黑将 (0,4)」的格局
         g = XiangqiGame()
-        g.board = [0] * 90
-        g.board[9 * 9 + 4] = 1     # 红帅
-        g.board[0 * 9 + 4] = -1    # 黑将
-        g.board[1 * 9 + 4] = 5     # 红车在 (1,4) 同行将军
-        g.history = []
-        g.to_move = RED
-        g.winner = 0
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅
+        flat[0 * 9 + 4] = -1    # 黑将
+        flat[1 * 9 + 4] = 5     # 红车在 (1,4) 同行将军
+        g.setup_board(flat, to_move=RED)
         w.game = g
         w.board.game = g
         assert g.in_check(BLACK)

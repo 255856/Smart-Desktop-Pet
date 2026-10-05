@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-685%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-674%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -22,7 +22,7 @@
 - **真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
-- **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（alpha-beta 引擎、九宫 / 蹩马腿 / 塞象眼 / 飞将全部按正式规则，3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
+- **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（**走法生成 / 将军 / 将死 / 困毙 / 飞将全部走 [cchess](https://pypi.org/project/cchess/) 库**，MIT、PyPI 1.20+，我们自己只写 alpha-beta 搜索 + 估值；3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
 - **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
 - **可观测**：所有 LLM/工具调用落 SQLite，**FastAPI Dashboard** (`localhost:8766`) 可视化 Trace、回放、调参
 
@@ -110,7 +110,7 @@ python -m app.web.dashboard
 ### ✅ 验证安装（独立步骤，确认环境 OK）
 
 ```bash
-python -m pytest tests/ -q              # 685 个测试通过，6 个 skip（约 45s）
+python -m pytest tests/ -q              # 674 个测试通过，6 个 skip（约 48s）
 python scripts/verify_features.py --no-gui    # 82 项功能冒烟通过
 python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
 ```
@@ -148,7 +148,7 @@ Smart-Desktop-Pet/
 ├── docs/                    # 详细文档（10 篇 1000+ 行）
 ├── data/                    # 运行时数据（memory / reminders / traces.db 等，gitignore）
 ├── scripts/                 # run.py / verify_features.py（513 行验证脚本）
-├── tests/                   # 42 个测试文件，685 个用例（git tracked）
+├── tests/                   # 45 个测试文件，680 个用例（git tracked）
 ├── voice/                   # GPT-SoVITS 训练音频（gitignore，仅 .gitkeep）
 └── GPT-SoVITS-v2pro-*/      # 整合包（gitignore，仅 .gitkeep）
 ```

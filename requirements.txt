@@ -36,6 +36,10 @@ pygame>=2.5.0
 # YAML 配置
 PyYAML>=6.0
 
+# 中国象棋规则引擎。app/games/xiangqi.py 的 XiangqiGame 直接 import cchess，
+# 缺它会让桌宠右键菜单点「中国象棋」时直接 ImportError
+cchess>=1.20
+
 # ================= [建议]（缺了有兜底提示）====================
 # 系统信息 / 进程列表。未装时相关工具返回「未安装 psutil」而不是崩
 psutil>=5.9.0
@@ -65,9 +69,13 @@ pycaw>=20240210; sys_platform == "win32"
 # python-docx>=1.1.0
 # openpyxl>=3.1.0
 
-# 截图 OCR（pytesseract 需另装 tesseract 二进制；winrt 是 Windows 内置 OCR）
+# 截图 OCR（pytesseract 需另装 tesseract 二进制；winsdk 是 Windows 内置 OCR）
 # pytesseract>=0.3.10
-# winsdk>=1.0.0b10; sys_platform == "win32"
+winsdk>=1.0.0b10; sys_platform == "win32"
+#   ↑ 已启用（2026-10-05）：两处用到
+#     1) app/core/toast.py —— 到点弹 Windows 原生系统通知（进通知中心，
+#        桌宠窗口隐藏/被盖住也看得到）
+#     2) app/engine/tools/_ocr.py —— Windows 内置 OCR
 
 # fetch_url_text 的正文提取
 # readability-lxml>=0.8.1

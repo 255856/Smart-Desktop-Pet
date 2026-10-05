@@ -791,10 +791,10 @@ class XiangqiWindow(QDialog):
         last = self.game.last_move()
         if last is not None:
             # 撤销上一步看 AI 是否被将 → 若撤销后没将，说明这步送将了
-            self.game._undo(last)
+            self.game.undo_one()
             ai_was_in_check_before = self.game.in_check(BLACK)
-            self.game._apply(last)
-            self.game.to_move = BLACK     # _undo 会翻转 to_move，需恢复
+            self.game.play_move(last)
+            self.game.to_move = BLACK     # undo_one 会翻转 to_move，需恢复
             if ai_was_in_check_before and not self.game.in_check(BLACK):
                 self._say(self.rng.choice(PLAYER_COMMENTS["player_self_check"]))
                 return
