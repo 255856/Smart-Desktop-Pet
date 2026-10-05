@@ -1,13 +1,13 @@
 # 🐳 桌面宠物 · Smart Desktop Pet
 
-> **一个真正能"养"的桌面 AI 宠物** —— 不只是会动、会说话，而是会**记住你、主动搭话、调用工具、跨多轮思考**，还能**陪你下五子棋、玩狼人杀**的数字伙伴。
+> **一个真正能"养"的桌面 AI 宠物** —— 不只是会动、会说话，而是会**记住你、主动搭话、调用工具、跨多轮思考**，还能**陪你下五子棋、下中国象棋、玩狼人杀**的数字伙伴。
 >
-> A truly *livestockable* desktop AI companion — remembers you, speaks proactively, calls tools, reasons across turns, and plays Gomoku & Werewolf with you.
+> A truly *livestockable* desktop AI companion — remembers you, speaks proactively, calls tools, reasons across turns, and plays Gomoku, Xiangqi & Werewolf with you.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-464%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-680%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -22,7 +22,7 @@
 - **真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
-- **真玩法**：**五子棋**（3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
+- **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（alpha-beta 引擎、九宫 / 蹩马腿 / 塞象眼 / 飞将全部按正式规则，3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
 - **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
 - **可观测**：所有 LLM/工具调用落 SQLite，**FastAPI Dashboard** (`localhost:8766`) 可视化 Trace、回放、调参
 
@@ -110,7 +110,7 @@ python -m app.web.dashboard
 ### ✅ 验证安装（独立步骤，确认环境 OK）
 
 ```bash
-python -m pytest tests/ -q              # 464 个测试通过，6 个 skip（约 35s）
+python -m pytest tests/ -q              # 680 个测试通过，6 个 skip（约 45s）
 python scripts/verify_features.py --no-gui    # 82 项功能冒烟通过
 python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
 ```
@@ -136,8 +136,8 @@ Smart-Desktop-Pet/
 │   ├── voice/               # TTS 3 引擎 + ASR + 角色情绪
 │   ├── engine/              # state / tools(32) / chat_store / reminder / screenshot
 │   │   └── tools/           # 52 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts _audio _weather _timer _power _filesearch _webfetch _ocr _runner _tts_mute 分组
-│   ├── games/               # gomoku + werewolf + werewolf_agents + director
-│   ├── ui/                  # 桌宠本体 + 聊天窗 + 设置 + 5 子游戏窗口 + UI 控制器
+│   ├── games/               # gomoku + xiangqi + werewolf + werewolf_agents + director
+│   ├── ui/                  # 桌宠本体 + 聊天窗 + 设置 + 6 子游戏窗口 + UI 控制器
 │   ├── mcp/                 # MCP stdio JSON-RPC 协议 + filesystem server
 │   ├── agents/              # Sub-agent 抽象基类（LifeAgent / ResearchAgent / CodeAgent / Orchestrator）
 │   ├── web/                 # FastAPI Dashboard（Agent Trace）
@@ -148,7 +148,7 @@ Smart-Desktop-Pet/
 ├── docs/                    # 详细文档（10 篇 1000+ 行）
 ├── data/                    # 运行时数据（memory / reminders / traces.db 等，gitignore）
 ├── scripts/                 # run.py / verify_features.py（513 行验证脚本）
-├── tests/                   # 36 个测试文件，464 个用例（git tracked）
+├── tests/                   # 42 个测试文件，680 个用例（git tracked）
 ├── voice/                   # GPT-SoVITS 训练音频（gitignore，仅 .gitkeep）
 └── GPT-SoVITS-v2pro-*/      # 整合包（gitignore，仅 .gitkeep）
 ```
@@ -179,7 +179,7 @@ Smart-Desktop-Pet/
 - **桌宠启动后看不到？** 看右下角系统托盘，单击显隐，或右键菜单 → 显示桌宠
 - **聊天窗闪退？** 看 `crash.log` 末尾错误；删 `data/chat_history.json` 重试
 - **LLM 报错？** 检查 `config.yaml` 的 `llm.api_key` / `base_url`；可切 Ollama（`http://127.0.0.1:11434/v1`）
-- **怎么玩五子棋 / 狼人杀？** 桌宠右键菜单 → "小游戏" → 进入；五子棋选难度获胜得金币，狼人杀由桌宠主持、其余 8 位玩家由 AI 扮演
+- **怎么玩五子棋 / 象棋 / 狼人杀？** 桌宠右键菜单 → "小游戏" → 进入；五子棋 / 象棋选难度获胜得金币，狼人杀由桌宠主持、其余 8 位玩家由 AI 扮演
 - **切换 Live2D？** `config.yaml` → `pet.renderer: live2d` + `pet.live2d.model_dir`；不可用自动 fallback sprite
 - **切换 TTS？** `config.yaml` → `character.tts_engine: edge | gptsovits | minimax`
 - **GPT-SoVITS 启动失败？** 看 `data/tts_api.log`；确认 `voice/<角色>/` 有参考音频

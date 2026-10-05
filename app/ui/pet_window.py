@@ -1556,6 +1556,10 @@ class PetWindow(QWidget):
         a_gomoku.triggered.connect(
             lambda _=False: self.game_requested.emit("gomoku"))
         games_menu.addAction(a_gomoku)
+        a_xiangqi = QAction("中国象棋", self)
+        a_xiangqi.triggered.connect(
+            lambda _=False: self.game_requested.emit("xiangqi"))
+        games_menu.addAction(a_xiangqi)
         a_werewolf = QAction("狼人杀（多人推理）", self)
         a_werewolf.triggered.connect(
             lambda _=False: self.game_requested.emit("werewolf"))

@@ -8,6 +8,11 @@ from .werewolf import (
     WerewolfGame, WOLF, SEER, WITCH, HUNTER, VILLAGER,
     CAMP_WOLF, CAMP_GOOD, ROLESET_9, ROLE_LABEL,
 )
+from .xiangqi import (
+    XiangqiGame, XiangqiAI, Move,
+    RED, BLACK, EMPTY, COLS, ROWS,
+    DIFFICULTIES, DIFF_DEPTH, name_of,
+)
 
 __all__ = [
     "BLACK", "WHITE", "EMPTY", "SIZE", "DIFFICULTIES",
@@ -15,4 +20,7 @@ __all__ = [
     # 狼人杀（纯逻辑；多 Agent / 窗口在 app.games.werewolf_director、app.ui.werewolf_window）
     "WerewolfGame", "WOLF", "SEER", "WITCH", "HUNTER", "VILLAGER",
     "CAMP_WOLF", "CAMP_GOOD", "ROLESET_9", "ROLE_LABEL",
+    # 中国象棋（纯逻辑；UI 在 app.ui.xiangqi_window）
+    "XiangqiGame", "XiangqiAI", "Move",
+    "RED", "BLACK", "COLS", "ROWS", "DIFF_DEPTH", "name_of",
 ]

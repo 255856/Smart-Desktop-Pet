@@ -203,6 +203,7 @@ class UIController(QObject):
         self.pet.checkin_status_fn = lambda: self.state.has_checked_in_today()
         self._gomoku_window = None
         self._werewolf_window = None
+        self._xiangqi_window = None
 
         self.state_mgr.food_low.connect(self._on_food_low)
         self.state_mgr.reminder_fired.connect(self._on_reminder_triggered)
@@ -260,6 +261,8 @@ class UIController(QObject):
             self._show_gomoku()
         elif game_id == "werewolf":
             self._show_werewolf()
+        elif game_id == "xiangqi":
+            self._show_xiangqi()
         else:
             log.warning("未知小游戏：%s", game_id)
 
@@ -351,6 +354,42 @@ class UIController(QObject):
         self._game_react(_gomoku_ev.get(result, "game_lose"))
         self.state.on_interact(feeling_gain=2)
         log.info("五子棋结束 result=%s difficulty=%s 金币 +%.0f",
+                 result, difficulty, granted)
+
+    def _show_xiangqi(self) -> None:
+        """打开中国象棋窗口（重复打开复用已存在窗口）。"""
+        from app.ui.xiangqi_window import XiangqiWindow
+        xw = self._xiangqi_window
+        if xw is None or not xw.isVisible():
+            xw = XiangqiWindow()
+            xw.game_finished.connect(self._on_xiangqi_finished)
+            xw.comment.connect(self._on_game_comment)
+            xw.game_session_active.connect(self._on_game_session)
+            xw.show()
+            self._xiangqi_window = xw
+            self._game_enter()
+        else:
+            xw.raise_()
+            xw.activateWindow()
+        xw.set_wallet(self.state.money, self.state.game_coin_remaining())
+
+    def _on_xiangqi_finished(self, result: str, difficulty: str) -> None:
+        """一局结束：按难度/结果发放金币（受每日上限约束），桌宠做反应。"""
+        from app.ui.xiangqi_window import REWARDS
+        xw = self._xiangqi_window
+        amount = 0
+        if result in ("win", "lose", "draw"):
+            amount = REWARDS.get(difficulty, REWARDS["normal"]).get(result, 0)
+        granted = self.state.add_game_reward(amount) if amount else 0
+        if xw is not None:
+            xw.set_wallet(self.state.money, self.state.game_coin_remaining())
+            xw.show_reward(granted, amount > 0 and granted <= 0)
+        _xq_ev = {"win": "game_win", "lose": "game_lose",
+                  "draw": "game_lose", "giveup": "game_lose",
+                  "resign": "game_win"}
+        self._game_react(_xq_ev.get(result, "game_lose"))
+        self.state.on_interact(feeling_gain=2)
+        log.info("象棋结束 result=%s difficulty=%s 金币 +%.0f",
                  result, difficulty, granted)
 
     def _on_game_comment(self, text: str) -> None:
