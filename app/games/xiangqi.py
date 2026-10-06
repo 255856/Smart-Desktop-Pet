@@ -84,8 +84,13 @@ class Move:
         self.captured = captured
 
     def uci(self) -> str:
-        """棋谱坐标,如 b2e2(列字母 a~i + 行号 0~9)。"""
-        return f"{chr(ord('a') + self.fc)}{self.fr}{chr(ord('a') + self.tc)}{self.tr}"
+        """棋谱坐标,如 b2e2(列字母 a~i + 行号 0~9)。
+
+        行号遵循 cchess / 国际象棋惯例:红方在 0 行(底部),黑方在 9 行(顶部)。
+        项目内部用 (r, c) 表示,r=0 在顶部,所以行号要翻转为 ROWS-1-fr。
+        """
+        return (f"{chr(ord('a') + self.fc)}{ROWS - 1 - self.fr}"
+                f"{chr(ord('a') + self.tc)}{ROWS - 1 - self.tr}")
 
     def text(self) -> str:
         return f"{chr(ord('a') + self.fc)}{self.fr + 1}→{chr(ord('a') + self.tc)}{self.tr + 1}"
@@ -106,12 +111,15 @@ class XiangqiGame:
 
     def __init__(self) -> None:
         self._board = ChessBoard(FULL_INIT_FEN)
-        # FEN 快照栈:每次 play() 推入「走之前」的 FEN,以便 undo 回退
+        # FEN 快照栈:每次 play() 成功后推入「走完之后」的 FEN(含新的行棋方)。
+        # 约定:栈[-1] = 当前局面,栈[-2] = 上一手之前 → undo_one 取 [-2]、
+        # undo(整回合) 取 [-3]。搜索(AI)期间用 undo_one(force=True) 回退。
         self._fen_stack: List[str] = [self._board.to_fen()]
         self.history: List[Move] = []
         self.winner = 0             # 0 未结束 / 1 红胜 / -1 黑胜
         self.result = ""            # checkmate / stalemate_draw / resign / ''
         self.repetition = 0
+        self._search_depth = 0      # >0 = AI 搜索进行中(跳过胜负判定)
 
     # ---------------------------------------------------------- 便捷查询
     def _read_board(self) -> List[int]:
@@ -188,9 +196,13 @@ class XiangqiGame:
     def is_attacked(self, sq: int, by_side: int) -> bool:
         """sq 是否被 by_side 攻击(直接借 cchess 逐子 is_valid_move 判定)。
 
-        备注:King 的 is_valid_move 内部会调 get_king(对手),若对方将不在宫里会
-        返回 None 然后 AttributeError。这里手动处理 King:只算「相邻 1 格」
-        (棋规如此);飞将由 detect_facing_general 单独算。
+        备注:
+        1) King 的 is_valid_move 内部会调 get_king(对手),若对方将不在宫里会
+           返回 None 然后 AttributeError。这里手动处理 King:只算「相邻 1 格」
+           (棋规如此);飞将由 _generals_face 单独算。
+        2) cchess 的 piece.is_valid_move(target) 不排除「target 就是 piece
+           自己所在格」,会误报:黑车(9,3)的 is_valid_move((3,0)) 也是 True。
+           帅/将吃子正需要这种检查 — 因此必须显式跳过 target == piece 自身。
         """
         if by_side not in (RED, BLACK):
             return False
@@ -198,6 +210,9 @@ class XiangqiGame:
         target = _to_cchess(sq // COLS, sq % COLS)
         tx, ty = target
         for piece in self._board.get_pieces(cchess_side):
+            if piece.x == tx and piece.y == ty:
+                # 棋子自己就在目标格——既不算攻击自己,也不影响落点判定
+                continue
             if piece.species == "k":
                 if abs(piece.x - tx) + abs(piece.y - ty) == 1:
                     return True
@@ -379,30 +394,29 @@ class XiangqiGame:
         # 记录历史(走前快照查询,避免 cchess 应用后位置变了)
         piece = self.piece_at(fr, fc)
         captured = self.piece_at(tr, tc)
-        # 推入「走之前」的 FEN,以便 undo 回退
-        self._fen_stack.append(self._board.to_fen())
         # 应用走子(注意:cchess.move 不会自动切换 turn,需要手动 next_turn)
         ret = self._board.move(_to_cchess(fr, fc), _to_cchess(tr, tc))
         if ret is None:
-            # 走不进去,弹出多余快照
-            self._fen_stack.pop()
             return False
         self._board.next_turn()
+        # 走完后的 FEN 入栈(含新的行棋方);搜索期间跳过胜负判定,
+        # 避免将死/困毙置位 winner 污染搜索回退
+        self._fen_stack.append(self._board.to_fen())
         self.history.append(Move(fr, fc, tr, tc, piece, captured))
-        self._update_result()
+        if self._search_depth == 0:
+            self._update_result()
         return True
 
     def play_move(self, mv: Move) -> bool:
         return self.play(mv.fr, mv.fc, mv.tr, mv.tc)
 
     def undo(self) -> bool:
-        """悔棋:撤销最近两步(红 + 黑),即整个回合。返回是否成功。"""
-        if len(self._fen_stack) < 2 or self.winner != 0:
-            return False
-        # fen_stack[0] 是开局 FEN。走完 1 步后 fen_stack=[FEN0, FEN1]。
-        # 想撤销整回合(红+黑)需要 ≥3 步:fen_stack=[FEN0, FEN1, FEN2, FEN3]。
-        # 退到 FEN1(开局 + 红方走完 1 步),用 FEN1 覆盖当前,弹出 FEN3、FEN2。
-        if len(self._fen_stack) < 3:
+        """悔棋:撤销最近两步(红 + 黑),即整个回合。返回是否成功。
+
+        栈约定(play 走完后 push):栈[-1] = 当前局面,栈[-3] = 上一回合
+        开始前。恢复栈[-3] 并弹出 2 项,history 同步弹 2。
+        """
+        if len(self._fen_stack) < 3 or self.winner != 0:
             return False
         prev_fen = self._fen_stack[-3]
         self._board.from_fen(prev_fen)
@@ -415,13 +429,16 @@ class XiangqiGame:
         self.result = ""
         return True
 
-    def undo_one(self) -> bool:
+    def undo_one(self, force: bool = False) -> bool:
         """撤销最近一着(单步悔棋,不影响对手着法)。
 
-        UI 想看「玩家走完一步之前 AI 是否被将」时用:undo_one → 读 AI 状态 →
-        再 play_move 还原。
+        force=True 供 AI 搜索回退用:忽略 winner 守卫(搜索中途可能因试探
+        将死而临时置位 winner)。UI 想看「玩家走完一步之前 AI 是否被将」时用:
+        undo_one → 读 AI 状态 → 再 play_move 还原。
         """
-        if len(self._fen_stack) < 2 or self.winner != 0:
+        if len(self._fen_stack) < 2:
+            return False
+        if self.winner != 0 and not force:
             return False
         prev_fen = self._fen_stack[-2]
         self._board.from_fen(prev_fen)
@@ -590,8 +607,12 @@ class XiangqiAI:
         best = -10 ** 9
         for mv in self._ordered_moves(game, moves):
             game.play_move(mv)
-            score = -self._search(game, depth - 1, -beta, -alpha, -side)
-            game.undo()
+            try:
+                score = -self._search(game, depth - 1, -beta, -alpha, -side)
+            finally:
+                # 必须单步回退!game.undo() 是「悔棋一整个回合」的 UI 语义,
+                # 在搜索里用会连环错位、永久破坏棋局(实测 AI 由此选出非法棋)。
+                game.undo_one(force=True)
             if score > best:
                 best = score
             if best > alpha:
@@ -619,17 +640,27 @@ class XiangqiAI:
         best_score = -10 ** 9
         best_moves: List[Move] = []
         alpha = -10 ** 9
-        for mv in self._ordered_moves(game, moves):
-            game.play_move(mv)
-            score = -self._search(game, self.depth - 1, -10 ** 9, -alpha,
-                                 -self.color)
-            game.undo()
-            if score > best_score:
-                best_score, best_moves = score, [mv]
-            elif score == best_score:
-                best_moves.append(mv)
-            if score > alpha:
-                alpha = score
+        # 搜索期间:跳过胜负判定(play 不置 winner),结束后必须完全还原
+        game._search_depth += 1
+        try:
+            for mv in self._ordered_moves(game, moves):
+                game.play_move(mv)
+                try:
+                    score = -self._search(game, self.depth - 1, -10 ** 9,
+                                          -alpha, -self.color)
+                finally:
+                    game.undo_one(force=True)
+                if score > best_score:
+                    best_score, best_moves = score, [mv]
+                elif score == best_score:
+                    best_moves.append(mv)
+                if score > alpha:
+                    alpha = score
+        finally:
+            game._search_depth -= 1
+            # 搜索不得改变对外可见的对局状态
+            game.winner = 0
+            game.result = ""
         return rng.choice(best_moves) if best_moves else moves[0]
 
 

@@ -4,7 +4,6 @@ import logging
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

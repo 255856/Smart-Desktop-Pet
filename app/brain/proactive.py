@@ -9,6 +9,7 @@ import threading
 from typing import Callable, Optional
 
 from app.core.qt_compat import QObject, QThread, Signal
+from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ class ProactiveBrain(QObject):
         if self.is_sleeping():
             log.info("ProactiveBrain: 桌宠在睡觉，跳过")
             return
-        if not self.llm_cfg.api_key or self.llm_cfg.api_key == "PUT-YOUR-API-KEY-HERE":
+        if is_placeholder_key(self.llm_cfg.api_key):
             return
 
         import datetime

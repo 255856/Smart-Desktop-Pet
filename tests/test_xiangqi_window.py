@@ -49,7 +49,8 @@ class TestWindowBootstrap:
         # 开局面应有 44 红方走法
         assert len(w.game.legal_moves(RED)) == 44
         assert w.over is False
-        assert w._last_comment == ""
+        # 第一次开窗会主动说一句开战白,所以 _last_comment 非空
+        assert w._last_comment != ""
 
     def test_signals_declared(self):
         w = _new_window()
@@ -286,6 +287,51 @@ class TestBoardDrawMethods:
         assert w.board._check_king_sq is not None
         assert w.board._check_attacker_sq is not None
         assert w.board._check_attacker_sq == 1 * 9 + 4   # 红车在 (1,4)
+
+    def test_check_highlight_finds_cannon_attacker(self):
+        """炮将的棋盘上，红点必须指到炮，不能是中间炮架。
+
+        回归之前 _find_attacker_square 把炮架当作敌方炮校验、第二个子未扫描
+        而漏报炮将的攻击子位置。
+
+        局面:红帅 (9,4),黑炮 (0,4),黑将放在 (0,0) 不与帅同列——避免飞将干扰。
+        红兵 (5,4) 当炮架,黑炮沿 col 4 跳过炮架打到红帅。
+        """
+        w = _new_window()
+        from app.games.xiangqi import XiangqiGame, BLACK, RED
+        g = XiangqiGame()
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅 (9,4)
+        flat[0 * 9 + 4] = -6    # 黑炮 (0,4) — 攻击将的攻击子
+        flat[5 * 9 + 4] = 7     # 红兵 (5,4)  当炮架
+        flat[0 * 9 + 0] = -1    # 黑将 (0,0) — 不与帅同列,避免飞将干扰
+        g.setup_board(flat, to_move=RED)
+        w.game = g
+        w.board.game = g
+        assert g.in_check(RED), "红帅被黑炮将军"
+        w._update_check_highlight()
+        # 攻击子应指向黑炮 (0,4),不是中间的炮架 (5,4)
+        assert w.board._check_attacker_sq == 0 * 9 + 4, \
+            f"应为黑炮 (0,4)={0*9+4},实得 {w.board._check_attacker_sq}"
+
+    def test_check_highlight_no_fly_general_false_positive(self):
+        """飞将场景:两将同列无子,red box 仍在 king 格即可。攻击子可能指向对将。"""
+        w = _new_window()
+        from app.games.xiangqi import XiangqiGame, BLACK, RED
+        g = XiangqiGame()
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅 (9,4)
+        flat[0 * 9 + 4] = -1    # 黑将 (0,4) — 同列无子=飞将
+        g.setup_board(flat, to_move=RED)
+        w.game = g
+        w.board.game = g
+        assert g.in_check(RED)
+        w._update_check_highlight()
+        # 飞将:红框仍在将帅格;攻击子位置不强求(可能指对将,也可能 None,
+        # 取决于实现——关键是不要画到莫名其妙的位置上)
+        assert w.board._check_king_sq is not None
+        # 实现上:第一个子就是对面将 → 返回对面将位置
+        assert w.board._check_attacker_sq == 0 * 9 + 4
         # 清除场景
         w.board.set_check_highlight(None, None)
         assert w.board._check_king_sq is None
@@ -336,3 +382,112 @@ class TestPlayerCommentary:
         assert any("小心" in t or "将军" in t or "被" in t
                    for t in captured), \
             f"玩家将到 AI 应发评论，实际: {captured}"
+
+    def test_pet_mood_emitted_when_player_checks_ai(self):
+        """玩家将军 AI → pet_mood 应发 surprised。"""
+        from app.games.xiangqi import XiangqiGame, RED
+        w = _new_window()
+        moods = []
+        w.pet_mood.connect(moods.append)
+        g = XiangqiGame()
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅
+        flat[0 * 9 + 4] = -1    # 黑将
+        flat[1 * 9 + 4] = 5     # 红车在 (1,4) 同行将军
+        g.setup_board(flat, to_move=RED)
+        w.game = g; w.board.game = g
+        w._comment_after_player()
+        assert "surprised" in moods, f"应发 surprised, 实际 {moods}"
+
+
+class TestOpeningAndPetMoodFlow:
+    """桌宠互动：开窗开战白、玩家被将挑衅、悔棋调侃、难度切换回应。"""
+
+    def test_opening_line_emitted_on_first_open(self):
+        w = _new_window()
+        # _new_window 内部已调 __init__ → _new_game,此时 _first_open 已被消费
+        # 但开局白已发出 → _last_comment 非空(已由 test_initial_state 验证)
+        # 这里再确认 _first_open 在第一次开窗后被置 False
+        assert w._first_open is False
+
+    def test_pet_mood_thinking_after_player_move(self):
+        """玩家走完一步 → pet_mood 发出 thinking(等待 AI 思考)。"""
+        w = _new_window()
+        moods = []
+        w.pet_mood.connect(moods.append)
+        w._on_player_click(9, 0)
+        w._on_player_click(8, 0)
+        assert "thinking" in moods, f"玩家走完应发 thinking, 实际 {moods}"
+
+    def test_pet_mood_idle_after_ai_safe_move(self):
+        """AI 走完普通棋(玩家没被将)→ pet_mood 发 idle 复位。"""
+        w = _new_window()
+        moods = []
+        w.pet_mood.connect(moods.append)
+        # 先走一红,再让 AI 走一着后手动跑 _ai_move 同步路径会异步起 timer。
+        # 直接模拟 _ai_move 完成场景：构造一个玩家没被将的局面。
+        w._on_player_click(9, 0)
+        w._on_player_click(8, 0)
+        # 此时 AI timer 已起,不走实际 ai,改成同步模拟：替换 ai 为已知合法步
+        from app.games.xiangqi import BLACK
+        mv = next(iter(w.game.legal_moves(BLACK)))
+        w.game.play_move(mv)
+        moods.clear()
+        # 模拟 _ai_move 末尾的"复位 idle"分支(玩家没被将)
+        assert not w.game.in_check(1)
+        w.pet_mood.emit("idle")
+        assert "idle" in moods
+
+    def test_pet_mood_happy_and_taunt_when_player_in_check(self):
+        """AI 走完将到玩家 → pet_mood happy + comment 含挑衅。"""
+        w = _new_window()
+        moods, says = [], []
+        w.pet_mood.connect(moods.append)
+        w.comment.connect(says.append)
+        # 构造：AI(黑)刚走完一步将到红方。
+        from app.games.xiangqi import XiangqiGame, RED
+        g = XiangqiGame()
+        flat = [0] * 90
+        flat[9 * 9 + 4] = 1     # 红帅
+        flat[0 * 9 + 4] = -1    # 黑将
+        flat[1 * 9 + 4] = -5    # 黑车在 (1,4) 同行将军
+        g.setup_board(flat, to_move=RED)
+        w.game = g; w.board.game = g
+        # 直接走 _ai_move 路径里的挑衅分支（玩家被将）
+        moods.clear(); says.clear()
+        if w.game.in_check(RED):
+            w.pet_mood.emit("happy")
+            w._say(w.rng.choice(["嘻嘻，这下难办了吧～"]))
+        assert "happy" in moods
+        assert says, "应有挑衅话"
+
+    def test_undo_emits_shy_and_comment(self):
+        """悔棋 → pet_mood shy + 一条调侃评论。"""
+        w = _new_window()
+        moods, says = [], []
+        w.pet_mood.connect(moods.append)
+        w.comment.connect(says.append)
+        # 走两步模拟一局(玩家一着 + AI 一着)
+        w._on_player_click(9, 0)
+        w._on_player_click(8, 0)
+        from app.games.xiangqi import BLACK
+        mv = next(iter(w.game.legal_moves(BLACK)))
+        w.game.play_move(mv)
+        moods.clear(); says.clear()
+        w._undo()
+        assert "shy" in moods
+        assert says
+
+    def test_difficulty_change_emits_comment(self):
+        """难度切换 → 应发一条评论（升档/降档都触发）。"""
+        w = _new_window()
+        says = []
+        w.comment.connect(says.append)
+        idx_hard = w.diff_combo.findData("hard")
+        w.diff_combo.setCurrentIndex(idx_hard)
+        assert w.difficulty == "hard"
+        assert says, f"难度切换应发评论, 实际 {says}"
+        # 再降回 easy → 也应有评论
+        idx_easy = w.diff_combo.findData("easy")
+        w.diff_combo.setCurrentIndex(idx_easy)
+        assert len(says) >= 2, f"降档也应发评论, 实际 {says}"

@@ -1,10 +1,14 @@
 name: Tests
 
-# 触发：master push + PR（任意目标分支）
+# 触发：master push + PR（任意目标分支）+ nightly 定时（UTC 06:00）
 on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # 每天 06:00 UTC（北京时间 14:00）跑 nightly 全量用例
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -36,7 +40,7 @@ jobs:
           # 建议层：Live2D 渲染，不装会自动降级为 PNG 帧动画
           pip install PyQtWebEngine
 
-      - name: Run tests
+      - name: Run tests (fast, default)
         env:
           QT_QPA_PLATFORM: offscreen
           # Windows runner 控制台默认是 cp1252（charmap），任何把中文写到
@@ -47,6 +51,9 @@ jobs:
         # 失败时把 pytest 摘要写进 run 页面顶部的 Job Summary：
         # Actions 的完整日志需要登录才能下载，而 run 页面是公开可读的，
         # 挂在 summary 里才能一眼看到是哪个用例挂了。
+        #
+        # 默认跳过 @pytest.mark.slow（性能/多线程边界用例），那些用例
+        # 受 pytest-cov 的 sys.settrace 计时放大容易假阳——见 nightly job。
         run: |
           pytest tests/ -q --no-header --tb=short -rA `
             --cov=app --cov-report=term-missing --cov-fail-under=25 2>&1 |
@@ -63,6 +70,41 @@ jobs:
             '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
           exit $code
+
+  # Nightly job：跑所有用例，覆盖覆盖率假阳性路径上的偶发故障。
+  # 触发：每天 06:00 UTC（北京时间 14:00）+ 手动 workflow_dispatch。
+  # 跳过 coverage 阈值（fail-under=25 是给 PR 用的；nightly 只关心能不能跑完）
+  nightly:
+    runs-on: windows-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install PyQtWebEngine
+
+      - name: Run all tests including @pytest.mark.slow
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+        shell: pwsh
+        run: |
+          pytest tests/ -q --no-header --tb=short -rA --run-slow 2>&1 |
+            Tee-Object -FilePath pytest-nightly.log
+          exit $LASTEXITCODE
 
       - name: Verify features (no GUI)
         env:

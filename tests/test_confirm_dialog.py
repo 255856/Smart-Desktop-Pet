@@ -22,11 +22,26 @@ class TestConfirmDangerousTool:
     """验证 _confirm_dangerous_tool 的集成点（不真弹窗，避免 offscreen 卡死）。"""
 
     def test_dangerous_tool_set_passed_to_agent(self):
-        """AgentLoop 的 DANGEROUS_TOOLS 集合包含 _DANGEROUS_LABELS 的所有 key。"""
+        """真正需要确认的工具必须都在 DANGEROUS_TOOLS 里。"""
         from app.brain.agent import DANGEROUS_TOOLS
         for k in _DANGEROUS_LABELS:
+            if k in ("open_app", "open_website"):
+                continue  # 2026-10-04 起有意移出，见下方回归测试
             assert k in DANGEROUS_TOOLS, (
                 f"危险工具 {k!r} 应在 DANGEROUS_TOOLS 里")
+
+    def test_open_actions_are_not_dangerous(self):
+        """回归：open_app / open_website 不得再要求确认。
+
+        这两个是桌宠最高频、零破坏性的操作，列为危险工具会导致每次都要过弹窗；
+        弹窗若不置前还会 60s 超时被拒（2026-10-04 日志两次「打开星穹铁道」失败）。
+        """
+        from app.brain.agent import DANGEROUS_TOOLS
+        assert "open_app" not in DANGEROUS_TOOLS
+        assert "open_website" not in DANGEROUS_TOOLS
+        # 真正有破坏性的必须仍在
+        for k in ("lock_screen", "kill_process", "run_script", "shutdown_computer"):
+            assert k in DANGEROUS_TOOLS, f"{k} 不该被移出危险工具表"
 
 
 class TestDangerousToolsIntegration:

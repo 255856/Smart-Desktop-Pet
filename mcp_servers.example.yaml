@@ -1,0 +1,30 @@
+# MCP server 配置示例
+# 复制为 mcp_servers.yaml 后按需修改；config.yaml 里 mcp.enabled: true 才会启动。
+#
+# 每个 server 是一个独立子进程，通过 stdio JSON-RPC 通信（MCP 标准传输）。
+# 启动后其工具会以 mcp_<server名>_<工具名> 并入桌宠工具系统，
+# 危险工具（覆盖 DANGEROUS_TOOLS 名单）执行前会弹确认窗。
+#
+# 提示：第三方 MCP server 一般用 npx 启动（需要 Node.js），例如：
+#   command: npx
+#   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/你/ Documents"]
+
+servers:
+  # 示例：本项目自带的 filesystem server（沙箱限定根目录，无需安装任何依赖）
+  - name: fs
+    description: "内置文件系统沙箱（read/list/search 均限定在 --root 目录内）"
+    command: python
+    args: ["-m", "app.mcp.filesystem_server", "--root", "E:/study/desktop-pet"]
+    enabled: true
+
+  # 示例：官方 filesystem server（需要 Node.js；把路径换成你想暴露的目录）
+  # - name: files
+  #   description: "官方文件系统 MCP（读/写/搜索/移动文件）"
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/你/Documents"]
+
+  # 示例：fetch server（抓网页转 Markdown）
+  # - name: fetch
+  #   description: "抓取网页并转为 Markdown"
+  #   command: npx
+  #   args: ["-y", "mcp-server-fetch"]

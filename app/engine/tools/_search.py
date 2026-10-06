@@ -1,7 +1,6 @@
 """网络搜索工具：web_search（主用 Tavily / 降级 DuckDuckGo）。"""
 from __future__ import annotations
 
-import json
 import logging
 import re
 import urllib.parse
@@ -37,9 +36,14 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
         """
         if not query or not query.strip():
             return "错误：搜索关键词不能为空"
-        n = max(1, min(int(max_n if max_n is not None else max_results), 10))
+        try:
+            n = max(1, min(int(max_n if max_n is not None else max_results), 10))
+        except (TypeError, ValueError):
+            return f"错误：max_n 必须是 1~10 的整数，收到 {max_n!r}"
+        tried: list[str] = []
         # 1) Tavily
         if tavily_api_key:
+            tried.append("Tavily")
             try:
                 results = _tavily_search(query.strip(), n, tavily_api_key, request_timeout_s)
                 if results:
@@ -47,6 +51,7 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
             except Exception as e:  # noqa: BLE001
                 log.warning("Tavily 搜索失败，降级到 DuckDuckGo：%s", e)
         # 2) DuckDuckGo 降级
+        tried.append("DuckDuckGo")
         try:
             results = _ddg_search(query.strip(), n, request_timeout_s)
             if results:
@@ -55,10 +60,20 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
                     + "https://www.bing.com/search?q=" + urllib.parse.quote(query.strip()))
         except Exception as e:  # noqa: BLE001
             log.warning("DuckDuckGo 搜索失败：%s", e)
-            return (
-                f"搜索失败（{e}）。建议手动访问 Bing 搜索："
-                + "https://www.bing.com/search?q=" + urllib.parse.quote(query.strip())
-            )
+            # 两个后端都不可用时（开箱配置就是这样：tavily_api_key 默认空、
+            # requirements 里 ddgs 也是注释掉的）必须说清「没搜成」和「为什么」，
+            # 否则模型会拿这句含糊的失败去编造搜索结果——这是「假装搜过了」
+            # 的最大来源。
+            need = []
+            if not tavily_api_key:
+                need.append("配置 TAVILY_API_KEY")
+            if "ddgs" in str(e) or "No module named" in str(e):
+                need.append("pip install ddgs")
+            hint = ("；需要：" + " 或 ".join(need)) if need else ""
+            return (f"错误：搜索失败（{', '.join(tried)} 均不可用：{e}）{hint}。"
+                    f"本次**没有**搜到任何内容，请不要凭猜测回答主人的问题。"
+                    f"可让主人手动访问：https://www.bing.com/search?q="
+                    + urllib.parse.quote(query.strip()))
 
     reg.register(Tool(
         name="web_search",
@@ -178,13 +193,22 @@ def _ddg_search(query: str, n: int, timeout_s: float) -> list[dict]:
             "或在 config.yaml 设置 tavily_api_key 走 Tavily。"
         ) from e
     out = []
-    with DDGS() as ddgs:
+    with DDGS(timeout=timeout_s) as ddgs:
         # ddgs >= 7 用 .text() / .news() / .answers() 等；旧版用 .ddg()
         method = getattr(ddgs, "text", None) or getattr(ddgs, "ddg", None)
         if method is None:
             raise RuntimeError("ddgs 版本不兼容，缺少 text/ddg 方法")
-        # timeout=timeout_s
-        results = method(query, max_results=n, timeout=timeout_s) or []
+        # timeout 只交给 DDGS 构造器。不同 ddgs 大版本的 .text() 参数表
+        # 差别很大，直接传 timeout= 很可能 TypeError 让降级后端恒失败。
+        import inspect
+        kwargs = {"max_results": n}
+        try:
+            params = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "timeout" in params:
+            kwargs["timeout"] = timeout_s
+        results = method(query, **kwargs) or []
         for r in results[:n]:
             out.append({
                 "title": (r.get("title") or "").strip(),

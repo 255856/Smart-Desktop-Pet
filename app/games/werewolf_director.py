@@ -26,8 +26,7 @@ from typing import Dict, List, Optional
 from app.core.qt_compat import QThread, Signal
 from app.games.werewolf import (
     WerewolfGame, ROLE_LABEL,
-    WOLF, SEER, WITCH, HUNTER, VILLAGER,
-    CAMP_WOLF, CAMP_GOOD,
+    WOLF, SEER, WITCH, HUNTER, CAMP_WOLF, CAMP_GOOD,
     SPEECH_SPEECH, SPEECH_LAST, SPEECH_CAMPAIGN, SPEECH_PK,
 )
 from app.games.werewolf_agents import PERSONAS, WerewolfAgent, HostAgent
@@ -211,18 +210,22 @@ class WerewolfDirector(QThread):
         wolves = [p.seat for p in g.alive_wolves()]
         human_seat = g.human_seat
         is_human_wolf = human_seat in wolves
-        non_wolf = [s for s in alive if s not in wolves]
+        # 可刀目标：所有存活玩家（含狼人自己，支持自刀骗解药）
+        kill_candidates = list(alive)
 
         nominations: Dict[int, int] = {}
         npc_wolves = [s for s in wolves if s != human_seat]
         if npc_wolves:
             results = await asyncio.gather(
-                *[self.agents[s].wolf_chat_message(non_wolf) for s in npc_wolves])
+                *[self.agents[s].wolf_chat_message(kill_candidates)
+                  for s in npc_wolves])
             for s, (text, t) in zip(npc_wolves, results):
                 g.add_wolf_chat(s, text)
+                # 狼聊始终写入复盘日志；仅当玩家是狼时才在界面显示
+                g.add_journal("wolf", f"{s}号{g.player(s).name}", text)
                 if is_human_wolf:
                     self._emit_wolf_chat(s, text)
-                if t is not None and t in non_wolf:
+                if t is not None and t in kill_candidates:
                     nominations[s] = t
         if is_human_wolf:
             mates = [s for s in wolves if s != human_seat]
@@ -236,13 +239,15 @@ class WerewolfDirector(QThread):
             msg = str(msg or "").strip()
             if msg:
                 g.add_wolf_chat(human_seat, msg)
+                g.add_journal("wolf",
+                              f"{human_seat}号{g.player(human_seat).name}", msg)
                 self._emit_wolf_chat(human_seat, msg)
             t = await self._ask_human(
-                "wolf_kill", list(non_wolf),
-                {"teammates": mates, "hint": "选择今晚刀的目标"},
-                default=non_wolf[0] if non_wolf else None)
+                "wolf_kill", kill_candidates,
+                {"teammates": mates, "hint": "选择今晚刀的目标（可选自己=自刀）"},
+                default=kill_candidates[0] if kill_candidates else None)
             ti = self._as_int(t)
-            if ti is not None and ti in non_wolf:
+            if ti is not None and ti in kill_candidates:
                 nominations[human_seat] = ti
         wolf_target = self._majority(list(nominations.values()))
 
@@ -711,16 +716,21 @@ class WerewolfDirector(QThread):
 
     async def _host(self, text: str) -> None:
         if text:
+            self.game.add_journal(
+                "host", f"{self.pet_name}（上帝）", text)
             self.host_message.emit(text)
 
     async def _public(self, text: str) -> None:
         """公共播报：同时写进全局公开事件，所有 agent 下一轮都能看到。"""
         if text:
+            self.game.add_journal("public", "公开播报", text)
             self.game.add_event(text)
             self.host_message.emit(text)
 
     def _emit_speech(self, seat: int, text: str, kind: str) -> None:
         name = self.game.player(seat).name
+        self.game.add_journal(
+            "speech", f"{seat}号{name}·{_KIND_LABEL.get(kind, '发言')}", text)
         self.speech.emit(seat, name, text, kind)
 
     def _emit_wolf_chat(self, seat: int, text: str) -> None:

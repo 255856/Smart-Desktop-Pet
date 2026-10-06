@@ -17,12 +17,12 @@ from app.core.qt_compat import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QComboBox,
     QColor, QObject, QEvent, QPushButton, Qt, QToolButton, QVBoxLayout,
     QWidget, QDialog, Signal, QPainter, QPen, QBrush,
-    QSize, QTimer,
+    QTimer,
 )
 from app.ui import ui_style
 from app.games.xiangqi import (
     XiangqiGame, XiangqiAI, RED, BLACK, EMPTY,
-    DIFF_DEPTH, COLS, ROWS, Move, name_of,
+    COLS, ROWS, Move, name_of,
 )
 
 log = logging.getLogger(__name__)
@@ -51,16 +51,49 @@ SETTLE_COMMENTS = {
     "giveup": ["诶，别灰心呀，再来一局嘛～", "这局先到这里，要再来一局吗？"],
     "resign": ["我认输啦，别太得意哦～", "今天就让让你～"],
 }
+# 玩家被将军时桌宠的挑衅话术(每次循环不同,避免重复)
+TAUNT_PLAYER_CHECK = [
+    "嘻嘻，这下难办了吧～",
+    "想想到底怎么挡吧～",
+    "这下子挡得住吗？",
+    "别慌别慌，好好想想～",
+    "要不要我教你？嘿嘿～",
+]
+# 进入对局的开战白(第一次开窗时随机一句)
+OPENING_LINES = [
+    "来一盘象棋吧！你执红先手哦～",
+    "准备好了吗？我可要认真了！",
+    "中国象棋，红先黑后，开始！",
+    "嗯……开局小心点～",
+]
+# 难度切换时桌宠的回应
+DIFF_LINES = {
+    "easy":   ["简单档？那我就随便下下啦～", "简单档陪你练练手～"],
+    "normal": ["普通档，放马过来吧！", "普通档，认真的哦～"],
+    "hard":   ["困难档？那我可要动真格了！", "困难档……你可别后悔呀～"],
+}
+DIFF_DOWNGRADE_LINES = [
+    "怎么，怕了？调简单档啦？",
+    "嘻嘻，调档可不能赖皮哦～",
+    "调档归调档，这局可不算～",
+]
+# 悔棋调侃
+UNDO_TAUNT = [
+    "悔棋？算你运气好～",
+    "诶，怎么还悔棋呀……",
+    "算了算了，让你一步～",
+    "下次想清楚再走嘛～",
+]
 
-# 玩家走出威胁 / 送将 / 闲谈时，桌宠也能插嘴（不再只让 AI 走完后单边说话）
+# 玩家走出好棋 / 闲谈时，桌宠也能插嘴（不再只让 AI 走完后单边说话）
 PLAYER_COMMENTS = {
-    # 玩家刚把军/将气了的瞬间
-    "player_check": ["哎，小心你的将！", "哦豁，要被将军了哦～"],
+    # 玩家这步把 AI（黑方）将军了——桌宠（黑方）自己的口吻
+    "player_check": ["哎呀，我被将军了……让我想想～",
+                    "将军？主人有两下子嘛～",
+                    "咦，这步将军有点意思～"],
     # 玩家走闲棋 / 一般推进
     "player_idle": ["嗯，这步我看看～", "哦，你走这边～", "嗯嗯，思考中～",
                    "好棋好棋，让我看看怎么应～"],
-    # 玩家送将（自己被将军）——这种一般是失误，桌宠嘴炮一下
-    "player_self_check": ["哎呀，你这步自己被将了呢～", "噢，你这一送……我可不客气啦！"],
 }
 
 # 棋盘配色（与五子棋接近的木纹暖色，但更浅更通透）
@@ -512,6 +545,9 @@ class XiangqiWindow(QDialog):
     game_finished = Signal(str, str)
     # 桌宠解说（控制器负责气泡 + TTS 朗读）
     comment = Signal(str)
+    # 桌宠情绪提示：thinking / surprised / happy / sad / shy / idle
+    # controller 收到后调 self.pet.animator.set_thinking() 或 play_emotion
+    pet_mood = Signal(str)
     # 对局会话状态：True=进入一局（保持游戏动作），False=关闭退出（回默认）
     game_session_active = Signal(bool)
 
@@ -528,6 +564,8 @@ class XiangqiWindow(QDialog):
         self.over = False
         self._last_comment = ""
         self._ready = False
+        # 第一次开窗(不是「再来一局」):桌宠主动说一句开战白并切到 happy 表情
+        self._first_open = True
         self._build_ui()
         self._new_game()
         self._ready = True
@@ -706,14 +744,34 @@ class XiangqiWindow(QDialog):
         self.turn_lbl.setText("你的回合（红方先手）")
         self.turn_lbl.show()
         self._update_history()
+        # 第一次打开窗口(不是「再来一局」):桌宠主动招呼并切到开心表情
+        if self._first_open:
+            self._first_open = False
+            self._say(self.rng.choice(OPENING_LINES))
+            self.pet_mood.emit("happy")
+        else:
+            # 再来一局:切到开心表情 + 轻松一句话,让玩家觉得「开始新一局」
+            self.pet_mood.emit("happy")
+            self._say(self.rng.choice([
+                "好，再来一局！", "换你执红～", "这回我可要小心点了！",
+            ]))
 
     def _on_difficulty(self, _idx: int) -> None:
         if not getattr(self, "_ready", True):
             return
         d = self.diff_combo.currentData()
-        if d and d != self.difficulty:
-            self.difficulty = d
-            self._new_game()
+        if not d or d == self.difficulty:
+            return
+        prev = self.difficulty
+        self.difficulty = d
+        self._new_game()
+        # 难度切换时桌宠回应(降档调侃,升档认真,同档不响应)
+        rank = {"easy": 0, "normal": 1, "hard": 2}
+        if prev in rank and d in rank:
+            if rank[d] < rank[prev]:
+                self._say(self.rng.choice(DIFF_DOWNGRADE_LINES))
+            else:
+                self._say(self.rng.choice(DIFF_LINES[d]))
 
     def _on_player_click(self, r: int, c: int) -> None:
         if self.over or self.game.winner != 0 or self.game.to_move != RED:
@@ -777,27 +835,24 @@ class XiangqiWindow(QDialog):
         self.turn_lbl.setObjectName("turn_lbl")
         self.turn_lbl.setStyleSheet("")
         self.turn_lbl.setText("桌宠思考中…")
+        # 让桌宠切到「AI 思考」表情(玩家走完后,等待 AI 应招的窗口)
+        self.pet_mood.emit("thinking")
         # AI 难度越大延迟越久（视觉上让玩家感知思考深度）
         delay = {"easy": 250, "normal": 420, "hard": 620}.get(self.difficulty, 420)
         self._ai_timer.start(delay)
 
     def _comment_after_player(self) -> None:
-        """玩家走完一步 → 桌宠插嘴。基于局势（玩家送将 / AI 被气 / 闲棋）选话术。"""
-        # AI 已被将军：嘴炮「小心你的将！」类（提醒玩家）
+        """玩家走完一步 → 桌宠插嘴。基于局势（AI 被将军 / 闲棋）选话术。
+
+        注:「玩家送将」在合法棋里不可能发生（is_legal 会拒绝送将/飞将的
+        走法），所以不需要也无法检测那个分支。
+        """
+        # 玩家这步把 AI（黑方）将军了
         if self.game.in_check(BLACK):
             self._say(self.rng.choice(PLAYER_COMMENTS["player_check"]))
+            # 桌宠带点惊讶表情(被将军时慌张)
+            self.pet_mood.emit("surprised")
             return
-        # 玩家送将（自己这步让对方能直接攻将）：嘴炮一句
-        last = self.game.last_move()
-        if last is not None:
-            # 撤销上一步看 AI 是否被将 → 若撤销后没将，说明这步送将了
-            self.game.undo_one()
-            ai_was_in_check_before = self.game.in_check(BLACK)
-            self.game.play_move(last)
-            self.game.to_move = BLACK     # undo_one 会翻转 to_move，需恢复
-            if ai_was_in_check_before and not self.game.in_check(BLACK):
-                self._say(self.rng.choice(PLAYER_COMMENTS["player_self_check"]))
-                return
         # 闲棋闲谈
         if self.rng.random() < 0.45:
             self._say(self.rng.choice(PLAYER_COMMENTS["player_idle"]))
@@ -822,28 +877,28 @@ class XiangqiWindow(QDialog):
         if king_sq is None or king_sq < 0:
             return None
         from app.games.xiangqi import _ORTHO as _ORTHO_, _DIAG as _DIAG_, \
-            side_of as sf, R, N, A, B, P, K, on_board as ob, COLS as CL
+            side_of as sf, R, N, C, A, B, P, K, on_board as ob, COLS as CL
         r, c = divmod(king_sq, CL)
         for dr, dc in _ORTHO_:
             nr, nc = r + dr, c + dc
-            first = None
+            screen_sq: Optional[int] = None      # 炮架(任意方棋子)
             while ob(nr, nc):
                 p = self.game.board[nr * CL + nc]
-                if p != 0:
+                if p == 0:
+                    nr, nc = nr + dr, nc + dc
+                    continue
+                # 第一个子:车/将直接将军(扫到此格即停)
+                if screen_sq is None:
                     if sf(p) == by_side and abs(p) in (R, K):
                         return nr * CL + nc
-                    first = p
+                    # 记为炮架,继续扫描第二个子
+                    screen_sq = nr * CL + nc
+                else:
+                    # 第二个子:敌方炮才计炮将,其它一律 break(炮架之后非炮即停)
+                    if sf(p) == by_side and abs(p) == C:
+                        return nr * CL + nc
                     break
                 nr, nc = nr + dr, nc + dc
-            if first is not None and sf(first) == by_side and abs(first) == 6:   # C=6
-                nr, nc = nr + dr, nc + dc
-                while ob(nr, nc):
-                    p = self.game.board[nr * CL + nc]
-                    if p != 0:
-                        if sf(p) == by_side:
-                            return nr * CL + nc
-                        break
-                    nr, nc = nr + dr, nc + dc
         for dr, dc in _ORTHO_:
             lr, lc = r + dr, c + dc
             if not ob(lr, lc) or self.game.board[lr * CL + lc] != 0:
@@ -901,11 +956,17 @@ class XiangqiWindow(QDialog):
         self.turn_lbl.setStyleSheet("")
         # 如果轮到红方且被将 → 红框高亮 + 标题提示
         self._update_check_highlight()
-        if self.game.in_check(RED):
+        in_player_check = self.game.in_check(RED)
+        if in_player_check:
             self.turn_lbl.setObjectName("turn_check")
             self.turn_lbl.setText("将军！你的回合")
+            # 桌宠得意的挑衅 + happy 表情
+            self.pet_mood.emit("happy")
+            self._say(self.rng.choice(TAUNT_PLAYER_CHECK))
         else:
             self.turn_lbl.setText("你的回合（红方）")
+            # 恢复自然表情,避免之前的 surprised / thinking 卡住
+            self.pet_mood.emit("idle")
 
     # ------------------------------------------------------------ 局势解说
     def _comment_after_ai(self, mv: Move) -> None:
@@ -937,6 +998,9 @@ class XiangqiWindow(QDialog):
         self.turn_lbl.setObjectName("turn_lbl")
         self.turn_lbl.setStyleSheet("")
         self.turn_lbl.setText("你的回合（红方）")
+        # 桌宠调侃
+        self.pet_mood.emit("shy")
+        self._say(self.rng.choice(UNDO_TAUNT))
 
     def _give_up(self) -> None:
         if self.over or self.game.winner != 0:

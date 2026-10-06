@@ -63,14 +63,14 @@ def register(reg: ToolRegistry) -> None:
                     if len(matches) >= limit:
                         break
         except PermissionError as e:
-            return f"无权限扫描：{e}"
+            return f"错误：无权限扫描：{e}"
         except Exception as e:  # noqa: BLE001
-            return f"扫描失败：{e}"
+            return f"错误：扫描失败：{e}"
         if not matches:
             if truncated:
-                return (f"在 {base} 扫描了 {visited} 个条目后达到时间/数量上限，"
-                        f"未找到文件名含「{keyword}」的文件。"
-                        f"建议指定更具体的 directory 缩小范围。")
+                return (f"错误：在 {base} 扫描了 {visited} 个条目后达到时间/数量上限，"
+                        f"未找到文件名含「{keyword}」的文件（结果不完整，"
+                        f"不代表真的没有）。建议指定更具体的 directory 缩小范围。")
             return f"在 {base} 未找到文件名含「{keyword}」的文件"
         lines = [f"找到 {len(matches)} 个匹配（最多 {limit}）："]
         for p in matches:

@@ -2,6 +2,7 @@
 config.yaml
 config.local.yaml
 .env
+mcp_servers.yaml
 
 # Python
 __pycache__/
@@ -58,6 +59,7 @@ agent_compare.txt
 
 # 临时 / 系统
 *.tmp
+.tmp_*
 *.bak
 .DS_Store
 Thumbs.db

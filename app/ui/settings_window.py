@@ -6,12 +6,11 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.qt_compat import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
+    QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
-    QSizePolicy, QSize, QSlider, QTabWidget, QVBoxLayout,
+    QSize, QSlider, QTabWidget, QVBoxLayout,
     QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
-    QToolButton, QObject, QScrollArea, QMenu, QAction,
-    event_global_pos,
+    QToolButton, QObject, QScrollArea, event_global_pos,
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore

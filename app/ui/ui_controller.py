@@ -4,9 +4,8 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
-from app.core.qt_compat import QObject, QTimer, QSize, Qt, Signal
+from app.core.qt_compat import QObject, QTimer, Qt, Signal
 from .chat_window import ChatWindow
 from app.ui.pet_window import PetWindow
 from .settings_window import SettingsWindow
@@ -208,13 +207,30 @@ class UIController(QObject):
         self.state_mgr.food_low.connect(self._on_food_low)
         self.state_mgr.reminder_fired.connect(self._on_reminder_triggered)
 
+        # 闹钟 / 倒计时到点的统一出口：置顶窗 + 循环提示音 + TTS 播报 +
+        # Windows 系统通知。原先提醒到点只弹一个气泡，主人忙起来完全注意不到。
+        from app.ui.alarm_window import AlarmPresenter
+        self.alarm = AlarmPresenter(speak_fn=self._speak_alarm)
+
+        from app.core.qt_compat import QApplication
+        at_quit = QApplication.instance()
+        if at_quit is not None:
+            at_quit.aboutToQuit.connect(self._on_about_to_quit)
+
+        # countdown 到点走的是 brain 的通道（后台线程触发），和提醒汇到一处
+        if hasattr(self.brain, "alarm_fired"):
+            self.brain.alarm_fired.connect(self._on_alarm_fired)
+
         self.brain.bubble_requested.connect(self.pet.show_bubble)
+        # clear_bubble 工具需要一条真能把气泡收掉的通道；
+        # 之前 _power.set_bubble_clear_hook 从没被主程序注入，该工具恒定空转。
+        hide = getattr(self.pet, "hide_bubble", None) or \
+            getattr(self.pet, "_hide_bubble", None)
+        if callable(hide) and hasattr(self.brain, "bubble_cleared"):
+            self.brain.bubble_cleared.connect(hide)
         self.brain.remark_ready.connect(self._on_proactive_remark)
         if hasattr(self.brain, "emotion_hint"):
             self.brain.emotion_hint.connect(self._on_proactive_emotion)
-
-        from app.core.qt_compat import QApplication
-        QApplication.instance().aboutToQuit.connect(self._on_about_to_quit)
 
     #  状态 / 业务
     def _on_food_low(self) -> None:
@@ -222,12 +238,47 @@ class UIController(QObject):
         self.pet.show_bubble("我饿了喵~ 想吃点东西！")
 
     def _on_reminder_triggered(self, text: str) -> None:
-        """提醒触发回调。"""
+        """提醒到点（add_reminder）。走闹钟通道：置顶窗 + 提示音 + 播报。"""
         log.info("提醒触发：%s", text)
-        self.pet.show_bubble(f"⏰ 提醒：{text}")
+        self._fire_alarm(text, kind="⏰ 闹钟到点")
+
+    def _on_alarm_fired(self, text: str, kind: str = "⏰ 倒计时结束") -> None:
+        """countdown 到点（后台线程经 brain 信号转上来）。"""
+        log.info("倒计时到点：%s", text)
+        self._fire_alarm(text, kind=kind)
+
+    def _fire_alarm(self, text: str, kind: str = "⏰ 提醒") -> None:
+        """到点提醒的统一处理。
+
+        四件事一起做，缺一不可：
+          1) 桌宠气泡（顺带播一个 reminder 动画）；
+          2) 置顶闹钟窗（主人在忙别的、桌宠在角落时也能看见）；
+          3) 循环系统提示音；
+          4) Windows 系统通知（进通知中心，桌宠隐藏也留痕）。
+        """
+        self.pet.show_bubble(f"{kind}：{text}")
         anim = getattr(self.pet, "animator", None)
         if anim is not None and hasattr(anim, "trigger_scene"):
-            anim.trigger_scene("reminder")
+            try:
+                anim.trigger_scene("reminder")
+            except Exception:  # noqa: BLE001
+                log.debug("reminder 动画触发失败", exc_info=True)
+        alarm = getattr(self, "alarm", None)
+        if alarm is not None:
+            alarm.fire(text, kind=kind, sound=True, speak=False)
+        # 系统通知失败也没关系：桌宠自己的置顶窗已经是可靠通道了
+        from app.core import toast
+        toast.show(kind, text)
+
+    def _speak_alarm(self, text: str) -> None:
+        """闹钟播报。TTS 不可用就只留提示音，不报错打扰主人。"""
+        tts = getattr(self, "tts", None)
+        if tts is None:
+            return
+        try:
+            tts.speak(text)
+        except Exception:  # noqa: BLE001
+            log.warning("闹钟 TTS 播报失败", exc_info=True)
 
     def _on_eat_requested(self) -> None:
         """吃饭：涨饱食度 + 体力 + 心情。"""
@@ -364,6 +415,7 @@ class UIController(QObject):
             xw = XiangqiWindow()
             xw.game_finished.connect(self._on_xiangqi_finished)
             xw.comment.connect(self._on_game_comment)
+            xw.pet_mood.connect(self._on_xiangqi_pet_mood)
             xw.game_session_active.connect(self._on_game_session)
             xw.show()
             self._xiangqi_window = xw
@@ -372,6 +424,22 @@ class UIController(QObject):
             xw.raise_()
             xw.activateWindow()
         xw.set_wallet(self.state.money, self.state.game_coin_remaining())
+
+    def _on_xiangqi_pet_mood(self, mood: str) -> None:
+        """象棋窗口报告的桌宠情绪:分派到 thinking / 表情键 / 复位。"""
+        anim = getattr(self.pet, "animator", None)
+        if anim is None:
+            return
+        try:
+            if mood == "thinking":
+                anim.set_thinking()
+            elif mood == "idle":
+                anim.set_idle()
+            elif mood:
+                # 其他键(happy/sad/surprised/shy)走表情键
+                self.pet.play_emotion(mood)
+        except Exception:  # noqa: BLE001
+            log.warning("象棋桌宠情绪切换失败：%s", mood)
 
     def _on_xiangqi_finished(self, result: str, difficulty: str) -> None:
         """一局结束：按难度/结果发放金币（受每日上限约束），桌宠做反应。"""
@@ -1189,7 +1257,18 @@ class UIController(QObject):
 
     #  退出
     def _on_about_to_quit(self) -> None:
-        """退出前最终存档。"""
+        """退出前最终存档 + 收掉闹钟（别让提示音在进程退出后还响）。"""
+        alarm = getattr(self, "alarm", None)
+        if alarm is not None:
+            try:
+                alarm.shutdown()
+            except Exception:  # noqa: BLE001
+                log.debug("关闭报警窗失败", exc_info=True)
+        try:
+            from app.voice.alarm_sound import stop_all
+            stop_all()
+        except Exception:  # noqa: BLE001
+            pass
         self.state_mgr.on_about_to_quit()
 
     def _quit(self) -> None:

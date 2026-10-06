@@ -16,7 +16,7 @@ from app.core.qt_compat import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QComboBox,
     QColor, QObject, QEvent, QPushButton, Qt, QToolButton, QVBoxLayout,
     QWidget, QDialog, Signal, QPainter, QPen, QBrush, QRadialGradient,
-    QSize, QTimer,
+    QTimer,
 )
 from app.ui import ui_style
 from app.games.gomoku import (

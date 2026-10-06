@@ -10,8 +10,26 @@ from typing import AsyncIterator, Callable, Optional
 import httpx
 
 from app.core.config import LLMConfig
+from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
+
+# 已经确认「服务端收下 tool_choice=required、但模型就是不肯调工具」的模型。
+# 这是**模型的能力特征**，不是单次请求的偶发，所以按模型名记在进程级：
+# 否则每条用户消息都会白等一次注定落空的 required 请求
+# （现场：第 0 轮多花 1.4s，连 5 轮重试时主人干等十几秒）。
+_TOOL_CHOICE_IGNORED: set[str] = set()
+
+
+def _note_tool_choice_ignored(model: str) -> None:
+    if model:
+        _TOOL_CHOICE_IGNORED.add(model)
+        log.info("LLMClient: 记录 %s 会忽略 tool_choice=required，"
+                 "后续请求直接用 prompt 强制", model)
+
+
+def _tool_choice_is_ignored(model: str) -> bool:
+    return model in _TOOL_CHOICE_IGNORED
 
 # 推理模型的 think 标签（DeepSeek-r1 等原生标签格式）
 THINK_TAG_START = "<think>"
@@ -33,19 +51,6 @@ CHINESE_SYSTEM_SUFFIX = (
     "必须调 web_search 拿真实信息，不允许编造或说「我不知道」。"
     "不要用 emoji 和装饰符号。回复 1~3 句。"
 )
-
-
-# 全部占位符 key —— 没填真 key 时 LLMClient 直接抛「未配置」而不是发请求被 401
-PLACEHOLDER_KEYS: frozenset[str] = frozenset({
-    "",
-    "PUT-YOUR-API-KEY-HERE",
-    "PUT-YOUR-MINIMAX-API-KEY-HERE",
-    "PUT-YOUR-MINIMAX-KEY-HERE",
-})
-
-
-def is_placeholder_key(k: str) -> bool:
-    return not k or k in PLACEHOLDER_KEYS
 
 
 _EMOJI_PATTERN = re.compile(
@@ -339,6 +344,18 @@ def _drop_low_cjk_paragraphs(text: str, threshold: float = 0.3) -> str:
     return "\n\n".join(kept).strip()
 
 
+# 「反思 / 否认工具行为」语境。主人问「你是不是在假装调用工具」时，桌宠回
+# 「以后小汐会注意的…老老实实调用工具，不再假装了啦~」是**正常回答**，
+# 但 _META_TOOL_SENT_RE 里的「调用…工具」会命中，把整句当工具独白删光，
+# 最终变成空气泡（2026-10-04 现场实况）。这类句子讲的是「对工具的态度」，
+# 不是「我正在调工具」的动作叙述，必须放行。
+_REFLECTION_RE = re.compile(
+    r"(?:不再|别再|没再|不会再|不该|不应该|没有(?:再)?(?:调用|使用)?工具|"
+    r"假装|骗|糊弄|老老实实|以后.{0,8}注意|下次(?:会|不)|改掉|改正|"
+    r"是不是在骗|有没有骗|有没有调用|是不是(?:在)?(?:假装|骗))"
+)
+
+
 def _is_pollution_sentence(core: str) -> bool:
     """判断一个句子单元是否为 CoT 规划 / 元描述 / 规则复读（高置信、保守）。"""
     if _META_RULE_KEYWORDS_RE.search(core):
@@ -348,7 +365,10 @@ def _is_pollution_sentence(core: str) -> bool:
     if _META_USER_REPEAT_SENT_RE.search(core):
         return True
     if _META_TOOL_SENT_RE.search(core):
-        return True
+        # 工具独白判定前先让「反思语境」过关：否则主人问起工具行为时，
+        # 桌宠的正常回答会被整句删掉（实测会把回复清成空串）。
+        if not _REFLECTION_RE.search(core):
+            return True
     if _NUMBERED_RULE_RE.search(core):
         return True
     # 句首自我规划 + 规划语境（两者同时满足才判污染，避免误伤「让我帮你」类回答）
@@ -439,8 +459,9 @@ def _strip_meta_by_sentence(text: str) -> str:
     return "".join(out)
 
 
-class LLMError(RuntimeError):
-    """大模型调用异常。"""
+# LLMError 已迁移到 app.core.errors —— 这里 re-export 以保持向后兼容。
+# 新代码请 `from app.core.errors import LLMError`。
+from app.core.errors import LLMError  # noqa: E402, F401
 
 
 @dataclass
@@ -676,6 +697,19 @@ class LLMClient:
 
         # 如果开了强制：先尝试 tool_choice="required"，失败则降级（带 user 提示）
         if want_force:
+            # 这个模型已经「确认过会忽略 tool_choice」时，直接走 prompt 强制，
+            # 省掉那次注定落空的请求（现场：带历史时第 0 轮要多花 1.4s+，
+            # 连 5 轮就是主人干等十几秒）。
+            # 记忆放在**模块级**并按模型名区分：这是模型的行为，不是单次请求的，
+            # 而且 LLMClient 每条消息都会新建（chat_window._send），
+            # 挂在实例上的话根本记不到。
+            if _tool_choice_is_ignored(self.cfg.model):
+                log.debug("LLMClient: %s 已确认忽略 tool_choice，本轮直接 prompt 强制",
+                          self.cfg.model)
+                async for ev, data in self._stream_with_force_prompt(
+                        url, list(messages), tools, cancel_check):
+                    yield ev, data
+                return
             forced_msgs = list(messages)
             async for ev, data in self._stream_with_optional_force(
                     url, forced_msgs, tools,
@@ -752,6 +786,10 @@ class LLMClient:
         if (tool_choice and tools and not saw_tool_calls
                 and not (cancel_check and cancel_check())
                 and allow_prompt_fallback):
+            # 服务端不报错但模型就是��调工具（国产模型常见）。记下来，
+            # 同一进程后续请求直接走 prompt 强制——否则每一轮都要先浪费一次
+            # 注定落空的 required 请求，等待时间直接翻倍。
+            _note_tool_choice_ignored(self.cfg.model)
             log.warning(
                 "LLMClient: tool_choice=%r 服务端接受，但模型仍然没调工具，"
                 "二次降级为 user-prompt 强制", tool_choice)
@@ -907,9 +945,14 @@ class LLMClient:
 _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # 提醒类（多种常见说法）—— 放在最前，避免被 open_app 的「开」误匹配
     # （「开会」单独出现时不应该误判为 open_app）
+    # 「闹钟」是设闹钟最自然的说法，原表**漏了这个词**——现场「定一个1分钟闹钟」
+    # 意图判成 None，于是下发全量 52 个工具，模型在 add_reminder / countdown
+    # 之间随机挑。漏词 = 路由不确定。
     ("add_reminder", re.compile(
-        r"(?:(?:帮?我)?(?:设置|设个|设一下|加个)?提醒|提醒我|叫我|"
-        r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)\s*(?:之后?|后)\s*提醒)"
+        r"(?:(?:帮?我)?(?:设置|设个|设一下|加个|定个|定)?(?:提醒|闹钟)|"
+        r"提醒我|叫我|到点叫我|"
+        r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)\s*(?:之后?|后)\s*提醒|"
+        r"(?:之后?|后)\s*(?:提醒|叫我|告诉我))"
         r"[^.。!！?？\n]*",
         re.UNICODE)),
     # 备用：纯「XX 分钟后」类（不需要显式「提醒」二字）

@@ -67,17 +67,27 @@ def register(reg: ToolRegistry) -> None:
         if args.strip():
             import shlex
             try:
-                extra = shlex.split(args)
+                # posix=False：Windows 上必须。POSIX 模式会把反斜杠当转义符，
+                # 实测 shlex.split(r'C:\Users\test\a.txt') → ['C:Userstesta.txt']，
+                # 路径被静默改坏而脚本只看到「找不到文件」。
+                extra = shlex.split(args, posix=False)
             except ValueError as e:
                 return f"错误：args 解析失败：{e}"
             cmd.extend(extra)
-        timeout = max(1, min(int(timeout_s if timeout_s else 60), 300))
+        try:
+            timeout = max(1, min(int(timeout_s if timeout_s else 60), 300))
+        except (TypeError, ValueError):
+            return f"错误：timeout_s 必须是数字，收到 {timeout_s!r}"
         log.info("run_script: %s (timeout=%ds)", cmd, timeout)
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
+                # 不指定就用系统 locale（中文 Windows 是 cp936），脚本只要吐一点
+                # UTF-8（emoji / 某些路径）就会 UnicodeDecodeError 让整个工具失败。
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
                 cwd=str(p.parent),
@@ -94,7 +104,14 @@ def register(reg: ToolRegistry) -> None:
         if len(err) > 2000:
             err = err[:2000] + f"\n... (截断，原 {len(err)} 字)"
         status = "OK" if proc.returncode == 0 else f"exit={proc.returncode}"
-        return f"[{status}] {p.name}\n--- stdout ---\n{out}\n--- stderr ---\n{err}".rstrip()
+        body = (f"[{status}] {p.name}\n--- stdout ---\n{out}\n"
+                f"--- stderr ---\n{err}").rstrip()
+        if proc.returncode != 0:
+            # 非零退出码必须显式标成失败：原实现只返回 "[exit=1] …"，
+            # 既没有「错误」也没有任何失败关键词，agent 的矛盾检测完全
+            # 拦不住，模型会照着 stdout 报「脚本已执行完成」。
+            return f"错误：脚本执行失败（退出码 {proc.returncode}），\n{body}"
+        return body
 
     reg.register(Tool(name="run_script",
         description="在用户主目录下的脚本执行本地脚本（.py / .ps1 / .bat / .sh）。"

@@ -15,8 +15,7 @@ from typing import Dict, List, Optional
 from app.core.qt_compat import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
     QColor, QObject, QEvent, QPushButton, Qt, QToolButton, QVBoxLayout,
-    QGridLayout, QWidget, QDialog, Signal, QScrollArea, QSizePolicy,
-    QTimer, QComboBox,
+    QGridLayout, QWidget, QDialog, Signal, QScrollArea, QTimer, QComboBox,
 )
 from app.ui import ui_style
 from app.games.werewolf import ROLE_LABEL
@@ -81,6 +80,32 @@ QLabel#phase_lbl {{ color: {ui_style.TEXT_SUB}; font-size: 9pt; }}
 """
 
 
+# 通用「浅色卡片对话框」样式（配音 / 复盘）：固定浅色，不跟随系统深色
+_DIALOG_CARD_QSS = """
+QFrame#card_dialog {
+    background: #ffffff; border: 1.5px solid #e6e4f5; border-radius: 16px;
+}
+QLabel { color: #4a4a5e; background: transparent; }
+QLabel#dlg_title { font-weight: 800; font-size: 13pt; color: #4a4a5e; }
+QLabel#dlg_sub { color: #9a97a8; font-size: 9pt; }
+QLabel#dlg_day { font-weight: 800; font-size: 11pt; color: #7c6cf0; }
+QLabel#dlg_x { font-size: 13pt; color: #a8a8b8; }
+QLabel#dlg_x:hover { color: #d6455d; }
+QComboBox { background: #ffffff; color: #4a4a5e; border: 1.5px solid #e0e0ee; border-radius: 8px; padding: 4px 8px; }
+QComboBox:hover { border-color: #c4b8f5; }
+QComboBox QAbstractItemView { background: #ffffff; color: #4a4a5e; selection-background-color: #f1ecff; selection-color: #6a58e0; border: 1px solid #e0e0ee; }
+QPushButton { background: #ffffff; border: 1.5px solid #e0e0ee; border-radius: 10px; padding: 6px 14px; font-weight: 600; color: #4a4a5e; }
+QPushButton:hover { border-color: #c4b8f5; color: #6a58e0; }
+QPushButton#primary_btn { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #a78bfa, stop:1 #7c6cf0); color: #fff; border: none; padding: 8px 22px; }
+QScrollArea { border: 1px solid #ececf3; background: #ffffff; border-radius: 10px; }
+QWidget#dlg_scroll { background: #ffffff; }
+QFrame#j_host { background: #f1ecff; border: 1.2px solid #d8ccfa; border-radius: 10px; }
+QFrame#j_public { background: #f7f6fc; border: 1px solid #ececf3; border-radius: 10px; }
+QFrame#j_speech { background: #f7f7fb; border: 1px solid #ececf3; border-radius: 10px; }
+QFrame#j_wolf { background: #fdecec; border: 1.5px solid #f1b4b4; border-radius: 10px; }
+"""
+
+
 class _DragFilter(QObject):
     def __init__(self, win):
         super().__init__(win)
@@ -96,6 +121,43 @@ class _DragFilter(QObject):
         elif evt.type() == QEvent.Type.MouseButtonRelease:
             self._drag_pos = None
         return False
+
+
+class _CardDialog(QDialog):
+    """浅色卡片对话框基类：无边框、白色圆角、自定义标题栏（可拖动）。"""
+
+    def __init__(self, title: str, width: int = 420, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(_DIALOG_CARD_QSS)
+        self.setFixedWidth(width)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._card = QFrame()
+        self._card.setObjectName("card_dialog")
+        outer.addWidget(self._card)
+        cl = QVBoxLayout(self._card)
+        cl.setContentsMargins(20, 16, 16, 18)
+        cl.setSpacing(10)
+
+        hdr = QFrame()
+        hdr.installEventFilter(_DragFilter(self))
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(4, 2, 2, 2)
+        t = QLabel(title)
+        t.setObjectName("dlg_title")
+        hl.addWidget(t)
+        hl.addStretch(1)
+        x = QLabel("✕")
+        x.setObjectName("dlg_x")
+        x.mousePressEvent = lambda _e: self.reject()
+        hl.addWidget(x)
+        cl.addWidget(hdr)
+
+        self.body = cl
 
 
 class WerewolfWindow(QDialog):
@@ -520,6 +582,8 @@ class WerewolfWindow(QDialog):
         self._set_wait("对局中断，可关闭后重新开始。")
 
     def _on_game_over(self, result: dict) -> None:
+        if self.director is not None:
+            self._last_game = self.director.game
         winner = result.get("winner")
         won = result.get("player_won")
         role = result.get("player_role", "")
@@ -550,10 +614,13 @@ class WerewolfWindow(QDialog):
         btn_again = QPushButton("再来一局")
         btn_again.setObjectName("primary_btn")
         btn_again.clicked.connect(self._restart)
+        btn_replay = QPushButton("对局复盘")
+        btn_replay.clicked.connect(self._open_replay)
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.close)
         row.addStretch(1)
         row.addWidget(btn_again)
+        row.addWidget(btn_replay)
         row.addWidget(btn_close)
         row.addStretch(1)
         self.action_layout.addLayout(row)
@@ -751,37 +818,35 @@ class WerewolfWindow(QDialog):
             self._save_voice_cfg()
             self.phase_lbl.setText("角色配音已保存")
 
+    def _open_replay(self) -> None:
+        g = getattr(self, "_last_game", None)
+        if g is None and self.director is not None:
+            g = self.director.game
+        if g is None:
+            return
+        dlg = ReplayDialog(g.journal, g.players, parent=self)
+        dlg.exec_()
 
-class VoiceCastDialog(QDialog):
-    """角色配音对话框：主持人 + 8 个 NPC 各选一个音色。"""
+class VoiceCastDialog(_CardDialog):
+    """角色配音：主持人 + 8 个 NPC 各选一个音色。"""
 
     def __init__(self, cfg: dict, voices, pet_name: str,
                  npc_names: List[str], parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("角色配音")
-        self.setMinimumWidth(400)
+        super().__init__("角色配音", width=420, parent=parent)
         self._combos: Dict[str, QComboBox] = {}
         names = [v.name for v in (voices or []) if getattr(v, "name", "")]
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(10)
-
-        title = QLabel("角色配音")
-        title.setStyleSheet("font-weight: 800; font-size: 13pt;")
-        lay.addWidget(title)
         sub = QLabel("为每个角色选择音色：主持人默认使用桌宠音色；其他角色选择「静音」则不朗读。")
+        sub.setObjectName("dlg_sub")
         sub.setWordWrap(True)
-        sub.setStyleSheet("color: #8a8a99; font-size: 9pt;")
-        lay.addWidget(sub)
+        self.body.addWidget(sub)
 
-        self._add_row(lay, "host", f"{pet_name}（主持人·上帝）",
+        self._add_row("host", f"{pet_name}（主持人·上帝）",
                        cfg.get("host", ""),
                        [("默认（桌宠音色）", "")] + [(n, n) for n in names])
         for i in range(1, 9):
             nm = npc_names[i - 1] if i - 1 < len(npc_names) else f"{i}号"
-            self._add_row(lay, str(i), f"{i}号 {nm}",
-                           cfg.get(str(i), ""),
+            self._add_row(str(i), f"{i}号 {nm}", cfg.get(str(i), ""),
                            [("静音", "")] + [(n, n) for n in names])
 
         row = QHBoxLayout()
@@ -793,12 +858,12 @@ class VoiceCastDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
         row.addWidget(btn_ok)
         row.addWidget(btn_cancel)
-        lay.addLayout(row)
+        self.body.addLayout(row)
 
-    def _add_row(self, lay, key, label, current, options) -> None:
+    def _add_row(self, key, label, current, options) -> None:
         r = QHBoxLayout()
         lb = QLabel(label)
-        lb.setMinimumWidth(160)
+        lb.setMinimumWidth(150)
         cb = QComboBox()
         for text, data in options:
             cb.addItem(text, data)
@@ -806,8 +871,69 @@ class VoiceCastDialog(QDialog):
         cb.setCurrentIndex(idx if idx >= 0 else 0)
         r.addWidget(lb)
         r.addWidget(cb, 1)
-        lay.addLayout(r)
+        self.body.addLayout(r)
         self._combos[key] = cb
 
     def result_cfg(self) -> dict:
         return {k: str(cb.currentData() or "") for k, cb in self._combos.items()}
+
+
+class ReplayDialog(_CardDialog):
+    """对局复盘：展示全部频道发言（含狼聊、夜晚），按天分组。"""
+
+    def __init__(self, journal: List[dict], players, parent=None):
+        super().__init__("对局复盘", width=480, parent=parent)
+        sub = QLabel("以下为完整对局记录，包含所有频道（狼人频道在游戏结束后可见）。")
+        sub.setObjectName("dlg_sub")
+        sub.setWordWrap(True)
+        self.body.addWidget(sub)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        host = QWidget()
+        host.setObjectName("dlg_scroll")
+        vl = QVBoxLayout(host)
+        vl.setContentsMargins(2, 2, 6, 2)
+        vl.setSpacing(6)
+
+        cur_day = -1
+        ch_obj = {"host": "j_host", "public": "j_public",
+                  "speech": "j_speech", "wolf": "j_wolf"}
+        ch_label = {"host": "主持人", "public": "公开",
+                    "speech": "发言", "wolf": "狼频道"}
+        for item in journal:
+            d = item.get("day", 0)
+            if d != cur_day:
+                cur_day = d
+                dl = QLabel(f"第 {d} 天")
+                dl.setObjectName("dlg_day")
+                vl.addWidget(dl)
+            box = QFrame()
+            box.setObjectName(ch_obj.get(item["channel"], "j_speech"))
+            bh = QVBoxLayout(box)
+            bh.setContentsMargins(10, 6, 10, 6)
+            bh.setSpacing(1)
+            who = item.get("who", "")
+            if who:
+                h = QLabel(f"{ch_label.get(item['channel'], '')} · {who}")
+                h.setStyleSheet("font-weight: 700; font-size: 9pt;")
+                bh.addWidget(h)
+            b = QLabel(item["text"])
+            b.setWordWrap(True)
+            b.setStyleSheet("font-size: 9.5pt;")
+            bh.addWidget(b)
+            vl.addWidget(box)
+        vl.addStretch(1)
+        scroll.setWidget(host)
+        scroll.setFixedHeight(460)
+        self.body.addWidget(scroll)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn = QPushButton("关闭")
+        btn.setObjectName("primary_btn")
+        btn.clicked.connect(self.accept)
+        row.addWidget(btn)
+        self.body.addLayout(row)

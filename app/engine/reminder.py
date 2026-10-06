@@ -94,12 +94,22 @@ class ReminderStore(QObject):
 
     reminder_triggered = Signal(str)   # 提醒文本
     list_changed = Signal()
+    # 请求「重新调度定时器」。工具（add_reminder）在 asyncio.to_thread 的
+    # 工作线程里跑，QTimer 只允许在其属主线程（主线程）start()，
+    # 跨线程直接调用是 Qt 明令禁止的 no-op：
+    #   QObject::startTimer: Timers cannot be started from another thread
+    # 那个 no-op 不会报错、isActive() 还会返回 True，于是提醒被存进磁盘、
+    # 列表里看得见、工具也回报「已设置提醒」，但**永远不会响**（实测）。
+    # 用信号把调度请求排队回主线程，跨线程调用就安全了。
+    reschedule = Signal()
 
     def __init__(self, data_file: str | Path, parent: Optional[QObject] = None):
         super().__init__(parent)
         self.data_file = Path(data_file)
         self._items: list[ReminderItem] = []
         self._lock = threading.Lock()
+        # 最近一次落盘是否成功。add_reminder 工具读它来决定能不能说「已设置」。
+        self.last_save_ok = True
         self._load()
         # 首次启动建空文件（让用户能看到数据位置；不破坏现有行为）
         if not self.data_file.exists():
@@ -112,6 +122,8 @@ class ReminderStore(QObject):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_tick)
+        # 跨线程调度请求 → 排队回主线程执行（见 reschedule 信号注释）
+        self.reschedule.connect(self._schedule_next_now)
         # 初始调度
         self._schedule_next()
 
@@ -124,22 +136,27 @@ class ReminderStore(QObject):
         except Exception as e:  # noqa: BLE001
             log.warning("加载 reminders 失败：%s", e)
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """落盘。返回是否成功（原来只 log.warning 吞掉，工具层无从得知）。"""
         try:
             self.data_file.parent.mkdir(parents=True, exist_ok=True)
             self.data_file.write_text(
                 json.dumps([asdict(i) for i in self._items], ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            return True
         except Exception as e:  # noqa: BLE001
             log.warning("保存 reminders 失败：%s", e)
+            return False
 
     def add(self, delay_seconds: int, text: str) -> ReminderItem:
         rid = f"r{int(time.time() * 1000)}"
         item = ReminderItem(id=rid, text=text, fire_at=time.time() + delay_seconds)
         with self._lock:
             self._items.append(item)
-            self._save()
+            # 工具层读它来决定能不能对主人说「已设置提醒」——
+            # 写盘失败时提醒只活在内存里，进程一退就没了。
+            self.last_save_ok = self._save()
         self.list_changed.emit()
         self._schedule_next()
         return item
@@ -168,10 +185,15 @@ class ReminderStore(QObject):
         return self.add(delay, content)
 
     def _schedule_next(self) -> None:
-        """找到最近的未触发提醒，设置单次定时器到那个时间点。
+        """请求重新调度。**可从任意线程调用**。
 
-        没有提醒时停止定时器。
+        内部 emit 一个信号，由 Qt 排队到定时器属主线程真正执行。
+        直接调 QTimer.start() 只在主线程有效——见 reschedule 信号注释。
         """
+        self.reschedule.emit()
+
+    def _schedule_next_now(self) -> None:
+        """真正设置定时器。**只允许在定时器属主线程（主线程）执行。**"""
         self._timer.stop()
         now = time.time()
         next_fire = None

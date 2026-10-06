@@ -50,6 +50,28 @@ def build_default_tools(
     _runner.register(reg)
     _tts_mute.register(reg)
 
+    # ---- 接线：把 UI hook 注入到用「全局 setter」而非参数传 hook 的模块 ----
+    # 原先 _timer.set_say_hook / _power.set_bubble_clear_hook 全仓只有 tests
+    # 调用过，主程序从不注入，导致：
+    #   - countdown 到点静默无声（工具却说「到点主人会收到提醒」）
+    #   - clear_bubble 永久空转
+    #
+    # 注意：这里**只接 bubble**（Qt 信号，跨线程 emit 是安全的——Qt 会把槽调用
+    # 排队到接收者所在线程）。不要在这里接任何「到点后再触发」的自定义回调：
+    # 那种回调会在后台线程里 emit 一个可能已析构的 QObject，实测直接把进程
+    # 打成 access violation。「没有提醒通道」这件事由 countdown() 在调用时
+    # 同步判断（见 _timer._has_notify_channel）。
+    _bubble = hooks.get("bubble")
+    if callable(_bubble):
+        _timer.set_say_hook(lambda text: _bubble(text))
+    # 倒计时到点专用：走闹钟通道而不是普通气泡，UI 层会弹置顶窗 + 响铃 + 播报
+    _alarm = hooks.get("alarm")
+    if callable(_alarm):
+        _timer.set_alarm_hook(_alarm)
+    _hide = hooks.get("hide_bubble")
+    if callable(_hide):
+        _power.set_bubble_clear_hook(_hide)
+
     return reg
 
 

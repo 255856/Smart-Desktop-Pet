@@ -35,7 +35,7 @@ def register(reg: ToolRegistry) -> None:
         if not desktop.is_dir():
             desktop = _HOME / "Desktop"
         if not desktop.is_dir():
-            return "找不到桌面目录"
+            return "错误：找不到桌面目录"
         files = sorted(desktop.iterdir(), key=lambda p: p.name)
         if not files:
             return "桌面是空的"
@@ -51,13 +51,13 @@ def register(reg: ToolRegistry) -> None:
             return "错误：path 不能为空"
         p = Path(path).expanduser()
         if not p.exists():
-            return f"文件不存在：{p}"
+            return f"错误：文件不存在：{p}"
         if not p.is_file():
-            return f"不是文件：{p}"
+            return f"错误：不是文件：{p}"
         if not _is_safe_path(p):
-            return f"安全策略拒绝：路径必须在用户主目录下（{p}）"
+            return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
         if p.stat().st_size > 1024 * 1024:    # 1 MB
-            return f"文件太大（>{1} MB），用 read_file 走专门解析器"
+            return f"错误：文件太大（>{1} MB），用 read_file 走专门解析器"
         try:
             raw = p.read_text(encoding="utf-8", errors="replace")
             cap = max(200, min(int(max_chars if max_chars else _MAX_BYTES), 50000))
@@ -66,7 +66,7 @@ def register(reg: ToolRegistry) -> None:
             return raw
         except Exception as e:  # noqa: BLE001
             log.exception("read_text_file failed")
-            return f"读取失败：{e}"
+            return f"错误：读取失败：{e}"
 
     def read_file(path: str = "", question: str = "") -> str:
         """按扩展名分发解析：PDF / Word / Excel / CSV / 图片 OCR / html / md。
@@ -78,17 +78,17 @@ def register(reg: ToolRegistry) -> None:
             if question and question.strip():
                 found = _locate_doc(question)
                 if not found:
-                    return f"未找到包含「{question}」的文档"
+                    return f"错误：未找到包含「{question}」的文档"
                 path = str(found)
             else:
                 return "错误：path 不能为空"
         p = Path(path).expanduser()
         if not p.exists():
-            return f"文件不存在：{p}"
+            return f"错误：文件不存在：{p}"
         if not p.is_file():
-            return f"不是文件：{p}"
+            return f"错误：不是文件：{p}"
         if not _is_safe_path(p):
-            return f"安全策略拒绝：路径必须在用户主目录下（{p}）"
+            return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
         ext = p.suffix.lower()
         try:
             if ext == ".pdf":
@@ -107,10 +107,10 @@ def register(reg: ToolRegistry) -> None:
                 return _read_html(p)
             if ext in (".txt", ".json", ".yaml", ".yml", ".csv", ".tsv"):
                 return _read_plain(p)
-            return f"暂不支持该格式（{ext}）。已知：txt/md/pdf/docx/xlsx/csv/图片/HTML"
+            return f"错误：暂不支持该格式（{ext}）。已知：txt/md/pdf/docx/xlsx/csv/图片/HTML"
         except Exception as e:  # noqa: BLE001
             log.exception("read_file failed for %s", p)
-            return f"读取失败：{e}"
+            return f"错误：读取失败：{e}"
 
     def _locate_doc(question: str) -> Path | None:
         """在家目录搜文件名含 question 的文档（优先 .md/.txt）。"""
@@ -131,14 +131,14 @@ def register(reg: ToolRegistry) -> None:
         try:
             from pypdf import PdfReader
         except ImportError:
-            return "PDF 解析失败：未安装 pypdf（pip install pypdf）"
+            return "错误：PDF 解析失败：未安装 pypdf（pip install pypdf）"
         try:
             reader = PdfReader(str(p))
             text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception as e:  # noqa: BLE001
-            return f"PDF 解析失败：{e}"
+            return f"错误：PDF 解析失败：{e}"
         if not text.strip():
-            return "PDF 内容为空（可能扫描版无 OCR 层）"
+            return "错误：PDF 内容为空（可能扫描版无 OCR 层）"
         if len(text) > _MAX_BYTES:
             text = text[:_MAX_BYTES] + f"\n\n... (截断，原文 {len(text)} 字符)"
         return text
@@ -147,14 +147,14 @@ def register(reg: ToolRegistry) -> None:
         try:
             import docx
         except ImportError:
-            return "DOCX 解析失败：未安装 python-docx（pip install python-docx）"
+            return "错误：DOCX 解析失败：未安装 python-docx（pip install python-docx）"
         try:
             d = docx.Document(str(p))
             text = "\n\n".join(par.text for par in d.paragraphs)
         except Exception as e:  # noqa: BLE001
-            return f"DOCX 解析失败：{e}"
+            return f"错误：DOCX 解析失败：{e}"
         if not text.strip():
-            return "DOCX 内容为空"
+            return "错误：DOCX 内容为空"
         if len(text) > _MAX_BYTES:
             text = text[:_MAX_BYTES] + f"\n\n... (截断)"
         return text
@@ -163,7 +163,7 @@ def register(reg: ToolRegistry) -> None:
         try:
             import openpyxl
         except ImportError:
-            return "XLSX 解析失败：未安装 openpyxl（pip install openpyxl）"
+            return "错误：XLSX 解析失败：未安装 openpyxl（pip install openpyxl）"
         try:
             wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
             lines = [f"# Sheet: {wb.sheetnames}"]
@@ -177,7 +177,7 @@ def register(reg: ToolRegistry) -> None:
                     # 把 None 替换为 ""
                     lines.append(" | ".join(str(c) if c is not None else "" for c in row[:20]))
         except Exception as e:  # noqa: BLE001
-            return f"XLSX 解析失败：{e}"
+            return f"错误：XLSX 解析失败：{e}"
         return "\n".join(lines)
 
     def _read_csv(p: Path) -> str:
@@ -192,7 +192,7 @@ def register(reg: ToolRegistry) -> None:
                         break
                     lines.append(" | ".join(str(c) for c in row))
         except Exception as e:  # noqa: BLE001
-            return f"CSV 解析失败：{e}"
+            return f"错误：CSV 解析失败：{e}"
         return "\n".join(lines) or "(空)"
 
     def _read_image_ocr(p: Path) -> str:
@@ -204,7 +204,7 @@ def register(reg: ToolRegistry) -> None:
         try:
             raw = p.read_text(encoding="utf-8", errors="replace")
         except Exception as e:  # noqa: BLE001
-            return f"读取失败：{e}"
+            return f"错误：读取失败：{e}"
         if len(raw) > _MAX_BYTES:
             return raw[:_MAX_BYTES] + f"\n\n... (截断)"
         return raw
@@ -227,7 +227,7 @@ def register(reg: ToolRegistry) -> None:
         try:
             raw = p.read_text(encoding="utf-8", errors="replace")
         except Exception as e:  # noqa: BLE001
-            return f"读取失败：{e}"
+            return f"错误：读取失败：{e}"
         if len(raw) > _MAX_BYTES:
             return raw[:_MAX_BYTES] + f"\n\n... (截断)"
         return raw

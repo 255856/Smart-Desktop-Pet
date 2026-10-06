@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import platform
 
 from ._core import Tool, ToolRegistry
@@ -69,15 +68,31 @@ def _set_brightness_windows(level: int) -> str:
     try:
         import subprocess
         # PowerShell 调 WMI：Brightness
+        # 原实现丢弃 subprocess.run 的返回值，无脑回报「亮度已调到 N%」——
+        # 台式机（无 WMI 显示器）、缺管理员权限、$b[0] 为 null 时 PowerShell 报错，
+        # 工具照样说成功。对比同文件 set_volume 缺 pycaw 时会诚实说明，标准不一致。
         ps = (
-            f"$b = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods; "
-            f"$b[0].wmiSetBrightness(1, {level})"
+            "$b = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods; "
+            "if (-not $b) { Write-Output 'NO_MONITOR'; exit 3 }; "
+            f"$b[0].wmiSetBrightness(1, {level}); "
+            f"if ($?) {{ Write-Output 'OK' }} else {{ Write-Output 'SET_FAILED'; exit 4 }}"
         )
-        subprocess.run(
+        proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, timeout=5, check=False,
+            capture_output=True, timeout=10, check=False, text=True,
+            encoding="utf-8", errors="replace",
         )
-        return f"亮度已调到 {level}%"
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if "NO_MONITOR" in out or proc.returncode == 3:
+            return (f"错误：本机没有支持 WMI 亮度的显示器（台式机/外接显示器常见），"
+                    f"亮度未改变。")
+        if proc.returncode != 0 or "SET_FAILED" in out:
+            log.warning("set_brightness 失败 rc=%s out=%r err=%r",
+                        proc.returncode, out[:120], err[:120])
+            return (f"错误：亮度未调到 {level}%（可能需要管理员权限，"
+                    f"或本机显示器不支持）")
+        return f"已把亮度调到 {level}%"
     except Exception as e:  # noqa: BLE001
         log.exception("调亮度失败")
         return f"错误：{e}（需要管理员权限）"

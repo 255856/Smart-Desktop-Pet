@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from app.core.qt_compat import QAction, QApplication, QIcon, QMenu, QObject, QPixmap, QSystemTrayIcon
+from app.core.qt_compat import QAction, QIcon, QMenu, QObject, QSystemTrayIcon
 from app.ui import ui_style
 
 
@@ -55,7 +55,6 @@ class TrayController(QObject):
             return QIcon(str(body))
         # 退化 2：项目根下的默认第一帧
         try:
-            from app.core.qt_compat import BACKEND as _BACKEND
             from pathlib import Path as _P
             here = _P(__file__).resolve().parent.parent
             first_idle = next(iter((here / "assets/sprites").glob("*/A_000_*.png")), None)

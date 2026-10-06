@@ -7,7 +7,7 @@ from app.engine.tools._tts_mute import (
     set_mute_hook,
 )
 from app.engine.tools._timer import (
-    countdown, list_countdowns, cancel_countdown, set_say_hook,
+    countdown, list_countdowns, cancel_countdown, set_say_hook, set_alarm_hook,
 )
 
 
@@ -162,10 +162,18 @@ class TestCountdown:
     def test_set_say_hook_does_not_crash(self):
         # 注入一个 mock hook，倒计时到点会调
         called = []
+        # 先清掉 alarm hook：它优先级高于 say hook（到点该弹置顶窗+响铃，
+        # 而不是只冒个气泡）。而它是个**进程级全局**——别的用例建过
+        # BrainController 就会把它占住（test_hallucination.py 就建了），
+        # 不清掉的话本例会静默走 alarm 分支，say hook 永远不被调。
+        set_alarm_hook(None)
         set_say_hook(lambda text: called.append(text))
-        # 0.1 秒倒计时 + 短延迟
+        # 0.1 秒倒计时。固定 sleep(0.3) 在机器繁忙时会飘（线程调度延迟
+        # 可以远超 0.3s），改成轮询等待。
         countdown(seconds=0.1, message="hook_test")
-        time.sleep(0.3)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not called:
+            time.sleep(0.05)
         # 验证 hook 被调
         assert any("hook_test" in t for t in called), f"hook not called: {called}"
         set_say_hook(None)    # 清理

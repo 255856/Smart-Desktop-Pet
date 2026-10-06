@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import logging
 import random
-import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from app.animation.animations import (
-    Animation, AnimationPlayer, Frame,
-    load_animation_from_dir, load_animation_set,
+    Animation, load_animation_from_dir,
 )
-from app.animation.pet_renderer import PetRenderer
-from app.core.qt_compat import QTimer
 
 log = logging.getLogger(__name__)
 

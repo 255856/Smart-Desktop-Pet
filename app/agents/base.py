@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import Optional
 
 from app.brain.llm_client import ChatMessage, LLMClient
 from app.engine.tools import Tool, ToolRegistry

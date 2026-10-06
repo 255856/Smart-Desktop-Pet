@@ -496,7 +496,7 @@ class App:
                 if "embed" in m.lower():
                     note = "  ← 可用于本地向量记忆"
                 elif "r1" in m.lower():
-                    note = "  ← 推理模型（带思考过程）"
+                    note = "  ← 推理模型"
                 banner.info(f"  · {m}{note}")
         else:
             banner.info("未检测到 Ollama", "https://ollama.com 安装后可走本地")
@@ -572,7 +572,7 @@ class App:
         # 统计动画目录（仅 sprite 模式；live2d 不加载帧图，扫描 2550 个 PNG
         # 纯属浪费，之前的「动画帧 · 2550 张」横幅有误导性——那只是数文件数）
         if getattr(cfg.pet, "renderer", "sprite") == "live2d":
-            banner.info("动画帧", "sprite 模式未启用，跳过（不占内存）")
+            banner.info("动画帧", "sprite 模式未启用，跳过")
         else:
             sprite_count = sum(
                 1 for p in sprite_dir.rglob("*.png")
@@ -581,7 +581,7 @@ class App:
                 banner.ok(f"动画帧", f"{sprite_count} 张")
             else:
                 banner.info("未找到动画帧",
-                            "用静态 fallback 显示（不影响聊天/工具）")
+                            "用静态 fallback 显示")
 
         banner.section("⑤ 运动控制器")
         self.motion = MotionController(
@@ -606,9 +606,11 @@ class App:
         banner.ok("BrainController",
                   f"{tool_count} 个工具 · {mem_count} 条记忆 · 后端={backend_label}")
         if self.brain.proactive is not None:
-            banner.ok("主动行为", "已启用（空闲时会主动关心）")
+            banner.ok("主动行为", "已启用")
+        if getattr(self.brain, "mcp_registry", None) is not None:
+            banner.info("MCP 外挂工具", "已启用（server 后台启动中，完成后日志可见）")
 
-        banner.section("⑦ UI 控制器（托盘 + 设置 + 聊天）")
+        banner.section("⑦ UI 控制器")
         self.ui = UIController(
             root, cfg, self.state_mgr, self.pet, self.tts,
             self.brain, self.motion,
@@ -750,6 +752,11 @@ class App:
         self.ui._on_quick_chat_sent(text)
 
     def _quit(self):
+        # 关 MCP server 子进程
+        try:
+            self.brain.shutdown_mcp()
+        except Exception:  # noqa: BLE001
+            pass
         # 关本地服务子进程（Live2D Demo / Agent Trace）
         for _pid in (self._demo_pid, self._dashboard_pid):
             if _pid:
@@ -761,6 +768,10 @@ class App:
         self.ui._quit()
 
     def _on_about_to_quit(self):
+        try:
+            self.brain.shutdown_mcp()
+        except Exception:  # noqa: BLE001
+            pass
         for _pid in (self._demo_pid, self._dashboard_pid):
             if _pid:
                 try:

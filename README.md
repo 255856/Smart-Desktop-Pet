@@ -115,6 +115,13 @@ python scripts/verify_features.py --no-gui    # 82 项功能冒烟通过
 python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
 ```
 
+> **Windows PowerShell 注意**：`verify_features.py` 把报告写到 `data\feature_check.txt`，
+> PowerShell 的 `Get-Content` 默认按 ANSI 编码读，中文会乱码。
+> 用编辑器直接打开看，或：
+> ```powershell
+> Get-Content -Path data\feature_check.txt -Encoding UTF8
+> ```
+
 ---
 
 ## 项目结构

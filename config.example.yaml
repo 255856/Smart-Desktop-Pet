@@ -105,3 +105,11 @@ pet:
     random_expression_max_s: 70
     # 渲染帧率上限（性能）：30fps 待机足够顺滑；隐藏到托盘时渲染完全暂停
     max_fps: 30
+
+# ---- MCP 外挂工具（Model Context Protocol）----
+# 可外挂任何 MCP 兼容 server，其工具会以 mcp_<server>_<tool> 的名字并入桌宠工具系统。
+# server 列表在 mcp_servers.yaml（示例见 mcp_servers.example.yaml）。
+mcp:
+  enabled: false
+  servers_file: "mcp_servers.yaml"
+  call_timeout: 30

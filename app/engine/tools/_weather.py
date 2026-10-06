@@ -1,7 +1,6 @@
 """天气查询（open-meteo，无需 API key；走 is_safe_url 校验 endpoint）。"""
 from __future__ import annotations
 
-import json
 import logging
 from urllib.parse import urlencode
 
@@ -23,11 +22,19 @@ DEFAULT_LOCATION = "北京"
 
 
 def _geocode(location: str) -> tuple[float, float, str]:
-    """地名 → (lat, lon, resolved_name)。失败时返回默认 + 默认地名。"""
+    """地名 → (lon, lat, resolved_name)。解析失败时回落到默认城市。
+
+    注意返回顺序是 (lon, lat, name)，不是文档里写的 (lat, lon, name)。
+    回落时**必须**改写 resolved_name：原实现保留用户传入的地名，于是网络抖动时
+    用户问「上海天气」会得到「📍 上海（39.9, 116.4）」——地名是上海的、
+    数据是北京的，模型会照着回答上海的天气。静默的错误答案比报错更糟。
+    """
+    fallback_name = (f"{DEFAULT_LOCATION}（地名「{location}」解析失败，"
+                     f"已按默认城市查询）")
     url = f"https://{_GEOCODING_HOST}/v1/search?{urlencode({'name': location, 'count': 1, 'language': 'zh', 'format': 'json'})}"
     if not is_safe_url(url, allowed_hosts={_GEOCODING_HOST}):
         log.warning("geocoding url blocked by safety check")
-        return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, DEFAULT_LOCATION
+        return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, fallback_name
     try:
         with httpx.Client(timeout=8.0) as c:
             r = c.get(url)
@@ -35,12 +42,13 @@ def _geocode(location: str) -> tuple[float, float, str]:
             data = r.json()
         results = data.get("results") or []
         if not results:
-            return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, location or DEFAULT_LOCATION
+            return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, fallback_name
         first = results[0]
-        return float(first["longitude"]), float(first["latitude"]), first.get("name", location)
+        return (float(first["longitude"]), float(first["latitude"]),
+                first.get("name", location))
     except Exception as e:  # noqa: BLE001
         log.warning("geocoding failed: %s", e)
-        return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, location or DEFAULT_LOCATION
+        return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, fallback_name
 
 
 _WEATHER_CODE = {
@@ -61,7 +69,10 @@ def register(reg: ToolRegistry) -> None:
 
     def get_weather(location: str = "", days: int = 1) -> str:
         """查天气。location: 城市名（中文 / 拼音 / 英文都行，空则默认北京）；days: 1~7 预报天数。"""
-        days = max(1, min(int(days if days else 1), 7))
+        try:
+            days = max(1, min(int(days if days else 1), 7))
+        except (TypeError, ValueError):
+            return f"错误：days 必须是 1~7 的整数，收到 {days!r}"
         loc = (location or DEFAULT_LOCATION).strip()
         lon, lat, resolved = _geocode(loc)
         params = {

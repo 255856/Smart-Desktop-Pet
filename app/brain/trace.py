@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 

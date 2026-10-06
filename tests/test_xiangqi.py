@@ -318,20 +318,19 @@ class TestCheckAndMate:
 
     def test_checkmate_detected(self):
         g = blank(); both_kings(g)
-        # 黑将在 (0, 4),红方炮+炮架将军
-        # 红车 (5, 4) + 红仕 (8, 4) 把黑将上下左右全封死,然后由下一步触发
-        put(g, 5, 4, R)                                      # 红车 (5,4)
-        put(g, 8, 4, A)                                      # 红仕 (8,4) 封下
-        # 让黑方走一着(手),我先摆出黑将被将,黑方无子可走
+        # 黑将在 (0, 4),真将死:每条逃路都被落点被攻击挡住。
+        #   - (1,4): 红车 (5,4) 同 col 控制 → 落点被攻击,不能下
+        #   - (0,3): 红车 (5,3) 同 col 控制 → 落点被攻击,不能左
+        #   - (0,5): 红车 (5,5) 同 col 控制 → 落点被攻击,不能右
+        # 同时 (5,4) 红车同 col 将军。
+        # 注:之前用红车堵 (0,3)/(0,5) 是错的——黑将合法吃掉那辆车
+        # (帅/将可以吃任何对方子)。修复 is_attacked 同点不算攻击后,
+        # 必须改用「黑将走到该格落点被另一红子攻击」的方式堵。
+        put(g, 5, 4, R)   # 红车 — 将军 + 攻击 (1,4)
+        put(g, 5, 3, R)   # 红车 — 攻击 (0,3) 落点
+        put(g, 5, 5, R)   # 红车 — 攻击 (0,5) 落点
         g.to_move = BLACK
         assert g.in_check(BLACK), "黑将被将"
-        # 黑将逃路被封: (1,4) 不行(红车),(0,3)/(0,5) 不能动(将不出宫)。
-        # 但 (0,3) 和 (0,5) 都还在九宫,黑将能不能走到 (0,3) 还是 (0,5)?
-        # 红车 (5,4) 攻击 (0,4) 和 (0,3) (从 col 4 上看,(0,3) 与 (5,4) 不在同列同横),
-        # 实际上 (0,3) 没被红车攻击(不同行不同列)。所以 (0,3) 还能走。
-        # 为了真将死,还要加子堵 (0,3) 和 (0,5):
-        put(g, 0, 3, R)
-        put(g, 0, 5, R)
         moves = g.legal_moves(BLACK)
         assert moves == [], f"黑将应无任何合法着法,实得 {moves}"
         g._update_result()
@@ -385,6 +384,23 @@ class TestCheckAndMate:
         # 横走不挡,仍被将军 → 必须非法
         assert (7, 1) not in ds
         assert (7, 3) not in ds
+
+    def test_king_can_capture_adjacent_enemy(self):
+        """回归:帅/将可以吃掉九宫内相邻的敌方子(包括敌方车)。
+
+        之前 is_attacked 把「黑车自己所在格」误判为被攻击(因 cchess 的
+        piece.is_valid_move(target) 不排除 target == piece 自己),导致
+        帅/将永远吃不到邻位的敌方子。
+        """
+        g = blank()
+        both_kings(g)
+        # 黑车紧挨红帅左边 (9,3):帅 (9,4) 应能直接吃车
+        put(g, 9, 3, -R)
+        assert (9, 3) in dests(g, 9, 4), \
+            "红帅应该能吃相邻的黑车,实际不能"
+        assert g.play(9, 4, 9, 3), "红帅吃黑车应成功"
+        assert g.piece_at(9, 3) == K
+        assert g.piece_at(9, 4) == EMPTY
 
 
 # ---------------------------------------------------------------- 流程
@@ -530,6 +546,7 @@ class TestAI:
         ai = XiangqiAI("normal", depth=5)
         assert ai.depth == 5
 
+    @pytest.mark.slow
     def test_ai_is_reasonably_fast(self):
         g = XiangqiGame()
         g.play(9, 0, 8, 0)
@@ -540,3 +557,31 @@ class TestAI:
         elapsed = time.time() - t
         assert mv is not None
         assert elapsed < 2.0, f"AI too slow: {elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------- Move 文本
+
+class TestMoveText:
+    """Move.uci / Move.text 的坐标表示。
+
+    cchess 标准的 UCI 行号是红方在 0(底部)、黑方在 9(顶部);项目 fr
+    是 r=9 在底部红方,所以 uci 行号必须翻转为 ROWS-1-fr 才符合 cchess 标准。
+    """
+
+    def test_uci_red_origin_lowers_to_zero(self):
+        from app.games.xiangqi import XiangqiGame
+        g = XiangqiGame()
+        # 走红炮 (7,1)→(7,4) 平到中线;cchess 标准应是「b2e2」(红方行号 2)
+        assert g.play(7, 1, 7, 4)
+        mv = g.last_move()
+        assert mv is not None
+        assert mv.uci() == "b2e2", f"红炮平中 UCI 应为 b2e2, 实得 {mv.uci()}"
+
+    def test_uci_black_origin_uses_nine(self):
+        # 黑车起点 (0,0) 下到 (2,0);cchess 标准行号 9(顶部黑方)
+        from app.games.xiangqi import XiangqiGame
+        g = XiangqiGame()
+        assert g.play(6, 0, 5, 0)              # 红兵随便走一着换边
+        assert g.play(0, 0, 2, 0)
+        mv = g.last_move()
+        assert mv.uci() == "a9a7", f"黑车下 UCI 应为 a9a7, 实得 {mv.uci()}"

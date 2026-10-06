@@ -1,0 +1,41 @@
+# pyproject.toml
+# 桌宠的 ruff / mypy 静态检查配置（与 requirements.txt / pytest.ini 互补）
+[tool.ruff]
+# 桌宠跨 Python 3.10/3.11/3.12 跑（见 .github/workflows/test.yml）
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    # 不要 lint PyInstaller 打包钩子（用了未公开 API）
+    "pyinstaller-hooks",
+    # 拆分脚本只跑一次，不入 CI
+    "scripts/_split_chat_window.py",
+    "scripts/_verify_marker.py",
+    "scripts/_debug_split.py",
+]
+
+[tool.ruff.lint]
+# 2026-10-05 策略：只在 CI 锁**少量关键规则**（真 bug）。其余 lint 允许大量 warn，
+# 留作 follow-up，避免一次大改引入新 bug。
+# - F401 unused-import：可能改了代码没删 import，加 CI 立刻堵住
+# - F822 undefined-export：__all__ 里有但实际未导出，star import 时易出错
+# - B905 zip-without-explicit-strict：zip() 没 strict= 漏写，加 strict="equal" 即可
+# - E402 module-import-not-at-top：项目里有几处故意（os.environ.setdefault 在 import 前），
+#   关掉避免误伤
+select = ["F401", "F822", "B905"]
+ignore = [
+    "E501",
+    "B008",
+    "UP007",
+    "RUF001", "RUF002", "RUF003",  # 中文项目全角字符常态
+    "UP045", "UP006",              # 老式 Optional[X] / Dict[K,V] 写法（py3.10 仍支持）
+    "UP037",                       # 字符串形式的注解（type hints 兼容性）
+    "E402",                        # 故意不在顶部（如 OMP 环境变量设好才 import torch）
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试代码允许模糊 assert / 未使用 import
+"tests/*" = ["F401", "F811", "B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

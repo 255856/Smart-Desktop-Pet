@@ -1,14 +1,13 @@
 """Agent 评估（Evaluator）。"""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 

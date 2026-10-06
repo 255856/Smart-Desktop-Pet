@@ -240,7 +240,7 @@ def _resolve_lnk(lnk_path: Path) -> Optional[str]:
 
     try:
         # 次选：pyshortcuts（pip install pyshortcuts）
-        from win32com.shell import shell, shellcon  # type: ignore
+        from win32com.shell import shell  # type: ignore
         # 实际拿不到，纯占位避免误删
     except Exception:  # noqa: BLE001
         pass

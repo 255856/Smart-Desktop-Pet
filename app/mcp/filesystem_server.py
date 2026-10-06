@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 

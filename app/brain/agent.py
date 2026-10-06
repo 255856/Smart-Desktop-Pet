@@ -14,8 +14,12 @@ log = logging.getLogger(__name__)
 
 MAX_TURNS = 6
 
-# 需要用户确认的危险工具集合
-DANGEROUS_TOOLS = {"open_app", "open_website", "lock_screen", "kill_process", "run_script",
+# 需要用户确认的危险工具集合。
+# 只放「不可逆 / 会打断用户 / 可能丢数据」的操作。
+# open_app / open_website 原先在这里，导致「帮我打开QQ」这种最高频、
+# 零破坏性的操作每次都要过一次弹窗；弹窗若不置前还会 60s 超时被拒
+# （见 2026-10-04 日志两次「打开星穹铁道」失败）。已移出。
+DANGEROUS_TOOLS = {"lock_screen", "kill_process", "run_script",
                    "set_wifi", "set_bluetooth", "shutdown_computer"}
 
 # 连续多少轮纯调工具（无文字）后强制进入 final 阶段
@@ -171,13 +175,34 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
     return "好的，已经帮主人搞定啦~"
 
 
+# 工具结果里代表「没做成」的关键词。
+# 任何一条命中 → 判 fail → 触发矛盾检测。
+# 前 10 条是原表；后面是 2026-10-04 全量审计实测补的——原先这些失败文案
+# 因为不含旧表里的词而被判成 ok，模型于是照着「成功文案」对主人报喜。
+_TOOL_FAIL_MARKERS = (
+    "失败", "错误", "无法", "未安装", "未找到",
+    "没有找到", "找不到", "没找到", "未能", "为空",
+    # ↓ 审计新增（实测这些原本全部漏判为 ok）
+    "没安装", "没装", "不支持", "未开启", "不可用", "未连接",
+    "钱不够", "没有叫", "没成功", "超时", "未执行", "未响应",
+    "未改变", "未生效", "没改变", "不支持",
+)
+
+
 def _tool_result_state(result: str) -> str:
-    """根据工具结果文本判定 'cancel' / 'fail' / 'ok'。"""
+    """根据工具结果文本判定 'cancel' / 'fail' / 'ok'。
+
+    判定依据两条，任一命中即 fail：
+      1. 带 `错误：` 前缀 —— 这是 docs/tools-reference.md 定的工具契约，
+         原实现从不看它，导致所有规范返回错误串的工具都被判成 ok；
+      2. 命中失败关键词（老兜底，照顾历史文案和第三方后端）。
+    """
     r = result or ""
     if _is_user_cancel(r):
         return "cancel"
-    if any(k in r for k in ("失败", "错误", "无法", "未安装", "未找到",
-                            "没有找到", "找不到", "没找到", "未能", "为空")):
+    if r.lstrip().startswith("错误"):
+        return "fail"
+    if any(k in r for k in _TOOL_FAIL_MARKERS):
         return "fail"
     return "ok"
 
@@ -187,12 +212,52 @@ _SUCCESS_CLAIM_WORDS = (
     "打开啦", "打开了", "打开好", "已打开", "成功", "搞定", "弄好", "设置好",
     "设好", "已设置", "设了", "启动啦", "启动了", "已启动", "找到了", "已经找到",
     "完成", "帮你打开", "帮你开", "上号", "进去就能", "截好", "算好", "搜好",
+    # ↓ 审计新增。人设全程用「主人」称呼，原表只认「帮你」，导致
+    # 「已经帮主人打开X啦~」这类最常见的报喜完全检测不到。
+    "帮主人打开", "帮主人开", "帮您打开", "帮您开",
+    "已经打开", "已经启动", "已经设好", "已经记好",
+    "记好啦", "记下啦", "截好啦", "算好啦", "搜好啦", "调好啦", "调好",
+)
+# 「动词+宾语+完成语气」句式（「打开星穹铁道啦」「记好啦」「算好啦」），
+# 字面词表覆盖不到，用正则兜。
+#
+# 两个坑（都踩过）：
+#   1. 动词词干里**不能**把完成语气（了/啦）烤进去——"保存好了" 若写成词干
+#      「保存好了」，后面就没语气词可匹配了，"已经帮主人保存好了~" 会漏判；
+#   2. 语气词组要能选空，否则 "已保存 / 已发送" 这类本身已含完成义的
+#      说法反而匹配不到。
+_ACTION_VERBS = (
+    "打开|启动|开启|运行|调出|拉起|设置好|设好|记好|记下|记住|删掉|删除"
+    "|截好图?|截图|搜到|查到|算好|调好|发送|复制好|静音|锁屏|添加好|保存好"
+)
+# 本身就带完成义的「已 XX」，不需要再跟语气词
+_ACTION_DONE = (
+    "已保存|已发送|已添加|已启动|已设置|已打开|已记录|已复制|已删除|已截"
+)
+# 成功断言：动作动词 + 宾语 + 完成语气。
+# 语气词**必须**出现（可选的话，「如果你打开QQ就会看到…」这种条件句
+# 也会被当成「已经做过」）；「已保存」这类自带完成义的走独立分支。
+_SUCCESS_CLAIM_RE = re.compile(
+    rf"(?:{_ACTION_VERBS})[^，。！？!?、\n]{{0,20}}?"
+    r"(?:啦|了|好了|成功|哦|喔|咯)"
+    rf"|(?:{_ACTION_DONE})"
+)
+# 「我替主人做了某个动作」的断言。额外要求带主语（帮你/帮主人/我/已…），
+# 避免把条件句（「如果你打开QQ…」）误判成已完成。
+_ACTION_CLAIM_RE = re.compile(
+    r"(?:已经|已|刚|这就|这就给主人)?\s*"
+    r"(?:帮你|帮主人|帮您|我|给主人)?\s*"
+    rf"(?:{_ACTION_VERBS})[^，。！？!?、\n]{{0,20}}?"
+    r"(?:啦|了|好了|成功|哦|喔|咯)"
+    rf"|(?:{_ACTION_DONE})"
 )
 # 最终答案里「如实提及失败」的信号（出现则不算矛盾）
+# 注意：这里**不能**放「唔」——它是小汐的口头禅（人设/兜底话术里都有），
+# 放进来会让校验器在几乎所有回复上自我静音。审计实测已移除。
 _HONEST_FAIL_WORDS = (
     "失败", "没能", "没法", "无法", "找不到", "没找到", "未找到", "没有找到",
     "未安装", "没安装", "没装", "取消", "抱歉", "出错", "错误", "打不开",
-    "开不了", "没成功", "没打开", "没反应", "唔",
+    "开不了", "没成功", "没打开", "没反应", "不支持", "没办到",
 )
 
 # 工具失败却报喜时的纠正提示
@@ -217,7 +282,54 @@ def _final_contradicts_tools(final_text: str, executed_tools: list) -> bool:
         return False
     if any(w in final_text for w in _HONEST_FAIL_WORDS):
         return False
-    return any(w in final_text for w in _SUCCESS_CLAIM_WORDS)
+    return _claims_success(final_text)
+
+
+def _claims_success(text: str) -> bool:
+    """文本是否在断言「某件事已经做完」。
+
+    纯格式判断，不看上下文：既没有失败措辞，又带成功词表里任一说法
+    （或命中「动词+宾语+语气词」正则），就认定为报喜。
+    """
+    if not text:
+        return False
+    if any(w in text for w in _HONEST_FAIL_WORDS):
+        return False
+    return any(w in text for w in _SUCCESS_CLAIM_WORDS) or bool(
+        _SUCCESS_CLAIM_RE.search(text))
+
+
+def _claims_unbacked_action(text: str) -> bool:
+    """文本是否在断言「我替主人做了某个动作」，而这一轮**没有调过任何工具**。
+
+    这是审计发现的第二个结构性漏洞：原实现里「零工具执行」时
+    `_final_contradicts_tools` 直接 `return False`，于是模型一句
+    「已经帮主人打开星穹铁道啦~」可以从头畅通到主人眼前——
+    正是用户抱怨的「模型说成功了实际没调用」。
+
+    判据很硬：没调过工具，就不可能真的做过打开/设置/删除这类事。
+    要求命中完成语气（啦/了/好了/成功），避免误伤条件句
+    （「如果你打开QQ会看到…」这种不带完成语气的不会被算）。
+    """
+    if not text:
+        return False
+    if any(w in text for w in _HONEST_FAIL_WORDS):
+        return False
+    return bool(_ACTION_CLAIM_RE.search(text))
+
+
+# 未执行任何工具却要报喜时的纠正提示
+_NO_TOOL_CLAIM_HINT = (
+    "[系统·纠正] 你刚才声称已经完成了某个操作，但**这一轮你没有调用过任何工具**，"
+    "所以那件事根本没有发生——主人什么都没看到。请不要凭空声称成功。\n"
+    "现在二选一：\n"
+    "  1) 如果这件事需要工具，就立刻调用对应的工具（看上面 schema）；\n"
+    "  2) 如果只是聊天/回答问题，就不要用「已经打开/设置好/记住了」这类说法，"
+    "直接正常回答主人的问题。"
+)
+
+# 未执行任何工具、且轮数耗尽时的诚实兜底（不能把没验证的报喜发给主人）
+_NO_TOOL_FALLBACK = "唔……主人，刚刚那个操作没能完成，主人再说一遍好不好？~"
 
 
 def _format_verify_hint(executed_tools: list, force_final: bool = False) -> str:
@@ -258,6 +370,64 @@ def _format_verify_hint(executed_tools: list, force_final: bool = False) -> str:
     return f"[系统·结果核对] 本轮工具执行结果：\n{tool_list}\n{decision}"
 
 
+# 意图 → 本轮下发的工具白名单。
+#
+# 为什么需要：全量下发 52 个工具（schema 约 14k 字符）时，模型在
+# 「帮我打开星穹铁道」上实测 5/6 次错选 list_installed_apps——工具太多
+# 本身就是选错的原因。裁到 8~15 个后选择空间大幅收窄。
+#
+# 设计取舍：
+#   - 识别不出意图（intent=None）时**照旧全量下发**，不牺牲任何能力；
+#   - 白名单是「软约束」：registry 按名字执行，即使模型硬调了不在白名单里的
+#     工具也照常跑，所以不会把一次误判变成硬失败；
+#   - 每组都带几个高频「后续工具」，让模型能接着调（比如查完时间再设提醒）。
+_INTENT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
+    "open_app": (
+        "open_app", "list_installed_apps", "open_website",
+        "open_file_explorer", "open_terminal", "open_notepad",
+        "list_desktop_files", "read_text_file", "get_current_time",
+    ),
+    # 【2026-10-04】闹钟意图只给 add_reminder，不再把 countdown 端上桌。
+    # 现场：主人说「定一个1分钟闹钟」，模型在两者间选了 countdown ——
+    # countdown 只活在内存里，桌宠一关就没；add_reminder 会落盘、能跨重启、
+    # 能在设置面板里看到和取消。闹钟这种「怕忘」的事必须用后者。
+    # 纯计时场景（「煮面计时 3 分钟」「番茄钟」）不命中本意图，走全量工具集，
+    # countdown 照常可用——它对秒级计时仍然更好。
+    "add_reminder": (
+        "add_reminder", "list_reminders", "delete_reminder",
+        "get_current_time", "date_info", "get_weather", "say_to_user",
+    ),
+    "remember_fact": (
+        "remember_fact", "recall_memory", "forget_memory",
+        "get_current_time", "get_pet_status", "date_info",
+    ),
+    "query": (
+        "get_current_time", "get_pet_status", "system_info", "get_battery",
+        "get_volume", "get_brightness", "calculate", "convert_units",
+        "date_info", "take_screenshot", "get_clipboard",
+        "list_installed_apps", "list_processes", "get_tts_mute_status",
+    ),
+    "web_search": (
+        "web_search", "fetch_url_text", "open_website", "ocr_image",
+        "read_text_file", "get_current_time", "list_installed_apps",
+    ),
+}
+
+# 白名单是**软约束**——ToolRegistry 按名字执行，模型硬调一个没下发的工具照样会跑。
+# 实测：闹钟意图下模型仍硬调了 countdown（内存态倒计时，桌宠一关就没）。
+# 要让「定闹钟只走 add_reminder」真正确定，这些工具在对应意图下必须**硬拒**，
+# 并把原因讲清楚，模型下一轮就会改用正确工具。
+_INTENT_BLOCKED_TOOLS: dict[str, dict[str, str]] = {
+    "add_reminder": {
+        "countdown": ("错误：本轮不提供 countdown。主人要的是「闹钟/提醒」，"
+                      "请改用 add_reminder —— 它会存进 reminders.json，"
+                      "桌宠重启后还在，也能取消。countdown 只活在内存里，一关就没。"),
+        "list_countdowns": "错误：本轮不提供倒计时相关工具，请改用 list_reminders。",
+        "cancel_countdown": "错误：本轮不提供倒计时相关工具，请改用 list_reminders / delete_reminder。",
+    },
+}
+
+
 class AgentLoop:
     def __init__(self, client: LLMClient, registry: ToolRegistry,
                  max_turns: int = MAX_TURNS,
@@ -267,13 +437,34 @@ class AgentLoop:
             client: LLM 客户端
             registry: 工具注册表
             max_turns: 最大循环轮数
-            confirm_tool: 危险工具执行前的确认回调，签名为 (tool_name, args_json) -> bool。
-                          返回 False 表示用户拒绝执行。为 None 时不确认直接执行。
+            confirm_tool: 危险工具执行前的确认回调，签名为
+                          (tool_name, args_json) -> Optional[bool]。
+                          True=放行 / False=主人拒绝 / None=弹窗超时未响应。
+                          三者都表示「不执行」时返回跳过结果文本。
+                          为 None 时不确认直接执行。
         """
         self.client = client
         self.registry = registry
         self.max_turns = max_turns
         self.confirm_tool = confirm_tool
+
+    def _select_tools(self, intent: Optional[str],
+                      all_tools: Optional[list[dict]]) -> Optional[list[dict]]:
+        """按意图裁剪本轮下发的工具列表。
+
+        - intent 为 None（识别不出要做什么）→ 原样全量返回，不丢能力；
+        - 意图命中白名单 → 只保留白名单里**注册表确实存在**的工具；
+        - 裁完为空 / 注册表里一个都没有 → 退回全量（宁可多给也不能把路堵死）。
+        """
+        if not all_tools:
+            return all_tools
+        wanted = _INTENT_TOOL_NAMES.get(intent or "")
+        if not wanted:
+            return all_tools
+        allow = set(wanted)
+        picked = [t for t in all_tools
+                  if (t.get("function") or {}).get("name") in allow]
+        return picked or all_tools
 
     @staticmethod
     def _first_user_text(messages: list[dict]) -> str:
@@ -301,11 +492,17 @@ class AgentLoop:
             return None
         try:
             confirmed = await asyncio.to_thread(self.confirm_tool, name, args)
-            if not confirmed:
-                return "用户取消了此操作。"
         except Exception as e:  # noqa: BLE001
             log.warning("确认回调异常：%s", e)
             return None  # 回调失败时不阻塞执行
+        # 确认回调是三态：True=放行 / False=主人拒绝 / None=弹窗超时没人管。
+        # 超时必须和「主人点了否」分开，否则会对主人谎称「你取消了」——
+        # 而他根本没见过那个弹窗。
+        if confirmed is None:
+            log.warning("tool %s 确认超时，未执行", name)
+            return "确认弹窗超时未响应，未执行。"
+        if not confirmed:
+            return "用户取消了此操作。"
         return None
 
     async def _execute_tools_parallel(
@@ -313,13 +510,23 @@ class AgentLoop:
         tool_calls: list[dict],
         messages: list[dict],
         cancel_check: Optional[Callable[[], bool]] = None,
+        intent: Optional[str] = None,
     ) -> AsyncIterator[tuple]:
         """并行执行所有工具调用，按原顺序 yield 结果。"""
+        blocked = _INTENT_BLOCKED_TOOLS.get(intent or "", {})
 
         async def _exec_one(i: int, tc: dict) -> tuple[int, str, str, str]:
             """在后台线程中执行单个工具，返回 (index, name, args, result)。"""
             name = tc["name"] or f"unknown_{i}"
             args = tc["arguments"] or "{}"
+
+            # 意图级硬闸：白名单只是软约束，模型仍可能硬调没下发的工具。
+            # 明确拒绝并说明原因，模型下一轮就会改用正确的工具。
+            if name in blocked:
+                msg = blocked[name]
+                log.warning("AgentLoop: 意图 %s 下拒绝调用 %s（已改用正确工具）",
+                            intent, name)
+                return i, name, args, msg
 
             # 危险工具确认
             skip_result = await self._confirm_or_skip(name, args)
@@ -361,7 +568,7 @@ class AgentLoop:
         - 第 1 轮没调工具 + 有工具意图 → 注入 user-prompt 强制重试（抗幻觉第 2 层）
         - 连续多轮纯调工具无文字 → 去掉 tools 强制 final（抗幻觉第 3 层）
         """
-        tools = self.registry.to_openai() if self.registry.names() else None
+        all_tools = self.registry.to_openai() if self.registry.names() else None
         final_text = ""
         # 累计「最近连续纯调工具、无文字」的轮数（用于抗幻觉第 3 层）
         consecutive_tool_only = 0
@@ -380,6 +587,14 @@ class AgentLoop:
         if force_first_turn:
             log.info("AgentLoop: 检测到动作意图 %s，第一轮开启 force_tool_use",
                      intent)
+
+        # 【工具裁剪】按意图只下发相关工具。识别不出意图就全量下发，
+        # 不牺牲闲聊/复杂请求的能力。详见 _INTENT_TOOL_NAMES 的注释。
+        tools = self._select_tools(intent, all_tools)
+        if all_tools and tools is not None and len(tools) < len(all_tools):
+            log.info("AgentLoop: 意图 %s → 本轮只下发 %d/%d 个工具 %s",
+                     intent, len(tools), len(all_tools),
+                     [t["function"]["name"] for t in tools])
 
         # 防工具独白泄漏：给 system 追加回复风格铁律（幂等）
         if messages and messages[0].get("role") == "system":
@@ -446,6 +661,13 @@ class AgentLoop:
                     log.warning(
                         "AgentLoop: 已 %d 轮仍调不到工具，放弃（意图=%s）", turn + 1, intent)
                     if final_text:
+                        # 审计修复：这里原先 `yield final_text` 原样放行，
+                        # 等于把模型凭空编的「已经打开X啦~」直接发给主人。
+                        # 走到这个分支时 tools_used 恒为 0（上面的进入条件），
+                        # 所以任何动作断言都必然是幻觉，必须换诚实话术。
+                        if _claims_unbacked_action(final_text):
+                            log.warning("AgentLoop: 重试耗尽，丢弃未验证的报喜话术")
+                            final_text = _NO_TOOL_FALLBACK
                         yield "text", final_text
                     break
                 log.warning(
@@ -467,8 +689,23 @@ class AgentLoop:
             # 没调工具 → 本轮准备给最终答复。先核实结果：
             # 若关键动作失败/取消，模型却报喜且不提失败，给一次纠正重答机会。
             if not tool_calls:
+                # 【审计新增】零工具执行却声称做了动作 = 100% 幻觉。
+                # 原实现只在 executed_tools 非空时才校验，这里是彻底盲区：
+                # 模型一句「已经帮主人打开星穹铁道啦~」能畅通直达主人眼前。
+                if (final_text and tools_used == 0
+                        and _claims_unbacked_action(final_text)):
+                    if verify_corrections < 1 and turn + 1 < self.max_turns:
+                        verify_corrections += 1
+                        log.warning("AgentLoop: 未调用任何工具却声称动作成功，要求重答")
+                        yield ("meta", {"event": "verify_retry",
+                                        "reason": "未调用工具却声称成功"})
+                        messages.append({"role": "assistant", "content": final_text})
+                        messages.append({"role": "user", "content": _NO_TOOL_CLAIM_HINT})
+                        continue
+                    log.warning("AgentLoop: 零工具仍声称成功，改用诚实兜底话术")
+                    final_text = _NO_TOOL_FALLBACK
                 # 有剩余轮次 + 尚未纠正过 + 工具失败却报喜 → 让模型重答一次
-                if (final_text and executed_tools and verify_corrections < 1
+                elif (final_text and executed_tools and verify_corrections < 1
                         and _final_contradicts_tools(final_text, executed_tools)
                         and turn + 1 < self.max_turns):
                     verify_corrections += 1
@@ -480,7 +717,7 @@ class AgentLoop:
                     messages.append({"role": "user", "content": _CORRECTION_HINT})
                     continue
                 # 已纠正过模型仍报喜、或没有剩余轮次：用代码层诚实失败文案兜底
-                if (final_text and executed_tools
+                elif (final_text and executed_tools
                         and _final_contradicts_tools(final_text, executed_tools)):
                     ln, la, lr = executed_tools[-1]
                     honest = _tool_ack_sentence(ln, la, lr)
@@ -511,7 +748,8 @@ class AgentLoop:
 
             # 并行执行所有工具调用
             async for event in self._execute_tools_parallel(
-                    tool_calls, messages, cancel_check=cancel_check):
+                    tool_calls, messages, cancel_check=cancel_check,
+                    intent=intent):
                 yield event
                 if event[0] == "tool":
                     # event = ("tool", name, args, result)

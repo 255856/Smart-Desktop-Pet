@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import subprocess
-import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -208,11 +208,35 @@ class MCPStdioClient:
 
 
 class MCPClientRegistry:
-    """MCP server 集合 + 工具桥接到 ToolRegistry。"""
+    """MCP server 集合 + 工具桥接到 ToolRegistry。
+
+    所有 async 操作走一个**常驻后台事件循环**（_ensure_loop 启动的守护线程）。
+    原因：MCPStdioClient 的 asyncio.Lock / 子进程 IO 都绑定创建时的 loop；
+    若 start_all 与 call_tool 各自 asyncio.run 起新 loop，锁会跨 loop 使用
+    （Python 3.10+ 直接 RuntimeError）。统一 run_coroutine_threadsafe 到同一
+    loop 彻底规避，工具调用侧也能从任意线程安全发起。
+    """
 
     def __init__(self):
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPStdioClient] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._loop_thread = threading.Thread(
+                target=self._loop.run_forever, daemon=True, name="mcp-loop")
+            self._loop_thread.start()
+        return self._loop
+
+    def run_sync(self, coro, timeout: float = 30.0):
+        """在常驻 loop 上跑一个协程并阻塞等结果（线程安全）。"""
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
 
     def load_from_yaml(self, path: str | Path) -> int:
         """从 yaml 加载 server 配置。返回加载数量。"""
@@ -277,6 +301,24 @@ class MCPClientRegistry:
             raise RuntimeError(f"MCP server '{server}' 未启动")
         return await client.call_tool(tool, arguments, timeout=timeout)
 
+    # -------------------------------------------------- 同步封装（UI / 工具侧用）
+    def start_all_sync(self, timeout: float = 20.0) -> dict[str, list[dict]]:
+        """启动所有 server（阻塞；内部走常驻 loop）。"""
+        return self.run_sync(self.start_all(), timeout=timeout)
+
+    def stop_all_sync(self, timeout: float = 10.0) -> None:
+        """停止所有 server 并关闭常驻 loop（阻塞；进程退出前调用）。"""
+        try:
+            self.run_sync(self.stop_all(), timeout=timeout)
+        except Exception:  # noqa: BLE001
+            log.debug("MCP stop_all 异常（忽略）", exc_info=True)
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=3)
+        self._loop = None
+        self._loop_thread = None
+
     def all_tools(self) -> list[MCPTool]:
         """返回所有 server 注册的工具（启动后才有）。"""
         out: list[MCPTool] = []
@@ -295,9 +337,8 @@ class MCPClientRegistry:
     def bridge_to(self, registry, dangerous_tools: Optional[set[str]] = None) -> int:
         """把 MCP tools 注册到本地 ToolRegistry，返回注册数量。
 
-        每个 MCP tool 在本地对应一个同步包装函数：
-            如果当前线程已有 event loop → 调度到该 loop（asyncio.run_coroutine_threadsafe）
-            否则 → 自己建一个 loop 跑（asyncio.run）
+        每个 MCP tool 在本地对应一个同步包装函数：所有调用统一 run_sync
+        到常驻 loop（与 start_all 同一 loop，避免 asyncio.Lock 跨 loop）。
         """
         from app.engine.tools import Tool
         dangerous_tools = dangerous_tools or {"open_app", "open_website"}
@@ -314,21 +355,9 @@ class MCPClientRegistry:
 
             def make_fn(s=server_name, t=tool_name):
                 def fn(**kwargs) -> str:
-                    coro = self.call(s, t, kwargs)
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # 已经在 event loop 里了：开线程跑
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                                future = pool.submit(
-                                    asyncio.run, _await_coro(coro))
-                                return future.result(timeout=30)
-                        else:
-                            return loop.run_until_complete(coro)
-                    except RuntimeError:
-                        # 没 loop：自己起一个
-                        return asyncio.run(_await_coro(coro))
+                        return self.run_sync(
+                            self.call(s, t, kwargs), timeout=60.0)
                     except Exception as e:  # noqa: BLE001
                         return f"错误：MCP 调用失败：{e}"
                 return fn

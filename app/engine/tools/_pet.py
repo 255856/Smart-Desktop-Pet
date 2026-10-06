@@ -18,13 +18,22 @@ EMOTIONS = ("happy", "sad", "angry", "shy", "think", "pride", "fear",
             "doubt", "surprise")
 
 
-def _fire_hook(hooks: dict, key: str, arg: str) -> None:
+def _fire_hook(hooks: dict, key: str, arg: str) -> bool:
+    """投递 hook。返回是否真的送出去了。
+
+    原实现返回 None 且吞掉异常，调用方无条件回报「已触发/已切换/已对主人说」，
+    于是 UI 侧没响应时桌宠仍然对主人报成功——「假装成功」的又一处来源。
+    这里如实回传成败，让调用方能说真话。
+    """
     cb = hooks.get(key)
-    if cb:
-        try:
-            cb(arg)
-        except Exception:  # noqa: BLE001
-            log.exception("hook %s 失败", key)
+    if not cb:
+        return False
+    try:
+        cb(arg)
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("hook %s 失败", key)
+        return False
 
 
 def register(
@@ -43,10 +52,11 @@ def register(
         it = items.by_name(food_name.strip())
         if it is None:
             names = "、".join(x.name for x in items.items[:20])
-            return f"没有叫「{food_name}」的食物。可选：{names}"
+            return f"错误：没有叫「{food_name}」的食物。可选：{names}"
         from app.engine.works import apply_food
         if not apply_food(state, it):
-            return f"钱不够（{it.price} 金币，现有 {state.money:.0f}），先去打工吧～"
+            return (f"错误：钱不够（需要 {it.price} 金币，现有 "
+                    f"{state.money:.0f}），没吃掉任何东西。")
         _fire_hook(hooks, "animation", "eat")
         return f"吃掉了「{it.name}」，花 {it.price} 金币。现在状态：{state.stats_summary()}"
 
@@ -59,7 +69,9 @@ def register(
             # 如实报错：不要假装触发成功，否则 agent 会顺着报喜
             return (f"错误：没有叫「{name}」的动画，未触发任何动作。"
                     f"可选：{', '.join(ANIMATIONS)}")
-        _fire_hook(hooks, "animation", name)
+        if not _fire_hook(hooks, "animation", name):
+            return (f"错误：动画「{name}」没能投递给界面（UI 通道不可用），"
+                    f"桌宠实际没有做出这个动作。")
         return f"已触发「{name}」动画"
 
     def change_pet_emotion(emotion: str) -> str:
@@ -70,14 +82,16 @@ def register(
         if name not in EMOTIONS:
             return (f"错误：没有「{name}」这种情绪，未切换。"
                     f"可选：{', '.join(EMOTIONS)}")
-        _fire_hook(hooks, "animation", f"emotion_{name}")
+        if not _fire_hook(hooks, "animation", f"emotion_{name}"):
+            return f"错误：情绪「{name}」没能投递给界面，实际没有切换。"
         return f"已切换到「{name}」情绪"
 
     def say_to_user(text: str) -> str:
         content = (text or "").strip()
         if not content:
             return "错误：要说的内容不能为空"
-        _fire_hook(hooks, "bubble", content)
+        if not _fire_hook(hooks, "bubble", content):
+            return "错误：气泡通道不可用，这句话没能显示给主人。"
         return "已对主人说。"
 
     reg.register(Tool(

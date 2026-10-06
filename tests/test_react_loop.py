@@ -268,11 +268,11 @@ class TestAgentLoopReAct:
         assert first_call["force_tool_use"] is False
 
     def test_dangerous_tool_confirmation(self):
-        """open_app 是危险工具，应走 confirm_tool 回调。"""
+        """lock_screen 是危险工具，应走 confirm_tool 回调。"""
         from app.brain.agent import AgentLoop
         reg = self._make_registry()
 
-        # 用户拒绝 open_app
+        # 用户拒绝 lock_screen
         confirmed = []
 
         def confirm(name, args):
@@ -281,12 +281,12 @@ class TestAgentLoopReAct:
 
         client = _SpyClient(responses=[
             {"text": "", "tool_calls": [
-                {"id": "c1", "name": "open_app",
-                 "arguments": '{"app_name": "QQ"}'}]},
-            {"text": "好的主人，不打开了 [happy]", "tool_calls": []},
+                {"id": "c1", "name": "lock_screen",
+                 "arguments": "{}"}]},
+            {"text": "好的主人，不锁屏了 [happy]", "tool_calls": []},
         ])
         agent = AgentLoop(client=client, registry=reg, confirm_tool=confirm)
-        msgs = [{"role": "user", "content": "帮我打开 QQ"}]
+        msgs = [{"role": "user", "content": "帮我锁屏"}]
 
         events = []
 
@@ -297,7 +297,7 @@ class TestAgentLoopReAct:
         asyncio.run(drive())
         # 确认回调被调用
         assert confirmed
-        assert confirmed[0][0] == "open_app"
+        assert confirmed[0][0] == "lock_screen"
         # 工具事件仍然 yield，但结果是「用户取消了此操作」
         tool_events = [ev for ev in events if ev[0] == "tool"]
         assert tool_events

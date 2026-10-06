@@ -4,15 +4,15 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from app.core.qt_compat import (
-    QAction, QApplication, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
-    QDragMoveEvent, QDropEvent, QEvent, QFont, QHBoxLayout, QImage, QLabel, QMenu,
+    QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
+    QDragMoveEvent, QDropEvent, QEvent, QHBoxLayout, QImage, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
-    QRegion, QSize, QSizePolicy, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
+    QRegion, QSize, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
     QGraphicsDropShadowEffect, QTransform,
     event_global_pos, event_local_pos,
 )

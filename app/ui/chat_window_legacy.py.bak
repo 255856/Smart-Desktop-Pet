@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
 from app.core.config import CharacterConfig, LLMConfig
+from app.core.api_keys import is_placeholder_key
 from app.brain.llm_client import ChatMessage, LLMClient, LLMError
 from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
 from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
@@ -59,6 +60,8 @@ _DANGEROUS_LABELS = {
     "set_bluetooth": "开关蓝牙",
     "shutdown_computer": "关机 / 重启",
 }
+# 危险工具确认弹窗的等待上限（秒）。超时按「未确认」处理，不算用户拒绝。
+_CONFIRM_TIMEOUT_S = 60.0
 from app.brain.trace import TraceRecorder
 from app.ui import ui_style
 from app.ui.memory_panel import MemoryDialog
@@ -227,7 +230,8 @@ class _AgentWorker(QThread):
                         payload_dict = payload[0] if payload else {}
                         if not isinstance(payload_dict, dict):
                             payload_dict = {"text": str(payload_dict)}
-                        self.meta.emit("meta", {"kind": "thought", "text": payload_dict.get("text", "")})
+                        text = payload_dict.get("text") or payload_dict.get("content", "")
+                        self.meta.emit("meta", {"kind": "thought", "text": str(text)})
                     elif kind == "done":
                         # 防御：如果之前没收到任何 text，把 done payload 当兜底
                         if payload and payload[0]:
@@ -1337,19 +1341,28 @@ class ChatWindow(QWidget):
         except Exception as e:  # noqa: BLE001
             log.debug("ASR 模型预热启动失败：%s", e)
 
-    def _confirm_dangerous_tool(self, name: str, args_json: str) -> bool:
+    def _confirm_dangerous_tool(self, name: str, args_json: str) -> Optional[bool]:
         """危险工具执行前的 UI 确认弹窗。
 
-        线程模型（PyQt5 modal dialog 必须主线程）：
-          1. AgentLoop 通过 asyncio.to_thread 在子线程调到这里
-          2. 子线程把"显示弹窗"任务用 QTimer.singleShot(0, ...) 投递到主线程 event queue
-          3. 子线程起 QEventLoop.exec() 阻塞等结果
-          4. 主线程 event loop 调度 → _show_confirm_box 弹 QMessageBox.exec()
-          5. 用户点 Yes/No → 写 holder + 子线程 QEventLoop.quit()
-          6. 子线程退出循环 → 返回结果
+        返回：
+          True  = 主人点了「是」，执行
+          False = 主人点了「否」，拒绝
+          None  = 弹窗超时没等到人（不是拒绝！），同样不执行
 
-        注意：QTimer.singleShot + chat_window 作为 receiver，会让槽函数自动跑在
-        chat_window 所在线程 = 主线程。这是 Qt 跨线程 UI 的官方推荐做法。
+        三态是必要的：原实现超时也返回 False，AgentLoop 会把它当成
+        「用户取消了此操作」讲给主人听，但主人从头到尾没看见过那个弹窗。
+
+        线程模型（PyQt5 modal dialog 必须主线程）：
+          1. AgentLoop 通过 asyncio.to_thread 在 Python ThreadPoolExecutor 子线程调到这里
+          2. 子线程用 threading.Event 等结果（不能用 QEventLoop.exec()——
+             QEventLoop 必须由拥有 QThread 的线程启动，子线程用 QEventLoop().exec()
+             会卡死或 abort，已实测确认）
+          3. QTimer.singleShot 把弹窗任务投递到主线程 event queue
+          4. 主线程 _show_confirm_box show+raise_+activateWindow 后进 exec()
+             （置前是必须的：主人常在用语音、没开聊天窗，弹窗不置前就永远超时）
+          5. 用户点 Yes/No → 弹窗返回 → on_done 写 holder + Event.set()
+          6. 子线程 Event.wait() 返回 → 拿到结果
+          7. 走满 _CONFIRM_TIMEOUT_S → 返回 None，并让主线程关掉残留弹窗
         """
         # 嵌套防御（防弹窗套弹窗）
         if getattr(self, "_confirm_in_progress", False):
@@ -1367,28 +1380,47 @@ class ChatWindow(QWidget):
             args_obj = {"raw": args_json}
         args_pretty = "\n".join(f"  {k}: {v}" for k, v in (args_obj or {}).items())
 
-        # 子线程：起本地 QEventLoop + 创建 holder
-        from PyQt5.QtCore import QEventLoop, QTimer
-        loop = QEventLoop()
-        holder = {"ok": False}
+        self._confirm_in_progress = True
+        # 投递到主线程弹窗；用 threading.Event 跨线程等结果
+        # （不能用 QEventLoop.exec：QEventLoop 必须由拥有 QThread 的线程启动，
+        # 子线程用 QEventLoop().exec() 会卡死或 abort，PyQt5 强制要求）
+        result_event = threading.Event()
 
         def _on_result(ok: bool):
-            holder["ok"] = ok
             self._confirm_in_progress = False
-            loop.quit()
+            result_event.set()    # 唤醒子线程 wait()
 
-        self._confirm_in_progress = True
-        # 投递到主线程执行 _show_confirm_box（Qt 默认 QueuedConnection）
         QTimer.singleShot(
             0,
             lambda: self._show_confirm_box(name, args_pretty, _on_result))
-        # 子线程阻塞等
-        loop.exec()
+        # 子线程阻塞等主线程弹完弹窗（60s 超时防卡死）
+        if not result_event.wait(timeout=_CONFIRM_TIMEOUT_S):
+            # 超时：把还留在屏幕上的弹窗关掉。原实现直接 return，
+            # 而主线程仍卡在 box.exec() 里 → 屏幕上留一个僵尸模态框，
+            # 下一个危险工具还能再叠一个（2026-10-04 日志实况）。
+            log.warning("危险工具确认超时（%ds），拒绝执行并关闭弹窗",
+                        int(_CONFIRM_TIMEOUT_S))
+            self._confirm_in_progress = False
+            # close 必须在主线程执行
+            QTimer.singleShot(0, self._close_confirm_box)
+            return None      # None = 超时，区别于 False（用户明确拒绝）
         return holder.get("ok", False)
 
+    def _close_confirm_box(self) -> None:
+        """主线程槽：关掉可能还开着的确认弹窗（超时兜底）。"""
+        box = getattr(self, "_confirm_box", None)
+        if box is None:
+            return
+        self._confirm_box = None
+        try:
+            box.reject()          # 等价于点「否」，让 exec() 正常返回
+        except RuntimeError:     # C++ 对象已被销毁
+            pass
+        except Exception:  # noqa: BLE001
+            log.debug("关闭确认弹窗失败", exc_info=True)
+
     def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
-        """主线程槽：弹 QMessageBox → 写结果 → 让子线程 QEventLoop 退出。"""
-        from app.core.qt_compat import QMessageBox
+        """主线程槽：弹 QMessageBox → 调 on_done（Event.set() 唤醒子线程）。"""
         try:
             label = _DANGEROUS_LABELS.get(name, name)
             text = (f"桌宠想要调用危险工具：\n\n"
@@ -1396,13 +1428,25 @@ class ChatWindow(QWidget):
                     f"参数：\n{args_pretty or '  (无)'}\n\n"
                     f"是否允许？")
             box = QMessageBox(self)
+            # 桌宠场景主人往往没在盯聊天窗，弹窗必须自己跳到前台，
+            # 否则它会藏在后面，60s 必然超时（同文件 _open_memory 里已有
+            # raise_/activateWindow 的正确范式）。
+            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            box.setWindowModality(Qt.WindowModality.ApplicationModal)
             box.setIcon(QMessageBox.Icon.Warning)
             box.setWindowTitle("危险工具确认")
             box.setText(text)
             box.setStandardButtons(
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             box.setDefaultButton(QMessageBox.StandardButton.No)
-            result = box.exec()
+            self._confirm_box = box      # 供超时路径 _close_confirm_box 用
+            try:
+                box.show()
+                box.raise_()
+                box.activateWindow()
+                result = box.exec()
+            finally:
+                self._confirm_box = None
             on_done(result == QMessageBox.StandardButton.Yes)
         except Exception:  # noqa: BLE001
             log.exception("confirm dialog failed")
@@ -1432,7 +1476,7 @@ class ChatWindow(QWidget):
         self.chat_view.append(f"⚠️ {err}")
 
     def _kickoff_llm(self) -> None:
-        if not self.llm_cfg.api_key or self.llm_cfg.api_key == "PUT-YOUR-API-KEY-HERE":
+        if is_placeholder_key(self.llm_cfg.api_key):
             self._render_message(Message(
                 role="assistant",
                 content="还没填 API Key，请先打开 config.yaml，把 llm.api_key 改成你的 key 再重启。",
@@ -1458,6 +1502,10 @@ class ChatWindow(QWidget):
         self._current_bot_msg = Message(role="assistant", content="")
         self._streaming_raw = ""   # 流式原始累积（最终规范前），供逐帧清洗显示
         self._streaming_anchor_pos = self._insert_placeholder(self._current_bot_msg)
+        # 重试类提示每轮只弹一次。模型偶发忽略 tool_choice 时会连着重试好几轮
+        # （实测带历史时可达 5 轮 / 12 秒），每轮都追加一张卡片会把聊天区刷满
+        # 「自动重试」噪声，主人看着干着急却什么也没多得到。
+        self._retry_notice_shown = False
 
         # Trace 记录：开始一条 run（每条用户消息 = 一条 run）
         if self.trace is not None:
@@ -1652,11 +1700,33 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 pass
 
-        # 思考块累积（推理模型的 planning / 反思）
-        if self._current_bot_msg is not None and kind in ("plan", "reflection", "thought"):
-            text = (payload or {}).get("text", "")
-            if text and text not in self._current_bot_msg.thoughts:
-                self._current_bot_msg.thoughts.append(text)
+        # lightweight 后端的 meta 事件嵌套了"event" 字段（reasoning_delta / force_retry /
+        # force_final / verify_retry）；展开映射到 UI 块类型
+        ev_name = None
+        if isinstance(payload, dict):
+            ev_name = payload.get("event")
+
+        # 思考块累积（推理模型的 planning / 反思 / reasoning_delta 内容）
+        # lightweight 后端 emit ('meta', {'event':'reasoning_delta', 'content':...})
+        # 标准后端 _AgentWorker emit ('meta', {'kind':'thought', 'text':...})
+        # 都归到 thoughts 列表
+        if self._current_bot_msg is not None:
+            thought_text = None
+            if kind == "thought":
+                thought_text = (payload or {}).get("text", "")
+            elif kind in ("plan", "reflection", "reasoning"):
+                payload_dict = payload if isinstance(payload, dict) else {}
+                if not payload_dict:
+                    payload_dict = {"text": str(payload)} if payload else {}
+                thought_text = payload_dict.get("text") or payload_dict.get("content", "")
+            elif kind == "meta":
+                ev_name = (payload or {}).get("event")
+                if ev_name == "reasoning_delta":
+                    thought_text = (payload or {}).get("content", "")
+                elif (payload or {}).get("kind") == "thought":
+                    thought_text = (payload or {}).get("text", "")
+            if thought_text and thought_text not in self._current_bot_msg.thoughts:
+                self._current_bot_msg.thoughts.append(thought_text)
                 self._refresh_streaming_message()
                 return
 
@@ -1672,19 +1742,28 @@ class ChatWindow(QWidget):
             return
 
         # force_retry 给一个小提示（避免主人误以为模型已经做完）
+        # 每轮**只提示一次**：连续重试是模型内部自愈过程，逐轮刷屏只会让人以为
+        # 桌宠坏了。完整重试过程照常进 Trace（_on_meta 开头已经 record）。
         if kind == "meta" and isinstance(payload, dict):
             ev = payload.get("event")
             if ev == "force_retry":
-                self._append_system_msg(
-                    "⚙️ 模型刚才回了文字但没调用工具——自动重试一次，主人稍等~"
-                )
-                log.info("ChatWindow: force_retry meta 事件已提示用户")
+                if not getattr(self, "_retry_notice_shown", False):
+                    self._retry_notice_shown = True
+                    self._append_system_msg(
+                        "⚙️ 正在调用工具，主人稍等一下~"
+                    )
+                    log.info("ChatWindow: force_retry 已提示用户（后续重试不再重复提示）")
+                else:
+                    log.info("ChatWindow: force_retry（第 %s 轮，静默重试）",
+                             payload.get("reason", ""))
             elif ev == "verify_retry":
                 # 工具结果与模型答复矛盾（如工具失败却报喜），已要求重答
-                self._append_system_msg(
-                    "🔎 核对了一下执行结果，好像不太对，让我重新确认一下~"
-                )
-                log.info("ChatWindow: verify_retry 事件已提示用户")
+                if not getattr(self, "_retry_notice_shown", False):
+                    self._retry_notice_shown = True
+                    self._append_system_msg(
+                        "🔎 核对了一下执行结果，好像不太对，让我重新确认一下~"
+                    )
+                    log.info("ChatWindow: verify_retry 事件已提示用户")
 
     def _on_chunk(self, tok: str) -> None:
         if self._current_bot_msg is None:

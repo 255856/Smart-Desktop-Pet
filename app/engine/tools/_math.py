@@ -33,21 +33,26 @@ def _convert(value: float, from_unit: str, to_unit: str) -> str:
     t = to_unit.lower().strip()
 
     # 温度
-    if u in ("c", "celsius", "摄氏") or t in ("c", "celsius", "摄氏"):
+    _C = ("c", "celsius", "摄氏")
+    _F = ("f", "fahrenheit", "华氏")
+    _K = ("k", "kelvin", "开尔文")
+    # 入口必须含 F / K：原先只认 C，导致 f→k 这种两边都不是摄氏的换算
+    # 直接掉到「不支持的换算」，而 description 明明宣称支持 C/F/K。
+    if u in _C + _F + _K or t in _C + _F + _K:
         if u == t:
-            return f"{value} C = {value} C"
-        if u in ("c", "celsius", "摄氏"):
-            result = value * 9/5 + 32 if t in ("f", "fahrenheit", "华氏") else value + 273.15
-            t_name = "F" if t in ("f", "fahrenheit", "华氏") else "K"
+            return f"{value} {u.upper()} = {value} {u.upper()}"
+        if u in _C:
+            result = value * 9/5 + 32 if t in _F else value + 273.15
+            t_name = "F" if t in _F else "K"
         else:
-            if u in ("f", "fahrenheit", "华氏"):
+            if u in _F:
                 v_c = (value - 32) * 5/9
             else:
                 v_c = value - 273.15
-            if t in ("c", "celsius", "摄氏"):
+            if t in _C:
                 result = v_c
                 t_name = "C"
-            elif t in ("f", "fahrenheit", "华氏"):
+            elif t in _F:
                 result = v_c * 9/5 + 32
                 t_name = "F"
             else:
@@ -56,20 +61,33 @@ def _convert(value: float, from_unit: str, to_unit: str) -> str:
         return f"{value} {u.upper()} = {result:.2f} {t_name}"
 
     # 长度
-    if u in ("cm", "毫米", "mm") and t in ("m", "米"):
+    # 毫米(mm) 必须和厘米(cm) 分开：原实现把 "mm" 归进 cm 分支，
+    # 导致 5mm→m 返回 0.05（正确 0.005）、5mm→inch 返回 0.1969（正确 0.0197），
+    # 自信地给出差 10 倍的错误数字，比报错更糟。
+    if u in ("mm", "毫米") and t in ("m", "米"):
+        return f"{value} mm = {value/1000:.6f} m"
+    if u in ("m", "米") and t in ("mm", "毫米"):
+        return f"{value} m = {value*1000:.0f} mm"
+    if u in ("cm", "厘米") and t in ("m", "米"):
         return f"{value} cm = {value/100:.4f} m"
-    if u in ("m", "米") and t in ("cm", "毫米", "mm"):
+    if u in ("m", "米") and t in ("cm", "厘米"):
         return f"{value} m = {value*100:.2f} cm"
-    if u in ("cm", "米", "mm", "m") and t in ("in", "inches", "英寸"):
-        v_in = value * 0.0393701 if u in ("cm", "mm") else value * 39.3701 if u in ("m", "米") else value
-        return f"{value} {u} = {v_in:.4f} inch"
-    if u in ("in", "inches", "英寸") and t in ("cm", "mm", "m", "米"):
-        v = value * 2.54 if t in ("cm",) else value * 25.4 if t in ("mm",) else value * 0.0254
-        return f"{value} inch = {v:.4f} {t}"
-    if u in ("ft", "feet", "英尺") and t in ("m", "米", "cm"):
+    if u in ("cm", "毫米", "mm") and t in ("in", "inches", "英寸"):
+        k = 0.0393701 if u in ("cm", "厘米") else 0.0393701 / 10
+        return f"{value} {u} = {value * k:.4f} inch"
+    if u in ("m", "米", "mm", "毫米") and t in ("in", "inches", "英寸"):
+        k = 39.3701 if u in ("m", "米") else 0.0393701 / 10
+        return f"{value} {u} = {value * k:.4f} inch"
+    if u in ("in", "inches", "英寸") and t in ("cm", "mm", "m", "米", "毫米", "厘米"):
+        if t in ("m", "米"):
+            return f"{value} inch = {value * 0.0254:.4f} {t}"
+        if t in ("cm", "厘米"):
+            return f"{value} inch = {value * 2.54:.4f} {t}"
+        return f"{value} inch = {value * 25.4:.4f} {t}"
+    if u in ("ft", "feet", "英尺") and t in ("m", "米", "cm", "厘米"):
         v = value * 0.3048 if t in ("m", "米") else value * 30.48
         return f"{value} ft = {v:.4f} {t}"
-    if u in ("m", "米", "cm") and t in ("ft", "feet", "英尺"):
+    if u in ("m", "米", "cm", "厘米") and t in ("ft", "feet", "英尺"):
         v = value * 3.28084 if u in ("m", "米") else value * 0.0328084
         return f"{value} {u} = {v:.4f} ft"
 
@@ -95,7 +113,9 @@ def _convert(value: float, from_unit: str, to_unit: str) -> str:
     if u in ("mph", "mi/h", "英里每小时") and t in ("km/h", "kmh", "公里每小时"):
         return f"{value} mph = {value*1.60934:.2f} km/h"
 
-    return f"不支持的换算：{from_unit} → {to_unit}。支持：长度(cm/m/ft/inch)、重量(kg/g/lb/oz)、温度(C/F/K)、速度(km/h/m/s/mph)"
+    return (f"错误：不支持的换算：{from_unit} → {to_unit}。"
+            f"支持：长度(cm/毫米/mm/m/ft/inch)、重量(kg/g/lb/oz)、"
+            f"温度(C/F/K)、速度(km/h/m/s/mph)")
 
 
 def _date_info(date_str: str = "") -> str:

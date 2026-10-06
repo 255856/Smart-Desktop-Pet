@@ -117,6 +117,18 @@ class AgentConfig(BaseModel):
     reflector_mode: Literal["heuristic", "llm", "off"] = "heuristic"
 
 
+class MCPConfig(BaseModel):
+    """MCP（Model Context Protocol）外挂工具。
+
+    servers_file 指向的 YAML 里配置要启动的 MCP server 列表
+    （每项：name / command / args / env / cwd / description），
+    启动时后台拉起子进程、握手并把它们的工具桥接进桌宠工具系统。
+    """
+    enabled: bool = False
+    servers_file: str = "mcp_servers.yaml"
+    call_timeout: int = 30
+
+
 class BrainConfig(BaseModel):
     """智能中枢：工具调用 + 长期记忆 + 主动行为 + Agent 后端选择。"""
     backend: AgentBackend = "lightweight"           # "lightweight"=手写 ReAct；"standard"=LangChain
@@ -179,6 +191,7 @@ class Config(BaseSettings):
     asr: ASRConfig = ASRConfig()
     brain: BrainConfig = BrainConfig()
     pet: PetConfig = PetConfig()
+    mcp: MCPConfig = MCPConfig()
 
     @property
     def name(self) -> str:
@@ -186,12 +199,9 @@ class Config(BaseSettings):
 
     def has_api_key(self) -> bool:
         """识别所有「占位符」（用户没填真 key）。"""
-        placeholders = {
-            "", "PUT-YOUR-API-KEY-HERE",
-            "PUT-YOUR-MINIMAX-API-KEY-HERE",
-            "PUT-YOUR-MINIMAX-API-KEY-HERE",   # 双写避免误改
-        }
-        return bool(self.llm.api_key) and self.llm.api_key not in placeholders
+        # 委托给 app.core.api_keys，避免每个调用点重复硬编码占位符字面值。
+        from app.core.api_keys import is_placeholder_key
+        return not is_placeholder_key(self.llm.api_key)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -225,5 +235,5 @@ __all__ = [
     "Config", "load_config",
     "LLMConfig", "CharacterConfig", "WindowConfig", "ReminderConfig",
     "AppConfig", "SpriteConfig", "ASRConfig", "BrainConfig",
-    "AgentConfig", "LangChainConfig",
+    "AgentConfig", "LangChainConfig", "MCPConfig",
 ]

@@ -13,6 +13,26 @@ log = logging.getLogger(__name__)
 IS_WINDOWS = platform.system() == "Windows"
 
 
+def _as_bool(v) -> Optional[bool]:
+    """把模型可能传来的各种「布尔」归一化成 True / False / None(不可识别)。
+
+    不能直接 `if v:` —— JSON 里 "false" 是非空字符串，恒为真。
+    开关类工具（Wi-Fi/蓝牙/音量）踩过这个坑：主人说「关掉WiFi」，
+    桌宠反而执行了 Enable。
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on", "y", "是", "开"):
+            return True
+        if s in ("false", "0", "no", "off", "n", "否", "关"):
+            return False
+    return None
+
+
 def _battery_windows() -> str:
     """Windows 笔记本电池状态（ps + WMI）。"""
     try:
@@ -132,23 +152,39 @@ def register(reg: ToolRegistry) -> None:
         """开 / 关 Wi-Fi（危险工具，需要管理员）。"""
         if not IS_WINDOWS:
             return "非 Windows 平台未实现"
+        # 显式归一化布尔。模型经常把 false 发成 JSON 字符串 "false"，
+        # 而 `if enable` 对非空字符串恒为真 → 主人说「关掉WiFi」，
+        # 桌宠反而执行 Enable-NetAdapter 并回报「已尝试 enable」。
+        enable = _as_bool(enable)
+        if enable is None:
+            return "错误：enable 必须是 true 或 false（收到的值无法识别）"
         action = "enable" if enable else "disable"
         verb = "Enable-NetAdapter" if enable else "Disable-NetAdapter"
         # 早先这里无视 enable 参数，脚本里写死 Disable-NetAdapter，
         # 于是「打开WiFi」实际把 Wi-Fi 关了，而返回文案还报 enable —— 行为与承诺相反。
+        # 网卡名匹配：中文 Windows 上叫「WLAN」「无线局域网连接」，
+        # 原来的 '*Wi-Fi*' 匹配为空 → 管道空转却 returncode=0 → 报成功。
+        # 改成按物理介质（11 = Wireless）筛，跨语言可靠，并检查有没有真的命中。
         try:
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
-                 f"Get-NetAdapter | Where-Object {{$_.Name -like '*Wi-Fi*'}} | "
-                 f"ForEach-Object {{ {verb} -Name $_.Name -Confirm:$false }}"],
-                capture_output=True, timeout=10, check=False, text=True,
+                 "$a = Get-NetAdapter | Where-Object "
+                 "{$_.NdisPhysicalMedium -eq 11 -or $_.Name -like '*Wi-Fi*' "
+                 "-or $_.Name -like '*WLAN*' -or $_.Name -like '*无线*'}; "
+                 f"if (-not $a) {{ Write-Output 'NO_ADAPTER'; exit 2 }}; "
+                 f"$a | ForEach-Object {{ {verb} -Name $_.Name -Confirm:$false }}"],
+                capture_output=True, timeout=20, check=False, text=True,
+                encoding="utf-8", errors="replace",
             )
+            out = (proc.stdout or "").strip()
+            if "NO_ADAPTER" in out or not out:
+                return "错误：没有找到无线网卡，未做任何修改"
             if proc.returncode != 0:
                 err = (proc.stderr or "").strip().splitlines()
                 log.warning("set_wifi %s 失败: %s", action, proc.stderr)
                 return (f"错误：{action} Wi-Fi 失败（可能需要管理员权限运行）"
                         + (f"：{err[-1][:80]}" if err else ""))
-            return f"已尝试 {action} Wi-Fi（可能需要管理员权限）"
+            return f"已{('开启' if enable else '关闭')} Wi-Fi（{out[:80]}）"
         except Exception as e:  # noqa: BLE001
             # 不把 str(e) 回给模型：subprocess 异常里含完整命令行
             log.exception("set_wifi 异常")
@@ -158,6 +194,9 @@ def register(reg: ToolRegistry) -> None:
         """开 / 关蓝牙（危险工具，需要管理员）。"""
         if not IS_WINDOWS:
             return "非 Windows 平台未实现"
+        enable = _as_bool(enable)
+        if enable is None:
+            return "错误：enable 必须是 true 或 false（收到的值无法识别）"
         action = "开" if enable else "关"
         try:
             ps = (
@@ -205,23 +244,18 @@ def register(reg: ToolRegistry) -> None:
             return f"读剪贴板失败：{e}"
 
     def clear_bubble() -> str:
-        """隐藏桌宠头顶气泡（用户说"别说了" / 屏幕太乱）。需要 bubble hook。"""
-        from app.engine.tools._pet import _fire_hook
-        # clear_bubble 走与 _pet 模块同样的 hooks 协议
-        # _fire_hook(hooks_dict, "bubble", text) 是只发气泡；这里传空字符串 + 实际逻辑
-        # 由 hook 实现：见 _pet 模块默认实现
-        # 简化做法：让 hook 接到空字符串时隐藏气泡（已在 _pet 里约定）
-        from app.engine.tools import _pet as _pet_mod
-        # 让 hook 看门 — 但 hooks 在 register 时被传入，此处拿不到
-        # 用全局 hook 暂存即可
+        """隐藏桌宠头顶气泡（用户说"别说了" / 屏幕太乱）。"""
+        # hook 由 build_default_tools 统一注入（见 app/engine/tools/__init__.py）。
+        # 原实现只 log.info 级别的兜底文案、没有「错误」前缀，agent 的矛盾检测
+        # 拦不住；而主程序压根没注入过这个 hook，等于一个永久空转的工具。
         clear_hook = _bubble_clear_hook
-        if callable(clear_hook):
-            try:
-                clear_hook()
-                return "已隐藏气泡"
-            except Exception as e:  # noqa: BLE001
-                return f"错误：{e}"
-        return "未连接气泡 hook（主程序没接入）"
+        if not callable(clear_hook):
+            return "错误：气泡通道未接入（主程序没注入 clear_bubble hook），气泡没消失。"
+        try:
+            clear_hook()
+            return "已隐藏气泡"
+        except Exception as e:  # noqa: BLE001
+            return f"错误：隐藏气泡失败（{type(e).__name__}）"
 
     # 注册
     reg.register(Tool(name="get_battery",

@@ -1,11 +1,12 @@
-"""智能中枢控制器：封装 MemoryStore + ToolRegistry + ProactiveBrain + AgentLoop。"""
+"""智能中枢控制器：封装 MemoryStore + ToolRegistry + ProactiveBrain + AgentLoop + MCP。"""
 from __future__ import annotations
 
 import datetime
 import logging
+import threading
 from pathlib import Path
 
-from app.core.qt_compat import QObject, Signal
+from app.core.qt_compat import QObject, Signal, is_qobject_alive
 from app.brain.agent import AgentLoop
 from app.brain.llm_client import LLMClient
 from app.brain.memory import MemoryStore
@@ -96,8 +97,13 @@ class BrainController(QObject):
     emotion_hint = Signal(object)
     # 信号：工具触发的气泡请求（文本）
     bubble_requested = Signal(str)
+    # 信号：工具请求收起桌宠气泡（clear_bubble 用）
+    bubble_cleared = Signal()
     # 信号：工具触发的动画请求（动画名）
     animation_requested = Signal(str)
+    # 信号：倒计时 / 提醒到点（文本, 类型标题）。UI 层接它弹置顶闹钟窗 +
+    # 提示音 + 播报 + 系统通知。原先 countdown 到点只冒一个气泡，主人常听不到。
+    alarm_fired = Signal(str, str)
 
     def __init__(self, root: Path, cfg, state, reminders,
                  parent: QObject | None = None) -> None:
@@ -124,6 +130,15 @@ class BrainController(QObject):
         foods_path = root / "data" / "foods.json"
         self.items = ItemStore.load(foods_path) if foods_path.is_file() else None
 
+        # 清掉上次运行残留的系统级闹钟任务（桌宠崩了/被强杀会留下）。
+        # 不清的话任务计划程序里会越攒越多，而且那些提醒主人已经不需要了。
+        try:
+            from app.core import win_alarm
+            if win_alarm.is_available():
+                win_alarm.cleanup_stale()
+        except Exception:  # noqa: BLE001
+            log.debug("清理残留系统闹钟失败", exc_info=True)
+
         if cfg.brain.tools_enabled:
             # web_search 主用 Tavily：优先 cfg.brain.tavily_api_key，否则读环境变量
             tavily_key = getattr(getattr(cfg, "brain", None), "tavily_api_key", None) \
@@ -134,8 +149,10 @@ class BrainController(QObject):
                 memory=self.memory,
                 items=self.items,
                 hooks={
-                    "bubble": self.bubble_requested.emit,
-                    "animation": self.animation_requested.emit,
+                    "bubble": self._emit_bubble,
+                    "animation": self._emit_animation,
+                    "hide_bubble": self._emit_bubble_cleared,
+                    "alarm": self._fire_alarm,
                 },
                 tavily_api_key=tavily_key,
             )
@@ -144,7 +161,14 @@ class BrainController(QObject):
         else:
             self.tool_registry = None
 
-        self._sleeping_checker = None
+        # MCP 外挂工具（后台线程启动 server + 桥接，不阻塞桌宠启动）
+        self.mcp_registry = None
+        if (self.tool_registry is not None
+                and getattr(cfg, "mcp", None) and cfg.mcp.enabled):
+            self._setup_mcp(root, cfg)
+
+        # 默认「不睡觉」：上层没注入前，proactive 不会被睡眠态挡掉
+        self._sleeping_checker = lambda: False
         if cfg.brain.proactive_enabled:
             self.proactive = ProactiveBrain(
                 llm_cfg=cfg.llm,
@@ -162,16 +186,50 @@ class BrainController(QObject):
         else:
             self.proactive = None
 
+    # ---- 给工具用的安全信号出口 ------------------------------------------------
+    # 工具在 asyncio.to_thread 的工作线程里跑，倒计时提醒更是在自己的后台
+    # 线程里跑。它们随时可能在 QObject 析构之后才回来 emit 信号——直接
+    # `self.bubble_requested.emit` 会在 Windows 上 access violation 打崩进程
+    # （测试里必现）。这里统一过一道存活性检查。
+    def _alive(self) -> bool:
+        if not is_qobject_alive(self):
+            log.debug("BrainController 已析构，丢弃迟到的工具回调")
+            return False
+        return True
+
+    def _emit_bubble(self, text: str) -> None:
+        if self._alive():
+            self.bubble_requested.emit(text)
+
+    def _emit_animation(self, name: str) -> None:
+        if self._alive():
+            self.animation_requested.emit(name)
+
+    def _emit_bubble_cleared(self) -> None:
+        if self._alive():
+            self.bubble_cleared.emit()
+
+    def _fire_alarm(self, text: str, kind: str = "⏰ 倒计时结束") -> None:
+        """倒计时到点：走闹钟通道（置顶窗 + 提示音 + 播报 + 系统通知）。
+
+        在后台线程里被调用，所以必须先过 _alive()——QObject 析构后 emit
+        会直接 access violation。
+        """
+        if self._alive():
+            self.alarm_fired.emit(text, kind)
+
     def set_sleeping_checker(self, checker) -> None:
-        """设置是否睡觉的检查函数（由 App 提供）。"""
-        self._sleeping_checker = checker
+        """设置是否睡觉的检查函数（由 App 提供）。
+
+        checker 为 None 时恢复默认（始终不睡觉），便于上层主程序无需关心
+        「是否已注入」的分支。
+        """
+        self._sleeping_checker = checker if checker is not None else (lambda: False)
 
     def _check_sleeping(self) -> bool:
-        """检查桌宠是否在睡觉。"""
-        if self._sleeping_checker is None:
-            return False
+        """检查桌宠是否在睡觉。checker 抛异常时兜底返回 False（不睡觉）。"""
         try:
-            return self._sleeping_checker()
+            return bool(self._sleeping_checker())
         except Exception:  # noqa: BLE001
             return False
 
@@ -255,3 +313,50 @@ class BrainController(QObject):
             registry=self.tool_registry,
             confirm_tool=confirm_tool,
         )
+
+    # ---------------------------------------------------------- MCP 外挂工具
+    def _setup_mcp(self, root: Path, cfg) -> None:
+        """后台加载 MCP servers 并把它们的工具桥接进 tool_registry。
+
+        MCP server 是独立子进程，启动 + initialize 握手可能秒级；
+        放后台线程避免卡启动。桥接完成后 AgentLoop 下一条消息就能用
+        （chat_window 每轮实时取 registry.names() / to_openai()）。
+        """
+        from app.mcp.protocol import MCPClientRegistry
+        servers_file = Path(cfg.mcp.servers_file)
+        if not servers_file.is_absolute():
+            servers_file = root / servers_file
+
+        registry = MCPClientRegistry()
+        n = registry.load_from_yaml(servers_file)
+        if n == 0:
+            log.info("MCP：已启用但没有可用的 server 配置（%s）", servers_file)
+            return
+        self.mcp_registry = registry
+        log.info("MCP：已加载 %d 个 server 配置，后台启动中…", n)
+
+        def _load():
+            try:
+                started = registry.start_all_sync(timeout=30.0)
+                ok = {k: len(v) for k, v in started.items() if v}
+                if not ok:
+                    log.warning("MCP：所有 server 启动失败（检查 %s）", servers_file)
+                    return
+                from app.brain.agent import DANGEROUS_TOOLS
+                bridged = registry.bridge_to(
+                    self.tool_registry, dangerous_tools=set(DANGEROUS_TOOLS))
+                log.info("MCP：已桥接 %d 个外挂工具 %s",
+                         bridged, list(ok.keys()))
+            except Exception:  # noqa: BLE001
+                log.exception("MCP 加载失败（不影响桌宠本体功能）")
+
+        threading.Thread(target=_load, daemon=True, name="mcp-load").start()
+
+    def shutdown_mcp(self) -> None:
+        """停止所有 MCP server 子进程 + 关闭常驻 loop（进程退出前调用）。"""
+        if self.mcp_registry is None:
+            return
+        try:
+            self.mcp_registry.stop_all_sync()
+        except Exception:  # noqa: BLE001
+            log.debug("MCP 关闭异常（忽略）", exc_info=True)

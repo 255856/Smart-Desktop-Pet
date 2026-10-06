@@ -11,7 +11,7 @@ import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Protocol
+from typing import Optional, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +294,10 @@ class MemoryStore:
         self._items: list[MemoryItem] = []
         self._lock = threading.RLock()
         self._dirty = False
+        # 最近一次落盘是否成功。工具层（remember_fact）读它来决定能不能对主人
+        # 说「已记住」——磁盘只读/写满时，内存里有、磁盘无，桌宠却报喜，
+        # 主人重启一开桌宠就发现「记性丢了」。
+        self.last_save_ok = True
         self._load()
         self._refit_backend()
 
@@ -314,7 +318,12 @@ class MemoryStore:
         except Exception as e:  # noqa: BLE001
             log.warning("载入记忆失败：%s", e)
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """落盘。返回是否成功。
+
+        原来只 log.warning 吞掉异常，调用方（remember_fact 工具）无从得知，
+        于是磁盘只读/写满时，桌宠照样对主人说「已记住」——重启即消失。
+        """
         try:
             self.data_file.parent.mkdir(parents=True, exist_ok=True)
             self.data_file.write_text(
@@ -322,8 +331,10 @@ class MemoryStore:
                            ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            return True
         except Exception as e:  # noqa: BLE001
             log.warning("保存记忆失败：%s", e)
+            return False
 
     def _refit_backend(self) -> None:
         """重新拟合向量后端（在 load / add / remove 之后调用）。"""
@@ -364,9 +375,10 @@ class MemoryStore:
             # 完全相同的文本不重复记
             if any(i.content == content for i in self._items):
                 log.debug("记忆去重：%s", content[:30])
+                self.last_save_ok = True   # 已存在，无需再写盘
                 return item
             self._items.append(item)
-            self._save()
+            self.last_save_ok = self._save()
             self._refit_backend()
         log.info("记忆新增 [%s] importance=%.2f: %s", category, importance, content[:60])
         return item

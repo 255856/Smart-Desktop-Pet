@@ -183,6 +183,10 @@ class WerewolfGame:
         self.sheriff: Optional[int] = None
         # 狼频道（夜晚狼队内部讨论，跨晚保留，仅狼视角可见）
         self.wolf_chat: List[WolfChatRecord] = []
+        # 复盘日志：按时间顺序记录所有频道（主持人/公开/发言/狼聊），
+        # 仅游戏结束后「复盘」使用，不进入任何 Agent 上下文
+        self.journal: List[Dict[str, object]] = []
+        self._journal_seq: int = 0
 
     def player(self, seat: int) -> Player:
         return self.players[seat]
@@ -458,6 +462,16 @@ class WerewolfGame:
             view["witch_poison"] = v.has_poison
             # 仅在夜晚结算前由 Director 单独告知狼刀目标（不放在静态视角里）
         return view
+
+    def add_journal(self, channel: str, who: str, text: str) -> None:
+        """记录一条复盘日志。channel: host/public/speech/wolf。"""
+        if not text:
+            return
+        self._journal_seq += 1
+        self.journal.append({
+            "seq": self._journal_seq, "day": self.day,
+            "channel": channel, "who": who, "text": text,
+        })
 
     def add_event(self, text: str) -> None:
         self.public_events.append(PublicEvent(self.day, text))

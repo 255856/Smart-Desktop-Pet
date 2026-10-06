@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
 from app.core.qt_compat import (
-    QDialog, QDialogButtonBox, QFileDialog, QInputDialog, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QDialog, QInputDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton,
     Qt, QVBoxLayout, QWidget,
 )
 

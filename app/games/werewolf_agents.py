@@ -24,8 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.games.werewolf import (
     WerewolfGame, ROLE_LABEL,
-    WOLF, SEER, WITCH, HUNTER, VILLAGER,
-    CAMP_WOLF, CAMP_GOOD,
+    WOLF, SEER, WITCH, HUNTER, CAMP_WOLF,
 )
 
 log = logging.getLogger(__name__)
@@ -55,6 +54,61 @@ JSON_RUN = '{"run": true 或 false}'
 JSON_TRANSFER = '{"target": 座位号 或 null（撕掉警徽）}'
 
 
+def _fn(name: str, desc: str, props: dict, required: list) -> dict:
+    return {"type": "function", "function": {
+        "name": name, "description": desc,
+        "parameters": {"type": "object", "properties": props,
+                       "required": required}}}
+
+
+# 各阶段游戏工具：每个阶段只暴露对应工具，模型自主决策、填参数
+def _build_tools() -> Dict[str, dict]:
+    seat_p = {"type": "integer", "description": "目标玩家座位号"}
+    text_p = {"type": "string", "description": "你要说的话（1-3句，符合性格与当前局势）"}
+    return {
+        "public_speak": _fn(
+            "public_speak", "在公共频道发言（所有存活玩家都能听到）",
+            {"text": text_p}, ["text"]),
+        "wolf_plan": _fn(
+            "wolf_plan", "在狼频道（仅狼可见，与公共频道隔离）讨论，并给出今晚建议击杀的目标",
+            {"text": {"type": "string", "description": "狼频道讨论发言（队友能看到）"},
+             "target": {"type": "integer",
+                        "description": "建议刀的座位号；可填自己=自刀骗解药"}},
+            ["text", "target"]),
+        "ballot": _fn(
+            "ballot", "白天投票放逐一名玩家",
+            {"action": {"type": "string", "enum": ["vote", "abstain"],
+                        "description": "vote=投给 seat，abstain=弃票"},
+             "seat": seat_p}, ["action"]),
+        "seer_check": _fn(
+            "seer_check", "预言家查验一名玩家的身份",
+            {"seat": seat_p}, ["seat"]),
+        "witch_action": _fn(
+            "witch_action", "女巫使用药水（一夜最多用一瓶）",
+            {"action": {"type": "string", "enum": ["antidote", "poison", "none"],
+                        "description": "antidote=用解药救今晚被杀者；poison=用毒药毒 seat；none=不用药"},
+             "seat": seat_p}, ["action"]),
+        "hunter_action": _fn(
+            "hunter_action", "猎人出局后是否开枪带走一人",
+            {"action": {"type": "string", "enum": ["shoot", "skip"],
+                        "description": "shoot=开枪带走 seat；skip=放弃"},
+             "seat": seat_p}, ["action"]),
+        "sheriff_run": _fn(
+            "sheriff_run", "决定是否举手竞选警长",
+            {"run": {"type": "boolean",
+                      "description": "true=上台竞选，false=不参选"}},
+            ["run"]),
+        "badge_action": _fn(
+            "badge_action", "警长出局后移交警徽或撕掉",
+            {"action": {"type": "string", "enum": ["transfer", "tear"],
+                        "description": "transfer=移交给 seat；tear=撕掉警徽"},
+             "seat": seat_p}, ["action"]),
+    }
+
+
+TOOLS: Dict[str, dict] = _build_tools()
+
+
 def extract_json(text: str) -> Optional[dict]:
     """从模型回复中提取 JSON 对象（兼容 ```json 代码块 / 多余文本）。"""
     if not text:
@@ -76,7 +130,7 @@ def extract_json(text: str) -> Optional[dict]:
             return None
 
 
-async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 60.0):
+async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 90.0):
     """带并发限流、单次超时与 529/429 过载退避的 LLM 调用。
 
     - semaphore：全局 asyncio.Semaphore（由 Director 注入），限制同时请求数；
@@ -118,12 +172,20 @@ def _perspective_text(view: dict) -> str:
     lines.append(f"现在是第 {view['day']} 天。你的座位是 {view['self_seat']} 号，"
                  f"身份：{ROLE_LABEL[view['self_role']]}（阵营："
                  f"{'狼人' if view['self_camp'] == CAMP_WOLF else '好人'}）。")
-    lines.append("座位信息：")
-    for s in view["seats"]:
-        tag = "（你）" if s["seat"] == view["self_seat"] else ""
-        state = "存活" if s["alive"] else "已死亡"
-        role = f"，身份：{ROLE_LABEL[s['role']]}" if s["role"] else ""
-        lines.append(f"  {s['seat']}号 {s['name']}{tag}：{state}{role}")
+    alive = [s for s in view["seats"] if s["alive"]]
+    dead = [s for s in view["seats"] if not s["alive"]]
+
+    def _one(s):
+        role = f"({ROLE_LABEL[s['role']]})" if s["role"] else ""
+        tag = "(你)" if s["seat"] == view["self_seat"] else ""
+        return f"{s['seat']}号{s['name']}{tag}{role}"
+
+    lines.append("【当前存活 %d 人】" % len(alive)
+                 + "、".join(_one(s) for s in alive))
+    if dead:
+        lines.append("【已死亡 %d 人：不能再发言、投票或被选为目标】" % len(dead)
+                     + "、".join(f"{s['seat']}号{s['name']}" for s in dead))
+    lines.append("注意：你只能与存活玩家互动，发言、投票、技能都不得涉及已死亡玩家。")
     if view.get("wolf_teammates"):
         lines.append("你的狼人队友座位：" + "、".join(map(str, view["wolf_teammates"])))
     if view.get("sheriff") is not None:
@@ -238,175 +300,209 @@ class WerewolfAgent:
             return obj
         return (raw or "").strip().strip("“”\"'") or None
 
+    async def _tool_call(self, instruction: str, tools: List[dict]):
+        """让模型基于场内信息自主思考并调用一个工具。
+        返回 {"name":..., "arguments": dict}；无 client / 失败 / 未调用返回 None。"""
+        if self.client is None:
+            return None
+        # 每次调用都刷新 system prompt，确保拿到最新的玩家状态与发言
+        self.client.system_prompt = self._system()
+        try:
+            messages = [{"role": "user", "content": instruction}]
+            final_calls = None
+            async for ev, data in self.client.chat_stream_events(
+                    messages, tools=tools, force_tool_use=True):
+                if ev == "finish":
+                    final_calls = data.get("tool_calls")
+            if final_calls:
+                tc = final_calls[0]
+                try:
+                    args = json.loads(tc.get("arguments") or "{}")
+                except Exception:  # noqa: BLE001
+                    args = {}
+                return {"name": tc.get("name", ""), "arguments": args}
+        except Exception as e:  # noqa: BLE001
+            log.warning("狼人杀 agent %d 工具调用失败：%r", self.seat, e)
+        return None
+
     async def day_speech(self, already: str) -> str:
-        prompt = (
-            f"现在轮到你白天发言（座位 {self.seat} 号 {self.name}）。\n"
-            f"今天此前的发言记录：\n{already}\n\n"
-            "请先在 analysis 里基于上面的公开事件、查验结果与各位发言做简短推理，再用 speech 说一段符合局势的话：\n"
-            "可以回应、质疑或附和某位玩家的具体发言，指出明确疑点或给出依据；不要凭空说『我觉得某某有问题』。1-3 句，口语化。\n"
-            + ("你是狼人：发言必须完全基于公开信息、像好人一样推理，绝不能提及狼频道、夜晚刀人或狼队友。\n"
-               if self.player.role == WOLF else "")
-            + f"输出 JSON：{JSON_SPEECH}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
-            return str(obj["speech"]).strip()
-        # 兼容模型直接吐纯文本；JSON 解析失败/LLM 超时 → 台词兜底（记日志便于诊断）
+        instruction = (
+            f"现在轮到你白天发言（{self.seat} 号 {self.name}）。\n"
+            f"今天此前的发言：\n{already or '（你是今天第一个发言）'}\n\n"
+            "请先核对上面的【当前存活/已死亡】状态、公开事件与各位发言，独立判断，"
+            "再调用 public_speak 说一段符合局势的话（1-3句，可回应/质疑/附和具体发言）。\n"
+            + ("你是狼人：发言必须像好人一样推理，不能提及狼频道、刀人或狼队友。\n"
+               if self.player.role == WOLF else ""))
+        call = await self._tool_call(instruction, [TOOLS["public_speak"]])
+        if call and call["name"] == "public_speak":
+            text = str(call["arguments"].get("text", "")).strip()
+            if text:
+                return text
         log.warning("狼人杀 agent %d 白天发言降级到脚本台词", self.seat)
         return self._scripted_speech()
 
     async def last_words(self) -> str:
-        prompt = ("你出局了，请说一句简短遗言（符合你的性格，可表水、可点出怀疑对象）。\n"
-                  "本局为暗牌，遗言绝不能说出自己的真实身份（你是狼人更要伪装到底、也别卖队友）；\n"
-                  "先在 analysis 想清楚该表水还是点谁，再给 speech。\n"
-                  f"输出 JSON：{JSON_LAST}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
-            return str(obj["speech"]).strip()
+        instruction = (
+            "你已出局，请说一句简短遗言（符合性格，可表水、可点怀疑对象）。\n"
+            "本局为暗牌，遗言不能说出自己的真实身份（狼人更要伪装、别卖队友）。\n"
+            "请调用 public_speak 给出遗言。")
+        call = await self._tool_call(instruction, [TOOLS["public_speak"]])
+        if call and call["name"] == "public_speak":
+            text = str(call["arguments"].get("text", "")).strip()
+            if text:
+                return text
         return self._scripted_last_words()
 
     async def vote(self, candidates: List[int]) -> Optional[int]:
-        prompt = (
-            "白天发言结束，现在投票。你必须基于上面『公开事件与结果』和『公共频道发言』里的真实信息判断，禁止凭空怀疑：\n"
-            "1. 回顾预言家起跳/查验、各人发言与站队、上一轮投票明细；\n"
-            "2. 找出具体疑点：谁的发言前后矛盾、谁在划水、谁被查杀、谁的投票可疑；\n"
-            "3. 狼人要伪装好人逻辑、保护队友并把嫌疑引向好人；好人力争投出狼人。\n"
-            "请先在 analysis 里完成上述推理（不对外），再在 reason 写清对外依据（引用具体座位/发言）、给出 target。\n"
-            f"候选（存活且非自己）：{candidates}\n"
-            f"输出 JSON：{JSON_VOTE}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
-                                                        candidates):
-            return int(obj["target"])
+        instruction = (
+            "白天发言结束，现在投票。请先核对上面的存活/死亡状态、公开事件和各位发言，\n"
+            "基于具体发言、查验或投票站队独立判断（不盲目跟从警长或多数票），"
+            "再调用 ballot：投给一名存活玩家，或弃票。\n"
+            f"可投票的存活目标（不含自己）：{candidates}")
+        call = await self._tool_call(instruction, [TOOLS["ballot"]])
+        if call and call["name"] == "ballot":
+            args = call["arguments"]
+            if str(args.get("action", "abstain")).lower() == "vote" and \
+                    self._valid_target(args.get("seat"), candidates):
+                return int(args["seat"])
+            return None
         return self._scripted_vote(candidates)
 
     async def wolf_nominate(self, candidates: List[int]) -> Tuple[int, str]:
-        prompt = (
-            "夜晚降临，你是狼人。请从下列存活的非狼人玩家中提名今晚击杀目标：\n"
-            f"候选：{candidates}\n"
-            "优先击杀疑似预言家、女巫等神职。请给狼队友一句简短理由。\n"
-            f"输出 JSON：{JSON_WOLF}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
-                                                        candidates):
-            return int(obj["target"]), str(obj.get("reason", "")).strip() or "直觉"
+        # 预留接口：当前 Director 用 wolf_chat_message（含讨论+目标）；此处保持工具调用范式
+        instruction = (
+            "夜晚降临，你是狼人。请从存活玩家中提名今晚击杀目标（含自己=自刀）。\n"
+            f"候选：{candidates}\n通常优先刀预言家/女巫等神职；自刀赌女巫会救。\n"
+            "请调用 wolf_plan 给出建议目标和理由。")
+        call = await self._tool_call(instruction, [TOOLS["wolf_plan"]])
+        if call and call["name"] == "wolf_plan":
+            args = call["arguments"]
+            if self._valid_target(args.get("target"), candidates):
+                return int(args["target"]), str(args.get("text", "")).strip() or "直觉"
         return self._scripted_wolf_nominate(candidates)
 
     async def seer_check(self, unchecked: List[int]) -> Optional[int]:
-        prompt = (
-            "你是预言家，请选择今晚要查验身份的存活玩家座位（不要重复查验）：\n"
-            f"未查验的存活座位：{unchecked}\n"
-            f"输出 JSON：{JSON_TARGET}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
-                                                        unchecked):
-            return int(obj["target"])
+        instruction = (
+            "你是预言家，请选择今晚要查验的存活玩家（不要重复查验）。\n"
+            f"未查验的存活座位：{unchecked}\n请调用 seer_check 给出查验座位。")
+        call = await self._tool_call(instruction, [TOOLS["seer_check"]])
+        if call and call["name"] == "seer_check":
+            if self._valid_target(call["arguments"].get("seat"), unchecked):
+                return int(call["arguments"]["seat"])
         return self._scripted_seer_check(unchecked)
 
     async def witch_decide(self, killed: Optional[int],
                            poison_candidates: List[int]) -> Dict[str, object]:
         me = self.player
-        prompt = (
+        instruction = (
             "你是女巫。\n"
             f"今晚狼人击杀的目标是：{killed if killed is not None else '无（空刀）'}。\n"
             f"解药：{'有' if me.has_antidote else '无'}；"
             f"毒药：{'有' if me.has_poison else '无'}。\n"
             f"一夜最多用一瓶药。候选毒目标：{poison_candidates or '无'}。\n"
-            f"输出 JSON：{JSON_WITCH}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict):
-            use = str(obj.get("use", "none")).lower()
+            "请调用 witch_action：用解药、用毒药（填 seat）或不用药。")
+        call = await self._tool_call(instruction, [TOOLS["witch_action"]])
+        if call and call["name"] == "witch_action":
+            args = call["arguments"]
+            use = str(args.get("action", "none")).lower()
             if use == "antidote" and me.has_antidote and killed is not None:
                 return {"use": "antidote"}
-            if use == "poison" and me.has_poison and poison_candidates:
-                t = obj.get("target")
-                if self._valid_target(t, poison_candidates):
-                    return {"use": "poison", "target": int(t)}
-            if use == "none":
-                return {"use": "none"}
+            if use == "poison" and me.has_poison and \
+                    self._valid_target(args.get("seat"), poison_candidates):
+                return {"use": "poison", "target": int(args["seat"])}
+            return {"use": "none"}
         return self._scripted_witch(killed, poison_candidates)
 
     async def hunter_shoot(self, candidates: List[int]) -> Optional[int]:
-        prompt = (
-            "你是猎人，现在出局可以开枪带走一人。请从存活且非自己的座位中选：\n"
-            f"候选：{candidates}\n输出 JSON：{JSON_TARGET}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
-                                                        candidates):
-            return int(obj["target"])
+        instruction = (
+            "你是猎人，现已出局可以开枪带走一人（被毒不能开枪）。\n"
+            f"存活候选（非自己）：{candidates}\n请调用 hunter_action：开枪（填 seat）或放弃。")
+        call = await self._tool_call(instruction, [TOOLS["hunter_action"]])
+        if call and call["name"] == "hunter_action":
+            args = call["arguments"]
+            if str(args.get("action", "skip")).lower() == "shoot" and \
+                    self._valid_target(args.get("seat"), candidates):
+                return int(args["seat"])
+            return None
         return self._scripted_hunter(candidates)
 
     async def run_for_sheriff(self) -> bool:
-        prompt = (
-            "第一天白天，现在竞选警长。警长有 1.5 票、负责归票，出局前可移交，"
-            "是非常重要的身份。\n"
-            "请大胆决定是否上台：预言家通常必跳；平民也可以大胆举手、帮好人拿警徽；"
-            "狼人可以悍跳争夺警徽、带节奏；只有女巫通常隐藏。\n"
-            "绝大多数玩家都愿意参与，除非你是女巫，否则倾向于举手。\n"
-            f"输出 JSON：{JSON_RUN}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and isinstance(obj.get("run"), bool):
-            return obj["run"]
+        instruction = (
+            "第一天白天竞选警长。警长有 1.5 票、负责归票，出局前可移交。\n"
+            "预言家通常必跳；平民可大胆举手；狼人可悍跳争夺；只有女巫通常隐藏。\n"
+            "请调用 sheriff_run 决定是否上台。")
+        call = await self._tool_call(instruction, [TOOLS["sheriff_run"]])
+        if call and call["name"] == "sheriff_run":
+            r = call["arguments"].get("run")
+            if isinstance(r, bool):
+                return r
         return self._scripted_run_sheriff()
 
     async def campaign_speech(self) -> str:
-        prompt = (
-            "你参与警长竞选，请发表一段竞选演说（1-2 句，说明你值得信任、"
-            "你会如何带好人获胜；预言家可以跳明并报验人）。\n"
-            f"输出 JSON：{JSON_SPEECH}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
-            return str(obj["speech"]).strip()
+        instruction = (
+            "你正在竞选警长，请调用 public_speak 发表一段竞选演说（1-2句，"
+            "说明你值得信任；预言家可以跳明并报验人）。")
+        call = await self._tool_call(instruction, [TOOLS["public_speak"]])
+        if call and call["name"] == "public_speak":
+            text = str(call["arguments"].get("text", "")).strip()
+            if text:
+                return text
         return self._scripted_campaign_speech()
 
     async def vote_sheriff(self, candidates: List[int]) -> Optional[int]:
-        prompt = (
-            "警下的人请从参选者中投票选出警长（你没有上台，只能投参选者）：\n"
-            f"参选者：{candidates}\n请投给你认为最可信、最像好人的人。\n"
-            f"输出 JSON：{JSON_TARGET}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and self._valid_target(obj.get("target"),
-                                                        candidates):
-            return int(obj["target"])
+        instruction = (
+            "你没有上台，需从参选者中投票选警长。请调用 ballot 投给最可信的参选者，或弃票。\n"
+            f"参选者：{candidates}")
+        call = await self._tool_call(instruction, [TOOLS["ballot"]])
+        if call and call["name"] == "ballot":
+            args = call["arguments"]
+            if str(args.get("action", "abstain")).lower() == "vote" and \
+                    self._valid_target(args.get("seat"), candidates):
+                return int(args["seat"])
+            return None
         return self._scripted_vote_sheriff(candidates)
 
     async def pk_speech(self) -> str:
-        prompt = (
-            "你在投票中平票，进入 PK。请发言说服大家投你、不要出你"
-            "（1-2 句，可表水、可点出你怀疑的狼）。\n"
-            f"输出 JSON：{JSON_SPEECH}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
-            return str(obj["speech"]).strip()
+        instruction = (
+            "你在投票中平票进入 PK，请调用 public_speak 发言说服大家不要出你"
+            "（1-2句，可表水、可点怀疑的狼）。")
+        call = await self._tool_call(instruction, [TOOLS["public_speak"]])
+        if call and call["name"] == "public_speak":
+            text = str(call["arguments"].get("text", "")).strip()
+            if text:
+                return text
         return self._scripted_pk_speech()
 
     async def transfer_badge(self, candidates: List[int]) -> Optional[int]:
-        prompt = (
-            "你是警长且即将出局，请选择把警徽移交给谁（优先给信任的好神职/"
-            "预言家查验过的好人；若没有可信的人可以撕掉）。\n"
-            f"存活候选：{candidates}\n输出 JSON：{JSON_TRANSFER}")
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict):
-            t = obj.get("target")
-            if t is None:
-                return None
-            if self._valid_target(t, candidates):
-                return int(t)
+        instruction = (
+            "你是警长且即将出局，请调用 badge_action：把警徽移交给信任的存活玩家，"
+            "或撕掉警徽。\n"
+            f"存活候选：{candidates}")
+        call = await self._tool_call(instruction, [TOOLS["badge_action"]])
+        if call and call["name"] == "badge_action":
+            args = call["arguments"]
+            if str(args.get("action", "tear")).lower() == "transfer" and \
+                    self._valid_target(args.get("seat"), candidates):
+                return int(args["seat"])
+            return None
         return self._scripted_transfer_badge(candidates)
 
     async def wolf_chat_message(self, targets: List[int]) -> Tuple[str, Optional[int]]:
         """夜晚狼频道讨论：返回 (频道发言, 建议击杀目标)。"""
-        prompt = (
-            "夜晚狼频道（只有狼队友能看见，与公共频道隔离）。请和队友讨论"
-            "今晚刀谁（说一句话，指出疑似神职的目标），并给出你的建议目标。\n"
-            f"可刀目标：{targets}\n输出 JSON："
-            '{"speech": "讨论发言", "target": 建议座位号}')
-        obj = await self._ask(prompt, want_json=True)
-        if isinstance(obj, dict) and str(obj.get("speech", "")).strip():
-            text = str(obj["speech"]).strip()
-            t = None
-            if self._valid_target(obj.get("target"), targets):
-                t = int(obj["target"])
-            return text, t
+        instruction = (
+            "夜晚狼频道（仅狼队友可见，与公共频道隔离）。请和队友讨论今晚刀谁。\n"
+            "候选包含所有存活玩家（也包括你自己）：一般优先刀预言家/女巫等神职好人；"
+            "可选择刀自己（自刀）骗解药，但没被救会真的死亡。\n"
+            f"可刀目标：{targets}\n请调用 wolf_plan：给出狼频道发言和建议目标。")
+        call = await self._tool_call(instruction, [TOOLS["wolf_plan"]])
+        if call and call["name"] == "wolf_plan":
+            args = call["arguments"]
+            text = str(args.get("text", "")).strip()
+            if text:
+                t = None
+                if self._valid_target(args.get("target"), targets):
+                    t = int(args["target"])
+                return text, t
         return self._scripted_wolf_chat(targets)
 
     def _alive_non_self(self) -> List[int]:

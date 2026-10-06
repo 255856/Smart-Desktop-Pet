@@ -26,12 +26,14 @@ def _reg():
     return build_default_tools(state=_State(), reminders=None, memory=None)
 
 
-def _spy_popen(monkeypatch, recorder):
+def _spy_popen(monkeypatch, recorder, stdout="WLAN\n", returncode=0):
     """拦截 powershell 调用，记录命令行，返回可控结果。"""
     class _P:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+        pass
+
+    _P.returncode = returncode
+    _P.stdout = stdout
+    _P.stderr = ""
 
     def fake_run(cmd, *a, **k):
         if isinstance(cmd, list) and len(cmd) > 2 and "powershell" in str(cmd[0]).lower():
@@ -53,7 +55,8 @@ def test_set_wifi_enable_actually_enables(monkeypatch):
     cmd = calls[-1]
     assert "Enable-NetAdapter" in cmd, f"enable=True 却执行了关闭：{cmd}"
     assert "Disable-NetAdapter" not in cmd, f"enable=True 却含 Disable：{cmd}"
-    assert "enable" in out
+    assert "错误" not in out, f"成功路径不该报错误：{out}"
+    assert "开启" in out
 
 
 def test_set_wifi_disable_actually_disables(monkeypatch):
@@ -62,13 +65,64 @@ def test_set_wifi_disable_actually_disables(monkeypatch):
     out = _reg().execute("set_wifi", json.dumps({"enable": False}))
     cmd = calls[-1]
     assert "Disable-NetAdapter" in cmd, f"enable=False 却执行了开启：{cmd}"
-    assert "disable" in out
+    assert "Enable-NetAdapter" not in cmd, f"enable=False 却含 Enable：{cmd}"
+    assert "错误" not in out, f"成功路径不该报错误：{out}"
+    assert "关闭" in out
+
+
+def test_set_wifi_string_false_is_not_truthy(monkeypatch):
+    """回归：模型把 false 发成 JSON 字符串 "false" 时必须执行「关」。
+
+    原实现直接 `if enable:`，"false" 是非空字符串恒为真 →
+    主人说「关掉WiFi」，桌宠反而 Enable。
+    """
+    for raw in ("false", "False", "no", "0", "关"):
+        calls = []
+        _spy_popen(monkeypatch, calls)
+        out = _reg().execute("set_wifi", json.dumps({"enable": raw}))
+        assert "Disable-NetAdapter" in calls[-1], (
+            f"enable={raw!r} 却执行了开启：{calls[-1]}")
+        assert "Enable-NetAdapter" not in calls[-1], (
+            f"enable={raw!r} 却含 Enable：{calls[-1]}")
+
+
+def test_set_wifi_string_true_is_truthy(monkeypatch):
+    """字符串 "true" 也要能正确识别为开启。"""
+    for raw in ("true", "True", "yes", "1", "开"):
+        calls = []
+        _spy_popen(monkeypatch, calls)
+        _reg().execute("set_wifi", json.dumps({"enable": raw}))
+        assert "Enable-NetAdapter" in calls[-1], (
+            f"enable={raw!r} 却执行了关闭：{calls[-1]}")
+
+
+def test_set_wifi_unparsable_enable_reports_error(monkeypatch):
+    """无法识别的 enable 必须如实报错，不能猜一个方向就动手。"""
+    calls = []
+    _spy_popen(monkeypatch, calls)
+    out = _reg().execute("set_wifi", json.dumps({"enable": "maybe"}))
+    assert not calls, "无法识别时不应执行任何命令"
+    assert "错误" in out
+    assert _tool_result_state(out) == "fail"
+
+
+def test_set_wifi_no_adapter_reports_error(monkeypatch):
+    """中文 Windows 上网卡叫 WLAN/无线局域网连接，匹配不到就是没改成。
+
+    原实现匹配不到时管道空转、returncode 仍为 0，于是回报「已尝试」，
+    实际一个字节都没改。
+    """
+    calls = []
+    _spy_popen(monkeypatch, calls, stdout="NO_ADAPTER\n")
+    out = _reg().execute("set_wifi", json.dumps({"enable": False}))
+    assert "错误" in out
+    assert _tool_result_state(out) == "fail", "没找到网卡必须能被矛盾检测识别"
 
 
 def test_set_wifi_reports_failure_honestly(monkeypatch):
     class _Fail:
         returncode = 1
-        stdout = ""
+        stdout = "WLAN\n"
         stderr = "Access is denied."
 
     monkeypatch.setattr(power_tools.subprocess, "run",
