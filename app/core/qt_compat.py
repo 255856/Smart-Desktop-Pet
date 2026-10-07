@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 try:
-    from PyQt5 import QtCore, QtGui, QtWidgets
+    from PyQt5 import QtCore
     from PyQt5.QtCore import (
         pyqtSignal as Signal, pyqtSlot as Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
         QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray,

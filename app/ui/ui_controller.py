@@ -327,7 +327,8 @@ class UIController(QObject):
             ww = WerewolfWindow(
                 llm_cfg=self.cfg.llm, enable_llm=enable_llm,
                 player_name="你", pet_name=pet_name,
-                voices=getattr(self.cfg.character, "voices", []))
+                voices=getattr(self.cfg.character, "voices", []),
+                chat_cfg=self.cfg.chat)
             ww.host_spoke.connect(self._on_werewolf_host)
             ww.speak_line.connect(self._on_ww_speak_line)
             ww.game_finished.connect(self._on_werewolf_finished)
@@ -723,8 +724,8 @@ class UIController(QObject):
         """缩放窗口尺寸变化后，重新预缩放 atlas 中所有帧的 pixmap。"""
         if not self._is_sprite():
             return  # live2d 没有 atlas，窗口尺寸由 PetWindow 自己 resize
-        from app.ui.pet_window import _scale_pixmap_keep_alpha, _clear_pixmap_cache
-        _clear_pixmap_cache()
+        from app.ui.pixmap_utils import scale_pixmap_keep_alpha, clear_pixmap_cache
+        clear_pixmap_cache()
         atlas = self.pet.atlas
         target_size = self.pet._window_size
 
@@ -733,9 +734,9 @@ class UIController(QObject):
                 return
             for f in a.frames:
                 if f.original is not None:
-                    f.pixmap = _scale_pixmap_keep_alpha(f.original, target_size)
+                    f.pixmap = scale_pixmap_keep_alpha(f.original, target_size)
                 else:
-                    f.pixmap = _scale_pixmap_keep_alpha(f.pixmap, target_size)
+                    f.pixmap = scale_pixmap_keep_alpha(f.pixmap, target_size)
 
         # idle / walk / emotion / sleep / 动作
         for a in atlas.idle: _rescale_anim(a)
@@ -871,6 +872,7 @@ class UIController(QObject):
                 ),
                 tts=self.tts,
                 memory_store=self.brain.memory,
+                chat_cfg=self.cfg.chat,
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)

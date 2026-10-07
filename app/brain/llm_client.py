@@ -496,12 +496,21 @@ def _build_full_system_prompt(persona: str) -> str:
 
 
 class LLMClient:
-    def __init__(self, cfg: LLMConfig, system_prompt: str):
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        system_prompt: str,
+        request_timeout_s: int | None = None,
+    ):
         self.cfg = cfg
         self.system_prompt = _build_full_system_prompt(system_prompt or "")
+        # 单次 chat 超时：调用方显式传(来自 chat.request_timeout_s)优先,否则用 cfg.timeout。
+        self._request_timeout_s = (
+            cfg.timeout if request_timeout_s is None else int(request_timeout_s)
+        )
         # 共享的异步 HTTP 客户端（连接池复用）
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.cfg.timeout, connect=10.0),
+            timeout=httpx.Timeout(self._request_timeout_s, connect=10.0),
         )
 
     async def close(self) -> None:

@@ -179,6 +179,7 @@ class BrainController(QObject):
                 min_minutes=cfg.brain.proactive_min_minutes,
                 max_minutes=cfg.brain.proactive_max_minutes,
                 is_sleeping=self._check_sleeping,
+                chat_cfg=cfg.chat,
             )
             self.proactive.remark_ready.connect(self._on_proactive_remark)
             self.proactive.emotion_hint.connect(self.emotion_hint)

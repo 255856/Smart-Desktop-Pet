@@ -74,10 +74,13 @@ class WerewolfDirector(QThread):
 
     def __init__(self, llm_cfg=None, enable_llm: bool = False,
                  player_name: str = HUMAN_NAME, pet_name: str = "桌宠",
-                 parent=None):
+                 parent=None, chat_cfg=None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.enable_llm = enable_llm
+        self._chat_timeout_s: int | None = (
+            chat_cfg.request_timeout_s if chat_cfg is not None else None
+        )
         self.player_name = player_name
         self.pet_name = pet_name
         self.rng = random.Random()
@@ -169,8 +172,14 @@ class WerewolfDirector(QThread):
         if self.enable_llm and self.llm_cfg is not None:
             from app.brain.llm_client import LLMClient
             for a in self.agents.values():
-                a.bind_client(LLMClient(self.llm_cfg, ""))
-            self.host.bind_client(LLMClient(self.llm_cfg, self.host._system))
+                a.bind_client(LLMClient(
+                    self.llm_cfg, "",
+                    request_timeout_s=self._chat_timeout_s,
+                ))
+            self.host.bind_client(LLMClient(
+                self.llm_cfg, self.host._system,
+                request_timeout_s=self._chat_timeout_s,
+            ))
 
         self._ticker_task = asyncio.ensure_future(self._ticker())
 
@@ -219,7 +228,7 @@ class WerewolfDirector(QThread):
             results = await asyncio.gather(
                 *[self.agents[s].wolf_chat_message(kill_candidates)
                   for s in npc_wolves])
-            for s, (text, t) in zip(npc_wolves, results):
+            for s, (text, t) in zip(npc_wolves, results, strict=False):
                 g.add_wolf_chat(s, text)
                 # 狼聊始终写入复盘日志；仅当玩家是狼时才在界面显示
                 g.add_journal("wolf", f"{s}号{g.player(s).name}", text)
@@ -367,7 +376,7 @@ class WerewolfDirector(QThread):
         self._set_phase("大家正在决定是否竞选警长…")
         runs = await asyncio.gather(
             *[self.agents[s].run_for_sheriff() for s in npc])
-        runners = [s for s, r in zip(npc, runs) if r]
+        runners = [s for s, r in zip(npc, runs, strict=False) if r]
         if human in alive:
             r = await self._ask_human(
                 "run_sheriff", ["run", "skip"],
@@ -457,7 +466,7 @@ class WerewolfDirector(QThread):
         npc = [s for s in voters if s != human]
         results = await asyncio.gather(
             *[self.agents[s].vote_sheriff(runners) for s in npc])
-        for s, t in zip(npc, results):
+        for s, t in zip(npc, results, strict=False):
             if t is not None and t in runners:
                 votes[s] = t
         if human in voters:
@@ -525,7 +534,7 @@ class WerewolfDirector(QThread):
             cands_for[s] = [t for t in cands if t != s]
         results = await asyncio.gather(
             *[self.agents[s].vote(cands_for[s]) for s in npc])
-        for s, t in zip(npc, results):
+        for s, t in zip(npc, results, strict=False):
             if t is not None and t in cands_for[s]:
                 votes[s] = t
         if g.player(human).alive:

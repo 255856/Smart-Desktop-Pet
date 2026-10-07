@@ -15,7 +15,7 @@ def _set_volume_windows(level: float) -> str:
     """0.0~1.0。Windows 用 pycaw；若没装则尝试 ctypes 直接调 IAudioEndpointVolume。"""
     level = max(0.0, min(1.0, level))
     try:
-        from ctypes import cast, POINTER, c_float
+        from ctypes import cast, POINTER
         from comtypes import CLSCTX_ALL
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
         device = AudioUtilities.GetSpeakers()

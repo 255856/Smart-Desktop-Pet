@@ -177,7 +177,7 @@ def _line_pattern_score(game: GomokuGame, r: int, c: int,
                 five = True
                 continue
             if 2 not in vals:
-                empties = [k for k, x in zip(ks, vals) if x == 0]
+                empties = [k for k, x in zip(ks, vals, strict=False) if x == 0]
                 ones = sum(1 for x in vals if x == 1)
                 if ones == 4 and len(empties) == 1:
                     fives.add(empties[0])
@@ -196,8 +196,8 @@ def _line_pattern_score(game: GomokuGame, r: int, c: int,
     for a in range(-5, 1):
         ks = list(range(a, a + 6))
         vals = [val(k) for k in ks]
-        ones = [k for k, x in zip(ks, vals) if x == 1]
-        empties = [k for k, x in zip(ks, vals) if x == 0]
+        ones = [k for k, x in zip(ks, vals, strict=False) if x == 1]
+        empties = [k for k, x in zip(ks, vals, strict=False) if x == 0]
         if 0 not in ones or len(ones) != 3 or len(empties) < 2:
             continue
         # 补任意一个空，看能否成活四 / 冲四

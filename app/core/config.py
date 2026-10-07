@@ -129,6 +129,15 @@ class MCPConfig(BaseModel):
     call_timeout: int = 30
 
 
+class ChatConfig(BaseModel):
+    """对话请求参数（统一所有 chat 客户端超时）。
+
+    request_timeout_s: 单次 chat 请求的整体超时（秒）。覆盖 LLMConfig.timeout，
+    解决「每个上层各自传 llm_cfg,忘了设超时」的硬编码问题。0 表示无限等待。
+    """
+    request_timeout_s: int = 20
+
+
 class BrainConfig(BaseModel):
     """智能中枢：工具调用 + 长期记忆 + 主动行为 + Agent 后端选择。"""
     backend: AgentBackend = "lightweight"           # "lightweight"=手写 ReAct；"standard"=LangChain
@@ -192,6 +201,7 @@ class Config(BaseSettings):
     brain: BrainConfig = BrainConfig()
     pet: PetConfig = PetConfig()
     mcp: MCPConfig = MCPConfig()
+    chat: ChatConfig = ChatConfig()
 
     @property
     def name(self) -> str:
@@ -235,5 +245,5 @@ __all__ = [
     "Config", "load_config",
     "LLMConfig", "CharacterConfig", "WindowConfig", "ReminderConfig",
     "AppConfig", "SpriteConfig", "ASRConfig", "BrainConfig",
-    "AgentConfig", "LangChainConfig", "MCPConfig",
+    "AgentConfig", "LangChainConfig", "MCPConfig", "ChatConfig",
 ]

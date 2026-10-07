@@ -192,8 +192,8 @@ class TfidfBackend:
     def similarity(self, query_vec: list[float], doc_vecs: list[list[float]]) -> list[float]:
         q_norm = math.sqrt(sum(x * x for x in query_vec)) or 1.0
         out: list[float] = []
-        for dv, dn in zip(doc_vecs, self._norms):
-            dot = sum(a * b for a, b in zip(query_vec, dv))
+        for dv, dn in zip(doc_vecs, self._norms, strict=False):
+            dot = sum(a * b for a, b in zip(query_vec, dv, strict=False))
             out.append(dot / (q_norm * dn))
         return out
 
@@ -236,7 +236,7 @@ class SentenceTransformerBackend:
         # vecs 已 normalize，直接点积 = cosine
         out: list[float] = []
         for dv in doc_vecs:
-            out.append(sum(a * b for a, b in zip(query_vec, dv)))
+            out.append(sum(a * b for a, b in zip(query_vec, dv, strict=False)))
         return out
 
 
@@ -474,7 +474,7 @@ class MemoryStore:
         if len(q_bigrams) >= 1:
             scores = [
                 (s if (_bigrams(i.content) & q_bigrams) else 0.0)
-                for s, i in zip(scores, items)
+                for s, i in zip(scores, items, strict=False)
             ]
 
         # 命中阈值（按「原始语义分」过滤，不是综合分）
@@ -490,7 +490,7 @@ class MemoryStore:
         #   「股票 / 天气 / 12345」这类完全无关的词召回 0 条。
         # 调高会漏召回（学校 .18 就没了），调低会把 0.05 量级的噪音放进来。
         _MIN_HIT = 0.0 if isinstance(self.backend, SubstringBackend) else 0.10
-        scored = [(s, i) for s, i in zip(scores, items) if s > _MIN_HIT]
+        scored = [(s, i) for s, i in zip(scores, items, strict=False) if s > _MIN_HIT]
         # 综合排序
         scored = [(self._score(i, s), i) for s, i in scored]
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -571,7 +571,7 @@ class MemoryStore:
             sims = self.backend.similarity(qv, self.backend._doc_vecs)  # type: ignore[attr-defined]
         except Exception:
             return []
-        return [(i, s) for i, s in zip(items, sims) if s >= threshold and i.category != "other"]
+        return [(i, s) for i, s in zip(items, sims, strict=False) if s >= threshold and i.category != "other"]
 
     def forget_if_expired(self, max_age_days: int = 90,
                           min_importance: float = 0.3) -> int:
@@ -637,7 +637,7 @@ class MemoryStore:
         try:
             vecs = self.backend.encode([a.content, b.content])
             va, vb = vecs[0], vecs[1]
-            dot = sum(x * y for x, y in zip(va, vb))
+            dot = sum(x * y for x, y in zip(va, vb, strict=False))
             na = math.sqrt(sum(x * x for x in va)) or 1.0
             nb = math.sqrt(sum(x * x for x in vb)) or 1.0
             return dot / (na * nb)

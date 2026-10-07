@@ -9,7 +9,10 @@
 """
 from __future__ import annotations
 
+import io
+import json
 import logging
+import os
 from typing import Dict, List, Optional
 
 from app.core.qt_compat import (
@@ -175,7 +178,8 @@ class WerewolfWindow(QDialog):
     def __init__(self, parent: Optional[QWidget] = None,
                  llm_cfg=None, enable_llm: bool = False,
                  player_name: str = "你", pet_name: str = "桌宠",
-                 voices: Optional[list] = None):
+                 voices: Optional[list] = None,
+                 chat_cfg=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -185,6 +189,7 @@ class WerewolfWindow(QDialog):
         self.player_name = player_name
         self.pet_name = pet_name
         self.voices = list(voices or [])
+        self.chat_cfg = chat_cfg
         self._voice_cfg = self._load_voice_cfg()
 
         self.director: Optional[WerewolfDirector] = None
@@ -423,7 +428,8 @@ class WerewolfWindow(QDialog):
         self.game_session_active.emit(True)
         self.director = WerewolfDirector(
             llm_cfg=self.llm_cfg, enable_llm=self.enable_llm,
-            player_name=self.player_name, pet_name=self.pet_name, parent=self)
+            player_name=self.player_name, pet_name=self.pet_name, parent=self,
+            chat_cfg=self.chat_cfg)
         d = self.director
         d.your_role.connect(self._on_your_role)
         d.host_message.connect(self._on_host)
@@ -793,7 +799,6 @@ class WerewolfWindow(QDialog):
 
     def _load_voice_cfg(self) -> dict:
         try:
-            import json
             p = os.path.join("data", "werewolf_voices.json")
             if os.path.isfile(p):
                 with io.open(p, "r", encoding="utf-8") as f:
@@ -803,7 +808,6 @@ class WerewolfWindow(QDialog):
         return self._default_voice_cfg()
 
     def _save_voice_cfg(self) -> None:
-        import json
         p = os.path.join("data", "werewolf_voices.json")
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with io.open(p, "w", encoding="utf-8") as f:

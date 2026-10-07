@@ -18,7 +18,8 @@ class _ChatOnceWorker(QThread):
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, llm_cfg, system_prompt, messages):
+    def __init__(self, llm_cfg, system_prompt, messages,
+                 request_timeout_s: int | None = None):
         super().__init__()
         # 只携带配置与消息（不在主线程共享 httpx 客户端）——
         # ProactiveBrain 复用共享 LLMClient 会让 httpx 连接绑在已关闭的子 loop 上，
@@ -26,6 +27,7 @@ class _ChatOnceWorker(QThread):
         self.llm_cfg = llm_cfg
         self.system_prompt = system_prompt
         self.messages = messages
+        self.request_timeout_s = request_timeout_s
         self._cancelled = threading.Event()
 
     def request_stop(self) -> None:
@@ -37,7 +39,8 @@ class _ChatOnceWorker(QThread):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             from app.brain.llm_client import LLMClient
-            client = LLMClient(self.llm_cfg, self.system_prompt)
+            client = LLMClient(self.llm_cfg, self.system_prompt,
+                               request_timeout_s=self.request_timeout_s)
 
             async def drive() -> str:
                 if self._cancelled.is_set():
@@ -90,6 +93,7 @@ class ProactiveBrain(QObject):
         min_minutes: int = 25,
         max_minutes: int = 45,
         is_sleeping: Optional[Callable[[], bool]] = None,
+        chat_cfg=None,            # app.core.config.ChatConfig, 可选
     ):
         super().__init__()
         self.llm_cfg = llm_cfg
@@ -100,6 +104,10 @@ class ProactiveBrain(QObject):
         self.min_minutes = max(5, int(min_minutes))
         self.max_minutes = max(self.min_minutes + 5, int(max_minutes))
         self.is_sleeping = is_sleeping or (lambda: False)
+        # 来自 config.yaml 的 chat.request_timeout_s；None 表示让 LLMClient 用 cfg.timeout
+        self._request_timeout_s: int | None = (
+            chat_cfg.request_timeout_s if chat_cfg is not None else None
+        )
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
         self._last_remarks: list[str] = []
@@ -181,6 +189,7 @@ class ProactiveBrain(QObject):
             llm_cfg=self.llm_cfg,
             system_prompt=system,
             messages=[ChatMessage(role="user", content=user)],
+            request_timeout_s=self._request_timeout_s,
         )
         worker.done.connect(self._on_done)
         worker.failed.connect(

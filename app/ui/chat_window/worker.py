@@ -8,11 +8,43 @@ _StreamWorker：包装纯流式 LLM 调用（无工具），吐 (text/done/faile
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 
+import httpx
+
 from app.core.qt_compat import QThread, Signal
+from app.core.errors import USER_FRIENDLY_NETWORK_ERROR
 from app.brain.llm_client import ChatMessage, LLMClient, LLMError
 from app.brain.agent import AgentLoop
+
+log = logging.getLogger(__name__)
+
+
+# httpx 抛出的网络异常族：连接断 / 超时 / DNS 失败 / 远程协议错。
+# 收到这些时只把 USER_FRIENDLY_NETWORK_ERROR 暴露给主人，原始异常进 log。
+_NETWORK_EXC = (
+    httpx.RemoteProtocolError,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    httpx.NetworkError,
+    ConnectionError,
+)
+
+
+def _failure_message(exc: BaseException) -> str:
+    """worker 抛异常时，给主人看的文案。
+
+    网络异常统一改成 USER_FRIENDLY_NETWORK_ERROR，原始异常打 log。
+    其他异常保留 repr（LLMError 的 message 一般已友好；`{e!r}` 是最后兜底）。
+    """
+    if isinstance(exc, _NETWORK_EXC):
+        log.warning("worker 网络异常转友好文案：%r", exc)
+        return USER_FRIENDLY_NETWORK_ERROR
+    return repr(exc)
 
 
 class _AgentWorker(QThread):
@@ -133,7 +165,7 @@ class _AgentWorker(QThread):
         except LLMError as e:
             self.failed.emit(str(e))
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(f"调用出错：{e!r}")
+            self.failed.emit(_failure_message(e))
 
 
 class _StreamWorker(QThread):
@@ -184,7 +216,7 @@ class _StreamWorker(QThread):
         except LLMError as e:
             self.failed.emit(str(e))
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(f"调用出错：{e!r}")
+            self.failed.emit(_failure_message(e))
 
 
 __all__ = ["_AgentWorker", "_StreamWorker"]

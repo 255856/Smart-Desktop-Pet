@@ -215,4 +215,4 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["SpriteAtlas", "PetAnimator"]
+__all__ = ["SpriteAtlas"]  # PetAnimator 通过 __getattr__ 延迟提供

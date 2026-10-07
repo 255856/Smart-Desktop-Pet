@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 from app.core.qt_compat import (
     QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
-    QDragMoveEvent, QDropEvent, QEvent, QHBoxLayout, QImage, QLabel, QMenu,
+    QDragMoveEvent, QDropEvent, QEvent, QHBoxLayout, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
     QRegion, QSize, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
     QGraphicsDropShadowEffect, QTransform,
@@ -18,14 +18,9 @@ from app.core.qt_compat import (
 )
 from app.animation.animations import Animation, Frame
 from app.ui import ui_style
+from app.ui.pixmap_utils import clear_pixmap_cache
 
 log = logging.getLogger(__name__)
-
-
-# 缓存：{(pixmap_id, width, height): scaled_pixmap}
-# pixmap_id 用 id(pixmap) 或帧内容 hash 标识，避免每帧重新缩放
-_scaled_pixmap_cache: dict[tuple[int, int, int], QPixmap] = {}
-_CACHE_MAX_SIZE = 8  # 最多缓存 8 个缩放后的 pixmap
 
 
 def _current_anim_ms(player) -> int:
@@ -37,62 +32,6 @@ def _current_anim_ms(player) -> int:
     if idx < 0 or idx >= len(anim.frames):
         return 0
     return anim.frames[idx].duration_ms
-
-
-def _scale_pixmap_keep_alpha(pix: QPixmap, size: QSize, cache_key: tuple = None) -> QPixmap:
-    """等比缩放 QPixmap 同时**保留 alpha 并消除白点**。
-
-    PyQt5 下 ``QPixmap.scaled(Qt.SmoothTransformation)`` 会丢 alpha，导致
-    透明 PNG 缩放后背景变白。这里先转 QImage（保留 alpha），QImage 缩放
-    （保 alpha），再扫一遍"a != 0 但 RGB 全接近 255"的边缘像素，把它们
-    的 a 强制设为 0 —— 否则在透明窗口底色上看着就是"白点闪烁"。
-
-    使用 cache_key 可以缓存缩放结果，避免每帧重复计算。
-    """
-    if pix.isNull():
-        return pix
-
-    # 如果有 cache_key 且缓存命中，直接返回
-    if cache_key is not None and cache_key in _scaled_pixmap_cache:
-        return _scaled_pixmap_cache[cache_key]
-
-    try:
-        import numpy as np
-        img = pix.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-        scaled = img.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation)
-        # 扫白边像素 → 强制 a=0
-        arr = np.array(scaled, copy=True)
-        rgb = arr[..., :3]
-        a = arr[..., 3]
-        # "近白": RGB 全 >= 245 (留一些余地防止误伤真正浅色角色)
-        white_mask = (
-            (rgb[..., 0] >= 245) &
-            (rgb[..., 1] >= 245) &
-            (rgb[..., 2] >= 245)
-        ) & (a > 0)
-        arr[white_mask, 3] = 0
-        from PIL import Image as _PI
-        cleaned = _PI.fromarray(arr, "RGBA")
-        result = QPixmap.fromImage(cleaned.toImage())
-    except Exception:
-        result = pix.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
-                         Qt.TransformationMode.SmoothTransformation)
-
-    # 缓存结果
-    if cache_key is not None:
-        if len(_scaled_pixmap_cache) >= _CACHE_MAX_SIZE:
-            # 简单 LRU：删除最旧的一个
-            oldest_key = next(iter(_scaled_pixmap_cache))
-            del _scaled_pixmap_cache[oldest_key]
-        _scaled_pixmap_cache[cache_key] = result
-
-    return result
-
-
-def _clear_pixmap_cache() -> None:
-    """清空缩放缓存（在切换角色或窗口尺寸变化时调用）。"""
-    _scaled_pixmap_cache.clear()
 
 
 # 触摸热区（在 sprite 坐标系内的相对比例，0.0-1.0）
@@ -250,7 +189,7 @@ class PetWindow(QWidget):
         self._install_display_input_filters(self._sprite_label)
         # sprite 模式保存旧引用以便像素路径不破
         if hasattr(self, 'atlas'):
-            _clear_pixmap_cache()
+            clear_pixmap_cache()
 
         # 气泡 label
         self._bubble_label = QLabel(self)
@@ -1140,7 +1079,7 @@ class PetWindow(QWidget):
             row = edges[y]
             starts = np.flatnonzero(row == 1)
             ends = np.flatnonzero(row == -1)
-            for s, e in zip(starts, ends):
+            for s, e in zip(starts, ends, strict=False):
                 region += QRegion(int(s), y, int(e - s), 1)
         return region
 

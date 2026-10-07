@@ -11,14 +11,10 @@
 全部继续工作（re-export）。
 """
 from __future__ import annotations
-from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import threading
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -37,24 +33,17 @@ def _safe_qapp():
 
 from app.core.qt_compat import (
     QApplication, QFont, QFrame, QHBoxLayout, QKeyEvent,
-    QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QObject, QPixmap, QPlainTextEdit, QPoint, QPushButton,
-    QSplitter, Qt, QTextBrowser, QTextCursor, QTextDocument, QToolButton,
-    QVBoxLayout, QWidget, Signal, QThread, QTimer, QSize, QColor, QEvent, QRect,
+    QLabel, QMessageBox, QPixmap, QPlainTextEdit, QPushButton,
+    Qt, QTextBrowser, QTextCursor, QToolButton,
+    QVBoxLayout, QWidget, Signal, QTimer, QColor, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
-    QUrl, QBuffer, QByteArray,
-    event_global_pos, event_local_pos,
+    QBuffer, QByteArray,
 )
-
-# Re-export for type hints
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from PyQt5.QtGui import QLabel as _QLabel  # type: ignore
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
 from app.core.config import CharacterConfig, LLMConfig
 from app.core.api_keys import is_placeholder_key
-from app.brain.llm_client import ChatMessage, LLMClient, LLMError
+from app.brain.llm_client import ChatMessage, LLMClient
 from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
 from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
 from app.engine.tools import ToolRegistry
@@ -113,10 +102,14 @@ class ChatWindow(QWidget):
                  backend: str = "lightweight",
                  langchain_cfg: Optional[LangChainAgentConfig] = None,
                  tts: Optional[object] = None,
-                 memory_store: Optional[object] = None):
+                 memory_store: Optional[object] = None,
+                 chat_cfg=None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
+        self._chat_timeout_s: int | None = (
+            chat_cfg.request_timeout_s if chat_cfg is not None else None
+        )
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
         self.tts = tts
         # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
@@ -799,7 +792,6 @@ class ChatWindow(QWidget):
             if self.registry:
                 tool = self.registry.get("open_app")
                 if tool:
-                    import json as _json
                     r = tool.fn(app_name=args)
                     self._render_message(Message(role="assistant", content=r))
                     return
@@ -954,9 +946,11 @@ class ChatWindow(QWidget):
         # （不能用 QEventLoop.exec：QEventLoop 必须由拥有 QThread 的线程启动，
         # 子线程用 QEventLoop().exec() 会卡死或 abort，PyQt5 强制要求）
         result_event = threading.Event()
+        result: dict[str, bool] = {}    # 主线程把 ok 写进来,子线程读
 
         def _on_result(ok: bool):
             self._confirm_in_progress = False
+            result["ok"] = ok
             result_event.set()    # 唤醒子线程 wait()
 
         QTimer.singleShot(
@@ -973,7 +967,7 @@ class ChatWindow(QWidget):
             # close 必须在主线程执行
             QTimer.singleShot(0, self._close_confirm_box)
             return None      # None = 超时，区别于 False（用户明确拒绝）
-        return holder.get("ok", False)
+        return result["ok"]
 
     def _close_confirm_box(self) -> None:
         """主线程槽：关掉可能还开着的确认弹窗（超时兜底）。"""
@@ -1065,7 +1059,10 @@ class ChatWindow(QWidget):
                     system_prompt = system_prompt + "\n\n" + extra
             except Exception as e:  # noqa: BLE001
                 log.warning("context_provider 失败：%s", e)
-        client = LLMClient(self.llm_cfg, system_prompt)
+        client = LLMClient(
+            self.llm_cfg, system_prompt,
+            request_timeout_s=self._chat_timeout_s,
+        )
 
         # 占位气泡：插入一个占位 div 并记下 cursor 作为 streaming patch anchor
         self._current_bot_msg = Message(role="assistant", content="")
