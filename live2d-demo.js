@@ -15,36 +15,8 @@
  */
 
 // ============================================================
-// 0. 工具：日志 / 加载状态 / 工具栏 / URL 安全校验
+// 0. 工具：日志 / 加载状态 / 工具栏
 // ============================================================
-// URL 校验：仅允许 http/https；拒绝 localhost/环回/私有 IP（根据 Mimosa 安全约束）
-// 注意：localhost 例外——本地 serve.py 场景需要
-const ALLOW_LOOPBACK = true;  // demo 允许 localhost（用户本地启动 serve.py）
-function validateModelUrl(url) {
-  if (!url || typeof url !== "string") return { ok: false, error: "URL 为空" };
-  const trimmed = url.trim();
-  // 自动修复：用户可能输入 "http:127.0.0.1..." 少一个斜杠 → "http://127.0.0.1..."
-  let fixed = trimmed;
-  fixed = fixed.replace(/^(https?):(?![\/\\])/i, "$1://");
-  if (!/^https?:\/\//i.test(fixed)) return { ok: false, error: "URL 必须以 http:// 或 https:// 开头（不要用 file:// 或 E:/ 本地路径）" };
-
-  try {
-    const u = new URL(fixed);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, error: "协议必须是 http 或 https" };
-    const host = u.hostname.toLowerCase();
-    // 检测 localhost / 环回 / 私有 IP
-    const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]"
-                    || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
-                    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
-    if (isLoopback && !ALLOW_LOOPBACK) return { ok: false, error: "禁止访问 loopback/私有 IP" };
-    // 检查 URL 是否是本地文件路径（兜底）
-    if (/^[a-z]:[\\\/]/i.test(trimmed)) return { ok: false, error: "URL 不能是 Windows 本地路径（如 E:/...）" };
-    return { ok: true, url: fixed };
-  } catch (e) {
-    return { ok: false, error: "URL 格式错误：" + (e.message || e) };
-  }
-}
-
 const logEl = document.getElementById("log");
 function log(msg, level = "") {
   const line = document.createElement("div");
@@ -57,9 +29,17 @@ function log(msg, level = "") {
 const loader = document.getElementById("loader");
 const loaderText = document.getElementById("loader-text");
 const statusEl = document.getElementById("status");
-function showLoader(t) { loaderText.textContent = t || "加载中…"; loader.classList.remove("hidden"); }
+function showLoader(txt) { loaderText.textContent = txt || window.t("loading"); loader.classList.remove("hidden"); }
 function hideLoader() { loader.classList.add("hidden"); }
-function setStatus(t, c = "#a8b0c0") { statusEl.textContent = t; statusEl.style.color = c; }
+// 浅色主题下把旧的深色背景亮色调成可读色，并联动顶栏状态点
+const STATUS_COLORS = {"#a8b0c0": "#8f8aa8", "#ffce5c": "#e0a53e", "#55efc4": "#17a673", "#ff7675": "#e0506e"};
+function setStatus(t, c = "#a8b0c0") {
+  const cc = STATUS_COLORS[c] || c;
+  statusEl.textContent = t;
+  statusEl.style.color = cc;
+  statusEl.classList.toggle("ready", cc === "#17a673");
+  statusEl.classList.toggle("err", cc === "#e0506e");
+}
 
 // ============================================================
 // 1. Live2D 渲染类（保留之前实现）
@@ -122,17 +102,15 @@ class Live2DDemo {
   }
   async loadModel(modelUrl) {
     if (!modelUrl) throw new Error("model URL 为空");
-    // URL 校验：http/https only；host 是合法公网/本地（localhost 允许，因为 demo 要支持本地 serve.py）
-    const valid = validateModelUrl(modelUrl);
-    if (!valid.ok) throw new Error(valid.error);
+    // demo 仅加载内置官方模型（URL 由 loadBuiltinModel 基于当前页面构造），无需外部 URL 校验
 
     this.shutdown();
     this.ensureApp();
     if (PIXI.live2d && PIXI.live2d.Live2DModel && PIXI.live2d.Live2DModel.registerTicker && PIXI.Ticker) {
       PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
     }
-    showLoader("加载模型…");
-    setStatus("加载中…", "#ffce5c");
+    showLoader(window.t("loading_model"));
+    setStatus(window.t("status_loading"), "#ffce5c");
     try {
       log(`加载模型：${modelUrl}`);
       const model = await PIXI.live2d.Live2DModel.from(modelUrl, { autoHitTest: false, autoFocus: false });
@@ -165,42 +143,54 @@ class Live2DDemo {
         if (hidden) log(`隐藏通用 WaterMark 图层 ${hidden} 个`, "ok");
       } catch (e) {}
       this._fit();
+      // 原始画布尺寸就绪后 _fit 即稳定；少量延迟兜底首帧布局 / 尺寸就绪
+      if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} }
+      if (this._fitTimers) this._fitTimers.forEach(clearTimeout);
+      this._fitTimers = [50, 200, 600, 1200].map((ms) => setTimeout(() => {
+        if (this.model === model) this._fit();
+      }, ms));
       this.ready = true;
       const exprs = (model.internalModel && model.internalModel.settings.expressions) || [];
       const motions = (model.internalModel && model.internalModel.settings.motions) || {};
       this._refreshControls();
       hideLoader();
-      const llmTag = window.llm.hasKey() ? ` 🧠${window.llm.cfg.model}` : " 🎭mock";
-      setStatus(`就绪 · ${exprs.length} 表情 / ${Object.keys(motions).length} 组动作${llmTag}`, "#55efc4");
+      const llmTag = window.llm.hasKey() ? ` · ${window.llm.cfg.model}` : window.t("mock_tag");
+      setStatus(window.t("status_ready", { expr: exprs.length, mot: Object.keys(motions).length, tag: llmTag }), "#55efc4");
       log(`模型加载完成：${exprs.length} 表情 / ${Object.keys(motions).length} 组动作`, "ok");
       if (window.llm.hasKey()) {
-        log(`✅ LLM 已配置：${window.llm.status()}`, "ok");
+        log(`LLM 已配置：${window.llm.status()}`, "ok");
       } else {
-        log(`ℹ️ 未配置 LLM API，桌宠用 mock 回复（点 🧠 LLM 按钮填 key 启用真模型）`, "ok");
+        log(`未配置 LLM API，桌宠用 mock 回复（点 LLM 按钮填 key 启用真模型）`, "ok");
       }
       if (window.startIdleBehavior) window.startIdleBehavior();
       this._emitEmotion("neutral");
       return { expressions: exprs, motions };
     } catch (err) {
       hideLoader();
-      setStatus("加载失败", "#ff7675");
+      setStatus(window.t("status_load_failed"), "#ff7675");
       const msg = err.message || String(err);
-      log(`加载失败：${msg}`, "err");
-      // 常见错误提示
+      log(`内置模型加载失败：${msg}`, "err");
       if (/Network error|fetch|404|403|Access-Control|CORS/i.test(msg)) {
-        log("💡 排查：检查 URL 拼写；浏览器拒绝混合 http/https；服务器需带 Access-Control-Allow-Origin: *", "err");
-        log("💡 如果用本地模型：在仓库根目录运行 python docs/demo/serve.py --model-dir <你的模型目录>，然后填 http://127.0.0.1:8765/...", "err");
-        log("💡 GitHub Pages 部署版（https://255856.github.io/Smart-Desktop-Pet/）无法直接访问你本机的 127.0.0.1，参见顶部横幅", "err");
+        log("排查：网络或资源缺失，请检查网络后点击左下角刷新按钮重试", "err");
       }
       throw err;
     }
   }
+  // 模型原始画布尺寸（固定，不随 scale / 渲染状态变化）。
+  // pixi-live2d-display 0.3 的 model.width 会随渲染状态变化，若每帧用它反算 scale，
+  // 在部分模型（如 Miara）上会出现 scale 在 0.129 与 1 之间自激振荡。
+  _modelSize() {
+    const im = this.model && this.model.internalModel;
+    const mw = (im && im.originalWidth) || this.model.width;
+    const mh = (im && im.originalHeight) || this.model.height;
+    return { mw, mh };
+  }
   _fit() {
     if (!this.model || !this.app) return;
     const w = this.app.screen.width, h = this.app.screen.height;
-    // 与桌面版 live2d_bridge.html 完全一致：手动按 canvas 尺寸算 scale
     // fitFactor 0.7 留 30% 边距（桌面默认 0.94，demo 用更大边距让 UI 不被遮挡）
-    const scale = Math.min((w / this.model.width) * this.fitFactor, (h / this.model.height) * this.fitFactor);
+    const { mw, mh } = this._modelSize();
+    const scale = Math.min((w / mw) * this.fitFactor, (h / mh) * this.fitFactor);
     this.model.scale.set(scale);
     try { this.model.anchor.set(0.5, 0.5); } catch (e) {}
     this.model.x = w / 2;
@@ -289,13 +279,15 @@ class Live2DDemo {
   focus(nx, ny) {
     if (!this.model || !this.ready) return;
     try {
-      this.model.focus(this.model.width / 2 + nx * this.model.width / 2,
-                        this.model.height / 2 + ny * this.model.height / 2);
+      const { mw, mh } = this._modelSize();
+      this.model.focus(mw / 2 + nx * mw / 2, mh / 2 + ny * mh / 2);
     } catch (e) {}
   }
   shutdown() {
     this._talking = false;
     if (this._mouthTimer) { clearInterval(this._mouthTimer); this._mouthTimer = null; }
+    if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} this._fitTicker = null; }
+    if (this._fitTimers) { this._fitTimers.forEach(clearTimeout); this._fitTimers = null; }
     if (this.model && this.app) {
       try { this.app.stage.removeChild(this.model); this.model.destroy(); } catch (e) {}
     }
@@ -312,44 +304,67 @@ class TTSBridge {
   constructor() {
     this.synth = window.speechSynthesis;
     this.voices = [];
+    this.allVoices = [];
     this.currentEngine = "edge";  // edge / gptsovits / minimax
     this._currentUtter = null;
+    this._userVoice = null;   // 用户手动选择（最高优先级）
+    this._pinnedVoice = null; // 默认推荐（中文 Xiaoxiao）
     this.refreshVoices();
-    if (this.synth) this.synth.onvoiceschanged = () => this.refreshVoices();
+    if (this.synth) {
+      // 用 addEventListener，避免被下拉初始化的同名监听覆盖
+      if (this.synth.addEventListener) this.synth.addEventListener("voiceschanged", () => this.refreshVoices());
+      // 兜底：部分环境不触发 voiceschanged，轮询直到拿到语音
+      let tries = 0;
+      this._voicePoll = setInterval(() => {
+        this.refreshVoices();
+        if ((this.allVoices && this.allVoices.length > 0) || ++tries > 20) clearInterval(this._voicePoll);
+      }, 500);
+    }
   }
   refreshVoices() {
     if (!this.synth) return;
-    this.voices = this.synth.getVoices().filter(v => v.lang.startsWith("zh") || v.lang.startsWith("en"));
-    // 也保留所有 voice（包括 ja、ko 等），让用户自由选
-    this.allVoices = this.synth.getVoices();
-    // 启动后默认锁定 Xiaoxiao（找不到再降级）
-    if (!this._pinnedVoice) {
-      this._autoPickDefault();
-    }
+    const all = this.synth.getVoices() || [];
+    this.allVoices = all;
+    // 仅保留 zh / en 语音作为常用集，同时 allVoices 保留全部（含 ja、ko 等）
+    this.voices = all.filter(v => {
+      const l = (v.lang || "").toLowerCase();
+      return l.startsWith("zh") || l.startsWith("en");
+    });
+    // 未手动指定时，默认锁定推荐语音（中文 Xiaoxiao）
+    if (!this._pinnedVoice) this._autoPickDefault();
   }
   _autoPickDefault() {
     if (!this.allVoices || this.allVoices.length === 0) return;
-    // 优先级：Xiaoxiao/小晓 > 第一个 zh-CN female voice > 第一个 voice
-    const pref = [
-      /xiaoxiao.*online.*natural/i,
-      /microsoft\s+xiaoxiao/i,
-      /小晓/,
-    ];
-    let voice = null;
-    for (const re of pref) {
-      voice = this.allVoices.find(v => re.test(v.name));
-      if (voice) break;
-    }
+    // 优先级：Xiaoxiao（含“小晓”）> 第一个 zh-CN 女声 > 第一个中文语音
+    let voice = this.allVoices.find(v => /xiaoxiao|小晓/i.test(v.name));
     if (!voice) {
-      // 找第一个 zh-CN 女声
       voice = this.allVoices.find(v =>
-        v.lang.toLowerCase().startsWith("zh-cn") && /female|女/i.test(v.name)
-      ) || this.allVoices.find(v => v.lang.toLowerCase().startsWith("zh"));
+        (v.lang || "").toLowerCase().startsWith("zh-cn") && /female|女/i.test(v.name)
+      ) || this.allVoices.find(v => (v.lang || "").toLowerCase().startsWith("zh"));
     }
     if (voice) {
       this._pinnedVoice = voice;
       console.log(`[TTS] 默认锁定语音：${voice.name}（${voice.lang}）`);
     }
+  }
+  // 按“用户手动选择 > 当前语言默认（中文 Xiaoxiao）> 引擎匹配”解析实际语音，speak 与下拉共用
+  pickVoice(wantEn) {
+    if (this._userVoice) return this._userVoice;
+    if (wantEn) {
+      return (this.voices || []).find(v => (v.lang || "").toLowerCase().startsWith("en"))
+        || (this.allVoices || []).find(v => (v.lang || "").toLowerCase().startsWith("en"))
+        || this._pinnedVoice
+        || null;
+    }
+    if (this._pinnedVoice) return this._pinnedVoice;
+    if (this.voices && this.voices.length > 0) {
+      const pref = this.currentEngine === "edge" ? ["xiaoxiao", "小晓", "female", "女"] :
+                   this.currentEngine === "gptsovits" ? ["yunjian", "云健", "male", "男"] :
+                   /* minimax */ ["yating", "云夏", "xiaoxiao", "小晓"];
+      return this.voices.find(v => pref.some(p => v.name.toLowerCase().includes(p.toLowerCase())))
+        || this.voices[0];
+    }
+    return null;
   }
   listVoices() {
     return this.voices.map((v, i) => ({
@@ -375,38 +390,33 @@ class TTSBridge {
   setVoiceByName(name) {
     if (!name || !this.allVoices) return null;
     const v = this.allVoices.find(x => x.name === name);
-    if (v) { this._pinnedVoice = v; log(`TTS 锁定语音：${v.name}（${v.lang}）`, "ok"); }
+    if (v) { this._userVoice = v; this._pinnedVoice = v; log(`TTS 锁定语音：${v.name}（${v.lang}）`, "ok"); }
     return v;
   }
   // 真实 speak：调用 SpeechSynthesis 同步驱动口型
   speak(text, onEnd) {
     if (!this.synth) { log("浏览器不支持 SpeechSynthesis", "err"); onEnd && onEnd(); return; }
     this.synth.cancel();
-    // 选一个 voice
-    let voice = null;
-    if (this._pinnedVoice) {
-      // 用户手动锁定的（如 Xiaoxiao）
-      voice = this._pinnedVoice;
-    } else if (this.voices.length > 0) {
-      // 按引擎匹配
-      const pref = this.currentEngine === "edge" ? ["xiaoxiao", "小晓", "female", "女"] :
-                   this.currentEngine === "gptsovits" ? ["yunjian", "云健", "male", "男"] :
-                   /* minimax */ ["yating", "云夏", "xiaoxiao", "小晓"];
-      voice = this.voices.find(v => pref.some(p => v.name.toLowerCase().includes(p.toLowerCase())))
-            || this.voices[0];
-    }
+    const wantEn = (window.I18N && window.I18N.lang === "en");
+    // 刷新语音列表，选一个 voice：用户手动选择 > 当前语言默认（中文 Xiaoxiao）> 引擎匹配
+    this.refreshVoices();
+    let voice = this.pickVoice(wantEn);
     const utt = new SpeechSynthesisUtterance(text);
-    if (voice) utt.voice = voice;
-    utt.lang = "zh-CN";
+    if (voice) {
+      // 取当前最新列表里的同名实例，避免持有过期的 SpeechSynthesisVoice
+      const live = this.synth.getVoices().find(v => v.name === voice.name) || voice;
+      try { utt.voice = live; } catch (_) { /* 个别环境对象失效，改用 utt.lang 让浏览器自选 */ }
+    }
+    utt.lang = wantEn ? "en-US" : "zh-CN";
     utt.rate = 1.0; utt.pitch = 1.0;
     // 用 TTS 边界事件驱动口型（更精准：TTS 真的在说话时 mouth 开合）
     utt.onstart = () => {
       window.demo.startTalk();
-      log(`🔊 TTS 开始 (${this.currentEngine}): ${text.slice(0, 30)}${text.length > 30 ? '…' : ''}`);
+      log(`TTS 开始 (${this.currentEngine}): ${text.slice(0, 30)}${text.length > 30 ? '…' : ''}`);
     };
     utt.onend = () => {
       window.demo.stopTalk();
-      log(`🔇 TTS 结束`, "ok");
+      log(`TTS 结束`, "ok");
       onEnd && onEnd();
     };
     utt.onerror = (e) => {
@@ -441,6 +451,7 @@ class ASRBridge {
     }
   }
   start(onResult, onEnd) {
+    if (this.recognition) this.recognition.lang = (window.I18N && window.I18N.lang === "en") ? "en-US" : "zh-CN";
     if (!this.available) {
       log("浏览器不支持 SpeechRecognition（用 Chrome / Edge）", "err");
       onEnd && onEnd();
@@ -456,7 +467,7 @@ class ASRBridge {
         if (tr.isFinal) finalText += tr[0].transcript;
         else interim += tr[0].transcript;
       }
-      log(`🎤 ASR: ${(finalText + interim).slice(0, 40)}${(finalText + interim).length > 40 ? '…' : ''}`);
+      log(`ASR: ${(finalText + interim).slice(0, 40)}${(finalText + interim).length > 40 ? '…' : ''}`);
       onResult && onResult(finalText + interim, !!finalText);
     };
     this.recognition.onerror = (e) => {
@@ -466,11 +477,11 @@ class ASRBridge {
     };
     this.recognition.onend = () => {
       this.listening = false;
-      log(`🎤 ASR 结束: "${finalText}"`, "ok");
+      log(`ASR 结束: "${finalText}"`, "ok");
       onEnd && onEnd();
     };
     this.recognition.start();
-    log("🎤 ASR 开始（说话）", "ok");
+    log("ASR 开始（说话）", "ok");
   }
   stop() {
     if (this.recognition && this.listening) this.recognition.stop();
@@ -486,10 +497,10 @@ async function webSearch(query, tavilyKey) {
     // Mock 结果（无 key 时）
     await new Promise(r => setTimeout(r, 500));
     return [
-      { title: `[Mock] ${query} 的搜索结果 1`, url: "https://example.com/1",
-        content: `这是关于「${query}」的模拟搜索结果。在 Tavily key 配置后会显示真实内容。` },
-      { title: `[Mock] ${query} 的搜索结果 2`, url: "https://example.com/2",
-        content: `另一个相关结果，包含 ${query} 的延伸信息。` },
+      { title: window.t("mock_s1", { q: query }), url: "https://example.com/1",
+        content: window.t("mock_c1", { q: query }) },
+      { title: window.t("mock_s2", { q: query }), url: "https://example.com/2",
+        content: window.t("mock_c2", { q: query }) },
     ];
   }
   // 真 Tavily API
@@ -522,7 +533,7 @@ class MemoryStore {
     this.items.push(item);
     if (this.items.length > 200) this.items = this.items.slice(-200);
     this._save();
-    log(`💾 记忆：${content}（重要度 ${importance}）`, "ok");
+    log(`记忆：${content}（重要度 ${importance}）`, "ok");
     return item;
   }
   recent(n = 5) { return this.items.slice(-n); }
@@ -535,7 +546,7 @@ class MemoryStore {
     const before = this.items.length;
     this.items = this.items.filter(x => !x.content.includes(content));
     this._save();
-    log(`🗑️ 遗忘 ${before - this.items.length} 条`);
+    log(`遗忘 ${before - this.items.length} 条`);
     return before - this.items.length;
   }
 }
@@ -553,7 +564,7 @@ class ReminderStore {
     const item = { id: Date.now(), content, fireAt };
     this.items.push(item);
     this._save();
-    log(`⏰ 提醒已设：${minutes} 分钟后「${content}」`, "ok");
+    log(`提醒已设：${minutes} 分钟后「${content}」`, "ok");
     return item;
   }
   list() { return this.items.slice(); }
@@ -561,18 +572,18 @@ class ReminderStore {
     const before = this.items.length;
     this.items = this.items.filter(x => x.id !== id);
     this._save();
-    log(`🗑️ 取消 ${before - this.items.length} 个提醒`);
+    log(`取消 ${before - this.items.length} 个提醒`);
     return before - this.items.length;
   }
   tick() {
     const now = Date.now();
     const fire = this.items.filter(x => x.fireAt <= now);
     for (const r of fire) {
-      log(`⏰ 提醒触发：${r.content}`, "ok");
-      window.tts.speak(`提醒：${r.content}`);
+      log(`提醒触发：${r.content}`, "ok");
+      window.tts.speak(window.t("rem_tts", { c: r.content }));
       // 浏览器通知（如已授权）
       if ("Notification" in window && Notification.permission === "granted") {
-        new Notification("桌宠提醒", { body: r.content });
+        new Notification(window.t("rem_notify_title"), { body: r.content });
       }
     }
     if (fire.length > 0) {
@@ -639,18 +650,17 @@ class LLMBridge {
       baseUrl: (baseUrl || this.cfg.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, ""),
       apiKey: apiKey || this.cfg.apiKey || "",
       model: model || this.cfg.model || "gpt-4o-mini",
-      systemPrompt: systemPrompt || this.cfg.systemPrompt ||
-        "你是桌宠「小白」，性格温柔黏人。回复 1-2 句话（30 字以内），像真人对主人说话。",
+      systemPrompt: systemPrompt || this.cfg.systemPrompt || window.t("llm_default_sys"),
     };
     this._saveCfg();
   }
   hasKey() { return !!(this.cfg.apiKey && this.cfg.apiKey.length > 10); }
-  status() { return this.hasKey() ? `${this.cfg.model} @ ${this.cfg.baseUrl}` : "未配置"; }
+  status() { return this.hasKey() ? `${this.cfg.model} @ ${this.cfg.baseUrl}` : window.t("llm_unconfigured"); }
 
   // OpenAI 兼容 /chat/completions（流式）
   async chatStream(messages, onDelta, onDone, onError) {
     if (!this.hasKey()) {
-      onError && onError(new Error("未配置 API key"));
+      onError && onError(new Error(window.t("err_no_key")));
       return;
     }
     try {
@@ -676,10 +686,16 @@ class LLMBridge {
       const decoder = new TextDecoder("utf-8");
       let fullText = "";
       let buf = "";
+      let rawBuf = "";          // 未清洗的原始缓冲（用于 finalize）
+      let inThink = false;       // 是否在 <think>...</think> 内
+      const THINK_OPEN_RE = /<think>/gi;
+      const THINK_CLOSE_RE = /<\/think>/gi;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        buf += chunk;
+        rawBuf += chunk;
         const lines = buf.split("\n");
         buf = lines.pop() || "";
         for (const line of lines) {
@@ -689,19 +705,81 @@ class LLMBridge {
           if (payload === "[DONE]") continue;
           try {
             const obj = JSON.parse(payload);
-            const delta = obj.choices?.[0]?.delta?.content || "";
-            if (delta) {
-              fullText += delta;
-              onDelta && onDelta(delta, fullText);
+            const choice = obj.choices?.[0] || {};
+            const delta = choice.delta || {};
+            // 1) reasoning_content / reasoning 字段（DeepSeek-r1 / Ollama qwen-thinking）
+            const reasoningChunk = delta.reasoning_content || delta.reasoning || "";
+            // 2) content 字段里可能夹杂 <think>...</think>
+            let contentChunk = delta.content || "";
+            if (contentChunk) {
+              // 维护 inThink 状态（流式 chunk 可能被切断在 <think> 中间）
+              let cleaned = contentChunk;
+              // 处理跨 chunk 的 <think>...</think>
+              if (inThink) {
+                const closeIdx = cleaned.search(/<\/think>/i);
+                if (closeIdx >= 0) {
+                  cleaned = cleaned.slice(closeIdx + cleaned.match(/<\/think>/i)[0].length);
+                  inThink = false;
+                } else {
+                  cleaned = "";
+                }
+              }
+              // 剩余 chunk 里出现新的 <think> → 切到丢弃模式
+              const openMatch = cleaned.match(/<think>/gi);
+              if (openMatch) {
+                let dropFrom = -1;
+                for (const m of cleaned.matchAll(/<think>/gi)) {
+                  dropFrom = m.index;
+                  break;
+                }
+                if (dropFrom >= 0) {
+                  cleaned = cleaned.slice(0, dropFrom);
+                  inThink = true;
+                }
+              }
+              contentChunk = cleaned;
+            }
+            // 合并到 rawBuf 供最终清洗
+            if (contentChunk || reasoningChunk) {
+              fullText += contentChunk;
+              // 仅把"真正显示"的内容传给 onDelta（reasoning 一律不显示）
+              if (contentChunk) onDelta && onDelta(contentChunk, fullText);
             }
           } catch (e) {}
         }
       }
+      // 最终全量清洗（流式 chunk 不剥的多余空白 + 表情标签）
+      fullText = sanitizeLLMText(fullText, true);
       onDone && onDone(fullText);
     } catch (e) {
       onError && onError(e);
     }
   }
+}
+
+// LLM 输出清洗：剥离 <think>...</think> 残留、情绪标签、emoji、多余空白
+function sanitizeLLMText(text, isFinal = true) {
+  if (!text) return text;
+  // 1) 残留 <think>...</think>（流式 chunk 边界可能漏掉）
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  text = text.replace(/<think>[\s\S]*$/gi, "");   // 未闭合的起始标签
+  text = text.replace(/<\/think>/gi, "");         // 孤立闭合标签
+  // 2) 情绪标签（最终回复不允许出现）
+  if (isFinal) {
+    text = text.replace(/\[\s*(?:happy|sad|angry|surprised|sleepy|neutral|neutral2|talk|joy|smile|laugh|shy|confuse|shock|worry|anger|disgust|love|fun|bored|excited|thinking|greeting|thinking1|thinking2|thinking3|thinking4)\s*[,\s\]]/gi, " ");
+    // 3) emoji + 装饰符号
+    text = text.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F2FF}]/gu, "");
+    text = text.replace(/[✨★☆♥♡♪♫]/g, "");
+    // 4) 多余空白
+    text = text.replace(/[ \t]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n");
+    text = text.trim();
+    // 5) 整段中文占比 < 15% → 视为英文 CoT 漏入正文，整体丢弃
+    if (text) {
+      const cjk = [...text].filter(ch => /[\u4e00-\u9fff\u3040-\u30ff]/.test(ch)).length;
+      if (cjk / text.length < 0.15) text = "";
+    }
+  }
+  return text;
 }
 window.llm = new LLMBridge();
 
@@ -728,27 +806,29 @@ class ProactiveBrain {
     log(`ProactiveBrain: 下次主动搭话在 ${Math.round(delay/60000)} 分钟后`);
     this._timer = setTimeout(() => this._fire(), delay);
   }
-  _getTimeContext() {
+  _getTimeKey() {
     const h = new Date().getHours();
-    if (h < 6) return "深夜";
-    if (h < 12) return "上午";
-    if (h < 18) return "下午";
-    return "晚上";
+    if (h < 6) return "tctx_night";
+    if (h < 12) return "tctx_morning";
+    if (h < 18) return "tctx_afternoon";
+    return "tctx_evening";
   }
   async _fire() {
     this._schedule();
-    const timeCtx = this._getTimeContext();
+    const timeCtx = window.t(this._getTimeKey());
     const memorySample = window.memory.recent(3).map(m => m.content);
 
     // mock 兜底（无 API key 时）
     const fallback = () => {
+      const mem1 = memorySample.length ? window.t("pa1mem", { x: memorySample[0].slice(0, 15) }) : "";
+      const mem2 = memorySample.length > 1 ? window.t("pa4mem", { x: memorySample[1].slice(0, 15) }) : "";
       const candidates = [
-        `主人现在是${timeCtx}，要不要休息一下？${memorySample.length ? '上次你说 ' + memorySample[0].slice(0, 15) + '，进展如何？' : ''}`,
-        `今天${timeCtx}好，记得多喝水呀～`,
-        `主人看起来坐了很久了，起来动一动吧！`,
-        `我刚才在发呆想主人～${memorySample.length > 1 ? '对了，' + memorySample[1].slice(0, 15) + '，后续怎么样了？' : ''}`,
-        `${timeCtx}安，要不要听一首歌？`,
-        `主人，我在呢，有事随时叫我。`,
+        window.t("pa1", { t: timeCtx, mem: mem1 }),
+        window.t("pa2", { t: timeCtx }),
+        window.t("pa3"),
+        window.t("pa4", { mem: mem2 }),
+        window.t("pa5", { t: timeCtx }),
+        window.t("pa6"),
       ];
       const remark = candidates[Math.floor(Math.random() * candidates.length)];
       if (this.lastRemarks.includes(remark)) return;
@@ -762,8 +842,7 @@ class ProactiveBrain {
       try {
         const messages = [{
           role: "user",
-          content: `现在是${timeCtx}。${memorySample.length ? '最近记忆：' + memorySample.join('；') : ''}
-请用 1 句话（≤30 字）主动搭话主人，像真人在微信里突然冒出来。`
+          content: window.t("pa_llm", { t: timeCtx, mem: memorySample.length ? window.t("pa_llm_mem", { m: memorySample.join("；") }) : "" })
         }];
         const text = await new Promise((resolve, reject) => {
           window.llm.chatStream(
@@ -780,7 +859,7 @@ class ProactiveBrain {
         window.trace.add("proactive", remark);
         return this._show(remark);
       } catch (e) {
-        log(`⚠️ LLM 调用失败：${e.message}（用 mock 兜底）`, "err");
+        log(`LLM 调用失败：${e.message}（用 mock 兜底）`, "err");
         return fallback();
       }
     }
@@ -788,10 +867,10 @@ class ProactiveBrain {
   }
 
   _show(remark) {
-    log(`💭 ProactiveBrain 主动搭话：${remark}`, "ok");
+    log(`ProactiveBrain 主动搭话：${remark}`, "ok");
     window.trace.add("remark", remark);
-    const timeCtx = this._getTimeContext();
-    const emotion = timeCtx === "上午" ? "happy" : timeCtx === "下午" ? "neutral" : "sleepy";
+    const tk = this._getTimeKey();
+    const emotion = tk === "tctx_morning" ? "happy" : tk === "tctx_afternoon" ? "neutral" : "sleepy";
     window.demo._emitEmotion(emotion);
     window.tts.speak(remark);
     appendChatBubble("proactive", remark);
@@ -830,36 +909,38 @@ async function handleUserInput(text) {
   window.trace.clear();
   window.trace.add("user", text);
 
-  // 简单意图识别
-  const t = text.trim();
-  // 1. 提醒类
-  const remindMatch = t.match(/(\d+)\s*(分钟|秒|小时|秒钟)\s*(?:之后?|后)\s*(?:提醒|叫我|告诉我|喊我|记得)?\s*(.*)/);
+  // 简单意图识别（中 / 英）
+  const txt = text.trim();
+  // 1. 提醒类（中文“3分钟后提醒我喝水” / 英文“in 5 minutes remind me to drink”）
+  const remindMatch = txt.match(/(\d+)\s*(分钟|秒钟|秒|小时|minutes?|mins?|hours?|seconds?|secs?)\s*(?:之后?|后)?\s*(?:提醒(?:我)?|叫我|告诉我|喊我|记得|remind\s*me(?:\s*to)?)\s*(.*)/i);
   if (remindMatch) {
     const n = parseInt(remindMatch[1]);
-    const unit = remindMatch[2];
-    const content = remindMatch[3] || `${t}`;
-    const minutes = unit === "秒" || unit === "秒钟" ? n / 60 :
-                    unit === "小时" ? n * 60 : n;
-    window.reminders.add(content || "该做事了", minutes);
-    const reply = `好的，${n}${unit}后提醒你「${content || '该做事了'}」`;
+    const unitRaw = remindMatch[2].toLowerCase();
+    const isSec = /秒|sec/.test(unitRaw);
+    const isHour = /小时|hour|^h$/.test(unitRaw);
+    const minutes = isSec ? n / 60 : isHour ? n * 60 : n;
+    const unitLabel = isSec ? window.t("unit_sec") : isHour ? window.t("unit_hour") : window.t("unit_min");
+    const content = (remindMatch[3] || "").replace(/^[\s:：,，to]+/i, "").trim() || txt || window.t("remind_default");
+    window.reminders.add(content, minutes);
+    const reply = window.t("remind_confirm", { n, unit: unitLabel, content });
     appendChatBubble("assistant", reply);
     window.tts.speak(reply);
     window.demo._emitEmotion("happy");
     return;
   }
   // 2. 搜索类
-  if (/搜索|查一下|查查|看看|搜一下|帮我找|search/i.test(t)) {
-    window.trace.add("tool_call", `web_search("${t}")`);
+  if (/搜索|查一下|查查|看看|搜一下|帮我找|search|look up|find (?:me |about )/i.test(txt)) {
+    window.trace.add("tool_call", `web_search("${txt}")`);
     const tavilyKey = localStorage.getItem("tavily_api_key") || "";
     try {
-      const results = await webSearch(t, tavilyKey);
-      window.trace.add("tool_result", `${results.length} 个结果`);
+      const results = await webSearch(txt, tavilyKey);
+      window.trace.add("tool_result", window.t("search_count", { n: results.length }));
       const summary = results.slice(0, 3).map((r, i) =>
         `${i+1}. ${r.title}\n   ${r.content.slice(0, 100)}${r.content.length > 100 ? '…' : ''}`
       ).join("\n\n");
-      const reply = `搜索到 ${results.length} 个结果：\n\n${summary}`;
+      const reply = window.t("search_reply", { n: results.length, summary });
       appendChatBubble("assistant", reply);
-      window.tts.speak(`搜索到 ${results.length} 个结果，第一条是 ${results[0].title}`);
+      window.tts.speak(window.t("search_tts", { n: results.length, title: results[0].title }));
       window.demo._emitEmotion("surprised");
       return;
     } catch (e) {
@@ -867,38 +948,40 @@ async function handleUserInput(text) {
     }
   }
   // 3. 记忆类
-  const memMatch = t.match(/(?:记住|记一下|别忘了|记着|记下)\s*[:：，,]?\s*(.+)/);
+  const memMatch = txt.match(/(?:记住|记一下|别忘了|记着|记下|remember that|remember|don't forget|note that)\s*[:：，,]?\s*(.+)/i);
   if (memMatch) {
-    window.memory.remember(memMatch[1].trim(), 7);
-    const reply = `好的，我记住了「${memMatch[1].trim()}」`;
+    const mc = memMatch[1].trim();
+    window.memory.remember(mc, 7);
+    const reply = window.t("mem_confirm", { c: mc });
     appendChatBubble("assistant", reply);
     window.tts.speak(reply);
     window.demo._emitEmotion("happy");
     return;
   }
   // 4. 桌宠本体动作
-  if (/笑一下|开心点|伤心|难过|睡觉|起床|跳舞|动一动/i.test(t)) {
+  if (/笑一下|开心点|伤心|难过|睡觉|起床|跳舞|动一动|smile|laugh|be happy|cheer up|sad|sleep|wake up|dance|move around/i.test(txt)) {
     const exprList = (window.demo.model && window.demo.model.internalModel.settings.expressions) || [];
     const randomExpr = exprList[Math.floor(Math.random() * exprList.length)];
     if (randomExpr) window.demo.setExpression(randomExpr.Name || randomExpr.name);
-    const reply = `好～`;
+    const reply = window.t("action_ok");
     appendChatBubble("assistant", reply);
     window.tts.speak(reply);
     window.demo._emitEmotion("happy");
     return;
   }
   // 5. 真实 LLM 调用（OpenAI 兼容 API；mock 兜底）
-  window.trace.add("llm_call", `chat("${t.slice(0, 30)}${t.length > 30 ? '…' : ''}")`);
+  window.trace.add("llm_call", `chat("${txt.slice(0, 30)}${txt.length > 30 ? '…' : ''}")`);
   const memoryCtx = window.memory.recent(3).map(m => m.content).join('；');
 
   if (!window.llm.hasKey()) {
     // 无 API key：mock 兜底
     await new Promise(r => setTimeout(r, 300));
+    const ask = (txt.endsWith('?') || txt.endsWith('？')) ? window.t("fb3q") : "";
     const fallbackReplies = [
-      `主人说的是「${t.slice(0, 20)}${t.length > 20 ? '…' : ''}」对吧？我想想...`,
-      `嗯嗯，我听到了。`,
-      `好的，主人。${t.endsWith('?') || t.endsWith('？') ? '让我想想这个问题...' : ''}`,
-      `收到～`,
+      window.t("fb1", { x: txt.slice(0, 20) + (txt.length > 20 ? '…' : '') }),
+      window.t("fb2"),
+      window.t("fb3", { q: ask }),
+      window.t("fb4"),
     ];
     const reply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
     window.trace.add("llm_response", reply);
@@ -909,8 +992,8 @@ async function handleUserInput(text) {
 
   // 真 API 调用
   const messages = [
-    { role: "user", content: t },
-    ...(memoryCtx ? [{ role: "system", content: `主人最近记忆：${memoryCtx}` }] : []),
+    { role: "user", content: txt },
+    ...(memoryCtx ? [{ role: "system", content: window.t("memory_ctx", { m: memoryCtx }) }] : []),
   ];
 
   // 增量显示（流式）
@@ -927,59 +1010,228 @@ async function handleUserInput(text) {
       messages,
       (delta, full) => { reply = full; bubble.textContent = full; chatEl.scrollTop = chatEl.scrollHeight; },
       (full) => {
-        reply = full.trim() || "（模型未返回）";
+        reply = full.trim() || window.t("model_empty");
         bubble.textContent = reply;
         window.trace.add("llm_response", reply);
         window.tts.speak(reply);
       },
       (err) => {
-        bubble.textContent = `❌ 调用失败：${err.message}`;
-        log(`❌ LLM 调用失败：${err.message}`, "err");
+        bubble.textContent = window.t("err_prefix") + err.message;
+        log(`LLM 调用失败：${err.message}`, "err");
       }
     );
   } catch (e) {
-    bubble.textContent = `❌ ${e.message}`;
-    log(`❌ LLM 异常：${e.message}`, "err");
+    bubble.textContent = window.t("err_prefix") + e.message;
+    log(`LLM 异常：${e.message}`, "err");
   }
 }
 
 // ============================================================
 // 11. UI 绑定
 // ============================================================
-// 环境横幅：检测是 GitHub Pages 还是本地访问
-(function setupEnvBanner() {
-  const banner = document.getElementById("env-banner");
-  const text = document.getElementById("env-banner-text");
-  if (!banner || !text) return;
-  const host = location.hostname.toLowerCase();
-  const isGithubPages = /\.github\.io$/.test(host);
-  if (isGithubPages) {
-    text.innerHTML =
-      '你正在访问 <strong>GitHub Pages 部署版</strong>（' + host + '）。' +
-      '这里 <strong>无法直接加载你本机的模型</strong>（127.0.0.1 指向 GitHub 服务器，不是你电脑）。' +
-      '要加载自己的模型：在仓库根运行 <code>python docs/demo/serve.py --port 8765 --root .</code>，' +
-      '然后访问 <code>http://127.0.0.1:8765/docs/demo/index.html</code>。';
-    banner.classList.remove("hidden");
-  }
-  const closeBtn = document.getElementById("env-banner-close");
-  if (closeBtn) closeBtn.addEventListener("click", () => banner.classList.add("hidden"));
-})();
+// ============================================================
+// 自定义弹窗（替代原生 prompt / alert / confirm），Promise 风格
+// ============================================================
+const Modal = (function () {
+  const overlay = document.getElementById("modal-overlay");
+  const titleEl = overlay.querySelector(".modal-title");
+  const bodyEl = overlay.querySelector(".modal-body");
+  const footEl = overlay.querySelector(".modal-foot");
+  let lastFocus = null, keyHandler = null;
 
-// 内置 Hiyori Pro 模型（零配置自动加载）
-// GitHub Pages 部署：模型放在 gh-pages 根的 hiyori_zh-Hans/ 下，index.html 在根
-// 本地 serve.py：模型放在仓库根 docs/demo/hiyori_zh-Hans/，index.html 在 docs/demo/
-// 因此路径需要按 IS_GITHUB_PAGES 切换
-const IS_GITHUB_PAGES = /\.github\.io$/.test(location.hostname);
-const BUILTIN_MODEL_PATHS = IS_GITHUB_PAGES ? [
-  // GitHub Pages：index.html 在根，hiyori_zh-Hans/ 也在根
-  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
-  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
-] : [
-  // 本地 serve.py (--root E:/study/desktop-pet)：index.html 在 docs/demo/，
-  // hiyori_zh-Hans/ 在 docs/demo/ 同级
-  "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json",
-  "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json",
+  function show() {
+    lastFocus = document.activeElement;
+    overlay.classList.add("show");
+    document.body.style.overflow = "hidden";
+  }
+  function hide() {
+    overlay.classList.remove("show");
+    document.body.style.overflow = "";
+    if (keyHandler) { document.removeEventListener("keydown", keyHandler); keyHandler = null; }
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+  }
+
+  function open(opt) {
+    return new Promise(function (resolve) {
+      titleEl.textContent = opt.title || "";
+      titleEl.parentElement.style.display = opt.title ? "flex" : "none";
+      bodyEl.innerHTML = "";
+      bodyEl.appendChild(opt.node);
+      footEl.innerHTML = "";
+
+      function finish(val) { hide(); resolve(val); }
+      const dismissable = opt.dismissable !== false;
+
+      if (opt.showCancel !== false) {
+        const c = document.createElement("button");
+        c.type = "button"; c.className = "modal-btn ghost";
+        c.textContent = opt.cancelText || window.t("modal_cancel");
+        c.addEventListener("click", function () { finish(null); });
+        footEl.appendChild(c);
+      }
+      const ok = document.createElement("button");
+      ok.type = "button";
+      ok.className = "modal-btn primary" + (opt.danger ? " danger" : "");
+      ok.textContent = opt.okText || window.t("modal_ok");
+      ok.addEventListener("click", async function () {
+        if (opt.onOk) {
+          let val;
+          try { val = await opt.onOk(); } catch (e) { val = false; }
+          if (val === false) return;          // 校验失败，保持弹窗
+          finish(val === undefined ? true : val);
+        } else {
+          finish(true);
+        }
+      });
+      footEl.appendChild(ok);
+
+      overlay.onclick = function (e) { if (dismissable && e.target === overlay) finish(null); };
+      keyHandler = function (e) {
+        if (!overlay.classList.contains("show")) return;
+        if (e.key === "Escape") { if (dismissable) finish(null); }
+        else if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") {
+          e.preventDefault(); ok.click();
+        }
+      };
+      document.addEventListener("keydown", keyHandler);
+      show();
+      if (opt.onShown) opt.onShown();
+    });
+  }
+
+  function textNode(text) {
+    const d = document.createElement("div");
+    d.className = "modal-text";
+    d.textContent = text || "";
+    return d;
+  }
+
+  function makeField(f) {
+    const wrap = document.createElement("label");
+    wrap.className = "modal-field";
+    if (f.label) {
+      const lab = document.createElement("span");
+      lab.className = "modal-label";
+      lab.textContent = f.label;
+      wrap.appendChild(lab);
+    }
+    let input;
+    if (f.textarea) {
+      input = document.createElement("textarea");
+      input.rows = f.rows || 3;
+    } else {
+      input = document.createElement("input");
+      input.type = f.type || "text";
+    }
+    input.className = "modal-input";
+    input.value = f.value || "";
+    if (f.placeholder) input.placeholder = f.placeholder;
+    if (f.autocomplete === false) input.setAttribute("autocomplete", "off");
+    wrap.appendChild(input);
+    f._input = input;
+    return wrap;
+  }
+
+  return {
+    alert: function (text, title) {
+      return open({ title: title, node: textNode(text), showCancel: false });
+    },
+    confirm: function (text, opts) {
+      opts = opts || {};
+      return open({ title: opts.title, node: textNode(text), okText: opts.okText, danger: opts.danger });
+    },
+    prompt: function (opts) {
+      const node = document.createElement("div");
+      if (opts.text) node.appendChild(textNode(opts.text));
+      const f = { label: opts.label, type: opts.type, value: opts.value,
+                  placeholder: opts.placeholder, textarea: opts.textarea, autocomplete: false };
+      node.appendChild(makeField(f));
+      return open({
+        title: opts.title, node: node, okText: opts.okText,
+        onShown: function () { f._input.focus(); if (f._input.select) { try { f._input.select(); } catch (e) {} } },
+        onOk: function () {
+          const v = f._input.value;
+          if (opts.required && !v.trim()) { f._input.classList.add("invalid"); return false; }
+          return opts.trim === false ? v : v.trim();
+        }
+      });
+    },
+    form: function (opts) {
+      const node = document.createElement("div");
+      if (opts.text) node.appendChild(textNode(opts.text));
+      const fields = opts.fields.map(makeField);
+      fields.forEach(function (fe) { node.appendChild(fe); });
+      const inputs = opts.fields.map(function (f) { return f._input; });
+      return open({
+        title: opts.title, node: node,
+        okText: opts.okText || window.t("modal_save"),
+        onShown: function () { if (inputs[0]) inputs[0].focus(); },
+        onOk: function () {
+          const values = {};
+          let bad = null;
+          for (let i = 0; i < opts.fields.length; i++) {
+            const f = opts.fields[i];
+            let v = inputs[i].value;
+            if (f.trim !== false) v = v.trim();
+            inputs[i].classList.remove("invalid");
+            values[f.name] = v;
+            let err = (f.required && !v) ? "required" : null;
+            if (!err && typeof f.validate === "function") err = f.validate(v, values);
+            if (err) { inputs[i].classList.add("invalid"); if (!bad) bad = inputs[i]; }
+          }
+          if (bad) { bad.focus(); return false; }
+          return values;
+        }
+      });
+    },
+    list: function (opts) {
+      const node = document.createElement("div");
+      node.className = "modal-list";
+      const items = opts.items || [];
+      if (!items.length) {
+        const e = document.createElement("div");
+        e.className = "modal-empty";
+        e.textContent = opts.emptyText || window.t("modal_empty");
+        node.appendChild(e);
+      } else {
+        items.forEach(function (it) {
+          const row = document.createElement("div");
+          row.className = "modal-list-row";
+          if (it.meta) {
+            const m = document.createElement("div");
+            m.className = "modal-list-meta";
+            m.textContent = it.meta;
+            row.appendChild(m);
+          }
+          const t = document.createElement("div");
+          t.className = "modal-list-text";
+          t.textContent = it.text;
+          row.appendChild(t);
+          node.appendChild(row);
+        });
+      }
+      return open({ title: opts.title, node: node, showCancel: false,
+                    okText: opts.okText || window.t("modal_close") });
+    }
+  };
+})();
+window.UI = Modal;
+
+// 内置官方样例模型（零配置自动加载；功能面板 / 角色卡可切换）
+// 本地 serve.py 与 GitHub Pages 部署中，模型目录均与 index.html 同级，统一用相对路径
+const BUILTIN_MODELS = [
+  { id: "hiyori_pro",  name: "Hiyori", badge: "Pro",  path: "hiyori_zh-Hans/hiyori_pro/runtime/hiyori_pro_t11.model3.json" },
+  { id: "hiyori_free", name: "Hiyori", badge: "Free", path: "hiyori_zh-Hans/hiyori_free/runtime/hiyori_free_t08.model3.json" },
+  { id: "miara_pro",   name: "Miara",  badge: "Pro",  path: "miara_en/runtime/miara_pro_t03.model3.json" },
 ];
+const MODEL_STORAGE_KEY = "desktop_pet_model";
+function currentModelId() {
+  const id = localStorage.getItem(MODEL_STORAGE_KEY);
+  return BUILTIN_MODELS.some(m => m.id === id) ? id : BUILTIN_MODELS[0].id;
+}
+function resolveModelUrl(p) {
+  return location.origin + location.pathname.replace(/index\.html?$/, "") + p;
+}
 
 document.getElementById("motion-btn").addEventListener("click", () => {
   const g = document.getElementById("motion-group").value;
@@ -991,38 +1243,69 @@ document.getElementById("expression-btn").addEventListener("click", () => {
 });
 document.getElementById("reset-btn").addEventListener("click", () => loadBuiltinModel());
 document.getElementById("speak-btn").addEventListener("click", (e) => {
-  if (window.demo._talking) { window.demo.stopTalk(); e.target.textContent = "🔊 测试口型"; }
-  else { window.demo.startTalk(); e.target.textContent = "🛑 停止口型"; }
+  if (window.demo._talking) { window.demo.stopTalk(); e.target.textContent = window.t("test_lipsync"); e.target.classList.remove("live"); }
+  else { window.demo.startTalk(); e.target.textContent = window.t("stop_lipsync"); e.target.classList.add("live"); }
 });
 
-// 重新加载按钮（如果用户主动想刷）
-const reloadBtn = document.getElementById("reload-btn");
-if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel());
-
-// 自动加载内置 Hiyori 模型
-async function loadBuiltinModel() {
-  showLoader("加载内置模型…");
-  setStatus("加载 Hiyori…", "#ffce5c");
-  for (const p of BUILTIN_MODEL_PATHS) {
-    try {
-      // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
-      const r = await fetch(p, { method: "GET" });
-      if (r.ok) {
-        log(`✓ 找到内置模型：${p}`, "ok");
-        const url = location.origin + location.pathname.replace(/index\.html?$/, "") + p;
-        await window.demo.loadModel(url);
-        return;
-      } else {
-        log(`探测 ${p} → ${r.status}`, "ok");
-      }
-    } catch (e) {
-      log(`探测 ${p} 异常：${e.message}`, "err");
-    }
-  }
-  hideLoader();
-  setStatus("内置模型未找到", "#ff7675");
-  log("❌ demo 内置的 Hiyori 模型未部署，请检查 hiyori_zh-Hans/ 目录", "err");
+// 角色卡显示当前模型
+function updateModelCard(model) {
+  const title = document.querySelector("#model-info .model-title");
+  if (title) title.innerHTML = `${model.name} <span class="badge-pro">${model.badge}</span>`;
 }
+function syncModelSelect(id) {
+  const sel = document.getElementById("model-select");
+  if (sel) sel.value = id;
+}
+
+// 加载指定内置模型（id 缺省取上次选择 / 默认第一个）
+async function loadBuiltinModel(id) {
+  const model = BUILTIN_MODELS.find(m => m.id === id) || BUILTIN_MODELS.find(m => m.id === currentModelId());
+  showLoader(window.t("loading_builtin"));
+  setStatus(window.t("status_load_model", { name: model.name }), "#ffce5c");
+  try {
+    // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
+    const r = await fetch(model.path, { method: "GET" });
+    if (!r.ok) {
+      hideLoader();
+      setStatus(window.t("status_builtin_missing"), "#ff7675");
+      log(`内置模型 ${model.name} 未部署（${model.path} → ${r.status}）`, "err");
+      return;
+    }
+    log(`加载内置模型：${model.name} ${model.badge}（${model.path}）`, "ok");
+    await window.demo.loadModel(resolveModelUrl(model.path));
+    localStorage.setItem(MODEL_STORAGE_KEY, model.id);
+    updateModelCard(model);
+    syncModelSelect(model.id);
+  } catch (e) {
+    hideLoader();
+    setStatus(window.t("status_builtin_missing"), "#ff7675");
+    log(`内置模型 ${model.name} 加载失败：${e.message || e}`, "err");
+  }
+}
+
+// 功能面板：模型选择下拉
+(function setupModelSelect() {
+  const sel = document.getElementById("model-select");
+  if (!sel) return;
+  for (const m of BUILTIN_MODELS) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `${m.name} ${m.badge}`;
+    sel.appendChild(opt);
+  }
+  sel.value = currentModelId();
+  sel.addEventListener("change", () => { if (sel.value) loadBuiltinModel(sel.value); });
+})();
+
+// 角色卡：循环切换模型 / 重新加载当前模型
+const switchBtn = document.getElementById("switch-model-btn");
+if (switchBtn) switchBtn.addEventListener("click", () => {
+  const idx = BUILTIN_MODELS.findIndex(m => m.id === currentModelId());
+  loadBuiltinModel(BUILTIN_MODELS[(idx + 1) % BUILTIN_MODELS.length].id);
+});
+const reloadBtn = document.getElementById("reload-btn");
+if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel(currentModelId()));
+
 document.getElementById("chat-btn").addEventListener("click", async () => {
   const text = document.getElementById("chat-input").value.trim();
   if (!text) { log("请输入文字", "err"); return; }
@@ -1039,14 +1322,14 @@ if (asrBtn) {
   asrBtn.addEventListener("mousedown", () => {
     if (!window.demo.ready) { log("请先加载模型", "err"); return; }
     asrBtn.classList.add("recording");
-    asrBtn.textContent = "🎤 正在听…";
+    asrBtn.title = window.t("listening");
     window.asr.start(
       (text, isFinal) => {
         if (isFinal) document.getElementById("chat-input").value = text;
       },
       () => {
         asrBtn.classList.remove("recording");
-        asrBtn.textContent = "🎤 按住说话";
+        asrBtn.title = window.t("hold_to_talk");
       }
     );
   });
@@ -1065,68 +1348,95 @@ if (ttsSel) {
   const voiceSel = document.getElementById("tts-voice");
   if (!voiceSel) return;
   function fillVoices() {
-    if (!window.tts || !window.tts.allVoices || window.tts.allVoices.length === 0) return;
-    voiceSel.innerHTML = '<option value="">自动（按引擎选）</option>';
-    for (const v of window.tts.allVoices) {
+    if (!window.tts || !window.tts.synth) return;
+    // 兜底刷新内部语音缓存（防止 voiceschanged 被覆盖、内部列表为空）
+    window.tts.refreshVoices();
+    const all = window.tts.allVoices || [];
+    if (all.length === 0) return;
+    voiceSel.innerHTML = '<option value="">' + window.t("auto_voice") + '</option>';
+    for (const v of all) {
       const opt = document.createElement("option");
       opt.value = v.name;
-      const marker = /xiaoxiao|小晓/i.test(v.name) ? " 🔥小晓" :
-                     /yunjian|云健/i.test(v.name) ? " 男" :
-                     /yating|云夏/i.test(v.name) ? " 女" :
-                     /yunxi|云希/i.test(v.name) ? " 男" :
-                     /female|女/i.test(v.name) ? " 女" :
-                     /male|男/i.test(v.name) ? " 男" : "";
+      const marker = /xiaoxiao|小晓/i.test(v.name) ? window.t("voice_reco") :
+                     /yunjian|云健|yunxi|云希|male|男/i.test(v.name) ? window.t("voice_male") :
+                     /yating|云夏|female|女/i.test(v.name) ? window.t("voice_female") : "";
       opt.textContent = `${v.name} (${v.lang})${marker}`;
       voiceSel.appendChild(opt);
     }
-    log(`📢 可用语音 ${window.tts.allVoices.length} 个（找小晓请选含 'Xiaoxiao' 的）`, "ok");
+    // 重建后选中当前实际生效的语音：pickVoice 已处理“手动优先 / 中文默认 Xiaoxiao / 英文默认英文语音”
+    const wantEn = window.I18N && window.I18N.lang === "en";
+    const cur = window.tts.pickVoice(wantEn);
+    if (cur) {
+      const target = [...voiceSel.options].find(o => o.value === cur.name);
+      if (target) voiceSel.value = target.value;
+    }
+    log(`可用语音 ${all.length} 个（默认 Xiaoxiao，也可在下拉中切换）`, "ok");
   }
   // 延迟多次尝试，因为 voiceschanged 触发有延迟
   setTimeout(fillVoices, 500);
   setTimeout(fillVoices, 2000);
   setTimeout(fillVoices, 5000);
-  if (window.speechSynthesis) {
-    window.speechSynthesis.onvoiceschanged = fillVoices;
+  if (window.speechSynthesis && window.speechSynthesis.addEventListener) {
+    window.speechSynthesis.addEventListener("voiceschanged", fillVoices);
   }
   voiceSel.addEventListener("change", (e) => {
     if (!e.target.value) {
+      // 选“自动”：清手动选择，恢复推荐默认（中文 Xiaoxiao）
+      window.tts._userVoice = null;
       window.tts._pinnedVoice = null;
-      log("TTS 解除语音锁定（按引擎自动选）", "ok");
+      window.tts.refreshVoices();
+      const wantEn = window.I18N && window.I18N.lang === "en";
+      const cur = window.tts.pickVoice(wantEn);
+      if (cur) voiceSel.value = cur.name;
+      log("TTS 已恢复自动选择（默认 Xiaoxiao）", "ok");
     } else {
       window.tts.setVoiceByName(e.target.value);
     }
   });
+  window.__refreshVoiceOptions = fillVoices;
 })();
 
-// Tavily key 配置
+// Tavily key 配置（自定义弹窗）
 const tavilyBtn = document.getElementById("tavily-btn");
 if (tavilyBtn) {
-  tavilyBtn.addEventListener("click", () => {
-    const key = prompt("输入 Tavily API key（留空用 mock）：", localStorage.getItem("tavily_api_key") || "");
-    if (key !== null) {
-      localStorage.setItem("tavily_api_key", key);
-      log(`Tavily key ${key ? "已设置" : "已清空"}`, "ok");
+  tavilyBtn.addEventListener("click", async () => {
+    const cur = localStorage.getItem("tavily_api_key") || "";
+    const v = await UI.prompt({
+      title: window.t("tavily_title"),
+      text: window.t("tavily_prompt"),
+      value: cur
+    });
+    if (v !== null) {
+      localStorage.setItem("tavily_api_key", v);
+      log(`Tavily key ${v ? window.t("tavily_set") : window.t("tavily_cleared")}`, "ok");
     }
   });
 }
 
-// LLM API 配置（OpenAI 兼容）
+// LLM API 配置（OpenAI 兼容，单个表单弹窗）
 const llmBtn = document.getElementById("llm-btn");
 if (llmBtn) {
-  llmBtn.addEventListener("click", () => {
+  llmBtn.addEventListener("click", async () => {
     const cur = window.llm.cfg;
-    // 用 prompt 分多步收集（demo 简单实现，未来可换 form modal）
-    const baseUrl = prompt("Base URL (OpenAI 兼容)：", cur.baseUrl || "https://api.openai.com/v1");
-    if (!baseUrl) return;
-    const apiKey = prompt("API Key：", cur.apiKey || "");
-    if (!apiKey) return;
-    const model = prompt("模型名（如 gpt-4o-mini / deepseek-chat / qwen-turbo）：", cur.model || "gpt-4o-mini");
-    if (!model) return;
-    const sysDefault = "你是桌宠「小白」，性格温柔黏人。回复 1-2 句话（30 字以内），像真人对主人说话。";
-    const systemPrompt = prompt("System Prompt（回车用默认）：", cur.systemPrompt || sysDefault) || sysDefault;
-    window.llm.setConfig({ baseUrl, apiKey, model, systemPrompt });
-    log(`✅ LLM 已配置：${window.llm.status()}`, "ok");
-    log(`现在桌宠会调用真实 LLM 生成回复（不再用 mock）`, "ok");
+    const vals = await UI.form({
+      title: window.t("llm_title"),
+      fields: [
+        { name: "baseUrl", label: window.t("llm_base_url"), value: cur.baseUrl || "https://api.openai.com/v1" },
+        { name: "apiKey", label: window.t("llm_api_key"), value: cur.apiKey || "", type: "password", required: true },
+        { name: "model", label: window.t("llm_model"), value: cur.model || "gpt-4o-mini" },
+        { name: "systemPrompt", label: window.t("llm_sysprompt"), textarea: true, value: cur.systemPrompt || window.t("llm_default_sys") }
+      ]
+    });
+    if (!vals) return;
+    if (!vals.apiKey) { log(window.t("llm_need_key"), "err"); return; }
+    window.llm.setConfig({
+      baseUrl: vals.baseUrl || "https://api.openai.com/v1",
+      apiKey: vals.apiKey,
+      model: vals.model || "gpt-4o-mini",
+      systemPrompt: vals.systemPrompt || window.t("llm_default_sys")
+    });
+    log(`LLM 已配置：${window.llm.status()}`, "ok");
+    log(window.t("llm_configured_log"), "ok");
   });
 }
 
@@ -1135,16 +1445,22 @@ const memBtn = document.getElementById("mem-btn");
 if (memBtn) {
   memBtn.addEventListener("click", () => {
     const items = window.memory.list();
-    if (items.length === 0) { appendChatBubble("assistant", "（暂无记忆）"); return; }
-    const summary = items.slice(-5).map(m => `· ${m.content}`).join("\n");
-    appendChatBubble("assistant", `最近 ${items.length} 条记忆：\n${summary}`);
-    window.tts.speak(`我记着 ${items.length} 件事`);
+    UI.list({
+      title: window.t("mem_title") + (items.length ? ` · ${items.length}` : ""),
+      emptyText: window.t("mem_empty"),
+      items: items.slice().reverse().map(m => ({ meta: new Date(m.time).toLocaleString(), text: m.content }))
+    });
+    if (items.length) window.tts.speak(window.t("mem_tts", { n: items.length }));
   });
 }
 const forgetBtn = document.getElementById("forget-btn");
 if (forgetBtn) {
-  forgetBtn.addEventListener("click", () => {
-    const q = prompt("遗忘包含此关键词的记忆：");
+  forgetBtn.addEventListener("click", async () => {
+    const q = await UI.prompt({
+      title: window.t("forget_title"),
+      text: window.t("forget_prompt"),
+      label: window.t("forget_keyword")
+    });
     if (q) { window.memory.forget(q); }
   });
 }
@@ -1152,11 +1468,19 @@ if (forgetBtn) {
 // 提醒面板
 const remindBtn = document.getElementById("remind-btn");
 if (remindBtn) {
-  remindBtn.addEventListener("click", () => {
-    const mins = prompt("几分钟后来提醒？");
-    if (mins && !isNaN(parseInt(mins))) {
-      const content = prompt("提醒内容？") || "该做事了";
-      window.reminders.add(content, parseInt(mins));
+  remindBtn.addEventListener("click", async () => {
+    const v = await UI.form({
+      title: window.t("remind_title"),
+      fields: [
+        { name: "mins", label: window.t("remind_minutes"), type: "number", placeholder: "10",
+          required: true, validate: function (v) { return /^[1-9]\d*$/.test(v) ? null : "bad"; } },
+        { name: "content", label: window.t("remind_content_label"), placeholder: window.t("remind_default") }
+      ]
+    });
+    if (!v) return;
+    const mins = parseInt(v.mins, 10);
+    if (!isNaN(mins)) {
+      window.reminders.add(v.content || window.t("remind_default"), mins);
     }
   });
 }
@@ -1164,9 +1488,14 @@ const remindListBtn = document.getElementById("remind-list-btn");
 if (remindListBtn) {
   remindListBtn.addEventListener("click", () => {
     const items = window.reminders.list();
-    if (items.length === 0) { appendChatBubble("assistant", "（暂无提醒）"); return; }
-    const summary = items.map(r => `· ${new Date(r.fireAt).toLocaleTimeString()} - ${r.content}`).join("\n");
-    appendChatBubble("assistant", `${items.length} 个待触发提醒：\n${summary}`);
+    UI.list({
+      title: window.t("rem_title") + (items.length ? ` · ${items.length}` : ""),
+      emptyText: window.t("rem_empty"),
+      items: items.map(r => ({
+        meta: window.t("rem_at") + " " + new Date(r.fireAt).toLocaleString(),
+        text: r.content
+      }))
+    });
   });
 }
 
@@ -1209,6 +1538,22 @@ function startIdleBehavior() {
 }
 window.startIdleBehavior = startIdleBehavior;
 
+// 语言切换时重渲染动态 UI（语音下拉 / 口型按钮 / 就绪状态）
+if (window.I18N) {
+  window.I18N.onChange(function () {
+    if (window.__refreshVoiceOptions) window.__refreshVoiceOptions();
+    const sb = document.getElementById("speak-btn");
+    if (sb) sb.textContent = window.t(window.demo && window.demo._talking ? "stop_lipsync" : "test_lipsync");
+    if (window.demo && window.demo.ready && window.demo.model) {
+      const m = window.demo.model;
+      const exprs = (m.internalModel && m.internalModel.settings.expressions) || [];
+      const motions = (m.internalModel && m.internalModel.settings.motions) || {};
+      const tag = window.llm.hasKey() ? ` · ${window.llm.cfg.model}` : window.t("mock_tag");
+      setStatus(window.t("status_ready", { expr: exprs.length, mot: Object.keys(motions).length, tag }), "#55efc4");
+    }
+  });
+}
+
 // ============================================================
 // 12. 启动
 // ============================================================
@@ -1216,7 +1561,7 @@ window.addEventListener("DOMContentLoaded", () => {
   (async () => {
     try { if (window.__sdkReady) await window.__sdkReady; }
     catch (e) {
-      setStatus("SDK 加载失败", "#ff7675");
+      setStatus(window.t("status_sdk_failed"), "#ff7675");
       log("SDK 加载失败：" + (e.message || e), "err");
       return;
     }
@@ -1225,22 +1570,22 @@ window.addEventListener("DOMContentLoaded", () => {
     if (st.pixi)    log(`  pixi    ← ${st.pixi.replace(/^ok:/, "")}`);
     if (st.core)    log(`  core    ← ${st.core.replace(/^ok:/, "")}`);
     if (st.cubism4) log(`  cubism4 ← ${st.cubism4.replace(/^ok:/, "")}`, "ok");
-    if (typeof PIXI === "undefined") { setStatus("PIXI 未加载", "#ff7675"); return; }
-    if (typeof Live2DCubismCore === "undefined") { setStatus("Cubism Core 未加载", "#ff7675"); return; }
+    if (typeof PIXI === "undefined") { setStatus(window.t("status_pixi_missing"), "#ff7675"); return; }
+    if (typeof Live2DCubismCore === "undefined") { setStatus(window.t("status_core_missing"), "#ff7675"); return; }
     if (!PIXI.live2d || !PIXI.live2d.Live2DModel || typeof PIXI.live2d.Live2DModel.from !== "function") {
-      setStatus("Live2DModel.from 不可用", "#ff7675");
+      setStatus(window.t("status_from_unavailable"), "#ff7675");
       log("pixi-live2d-display 未注册 Live2DModel.from", "err");
       return;
     }
     try { window.demo.ensureApp(); }
-    catch (e) { setStatus("PIXI 初始化失败", "#ff7675"); log(e.message || e, "err"); return; }
-    setStatus("就绪 · 请填写 Model URL（或拖入 .model3.json）", "#55efc4");
+    catch (e) { setStatus(window.t("status_pixi_init_failed"), "#ff7675"); log(e.message || e, "err"); return; }
+    setStatus(window.t("status_ready_loading"), "#55efc4");
     log(`PIXI v${PIXI.VERSION} · Live2DModel.from 已就绪`, "ok");
-    if (window.asr.available) log("✅ ASR 可用（按住说话按钮）", "ok");
-    else log("⚠️ ASR 不可用（请用 Chrome / Edge）", "err");
-    if (window.tts.voices.length) log(`✅ TTS 可用（${window.tts.voices.length} 个语音）`, "ok");
-    else log("⚠️ TTS 暂未加载语音", "err");
-    // 零配置自动加载内置 Hiyori Pro 模型
-    loadBuiltinModel();
+    if (window.asr.available) log("ASR 可用（按住说话按钮）", "ok");
+    else log("ASR 不可用（请用 Chrome / Edge）", "err");
+    if (window.tts.voices.length) log(`TTS 可用（${window.tts.voices.length} 个语音）`, "ok");
+    else log("TTS 暂未加载语音", "err");
+    // 零配置自动加载上次选择的内置模型（默认 Hiyori Pro）
+    loadBuiltinModel(currentModelId());
   })();
 });
