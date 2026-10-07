@@ -53,8 +53,16 @@ function saveSettings() {
 const loader = document.getElementById("loader");
 const loaderText = document.getElementById("loader-text");
 const statusEl = document.getElementById("status");
-function showLoader(txt) { loaderText.textContent = txt || window.t("loading"); loader.classList.remove("hidden"); }
-function hideLoader() { loader.classList.add("hidden"); }
+function showLoader(txt) {
+  loaderText.textContent = txt || window.t("loading");
+  loader.classList.remove("hidden");
+  // 加载期间置灰并禁用聊天栏/快捷指令/模型卡，避免点击静默失败
+  document.getElementById("stage-wrap") && document.getElementById("stage-wrap").classList.add("is-loading");
+}
+function hideLoader() {
+  loader.classList.add("hidden");
+  document.getElementById("stage-wrap") && document.getElementById("stage-wrap").classList.remove("is-loading");
+}
 // 浅色主题下把旧的深色背景亮色调成可读色，并联动顶栏状态点
 const STATUS_COLORS = {"#a8b0c0": "#8f8aa8", "#ffce5c": "#e0a53e", "#55efc4": "#17a673", "#ff7675": "#e0506e"};
 function setStatus(t, c = "#a8b0c0") {
@@ -124,7 +132,7 @@ class Live2DDemo {
     setTimeout(onResize, 600);
     setTimeout(onResize, 1500);
   }
-  async loadModel(modelUrl) {
+  async loadModel(modelUrl, meta = null) {
     if (!modelUrl) throw new Error("model URL 为空");
     // 支持内置官方样例、custom-models.js 私有模型、以及功能面板输入的外部 URL
 
@@ -137,7 +145,39 @@ class Live2DDemo {
     setStatus(window.t("status_loading"), "#ffce5c");
     try {
       log(`加载模型：${modelUrl}`);
-      const model = await PIXI.live2d.Live2DModel.from(modelUrl, { autoHitTest: false, autoFocus: false });
+      // 注册表声明了动作/表情而 model3.json 未登记（VTS 导出通病）时，
+      // 先拉取 JSON 注入 FileReferences，再以 settings 对象交给渲染器
+      let source = modelUrl;
+      if (meta && ((meta.motions && meta.motions.length) || (meta.expressions && meta.expressions.length))) {
+        try {
+          const r = await fetch(modelUrl);
+          if (r.ok) {
+            const json = await r.json();
+            const fr = (json.FileReferences = json.FileReferences || {});
+            if (meta.motions.length && !Object.keys(fr.Motions || {}).length) {
+              const groups = {};
+              for (const m of meta.motions) (groups[m.group] = groups[m.group] || []).push({ File: m.file });
+              fr.Motions = groups;
+            }
+            if (meta.expressions.length && !(fr.Expressions || []).length) {
+              fr.Expressions = meta.expressions.map(e => ({ Name: e.name, File: e.file }));
+            }
+            const C4 = (PIXI.live2d.cubism4 && PIXI.live2d.cubism4.Cubism4ModelSettings) || PIXI.live2d.Cubism4ModelSettings;
+            if (C4) {
+              json.url = modelUrl;   // Cubism4ModelSettings 构造时校验 json.url 必须存在
+              const settings = new C4(json);
+              settings.url = modelUrl;   // moc/贴图/动作/表情相对路径解析基准
+              source = settings;
+              log(`注入注册表动作/表情：${meta.motions ? meta.motions.length : 0} 动作 / ${meta.expressions ? meta.expressions.length : 0} 表情`, "ok");
+            } else {
+              log(`渲染器无 Cubism4ModelSettings，退回原始加载`, "err");
+            }
+          }
+        } catch (e) {
+          log(`注册表注入失败，退回原始加载：${e.message || e}`, "err");
+        }
+      }
+      const model = await PIXI.live2d.Live2DModel.from(source, { autoHitTest: false, autoFocus: false });
       this.model = model;
       this.app.stage.addChild(model);
       // mask 兜底
@@ -260,11 +300,35 @@ class Live2DDemo {
     const exprSel = document.getElementById("expression");
     exprSel.innerHTML = "";
     const exprs = (this.model.internalModel && this.model.internalModel.settings.expressions) || [];
+    // 名称形如「分类 名字」（如「发型 丸子头」）时按分类分组显示
+    const cats = new Map();
+    let allCategorized = exprs.length > 0;
     for (const e of exprs) {
-      const name = e.Name || e.name || "";
-      const opt = document.createElement("option");
-      opt.value = name; opt.textContent = name;
-      exprSel.appendChild(opt);
+      const name = String(e.Name || e.name || "");
+      const sp = name.indexOf(" ");
+      if (sp <= 0) { allCategorized = false; break; }
+      const cat = name.slice(0, sp);
+      if (!cats.has(cat)) cats.set(cat, []);
+      cats.get(cat).push({ name, rest: name.slice(sp + 1) });
+    }
+    if (allCategorized && cats.size > 1) {
+      for (const [cat, list] of cats) {
+        const og = document.createElement("optgroup");
+        og.label = `${cat} (${list.length})`;
+        for (const it of list) {
+          const opt = document.createElement("option");
+          opt.value = it.name; opt.textContent = it.rest;
+          og.appendChild(opt);
+        }
+        exprSel.appendChild(og);
+      }
+    } else {
+      for (const e of exprs) {
+        const name = String(e.Name || e.name || "");
+        const opt = document.createElement("option");
+        opt.value = name; opt.textContent = name;
+        exprSel.appendChild(opt);
+      }
     }
   }
   playMotion(group) {
@@ -1700,7 +1764,7 @@ function toolTraceArgs(args) {
 
 async function handleUserInput(text) {
   if (!text || !window.demo.ready) {
-    if (!window.demo.ready) log("请先加载模型", "err");
+    if (!window.demo.ready) toast(window.t("not_ready"), "err");
     return;
   }
   appendChatBubble("user", text);
@@ -2164,7 +2228,15 @@ const BUILTIN_MODELS = [
 // 私有自定义模型（custom-models.js 提供，已 gitignore；gh-pages 部署时由 Actions 注入）
 const CUSTOM_MODELS = (Array.isArray(window.CUSTOM_MODELS) ? window.CUSTOM_MODELS : [])
   .filter(m => m && m.id && m.name && m.path)
-  .map(m => ({ id: String(m.id), name: String(m.name), badge: String(m.badge || "Custom"), path: String(m.path), custom: true }));
+  .map(m => ({
+    id: String(m.id),
+    name: String(m.name),
+    badge: String(m.badge || "Custom"),
+    path: String(m.path),
+    custom: true,
+    motions: Array.isArray(m.motions) ? m.motions : undefined,
+    expressions: Array.isArray(m.expressions) ? m.expressions : undefined,
+  }));
 const ALL_MODELS = BUILTIN_MODELS.concat(CUSTOM_MODELS);
 if (CUSTOM_MODELS.length) {
   log(`自定义模型 ${CUSTOM_MODELS.length} 个：` + CUSTOM_MODELS.map(m => `${m.name}(${m.id})`).join("、"), "ok");
@@ -2223,7 +2295,7 @@ async function loadBuiltinModel(id) {
       return;
     }
     log(`加载模型：${model.name} ${model.badge}（${model.path}）`, "ok");
-    await window.demo.loadModel(resolveModelUrl(model.path));
+    await window.demo.loadModel(resolveModelUrl(model.path), model);
     localStorage.setItem(MODEL_STORAGE_KEY, model.id);
     updateModelCard(model);
     syncModelSelect(model.id);
@@ -2253,14 +2325,59 @@ async function loadBuiltinModel(id) {
   sel.addEventListener("change", () => { if (sel.value) loadBuiltinModel(sel.value); });
 })();
 
-// 角色卡：循环切换模型 / 重新加载当前模型
+// 角色卡：左下角列表弹层选择模型 / 重新加载当前模型
 const switchBtn = document.getElementById("switch-model-btn");
-if (switchBtn) switchBtn.addEventListener("click", () => {
-  const idx = ALL_MODELS.findIndex(m => m.id === currentModelId());
-  loadBuiltinModel(ALL_MODELS[(idx + 1) % ALL_MODELS.length].id);
-});
+const modelMenu = document.getElementById("model-menu");
+if (switchBtn && modelMenu) {
+  function renderModelMenu() {
+    modelMenu.innerHTML = "";
+    for (const m of ALL_MODELS) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "mm-item" + (m.id === currentModelId() ? " current" : "");
+      const mark = document.createElement("span");
+      mark.className = "mm-mark";
+      mark.textContent = m.id === currentModelId() ? "✓" : "";
+      const name = document.createElement("span");
+      name.textContent = m.name;
+      const badge = document.createElement("span");
+      badge.className = "badge-pro";
+      badge.textContent = m.badge;
+      item.appendChild(mark); item.appendChild(name); item.appendChild(badge);
+      item.addEventListener("click", () => {
+        modelMenu.hidden = true;
+        if (m.id !== currentModelId()) loadBuiltinModel(m.id);
+      });
+      modelMenu.appendChild(item);
+    }
+  }
+  switchBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (modelMenu.hidden) { renderModelMenu(); modelMenu.hidden = false; }
+    else modelMenu.hidden = true;
+  });
+}
 const reloadBtn = document.getElementById("reload-btn");
 if (reloadBtn) reloadBtn.addEventListener("click", () => loadBuiltinModel(currentModelId()));
+
+// 点击空白处关闭：功能面板 / 调试面板 / 模型列表弹层
+document.addEventListener("pointerdown", (e) => {
+  const fp = document.getElementById("feature-panel");
+  const pt = document.getElementById("panel-toggle");
+  if (fp && fp.classList.contains("open") && !fp.contains(e.target) && !(pt && pt.contains(e.target))) {
+    fp.classList.remove("open");
+    if (pt) pt.classList.remove("active");
+  }
+  const dbg = document.getElementById("debug-panel");
+  const dt = document.getElementById("debug-toggle");
+  if (dbg && dbg.classList.contains("open") && !dbg.contains(e.target) && !(dt && dt.contains(e.target))) {
+    dbg.classList.remove("open");
+    if (dt) dt.classList.remove("active");
+  }
+  if (modelMenu && !modelMenu.hidden && !modelMenu.contains(e.target) && !(switchBtn && switchBtn.contains(e.target))) {
+    modelMenu.hidden = true;
+  }
+}, true);
 
 // 外部 URL 模型加载（http/https 校验；对齐桌面版"任意模型 URL"能力）
 function externalModelName(url) {

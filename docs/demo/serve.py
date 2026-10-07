@@ -83,6 +83,9 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         # PIXI 模型贴图跨域
         self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+        # 页面与脚本每次使用前必须再验证，避免开发时浏览器启发式缓存吃掉更新
+        if self.path.split("?", 1)[0].split("#", 1)[0].endswith((".html", ".js", ".json")):
+            self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def do_OPTIONS(self):

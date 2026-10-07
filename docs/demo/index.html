@@ -267,17 +267,14 @@
   .bubble.typing .dot:nth-child(3){ animation-delay:.3s; }
   @keyframes tdot{ 0%,60%,100%{ transform:translateY(0); opacity:.4; } 30%{ transform:translateY(-5px); opacity:1; } }
 
-  /* ---------------- 快捷指令 chips ---------------- */
+  /* ---------------- 快捷指令 chips（换行布局，全部可点） ---------------- */
   #chips{
     position:absolute; left:50%; bottom:82px; transform:translateX(-50%);
-    width:min(640px,68vw); display:flex; gap:8px; overflow-x:auto;
-    padding:4px 6px; scrollbar-width:none; z-index:11;
-    -webkit-mask-image:linear-gradient(90deg,transparent,#000 12px,#000 calc(100% - 12px),transparent);
-            mask-image:linear-gradient(90deg,transparent,#000 12px,#000 calc(100% - 12px),transparent);
+    width:min(660px,70vw); display:flex; flex-wrap:wrap; justify-content:center;
+    gap:8px; padding:4px 6px; z-index:11;
   }
-  #chips::-webkit-scrollbar{ display:none; }
   .chip{
-    flex-shrink:0; padding:7px 14px; border-radius:999px; cursor:pointer;
+    padding:7px 14px; border-radius:999px; cursor:pointer;
     font-size:12.5px; color:var(--brand-d); white-space:nowrap;
     background:rgba(255,255,255,.82); border:1px solid rgba(124,108,240,.22);
     backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
@@ -286,6 +283,29 @@
   }
   .chip:hover{ background:var(--brand); color:#fff; border-color:var(--brand); transform:translateY(-2px); box-shadow:0 6px 14px rgba(124,108,240,.3); }
   .chip:active{ transform:translateY(0) scale(.96); }
+  /* 加载期间：聊天栏/快捷指令/模型卡置灰且不可点 */
+  #stage-wrap.is-loading #chips,
+  #stage-wrap.is-loading #chat-bar,
+  #stage-wrap.is-loading #model-info{ opacity:.35; pointer-events:none; filter:saturate(.8); }
+
+  /* ---------------- 左下角模型列表弹层 ---------------- */
+  #model-menu{
+    position:absolute; left:18px; bottom:76px; z-index:20; min-width:210px;
+    background:rgba(255,255,255,.94); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    border:1px solid rgba(255,255,255,.95); border-radius:14px;
+    box-shadow:var(--shadow); padding:6px;
+    display:flex; flex-direction:column; gap:2px;
+    animation:bubbleIn .2s ease;
+  }
+  #model-menu[hidden]{ display:none; }
+  #model-menu .mm-item{
+    display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:9px;
+    cursor:pointer; font-size:13px; color:var(--ink); border:none;
+    background:transparent; text-align:left; width:100%; transition:background .14s;
+  }
+  #model-menu .mm-item:hover{ background:var(--brand-soft); }
+  #model-menu .mm-item.current{ background:var(--brand-soft); color:var(--brand-d); font-weight:700; }
+  #model-menu .mm-mark{ width:14px; flex-shrink:0; color:var(--brand-d); }
 
   /* ---------------- 模型状态 chip（左下） ---------------- */
   #model-info{
@@ -640,6 +660,9 @@
         </div>
       </div>
 
+      <!-- 左下角模型列表弹层 -->
+      <div id="model-menu" hidden></div>
+
       <!-- 聊天气泡 -->
       <div id="chat-area"></div>
 
@@ -811,6 +834,7 @@
       tools_title: "网页可用工具 · 与桌面版同名对齐",
       hold_to_talk: "按住说话",
       listening: "正在听…",
+      not_ready: "模型还在加载中，马上就好～",
       chat_placeholder: "和桌宠聊天：搜索、记忆、提醒…",
       send: "发送",
       welcome_bubble: "你好呀，我是你的桌宠～可以让我查时间、天气、搜索、设提醒、记事情，也可以直接和我聊天！",
@@ -979,6 +1003,7 @@
       tools_title: "Web tools · name-aligned with desktop",
       hold_to_talk: "Hold to talk",
       listening: "Listening…",
+      not_ready: "Model is still loading, one sec~",
       chat_placeholder: "Chat with your pet: search, remember, remind…",
       send: "Send",
       welcome_bubble: "Hi, I'm your desktop pet! Ask me for time, weather, search, reminders or memory — or just chat with me.",

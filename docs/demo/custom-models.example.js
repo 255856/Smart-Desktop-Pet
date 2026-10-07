@@ -28,5 +28,16 @@ window.CUSTOM_MODELS = [
   //   name: "超频猫猫",              // 下拉框 / 模型卡显示名
   //   badge: "Private",             // 角标（如 Private / Custom）
   //   path: "custom_models/超频猫猫/超频猫猫.model3.json",
+  //
+  //   // 可选：VTS 导出的模型常不在 model3.json 登记动作/表情（发型、手势、配件等
+  //   // 都是 exp3 表情）。登记后页面加载时自动注入，下拉框即可播放。
+  //   // file 路径相对模型目录；gh-pages 部署时 Actions 会自动扫描生成，无需手写。
+  //   motions: [
+  //     { group: "Idle",   file: "idle.motion3.json" },
+  //     { group: "Motion", file: "motions/Zzz.motion3.json" },
+  //   ],
+  //   expressions: [
+  //     { name: "发型 丸子头", file: "Expressions/发型 丸子头.exp3.json" },
+  //   ],
   // },
 ];
