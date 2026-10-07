@@ -74,6 +74,15 @@ jobs:
             echo "::warning::未在 gh-pages 分支找到 miara_en，线上将缺少 Miara 模型"
           fi
 
+          # 私有自定义模型（如超频猫猫，仅存在于 gh-pages 分支，master 永远没有）
+          if [ -d pages/custom_models ]; then
+            echo "Including custom models from gh-pages branch"
+            cp -r pages/custom_models _demo/
+          fi
+
+          # 自动生成 custom-models.js 注册表（扫描 gh-pages 上各模型目录的 *.model3.json）
+          python3 main/.github/scripts/gen_custom_models.py pages/custom_models _demo/custom-models.js
+
           # 功能对齐报告（附加静态页）
           cp main/docs/demo/FEATURE_ALIGNMENT.html _demo/ 2>/dev/null || true
 

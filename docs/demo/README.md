@@ -48,11 +48,13 @@
 
 | 文件 | 作用 |
 |---|---|
-| `index.html` | 演示页入口（UI + 控件 + CDN 加载运行时） |
-| `live2d-demo.js` | 渲染核心（剥离 QWebChannel 的独立版本） |
+| `index.html` | 演示页入口（UI + 控件 + i18n + CDN 加载运行时） |
+| `live2d-demo.js` | 渲染核心 + Agent 工具调用（剥离 QWebChannel 的独立版本） |
 | `serve.py` | 零依赖本地服务器（stdlib only，带 CORS / 目录浏览 / 模型挂载） |
+| `vendor/` | pixi / Cubism Core / pixi-live2d-display 本地副本（离线可用） |
+| `hiyori_zh-Hans/` `miara_en/` | Live2D 官方授权演示模型（仅限个人演示，禁止二次传播） |
 
-> **不存在的**：任何 `*.model3.json` / `*.moc3` / 贴图 —— 用户自备。
+> **不存在的**：其他任何 `*.model3.json` / `*.moc3` / 贴图 —— 用户自备。
 
 ---
 
@@ -88,9 +90,21 @@ python docs/demo/serve.py --model-dir "E:\live2d-models\Hiyori"
 # 改端口 + 改静态根 + 多个 --model-dir 不支持但可建符号链接
 python docs/demo/serve.py --port 9000 --root ./docs/demo
 
+# 挂载私有自定义模型（免拷贝，配合 custom-models.js 出现在模型下拉框）
+python docs/demo/serve.py --port 8765 --root . --custom-dir "assets/live2d/超频猫猫完整版"
+
 # 后台运行（Windows PowerShell）
 Start-Process python -ArgumentList "docs/demo/serve.py","--model-dir","E:\live2d-models" -WindowStyle Hidden
 ```
+
+### 私有自定义模型（如「超频猫猫」）
+
+想让自己的模型出现在 demo 下拉框、且部署到 GitHub Pages 后**别人能看到但 git clone 拿不到**：
+
+1. 复制 `custom-models.example.js` 为 `custom-models.js`（已 gitignore），登记模型；
+2. 本地：`--custom-dir` 挂载，或把模型目录拷进 `docs/demo/custom_models/`；
+3. 线上：模型放进 **gh-pages 分支**的 `custom_models/`，Actions 会自动注入并生成注册表
+   —— master 分支永远没有模型文件，完整步骤与安全边界见 [DEPLOY.md](DEPLOY.md)。
 
 ---
 
@@ -98,14 +112,33 @@ Start-Process python -ArgumentList "docs/demo/serve.py","--model-dir","E:\live2d
 
 | 控件 | 功能 |
 |---|---|
-| **Model URL** 输入框 | 粘贴模型 `.model3.json` 的完整 URL 后回车加载 |
-| **拖拽** `.model3.json` 到页面 | 直接内存加载（File API，无 CORS 问题） |
-| **动作组**下拉 + **▶ 动作** | 随机播放所选动作组的动作 |
-| **表情**下拉 + **😊 表情** | 切换模型内置表情 |
-| **💬 测试口型** | 模拟说话时的嘴型同步（demo 用） |
-| **↺ 重置** | 重新加载当前模型 |
-| **鼠标移动** | 桌面宠物的视线跟随 |
-| **鼠标按下** | 桌面宠物的拖拽头部位 |
+| **快捷指令 chips** | 聊天框上方一排常用指令（时间 / 提醒 / 记忆 / 天气 / 搜索 / 打开网站），点击即发送 |
+| **聊天输入框** | 自然语言对话：LLM Function Calling 自动选工具，无 key 时正则意图 + mock 回复 |
+| **按住说话 🎤** | 浏览器 SpeechRecognition 语音输入 |
+| **拖拽 `.model3.json` 链接** | 拖入 http(s) 模型链接直接加载（本地文件受浏览器沙箱限制，会给出提示） |
+| **模型 URL 输入框** | 功能面板「模型」组，粘贴 `https://…/xxx.model3.json` 加载 |
+| **动作 / 表情下拉 + 播放** | 播放所选动作组 / 表情 |
+| **💬 测试口型** | 模拟说话嘴型同步 |
+| **自动朗读 / 主动搭话开关** | 偏好设置，localStorage 持久化 |
+| **查看记忆 / 遗忘 / 提醒列表** | 每条记忆与提醒支持 ✕ 单独删除 |
+| **清空对话 / 导出对话** | 聊天历史管理（导出为 .txt） |
+| **工具清单** | 查看网页版 18 个与桌面版同名对齐的工具 |
+| **鼠标移动 / 点击模型** | 视线跟随；点击摸头 → 爱心特效 + 亲密度 +1 |
+| **↺ 重置 / 切换模型** | 内置 Hiyori Pro/Free、Miara Pro 循环切换 |
+
+## 🤖 Agent 工具对齐 / Tool Alignment
+
+网页 Demo 注册了 **18 个与桌面版 `app/engine/tools/` 同名**的工具（浏览器沙箱内可用的子集），
+配置 LLM Key 后由模型通过 **Function Calling 自主多轮调用**（ReAct：调用 → 观察 → 总结），
+全流程可在调试面板 **Agent Trace** 中观察：
+
+`get_current_time` `date_info` `calculate` `convert_units` `get_weather`（open-meteo，无需 key）
+`web_search`（Tavily，无 key 用 mock）`remember_fact` `recall_memory` `forget_memory`
+`add_reminder` `list_reminders` `delete_reminder` `open_website` `clipboard_copy`
+`send_notification` `change_pet_emotion` `play_animation` `get_pet_status`
+
+> 桌面版专属工具（打开本地应用、文件读写、截图、系统控制等）受浏览器安全沙箱限制，不在网页版范围内。
+> 服务商不支持 `tools` 参数时自动降级为普通流式对话。
 
 ---
 
@@ -156,8 +189,8 @@ GitHub Pages 设置：`Settings → Pages → Branch: gh-pages / root`。
 - **pixi-live2d-display cubism4** — `cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js`
 - **Live2DCubismCore** — `cubism.live2d.com/sdk-web/bin/CubismSdkForWeb-4-r.1/Core/live2dcubismcore.min.js`
 
-> 如需**完全离线**，把 `app/animation/cubism-sdk/` 三个 JS 拷到 `docs/demo/vendor/`，
-> 然后改 `index.html` 的 `<script src>` 为相对路径。
+> `vendor/` 已内置 pixi / Cubism Core / pixi-live2d-display 三个运行时的本地副本，
+> **离线也能运行**；加载顺序为 vendor → jsdelivr → unpkg 三级 fallback。
 
 ### 浏览器兼容
 

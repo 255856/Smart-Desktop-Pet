@@ -66,12 +66,15 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
       - 注入 CORS 头（方便 GitHub Pages 托管页面拉本机模型）
       - 默认根指向 --root
       - /models/<path> 重写到 --model-dir/<path>
+      - 任意前缀下的 /custom_models/<path> 重写到 --custom-dir/<path>
+        （本地私有模型挂载点，与 gh-pages 分支上的 custom_models/ 同构）
       - 根路径自动跳到 /index.html
       - 目录请求返回简易 HTML 索引（方便复制 *.model3.json URL）
     """
 
     server_root: Path = Path("docs/demo").resolve()
     model_dir: Path | None = None
+    custom_dir: Path | None = None
 
     # ---------- CORS ----------
     def end_headers(self):
@@ -88,7 +91,7 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
 
     # ---------- 路由 ----------
     def translate_path(self, path: str) -> str:
-        """默认走 --root；/models/* 改走 --model-dir。"""
+        """默认走 --root；/models/* 改走 --model-dir；*/custom_models/* 改走 --custom-dir。"""
         # 剥离 query string / fragment，避免 index.html?lang=en 被当成文件名
         path = path.split("?", 1)[0].split("#", 1)[0]
         if self.model_dir and (path == "/models" or path.startswith("/models/")):
@@ -100,6 +103,21 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             except ValueError:
                 return str(self.model_dir)  # 越界 → 回退到 model_dir 本身
             return str(target)
+        # 私有模型挂载：URL 中任意位置的 /custom_models/ 后缀都映射到 --custom-dir
+        # （兼容 --root . 时的 /docs/demo/custom_models/x 与 --root docs/demo 时的 /custom_models/x）
+        if self.custom_dir:
+            marker = "/custom_models"
+            idx = path.find(marker)
+            if idx != -1:
+                # URL 是百分号编码的，中文文件名必须先解码
+                rel = urllib.parse.unquote(path[idx + len(marker):]).lstrip("/")
+                target = (self.custom_dir / rel).resolve()
+                # 安全：必须在 custom_dir 下
+                try:
+                    target.relative_to(self.custom_dir.resolve())
+                except ValueError:
+                    return str(self.custom_dir)  # 越界 → 回退到 custom_dir 本身
+                return str(target)
         return str(safe_resolve(self.server_root, path) or self.server_root)
 
     def do_GET(self):
@@ -246,6 +264,9 @@ def parse_args():
                    help=f"静态根目录（默认 {here}）")
     p.add_argument("--model-dir", type=Path, default=None,
                    help="可选：你的 Live2D 模型目录，浏览器可通过 /models/<file> 访问")
+    p.add_argument("--custom-dir", type=Path, default=None,
+                   help="可选：私有自定义模型目录，挂载到 /custom_models/* "
+                        "（与 custom-models.js 里的相对路径 custom_models/… 对应）")
     return p.parse_args()
 
 
@@ -257,6 +278,7 @@ def main() -> int:
 
     DemoHandler.server_root = root
     DemoHandler.model_dir = args.model_dir.resolve() if args.model_dir else None
+    DemoHandler.custom_dir = args.custom_dir.resolve() if args.custom_dir else None
 
     print(f"🐳 Desktop Pet · Live2D Demo")
     print(f"   http://{args.host}:{args.port}/")
@@ -265,6 +287,8 @@ def main() -> int:
         print(f"   model dir   : {DemoHandler.model_dir}   （挂载到 /models/*）")
     else:
         print(f"   model dir   : （未设置）用 --model-dir 指向你的模型目录")
+    if DemoHandler.custom_dir:
+        print(f"   custom dir  : {DemoHandler.custom_dir}   （挂载到 /custom_models/*）")
     print(f"   Ctrl+C 停止")
     print()
 

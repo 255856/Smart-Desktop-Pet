@@ -120,17 +120,74 @@ https://255856.github.io/Smart-Desktop-Pet/
 
 ## ❓ 关于"别人怎么看模型"
 
-**关键事实**：Live2D 模型有版权，**不能托管在 GitHub Pages**（GitHub ToS 也禁止）。
-
-所以部署后的体验是：
-
 | 场景 | 用户怎么做 |
 |---|---|
-| 体验完整功能 | 自己起 `serve.py --model-dir <自己的模型目录>`，在 URL 框填本地地址 |
-| 只想看看渲染效果 | URL 框留空，看页面 UI 和控件（无模型时画布为空，但 UI 完整） |
-| 录演示视频 | 用 `serve.py` 本地加载模型 + 屏幕录制 |
+| 看你部署的私有模型 | 直接打开 Pages demo，下拉框切换（模型从 gh-pages 分支提供，见上文「私有模型上 Pages」） |
+| 看内置官方样例 | 打开 Pages demo，Hiyori / Miara 零配置自动加载（模型同样来自 gh-pages 分支） |
+| 用自己的模型完整体验 | 本地 `serve.py --custom-dir <模型目录>` 或 `--model-dir` 挂载 |
+| 只想看看渲染效果 | URL 框留空，看页面 UI 和控件 |
 
-**官方可加载的样例模型**：Live2D 官方 [Hiyori](https://www.live2d.com/en/sample/sample01/) 是允许个人非商用加载的；用户可以本地下载后用 `serve.py --model-dir` 挂载。
+**版权提醒**：模型文件受上游创作者版权约束。官方 Hiyori/Miara 样例仅限个人非商用演示；
+你自己的私有模型请确认拥有对外展示权后再放上 gh-pages（技术边界见上文安全边界表）。
+
+---
+
+## 🔐 私有模型上 Pages（如「超频猫猫」）
+
+需求：**线上 demo 页能看到自己的私有模型，但别人 `git clone` 仓库拿不到模型文件。**
+
+实现方式与内置 Hiyori / Miara 一致——**模型只放 `gh-pages` 分支，master 永远没有**：
+
+```
+master 分支                     gh-pages 分支                   Pages 线上
+├── docs/demo/index.html        ├── hiyori_zh-Hans/             ├── index.html（master 最新）
+├── docs/demo/live2d-demo.js    ├── miara_en/                   ├── live2d-demo.js（master 最新）
+└── .github/workflows/…         ├── custom_models/              ├── hiyori_zh-Hans/
+    （push 触发部署）            │   └── 超频猫猫/               ├── miara_en/
+                                 └── （模型只在这里）             ├── custom_models/超频猫猫/
+                                                                 └── custom-models.js（自动生成）
+```
+
+部署 Actions（`deploy-demo.yml`）构建时会：master 取页面代码 + gh-pages 取全部模型，
+并扫描 `custom_models/` **自动生成 `custom-models.js` 注册表**（扫描各目录下的
+`*.model3.json`，无需手写）。
+
+### 把私有模型放上 gh-pages（一条命令序列）
+
+```bash
+# 在仓库根目录（模型源：assets/live2d/超频猫猫完整版/超频猫猫）
+git worktree add /tmp/gh-pages gh-pages
+mkdir -p /tmp/gh-pages/custom_models
+cp -r "assets/live2d/超频猫猫完整版/超频猫猫" /tmp/gh-pages/custom_models/
+cd /tmp/gh-pages
+git add custom_models
+git -c user.email="<你的邮箱>" -c user.name="<你的名字>" commit -m "Add private model 超频猫猫"
+git push origin gh-pages
+cd - && git worktree remove /tmp/gh-pages
+```
+
+推送后到 Actions 手动触发一次 `Deploy Live2D Demo to GitHub Pages`
+（或随便 push 一个 `docs/demo/**` 改动），线上即可在下拉框看到「超频猫猫 Private」。
+
+### 本地开发（免拷贝）
+
+```bash
+python docs/demo/serve.py --port 8765 --root . --custom-dir "assets/live2d/超频猫猫完整版"
+```
+
+`--custom-dir` 把本地模型目录挂载到 `/custom_models/*`（与 gh-pages 上的路径结构一致），
+配合 `custom-models.js`（模板见 `custom-models.example.js`，已 gitignore）注册模型即可。
+也可以直接把模型目录拷进 `docs/demo/custom_models/`（同样已 gitignore），无需任何参数。
+
+### ⚠️ 必须知道的安全边界
+
+| 事实 | 说明 |
+|---|---|
+| ✅ `git clone` 拿不到模型 | master 分支零模型文件（`.gitignore` 排除），克隆者只得到代码 + UI |
+| ✅ 普通访客看不到模型文件链接 | 模型在渲染器内部加载，页面不展示下载入口 |
+| ❌ 技术用户可以扒资源 | 浏览器必须下载 `.moc3`/贴图才能渲染，DevTools Network 里都能看到并另存——**任何公开网页都做不到真防下载** |
+| ❌ gh-pages 分支本身是公开的 | 知道分支名的人可以 `git clone -b gh-pages` 拉到模型；介意请改用私有 CDN + 签名 URL |
+| ⚖️ 版权自负 | 只部署你**拥有发布权**的模型；Live2D 官方样例（Hiyori/Miara）仅限个人非商用演示 |
 
 ---
 
@@ -169,13 +226,13 @@ docs/demo/vendor/
 
 ## 📜 部署物清单
 
-`gh-pages` 分支根目录只有 3 个文件，**全部不包含版权内容**：
-
 ```
-gh-pages/
-├── index.html         # 演示页（加载 CDN 运行时）
-├── live2d-demo.js     # 渲染逻辑（纯引擎，无模型）
-└── README.md          # 使用说明
+master 分支（源码，零模型）         gh-pages 分支（模型仓库）         Pages 线上（两者合并）
+docs/demo/index.html               hiyori_zh-Hans/  miara_en/        master 的页面代码
+docs/demo/live2d-demo.js           custom_models/私有模型/          + gh-pages 的全部模型
+docs/demo/vendor/*.js              （git clone master 拿不到）       + 自动生成的 custom-models.js
+docs/demo/custom-models.example.js
 ```
 
-仓库主分支的 `.gitignore` 已显式排除 `assets/live2d/`，模型文件**永远不会被推上去**。
+仓库主分支的 `.gitignore` 已显式排除 `assets/live2d/`、`docs/demo/custom_models/`、
+`docs/demo/custom-models.js`，模型文件**永远不会进 master**。

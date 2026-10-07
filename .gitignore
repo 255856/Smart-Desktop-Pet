@@ -117,3 +117,6 @@ voice/**
 GPT-SoVITS-v2pro-20250604-nvidia50/**
 !GPT-SoVITS-v2pro-20250604-nvidia50/
 !GPT-SoVITS-v2pro-20250604-nvidia50/.gitkeep
+# demo 私有自定义模型（如超频猫猫，仅本地 --custom-dir 挂载 / gh-pages 分支，不入 master）
+docs/demo/custom_models/
+docs/demo/custom-models.js
