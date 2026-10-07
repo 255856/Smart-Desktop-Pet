@@ -1,4 +1,4 @@
-# 🐳 桌面宠物 · Smart Desktop Pet
+# 桌面宠物 · Smart Desktop Pet
 
 > **一个真正能"养"的桌面 AI 宠物** —— 不只是会动、会说话，而是会**记住你、主动搭话、调用工具、跨多轮思考**，还能**陪你下五子棋、下中国象棋、玩狼人杀**的数字伙伴。
 >
@@ -11,7 +11,7 @@
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
-[中文](#-5-分钟跑起来) · [English](#-5-min-quick-start) · [**Live2D 在线 Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
+[中文](#5-分钟跑起来) · [English](#5-min-quick-start) · [**Live2D 在线 Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
 
 ---
 
@@ -107,7 +107,7 @@ python -m app.web.dashboard
 
 可视化每一次 Agent 决策的工具调用链。
 
-### ✅ 验证安装（独立步骤，确认环境 OK）
+### 验证安装（独立步骤，确认环境 OK）
 
 ```bash
 python -m pytest tests/ -q              # 674 个测试通过，6 个 skip（约 48s）
@@ -256,7 +256,7 @@ python -m app.web.dashboard
 # → http://127.0.0.1:8766
 ```
 
-### ✅ Verify
+### Verify
 
 ```bash
 python -m pytest tests/ -q                 # 464 passed, 6 skipped
