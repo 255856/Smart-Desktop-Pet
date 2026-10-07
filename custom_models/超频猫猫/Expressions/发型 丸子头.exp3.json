@@ -1,0 +1,35 @@
+{
+    "Type": "Live2D Expression",
+    "Parameters": [
+        {
+            "Id": "Key36",
+            "Value": 1.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key37",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key38",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key39",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key40",
+            "Value": 1.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key41",
+            "Value": 0.0,
+            "Blend": "Add"
+        }
+    ]
+}

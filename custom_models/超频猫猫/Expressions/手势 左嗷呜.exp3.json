@@ -1,0 +1,50 @@
+{
+    "Type": "Live2D Expression",
+    "Parameters": [
+        {
+            "Id": "Key23",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key24",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key25",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key26",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key27",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key29",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key31",
+            "Value": 1.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key32",
+            "Value": 0.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "Key35",
+            "Value": 0.0,
+            "Blend": "Add"
+        }
+    ]
+}
