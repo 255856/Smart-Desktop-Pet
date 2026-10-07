@@ -86,6 +86,7 @@ class Live2DDemo {
     this._mouthTimer = null;
     this._simulating = false;
     this._emotionListeners = [];  // 监听 emotion 变化
+    this._loadEpoch = 0;          // 加载代数：切换时递增，作废在途的旧加载
     this.fitFactor = 0.7;  // 留 30% 边距（桌面默认 0.94）
   }
   onEmotion(fn) { this._emotionListeners.push(fn); }
@@ -137,6 +138,7 @@ class Live2DDemo {
     // 支持内置官方样例、custom-models.js 私有模型、以及功能面板输入的外部 URL
 
     this.shutdown();
+    const epoch = this._loadEpoch;   // 本轮加载代数；await 期间若再切换则作废
     this.ensureApp();
     if (PIXI.live2d && PIXI.live2d.Live2DModel && PIXI.live2d.Live2DModel.registerTicker && PIXI.Ticker) {
       PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
@@ -178,6 +180,12 @@ class Live2DDemo {
         }
       }
       const model = await PIXI.live2d.Live2DModel.from(source, { autoHitTest: false, autoFocus: false });
+      // 加载期间用户又切换了模型：本轮结果作废，直接销毁，避免新旧模型重叠
+      if (epoch !== this._loadEpoch) {
+        try { model.destroy({ children: true, texture: true, baseTexture: true }); } catch (e) {}
+        log("已取消过期的模型加载");
+        return null;
+      }
       this.model = model;
       this.app.stage.addChild(model);
       // mask 兜底
@@ -256,6 +264,7 @@ class Live2DDemo {
       this._emitEmotion("neutral");
       return { expressions: exprs, motions };
     } catch (err) {
+      if (epoch !== this._loadEpoch) return null;   // 过期加载的失败不打扰新模型
       hideLoader();
       setStatus(window.t("status_load_failed"), "#ff7675");
       const msg = err.message || String(err);
@@ -412,6 +421,7 @@ class Live2DDemo {
     requestAnimationFrame(tick);
   }
   shutdown() {
+    this._loadEpoch++;   // 作废所有在途加载（await 中的 from 完成后会自毁）
     this._talking = false;
     if (this._mouthTimer) { clearInterval(this._mouthTimer); this._mouthTimer = null; }
     if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} this._fitTicker = null; }
@@ -2275,13 +2285,16 @@ function syncModelSelect(id) {
 }
 
 // 加载指定内置/自定义模型（id 缺省取上次选择 / 默认第一个）
+let builtinLoadSeq = 0;   // 切换请求序号：过期请求的失败不再触发回退加载
 async function loadBuiltinModel(id) {
+  const seq = ++builtinLoadSeq;
   const model = ALL_MODELS.find(m => m.id === id) || ALL_MODELS.find(m => m.id === currentModelId());
   showLoader(window.t("loading_builtin"));
   setStatus(window.t("status_load_model", { name: model.name }), "#ffce5c");
   try {
     // 用 GET（不是 HEAD）—— GitHub Pages 对 HEAD 支持不一致
     const r = await fetch(model.path, { method: "GET" });
+    if (seq !== builtinLoadSeq) return;   // 已有更新的切换请求
     if (!r.ok) {
       hideLoader();
       // 私有自定义模型缺失（例如别人 clone 了 master / gh-pages 未放模型）→ 回退内置样例
@@ -2296,10 +2309,12 @@ async function loadBuiltinModel(id) {
     }
     log(`加载模型：${model.name} ${model.badge}（${model.path}）`, "ok");
     await window.demo.loadModel(resolveModelUrl(model.path), model);
+    if (seq !== builtinLoadSeq) return;
     localStorage.setItem(MODEL_STORAGE_KEY, model.id);
     updateModelCard(model);
     syncModelSelect(model.id);
   } catch (e) {
+    if (seq !== builtinLoadSeq) return;
     hideLoader();
     if (model.custom) {
       log(`自定义模型 ${model.name} 加载失败：${e.message || e}，回退内置模型`, "err");
