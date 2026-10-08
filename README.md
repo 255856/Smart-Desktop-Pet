@@ -11,256 +11,300 @@
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
-[中文](#5-分钟跑起来) · [English](#5-min-quick-start) · [**Live2D 在线 Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
+[中文](#5-分钟跑起来) · [English](#5-min-quick-start) · [**Live2D 在线 Demo / Live2D Demo**](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
 
 ---
 
-## 它能做什么？
+## 它能做什么？ / What can it do?
 
-- **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 max_turns → 工具结果直接总结），可选 **LangChain** 后端
+- **真智能 / Real intelligence**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 max_turns → 工具结果直接总结），可选 **LangChain** 后端
+  / Hand-rolled **ReAct Agent** loop + **3-layer anti-hallucination** (force tool calls → keep going up to `max_turns` → summarize tool outputs) and an optional **LangChain** backend.
+
 - **52 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
-- **真记忆**：`TF-IDF` / `sentence-transformers` 可插拔；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
+  / **52 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts...
+
+- **真记忆**：可插拔 `TF-IDF` / `sentence-transformers` 检索；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
+  / **Real memory**: pluggable `TF-IDF` / `sentence-transformers` retrieval; importance scoring + time decay + conflict detection + long-term evolution.
+
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
+  / **Real voice**: **3 TTS engines** (edge-tts / GPT-SoVITS local cloning / MiniMax cloud) + browser SpeechRecognition **ASR hold-to-talk** + mouth-sync.
+
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
+  / **Real look**: **dual renderer** (Live2D Cubism 4 + pixi-live2d-display / PNG frame animation), graceful fallback when the model is missing.
+
 - **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（**走法生成 / 将军 / 将死 / 困毙 / 飞将全部走 [cchess](https://pypi.org/project/cchess/) 库**，MIT、PyPI 1.20+，我们自己只写 alpha-beta 搜索 + 估值；3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
+  / **Real games**: **Gomoku** (3 AI difficulty levels) + **Chinese Chess** (move generation / check / checkmate / stalemate / flying general all from the **[cchess](https://pypi.org/project/cchess/)** library, MIT, PyPI 1.20+**; we only write the alpha-beta search + evaluation; 3 AI difficulty levels) + **9-player Werewolf** (you + 8 independent NPC agents + the pet as moderator, fully offline without any API key) + daily check-in + feeding + 5-stat nurturing.
+
 - **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
+  / **Real extensibility**: built-in **MCP stdio JSON-RPC** + filesystem server, attach any MCP-compatible server.
+
 - **可观测**：所有 LLM/工具调用落 SQLite，**FastAPI Dashboard** (`localhost:8766`) 可视化 Trace、回放、调参
+  / **Observable**: all LLM / tool calls land in SQLite; **FastAPI Dashboard** (`localhost:8766`) visualizes Trace, replay, and runtime parameters.
 
 ---
 
-## 5 分钟跑起来
+## 5 分钟跑起来 / 5-Min Quick Start
 
-> **目标**：克隆 → 安装 → 配置 → 启动桌宠 → 看 UI
-> **依赖**：Python 3.10+、Windows 4GB 内存
-
-### 第 1 步：克隆仓库
+### 安装前置（适用于 macOS / Linux）/ Prerequisites (macOS / Linux)
 
 ```bash
-git clone https://github.com/255856/Smart-Desktop-Pet.git
-cd Smart-Desktop-Pet
+# Python 3.10+
+python3 --version
+pip3 install -r requirements.txt
+
+# 可选：Live2D 渲染 + Chromium 内核（建议 250MB+）
+pip3 install PyQtWebEngine
+
+# 启动 / Run
+python3 main.py
 ```
 
-### 第 2 步：安装 Python 依赖
+### 安装前置（适用于 Windows）/ Prerequisites (Windows)
 
-```bash
-# 推荐用虚拟环境
-python -m venv .venv
-source .venv/bin/activate        # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-
+```powershell
+# Python 3.10+ (勾选 Add Python to PATH)
+python --version
 pip install -r requirements.txt
-```
 
-> **依赖说明**：`requirements.txt` 已分四层标注（必需 / 建议 / 可选 / 开发）。
-> 基础栈（PyQt5 + httpx + edge-tts + pygame + Pillow + PyYAML）即可跑通桌宠本体。
-> - 想要 **Live2D 渲染**（不装则自动降级为 PNG 帧动画）：`pip install PyQtWebEngine`
-> - 想要 **按住说话（ASR）**：`pip install faster-whisper sounddevice`，并在 `config.yaml` 开 `asr.enabled`
-> - **LangChain 后端** 仅在 `brain.backend: standard` 时才用到（默认 `lightweight` 手写 ReAct）
-
-### 第 3 步：配置 LLM API Key
-
-桌宠需要 LLM 才能"思考"。两种方式任选：
-
-**方式 A：使用 OpenAI / DeepSeek / 通义等云端 API**（推荐起步）
-
-```bash
-cp config.example.yaml config.yaml
-```
-
-编辑 `config.yaml`：
-```yaml
-llm:
-  base_url: https://api.openai.com/v1        # 或 https://api.deepseek.com/v1
-  api_key: sk-xxxxxxx                       # 你的 API Key
-  model: gpt-4o-mini                        # 或 deepseek-chat / qwen-turbo
-```
-
-**方式 B：本地 Ollama**（零成本、零配置）
-
-```bash
-# 1. 安装 Ollama（https://ollama.com）
-# 2. 拉模型
-ollama pull qwen2.5:7b
-# 3. config.yaml 改：
-llm:
-  base_url: http://127.0.0.1:11434/v1
-  api_key: ollama
-  model: qwen2.5:7b
-```
-
-### 第 4 步：启动桌宠
-
-```bash
-python main.py
-```
-
-**首次启动会引导你**：
-1. 选择 Live2D 模型（可暂时选 sprite 跳过）
-2. 选择 TTS 引擎（默认 edge-tts，无需 Key）
-3. 桌宠出现在桌面右下角，**右键托盘图标**可打开聊天窗、设置、Agent Trace 等
-
-### 第 5 步：（可选）启动 Agent Trace Dashboard
-
-```bash
-python -m app.web.dashboard
-# 浏览器打开 http://127.0.0.1:8766
-```
-
-可视化每一次 Agent 决策的工具调用链。
-
-### 验证安装（独立步骤，确认环境 OK）
-
-```bash
-python -m pytest tests/ -q              # 674 个测试通过，6 个 skip（约 48s）
-python scripts/verify_features.py --no-gui    # 82 项功能冒烟通过
-python docs/demo/serve.py --port 8765  # 浏览器 http://127.0.0.1:8765 看 Live2D Demo
-```
-
-> **Windows PowerShell 注意**：`verify_features.py` 把报告写到 `data\feature_check.txt`，
-> PowerShell 的 `Get-Content` 默认按 ANSI 编码读，中文会乱码。
-> 用编辑器直接打开看，或：
-> ```powershell
-> Get-Content -Path data\feature_check.txt -Encoding UTF8
-> ```
-
----
-
-## 项目结构
-
-```
-Smart-Desktop-Pet/
-├── main.py                  # 启动壳（import app.main）
-├── config.example.yaml      # 配置示例（复制为 config.yaml）
-├── requirements.txt         # Python 依赖
-├── pytest.ini
-│
-├── app/                     # 92 个源文件（12 个子模块）
-│   ├── main.py              # 真正入口（横幅 + Ollama 探测 + 装配）
-│   ├── core/                # config / settings / save / tray / qt_compat
-│   ├── brain/               # agent / llm_client / memory / proactive / trace
-│   │   └── _legacy/         # Plan-Execute-Reflect 路线遗产（tests 仍引用）
-│   ├── animation/           # Live2D + sprite 双渲染
-│   │   └── cubism-sdk/      # 桌面 SDK（QWebEngineView 内嵌用）
-│   ├── voice/               # TTS 3 引擎 + ASR + 角色情绪
-│   ├── engine/              # state / tools(32) / chat_store / reminder / screenshot
-│   │   └── tools/           # 52 个工具按 _time _reminder _memory _pet _math _file _system _search _shortcuts _audio _weather _timer _power _filesearch _webfetch _ocr _runner _tts_mute 分组
-│   ├── games/               # gomoku + xiangqi + werewolf + werewolf_agents + director
-│   ├── ui/                  # 桌宠本体 + 聊天窗 + 设置 + 6 子游戏窗口 + UI 控制器
-│   ├── mcp/                 # MCP stdio JSON-RPC 协议 + filesystem server
-│   ├── agents/              # Sub-agent 抽象基类（LifeAgent / ResearchAgent / CodeAgent / Orchestrator）
-│   ├── web/                 # FastAPI Dashboard（Agent Trace）
-│   └── eval/                # Eval 框架（cases.py）
-│
-├── assets/                  # 应用图标 + 投喂素材 + Live2D profile（live2d 模型 gitignore 不入库）
-├── characters/              # 角色 YAML（jingyuniang.yaml 是示例；克隆后直接可用）
-├── docs/                    # 详细文档（10 篇 1000+ 行）
-├── data/                    # 运行时数据（memory / reminders / traces.db 等，gitignore）
-├── scripts/                 # run.py / verify_features.py（513 行验证脚本）
-├── tests/                   # 45 个测试文件，680 个用例（git tracked）
-├── voice/                   # GPT-SoVITS 训练音频（gitignore，仅 .gitkeep）
-└── GPT-SoVITS-v2pro-*/      # 整合包（gitignore，仅 .gitkeep）
-```
-
----
-
-## 文档导航
-
-| 文档 | 看什么 |
-|---|---|
-| **[Live2D 在线 Demo](https://255856.github.io/Smart-Desktop-Pet/)** | 浏览器直接看 Hiyori 真实渲染（含 TTS/ASR/主动搭话/Trace） |
-| [docs/quickstart.md](docs/quickstart.md) | 5 分钟极简版（跳过 README 的炫技部分） |
-| [docs/architecture.md](docs/architecture.md) | 启动时序 + Live2D 渲染子图 + Agent 流程图 |
-| [docs/config-reference.md](docs/config-reference.md) | `config.yaml` 全部字段（默认/范围/说明） |
-| [docs/tools-reference.md](docs/tools-reference.md) | 52 个工具完整说明（触发方式 / 沙箱 / host 校验）+ 如何加新工具 |
-| [docs/tts-integration.md](docs/tts-integration.md) | edge / gptsovits / minimax 三引擎 + 自愈逻辑 |
-| [docs/live2d-integration.md](docs/live2d-integration.md) | `.model3.json` + profile YAML + cubism-sdk 来源 + fallback 触发 |
-| [docs/emotion-system.md](docs/emotion-system.md) | 11 个 Emotion 枚举 + 标签解析 + 关键词兜底 |
-| [docs/dev-testing.md](docs/dev-testing.md) | pytest 跑法 + verify_features 解读 + CI 接入 |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | FAQ 展开 |
-| [docs/demo/](docs/demo/README.md) | 纯静态 Demo 本地预览 + 部署到 GitHub Pages |
-| [docs/资源下载说明.md](docs/资源下载说明.md) | voice / sprites / GPT-SoVITS / Live2D 模型 下载 |
-
----
-
-## FAQ
-
-- **桌宠启动后看不到？** 看右下角系统托盘，单击显隐，或右键菜单 → 显示桌宠
-- **聊天窗闪退？** 看 `crash.log` 末尾错误；删 `data/chat_history.json` 重试
-- **LLM 报错？** 检查 `config.yaml` 的 `llm.api_key` / `base_url`；可切 Ollama（`http://127.0.0.1:11434/v1`）
-- **怎么玩五子棋 / 象棋 / 狼人杀？** 桌宠右键菜单 → "小游戏" → 进入；五子棋 / 象棋选难度获胜得金币，狼人杀由桌宠主持、其余 8 位玩家由 AI 扮演
-- **切换 Live2D？** `config.yaml` → `pet.renderer: live2d` + `pet.live2d.model_dir`；不可用自动 fallback sprite
-- **切换 TTS？** `config.yaml` → `character.tts_engine: edge | gptsovits | minimax`
-- **GPT-SoVITS 启动失败？** 看 `data/tts_api.log`；确认 `voice/<角色>/` 有参考音频
-- **想加自己的工具？** 参考 [docs/tools-reference.md](docs/tools-reference.md) 末尾"添加工具（开发者指南）"
-- **想加自己的角色？** 复制 `characters/jingyuniang.yaml`，改 `system_prompt` / `tts_engine` / `live2d_model_dir`
-
----
-
-## License
-
-**MIT** — 代码部分。
-
-版权资源（**Live2D 官方模型**、**GPT-SoVITS 整合包**、**参考音频**）受上游版权约束，**不随仓库分发**。仅在 `assets/live2d_profiles/`、`voice/`、`GPT-SoVITS-*/` 留 `.gitkeep` 骨架；纯静态 Demo 所用的官方样例模型（Hiyori / Miara）只部署在 **gh-pages 分支**。
-
----
-
-## 贡献
-
-PR 欢迎！请先读：
-- [docs/dev-testing.md](docs/dev-testing.md) — 测试约定
-- [docs/architecture.md](docs/architecture.md) — 模块边界
-- `.gitignore` — **不能**提交的内容（版权资源 / 运行时数据 / 计划文档）
-
----
-
-# 5-Min Quick Start
-
-> **Goal**: clone → install → configure → launch → see the pet
-> **Deps**: Python 3.10+, Windows/macOS/Linux, 4GB RAM
-
-### 1. Clone
-
-```bash
-git clone https://github.com/255856/Smart-Desktop-Pet.git
-cd Smart-Desktop-Pet
-```
-
-### 2. Install
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# 可选：Live2D 渲染（不装自动降级为 PNG 帧动画）
+# 可选：Live2D 渲染 + Chromium 内核（建议 250MB+）
 pip install PyQtWebEngine
-# 可选：按住说话 ASR
-pip install faster-whisper sounddevice
-```
 
-### 3. Configure LLM
-
-```bash
-cp config.example.yaml config.yaml
-# Edit config.yaml — set llm.api_key (or use Ollama locally)
-```
-
-### 4. Run
-
-```bash
+# 启动 / Run
 python main.py
-# → pet appears in the system tray; right-click for chat/settings/games
 ```
 
-### 5. (Optional) Agent Trace
+### 第一次打开会怎样？ / What happens on first launch?
+
+1. **默认自动开启内置模型 Hiyori**（Live2D 官方样例，零配置）
+   / The default model is the Live2D official sample **Hiyori**, which works out of the box.
+2. **桌宠主动打招呼**：检测当前时间段说「早上好 / 中午好 / 晚上好」
+   / The pet greets you based on the time of day ("Good morning / afternoon / evening").
+3. **任意键说话 / 按住说话键 ASR** → 桌宠回复 + 异步嘴型同步
+   / Type to chat / hold-to-talk for ASR → the pet replies with mouth-sync.
+4. **无 API key**？桌宠用 mock 回复兜底（功能演示完整，但不能调真实 Tavily 搜索 / 真 LLM）
+   / **No API key**? The pet falls back to mock replies (full UI demo, but no real Tavily search / real LLM).
+5. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型
+   / **Right-click the model → "Settings"** to configure LLM / Tavily keys.
+
+### 试用在线 Demo / Try the online demo
+
+任何浏览器直接打开（不需要任何运行时数据 / 零依赖）：
+Open it in any browser (no runtime required / zero dependencies):
+
+> **https://255856.github.io/Smart-Desktop-Pet/**
+
+> 在线 Demo 来自 gh-pages 分支。Live2D 模型版权属原作者——Demo 内置官方授权样例，**用户自备**模型可填 URL 加载。
+> The online demo ships from the `gh-pages` branch. Live2D models are copyrighted — the demo bundles officially-licensed samples; load **your own** model by URL.
+
+---
+
+## 它长什么样？ / What does it look like?
+
+### 主屏（Live2D 模型 + 浮动聊天栏 + 拖拽）/ Main screen (Live2D model + floating chat + drag)
+
+![主屏](docs/_assets/icon.png)
+
+> **左上**：5 项状态 / 亲密度 / 等级 / 提醒计数 / 经验
+> **右上**：动作选择 / 表情选择 / 测试口型 / 隐藏窗口
+> **右键模型**：设置 / 模型切换 / 截图 / 重启 / 喂养 / 触发回忆
+>
+> **Top-left**: 5 stats / affection / level / reminder count / XP.
+> **Top-right**: motion picker / expression picker / mouth-sync test / hide window.
+> **Right-click on the model**: settings / switch model / screenshot / restart / feed / recall memory.
+
+### 设置面板（5 个分组 18+ 选项）/ Settings panel (5 groups, 18+ options)
+
+LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
+
+LLM / TTS / ASR / reminders / memory / shortcuts — all adjustable.
+
+### FastAPI Dashboard (https://localhost:8766)
+
+所有 LLM/工具调用落 SQLite 后在此可视化、可回放、可调参
+All LLM / tool calls land in SQLite and are visualized, replayed, and tunable here.
+
+---
+
+## 它怎么做到的？ / How does it work?
+
+### 1. Agent 工具调用循环（抗幻觉 3 层）/ Agent tool-calling loop (3 anti-hallucination layers)
+
+```
+用户消息 / User message
+    │
+    ▼
+强制先调工具（除非明确知识类）/ Force a tool call first (unless it's pure knowledge)
+    │
+    ├─ 工具失败 → 反思重试，最多 max_turns 轮 / Retry on failure up to max_turns
+    │
+    ├─ 工具成功 → 把结果拼到上下文，继续推进 / Append result and keep going
+    │
+    └─ 达到 max_turns → 汇总所有工具结果成最终回答 / Summarize all results as final answer
+```
+
+**3 层抗幻觉 / 3 anti-hallucination layers**：
+1. **强制调工具**（除非明确知识类）：deflect a tool call first (unless it's pure knowledge).
+2. **跨轮持续到 max_turns**：不放弃多轮顽固成见。keep going up to `max_turns`; never give up after one tool call.
+3. **工具结果直接总结成答案**：strictly summarize tool outputs into the final answer — no free-form fabrication.
+
+### 2. 多 Agent 协同 / Multi-agent coordination
+
+桌宠本体 + Life Agent + Research Agent + Code Agent + Orchestrator：
+Pet + Life + Research + Code agents + Orchestrator:
+
+- **Orchestrator**：把请求拆给子任务。回复职责。 breaks down requests into sub-tasks and arbitrates replies.
+- **Life Agent**：日程 / 提醒 / 习惯 / 主动搭话。schedules, reminders, habits, proactive chat.
+- **Research Agent**：搜资料 / 查资料 / 写报告。searches and writes reports.
+- **Code Agent**：写脚本 / 改文件 / git 提交。writes scripts, edits files, makes git commits.
+
+### 3. 长期记忆（双记忆引擎 + 重要性 + 冲突检测）/ Long-term memory (dual backends + importance + conflict detection)
+
+- **检索 / Retrieval**: `TF-IDF` (offline) / `sentence-transformers` (semantic)
+- **重要度评分 / Importance score** (1–10)
+- **时间衰减 / Time decay**（记忆越久越靠后）
+- **冲突检测 / Conflict detection**（更新与已有记忆冲突时合并）
+
+---
+
+## 与桌宠本体不同 / How it's different from the desktop app
+
+| 维度 / Aspect | 桌面版 / Desktop | 网页 Demo / Web Demo |
+|---|---|---|
+| 渲染 / Renderer | Live2D / PNG / **Voice** | ✓ Live2D |
+| 语音 / Voice | ✅ Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
+| 大脑 / Brain | ✅ ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
+| 工具 / Tools | ✅ 52 个 / 52 | ✓ 18 个 / 18 (browser sandbox) |
+| 记忆 / Memory | ✅ TF-IDF / 向量 / 持久化 | ✓ localStorage |
+| 提醒 / Reminders | ✅ 系统通知 + cron | ✓ Browser Notifications |
+| 游戏 / Games | ✅ 五子棋 / 象棋 / 狼人杀 | ✗ (browser sandbox) |
+| 养成 / Nurturing | ✅ 5 状态 / 喂食 / 签到 | ✗ |
+| 主动搭话 / Proactive | ✅ 时段上下文 / 习惯 | ✓ 时段上下文 / habit |
+| Trace / Trace | ✅ SQLite + Dashboard | ✓ 内嵌 / embedded |
+
+### 怎样补齐？/ How to close the gap?
+
+本仓库内网页 Demo 与桌面版**始终同步更新**——新增的桌面工具可零成本移植到 Web（browser sandbox 限制除外：截图 / 本地文件 / 系统调用 / 应用启动）。
+This repo keeps the Web demo **in sync** with the desktop app — new desktop tools can be ported to the web for free (browser sandbox limits aside: screenshot / local files / system calls / app launching).
+
+---
+
+## 它能怎么玩？ / How can you play with it?
+
+### 基础对话 / Basic chat
+
+- 「今天天气怎么样？」 → 自动搜索 → 真回答。/"How's the weather today?" → auto-search → real answer.
+- 「3 分钟后提醒我喝水」 → 系统通知 + TTS。/"Remind me to drink water in 3 minutes" → system notification + TTS.
+- 「记住我最爱的颜色是蓝色」 → 写入长期记忆 → 下次自动想起。/"Remember my favorite color is blue" → long-term memory.
+
+### 设置项 / Settings
+
+| 类别 / Category | 项目 / Items |
+|---|---|
+| LLM | 模型名 / base URL / API key / system prompt |
+| TTS / TTS | 引擎（edge / GPT-SoVITS / MiniMax）/ 语速 / 音调 / 试听 / Test |
+| ASR / ASR | 语言 / 自动发送 |
+| 提醒 / Reminder | 默认 5/10/30 分钟 |
+| 记忆 / Memory | 重要度阈值 / 冲突合并 / 检索策略 |
+| 快捷指令 / Shortcut | 自定义 / 系统级 |
+
+### 游戏 / Games
+
+- **五子棋**：右键菜单 → 五子棋 → 选难度 → 3 档 AI（你可以 0 难度 5 子棋 → 必赢）
+  / **Gomoku**: right-click → Gomoku → pick difficulty → 3 AI levels (you can pick 0 to always win).
+- **中国象棋**：规则（**走法生成 / 将军 / 将死 / 困毙 / 飞将**）走 [cchess](https://pypi.org/project/cchess/) 库，AI 自己写
+  / **Chinese Chess**: rules (**move generation / check / checkmate / stalemate / flying general**) come from [cchess](https://pypi.org/project/cchess/), AI is hand-rolled.
+- **狼人杀**：9 人（你 + 8 NPC + 桌宠主持），全离线 / 9 players (you + 8 NPCs + the pet as moderator), fully offline.
+
+### MCP / MCP
+
+桌面版内置 **MCP stdio JSON-RPC** + filesystem server：
 
 ```bash
-python -m app.web.dashboard
-# → http://127.0.0.1:8766
+# 例：使用 mcp-server-filesystem 访问桌面 / Example: mcp-server-filesystem
+mcp_servers.yaml:
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/Documents"]
 ```
 
-### Verify
+在设置 → MCP 服务器中启用 → 桌宠即可读写你的 Documents 目录。
+Enable it in Settings → MCP Servers → the pet can now read/write your Documents directory.
+
+---
+
+## 文档 / Documentation
+
+- [Live2D 在线 Demo / Live2D Online Demo](https://255856.github.io/Smart-Desktop-Pet/) — 浏览器即可体验，零依赖
+  / Try it in any browser, zero dependencies.
+- [Live2D Demo 部署说明 / Demo deployment](docs/demo/DEPLOY.md) — 怎么部署到 GitHub Pages + 自定义模型放上 Pages
+  / How to deploy to GitHub Pages + put your custom model on Pages.
+- [Live2D Demo 功能对齐报告 / Feature alignment report](docs/demo/FEATURE_ALIGNMENT.html) — 网页 Demo 与桌面版能力对比表
+  / Capability comparison between web demo and desktop app.
+- [快速开始 / Quick start](docs/quickstart.md)
+- [架构 / Architecture](docs/architecture.md)
+- [Live2D 集成 / Live2D integration](docs/live2d-integration.md)
+- [情绪系统 / Emotion system](docs/emotion-system.md)
+- [TTS 集成 / TTS integration](docs/tts-integration.md)
+- [桌面版工具参考 / Tools reference](docs/tools-reference.md) — 52 个工具详细说明
+  / Detailed description of all 52 tools.
+
+---
+
+## 测试 / Testing
 
 ```bash
-python -m pytest tests/ -q                 # 464 passed, 6 skipped
-python scripts/verify_features.py --no-gui # 82 checks OK
+# 跑全部测试（约 1 分钟）/ Run the full test suite (~1 min)
+pytest tests/ -q --no-header
+
+# 跑特性验证（5 分钟全量，与 TTS / 文件 / 记忆 / 工具交互）
+# / Run the feature-verification suite (5 min full coverage, exercises TTS / files / memory / tool interactions)
+python scripts/verify_features.py
+
+# 跑单个测试 / Run a single test
+pytest tests/test_langchain_agent.py -v
 ```
 
-For details see [`docs/`](docs/) or try the **zero-install [Live2D demo](https://255856.github.io/Smart-Desktop-Pet/)**.
+测试结果：
+- **674 passed** / 6 skipped
+- 验证：82 项功能检查
+  *674 passed / 6 skipped; verification: 82 feature checks.*
+
+CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Windows 专有 API）
+CI runs on Windows runners (Qt / pywin32 / WMI brightness / battery all need Windows APIs).
+
+---
+
+## 贡献 / Contributing
+
+欢迎任何贡献！特别需要：
+Any contribution is welcome! Especially:
+
+- 新工具（web API / 本地应用 / 桌面操作）
+  / New tools (web APIs / local apps / desktop ops).
+- 新游戏（五子棋 / 象棋 AI 调优 / 狼人杀规则扩展）
+  / New games (Gomoku / Xiangqi AI tuning / Werewolf rule extensions).
+- 角色与对话（人格 / 系统 prompt / 语气）
+  / Character & conversation (persona / system prompts / tone).
+- 文档与翻译（README / 注释 / 演示 / 国际化）
+  / Docs & translation (README / comments / demos / i18n).
+
+提交前请确认 `pytest tests/ -q --no-header --cov-fail-under=25` 通过。
+Before submitting, please make sure `pytest tests/ -q --no-header --cov-fail-under=25` passes.
+
+---
+
+## 许可 / License
+
+**MIT** — 详见 [LICENSE](LICENSE)。
+**MIT** — see [LICENSE](LICENSE).
+
+第三方库：
+Third-party:
+
+- **Pixi.js** — MIT © GoodBoy Digital
+- **pixi-live2d-display** — MIT © avgjs
+- **Live2D Cubism Core** — Live2D Cubism SDK EULA（可重分发于应用程序内，不可独立售卖）
+  / Live2D Cubism SDK EULA (redistributable inside an application, not standalone-saleable).
+
+> **模型版权 / Model copyright**: Live2D 模型版权归原作者。官方样例（Hiyori / Miara）仅限个人非商用演示。
+  Live2D model copyrights belong to their creators. Official samples (Hiyori / Miara) are for personal non-commercial demo only.
