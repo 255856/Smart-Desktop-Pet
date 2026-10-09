@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -60,10 +61,22 @@ class TraceRecorder:
         self._current_run: Optional[str] = None
         self._seq_counter: dict[str, int] = {}
 
-    def _conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _conn(self):
+        # 每次操作一个独立连接，退出时提交并关闭，不泄漏文件句柄。
+        # （`with sqlite3.connect() as c:` 只做事务提交、不会关闭连接；
+        # 在 Windows + coverage 插桩下连接延迟 GC，teardown 删临时 .db
+        # 报 WinError 32。）
         c = sqlite3.connect(self.db_path)
-        c.row_factory = sqlite3.Row
-        return c
+        try:
+            c.row_factory = sqlite3.Row
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
 
     def _init_schema(self) -> None:
         with self._lock, self._conn() as c:

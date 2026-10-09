@@ -143,11 +143,11 @@ _BUILTIN_MAP: dict[str, list[str]] = {
 
     "抖音": [
         r"%PROGRAMFILES%\Bytedance\Douyin\Douyin.exe",
-        r"%PROGRAMFILES% (x86)\Byted 0586\Douyin\Douyin.exe",
+        r"%PROGRAMFILES% (x86)\Bytedance\Douyin\Douyin.exe",
     ],
     "douyin": [
         r"%PROGRAMFILES%\Bytedance\Douyin\Douyin.exe",
-        r"%PROGRAMFILES% (x86)\Byted 0586\Douyin\Douyin.exe",
+        r"%PROGRAMFILES% (x86)\Bytedance\Douyin\Douyin.exe",
     ],
     "哔哩哔哩": [
         r"%PROGRAMFILES%\BiliBili\BiliBili.exe",
@@ -278,7 +278,7 @@ def _normalize_key(name: str) -> str:
 
 
 class AppRegistry:
-    """应用程序路径映射注册表。
+    r"""应用程序路径映射注册表。
 
     用法::
 

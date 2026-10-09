@@ -112,19 +112,77 @@ def register(reg: ToolRegistry) -> None:
             log.exception("read_file failed for %s", p)
             return f"错误：读取失败：{e}"
 
+    # 文档检索的有界配置：只扫常见文档目录，且检查文件数封顶。
+    # （原先对整个家目录 rglob，找不到时会扫完 AppData / 缓存 / venv，
+    # 在 CI runner 上表现为卡死、超时——3.11、3.12 假阳性的根因。）
+    _DOC_DIR_NAMES = ("Desktop", "Documents", "Downloads", "OneDrive")
+    _DOC_EXTS = (".md", ".txt", ".docx", ".pdf")
+    _SKIP_DIR_NAMES = frozenset({
+        "appdata", "node_modules", ".git", "__pycache__",
+        "site-packages", ".venv", "venv", "cache", "caches",
+    })
+    _SCAN_BUDGET = 2000
+    _BUDGET_EXHAUSTED = object()
+
     def _locate_doc(question: str) -> Path | None:
-        """在家目录搜文件名含 question 的文档（优先 .md/.txt）。"""
+        """在常见文档目录按文件名搜文档（浅层、有界，任何机器都快速返回）。
+
+        扫家目录顶层文件 + 桌面 / 文档 / 下载 / OneDrive（递归），跳过
+        AppData、node_modules、缓存等，检查文件数封顶 2000；找不到也要快。
+        """
         kw = question.lower()
-        try:
-            for ext in (".md", ".txt", ".docx", ".pdf"):
-                for p in _HOME.rglob(f"*{ext}"):
-                    if not p.is_file():
-                        continue
-                    name = p.stem.lower()    # 匹配文件名不含扩展名
-                    if kw in name or kw in p.name.lower():
-                        return p
-        except (PermissionError, OSError):
+        state = {"budget": _SCAN_BUDGET}
+
+        def _check(dirpath: str, filenames):
+            for fn in filenames:
+                low = fn.lower()
+                if not low.endswith(_DOC_EXTS):
+                    continue
+                state["budget"] -= 1
+                if kw in low:
+                    cand = Path(dirpath) / fn
+                    if cand.is_file():
+                        return cand
+                if state["budget"] <= 0:
+                    return _BUDGET_EXHAUSTED
             return None
+
+        # 1) 家目录顶层（只看文件，不递归）
+        try:
+            top_files = [n for n in os.listdir(_HOME)
+                         if os.path.isfile(_HOME / n)]
+            hit = _check(str(_HOME), top_files)
+            if hit is _BUDGET_EXHAUSTED:
+                return None
+            if hit is not None:
+                return hit
+        except OSError:
+            pass
+
+        # 2) 常见文档目录递归（剪枝 + 预算）
+        roots, seen = [], set()
+        for name in _DOC_DIR_NAMES:
+            d = _HOME / name
+            if d.is_dir():
+                key = os.path.normcase(os.path.abspath(d))
+                if key not in seen:
+                    seen.add(key)
+                    roots.append(d)
+        for root in roots:
+            try:
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [
+                        d for d in dirnames
+                        if not d.startswith(".")
+                        and d.lower() not in _SKIP_DIR_NAMES
+                    ]
+                    hit = _check(dirpath, filenames)
+                    if hit is _BUDGET_EXHAUSTED:
+                        return None
+                    if hit is not None:
+                        return hit
+            except (PermissionError, OSError):
+                continue
         return None
 
     def _read_pdf(p: Path) -> str:
