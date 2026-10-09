@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-674%20passed%20%2F%206%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-740%20passed%20%2F%208%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -265,9 +265,9 @@ pytest tests/test_langchain_agent.py -v
 ```
 
 测试结果：
-- **674 passed** / 6 skipped
+- **740 passed** / 8 skipped
 - 验证：82 项功能检查
-  *674 passed / 6 skipped; verification: 82 feature checks.*
+  *740 passed / 8 skipped; verification: 82 feature checks.*
 
 CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Windows 专有 API）
 CI runs on Windows runners (Qt / pywin32 / WMI brightness / battery all need Windows APIs).
