@@ -123,3 +123,12 @@ docs/demo/custom-models.js
 
 # Claude Code 本地配置（每台机器不同，不应入库）
 .claude/
+
+# 一次性脚本（_ 前缀，commit 走主流程，不入库）
+scripts/_*.py
+
+# 散落根目录的旧 log（项目自带 logs/ 目录管运行时日志）
+/_*.log
+
+# 历史归档目录（已迁移到 gh-pages 或 commit，不在 master 重复保留）
+tools/_archive/
