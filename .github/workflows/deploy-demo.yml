@@ -54,9 +54,20 @@ jobs:
           cp main/docs/demo/live2d-demo.js _demo/
           cp main/docs/demo/favicon.ico _demo/
 
-          # 渲染库（必须，否则线上无法加载 PIXI / Cubism Core）
+          # 渲染库（必须，否则线上无法加载 Live2D）
+          # pixi-live2d-display（cubism4.min.js）最容易被漏掉：漏了线上就只能退回
+          # jsdelivr / unpkg，国内或离线网络下直接「SDK 加载失败」
           cp main/docs/demo/vendor/pixi.min.js _demo/vendor/
           cp main/docs/demo/vendor/live2dcubismcore.min.js _demo/vendor/
+          cp main/docs/demo/vendor/cubism4.min.js _demo/vendor/
+
+          # 校验：三个渲染库缺一不可，缺就让部署失败，而不是静默发一个坏页面
+          for f in pixi.min.js live2dcubismcore.min.js cubism4.min.js; do
+            if [ ! -s "_demo/vendor/$f" ]; then
+              echo "::error::渲染库缺失或为空：_demo/vendor/$f"
+              exit 1
+            fi
+          done
 
           # 内置 Hiyori 模型（约 45MB，仅存在于 gh-pages 分支，保持 master 轻量）
           if [ -d pages/hiyori_zh-Hans ]; then
