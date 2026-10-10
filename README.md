@@ -1,4 +1,4 @@
-# 🐱 桌面宠物 · Smart Desktop Pet
+# 桌面宠物 · Smart Desktop Pet
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
@@ -12,7 +12,7 @@
 [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-1976D2?style=for-the-badge&logo=github&logoColor=white)](#zh-hans)
 [![English](https://img.shields.io/badge/English-24292F?style=for-the-badge&logo=github&logoColor=white)](#english)
 
-🎮 [Live2D 在线 Demo / Live2D Demo](https://255856.github.io/Smart-Desktop-Pet/) · 📚 [文档 / Docs](docs/)
+[Live2D 在线 Demo / Live2D Demo](https://255856.github.io/Smart-Desktop-Pet/) · [文档 / Docs](docs/)
 
 ---
 
@@ -141,15 +141,15 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 | 维度 | 桌面版 | 网页 Demo |
 |---|---|---|
 | 渲染 | Live2D / PNG / **Voice** | ✓ Live2D |
-| 语音 | ✅ Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
-| 大脑 | ✅ ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
-| 工具 | ✅ 52 个 | ✓ 18 个（browser sandbox） |
-| 记忆 | ✅ TF-IDF / 向量 / 持久化 | ✓ localStorage |
-| 提醒 | ✅ 系统通知 + cron | ✓ Browser Notifications |
-| 游戏 | ✅ 五子棋 / 象棋 / 狼人杀 | ✗（browser sandbox） |
-| 养成 | ✅ 5 状态 / 喂食 / 签到 | ✗ |
-| 主动搭话 | ✅ 时段上下文 / 习惯 | ✓ 时段上下文 / habit |
-| Trace | ✅ SQLite + Dashboard | ✓ 内嵌 |
+| 语音 | Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
+| 大脑 | ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
+| 工具 | 52 个 | ✓ 18 个（browser sandbox） |
+| 记忆 | TF-IDF / 向量 / 持久化 | ✓ localStorage |
+| 提醒 | 系统通知 + cron | ✓ Browser Notifications |
+| 游戏 | 五子棋 / 象棋 / 狼人杀 | ✗（browser sandbox） |
+| 养成 | 5 状态 / 喂食 / 签到 | ✗ |
+| 主动搭话 | 时段上下文 / 习惯 | ✓ 时段上下文 / habit |
+| Trace | SQLite + Dashboard | ✓ 内嵌 |
 
 ### 怎样补齐？
 
