@@ -1288,5 +1288,7 @@
      该文件与 custom_models/ 模型目录均不入 master 仓库（.gitignore 排除），
      gh-pages 部署时由 Actions 从 gh-pages 分支注入，保证 git clone 拿不到模型。 -->
 <script src="custom-models.js"></script>
+<!-- 核心逻辑（养成状态机 / 倒计时）：纯逻辑、零浏览器依赖，可在 Node 里直接单测 -->
+<script src="core.js"></script>
 <script src="live2d-demo.js"></script>
 </body></html>
