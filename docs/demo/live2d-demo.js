@@ -290,6 +290,7 @@ class Live2DDemo {
     // fitFactor 0.7 留 30% 边距（桌面默认 0.94，demo 用更大边距让 UI 不被遮挡）
     const { mw, mh } = this._modelSize();
     const scale = Math.min((w / mw) * this.fitFactor, (h / mh) * this.fitFactor);
+    this._fitScale = scale;   // 目标缩放存档：pulse() 以此为基准，避免复利放大
     this.model.scale.set(scale);
     try { this.model.anchor.set(0.5, 0.5); } catch (e) {}
     this.model.x = w / 2;
@@ -402,19 +403,26 @@ class Live2DDemo {
   focus(nx, ny) {
     if (!this.model || !this.ready) return;
     try {
-      const { mw, mh } = this._modelSize();
-      this.model.focus(mw / 2 + nx * mw / 2, mh / 2 + ny * mh / 2);
+      // pixi-live2d-display 的 focus(x, y) 收【全局坐标】：内部先 toModelPosition
+      // 转成模型本地空间，再按 originalWidth/Height 归一化到 -1..1。
+      // 之前误传模型本地坐标（mw/2 + nx*mw/2），等于被换算两次，视线恒定偏在
+      // 一侧 —— 表现为鼠标停在正中时模型反而低头。这里传屏幕全局坐标。
+      const w = this.app.screen.width, h = this.app.screen.height;
+      this.model.focus((nx + 1) / 2 * w, (ny + 1) / 2 * h);
     } catch (e) {}
   }
   // 轻微弹跳反馈（摸头 / 情绪切换时）
   pulse() {
-    if (!this.model) return;
-    const base = this.model.scale.x;
+    if (!this.model || this._pulsing) return;   // 并发 pulse 会复利叠加放大
     const t0 = performance.now();
+    this._pulsing = true;
     const tick = () => {
-      if (!this.model) return;
+      if (!this.model) { this._pulsing = false; return; }
       const t = (performance.now() - t0) / 320;
-      if (t >= 1) { this.model.scale.set(base); return; }
+      // 基准取 _fitScale（_fit() 算出的目标缩放）而非当前 scale：
+      // 若从「上一次动画中途的 scale」取基准，连续点击会 1.06 → 1.06² 越滚越大
+      const base = (this._fitScale != null) ? this._fitScale : this.model.scale.x;
+      if (t >= 1) { this.model.scale.set(base); this._pulsing = false; return; }
       this.model.scale.set(base * (1 + 0.06 * Math.sin(t * Math.PI)));
       requestAnimationFrame(tick);
     };
@@ -423,13 +431,21 @@ class Live2DDemo {
   shutdown() {
     this._loadEpoch++;   // 作废所有在途加载（await 中的 from 完成后会自毁）
     this._talking = false;
+    this._pulsing = false;
     if (this._mouthTimer) { clearInterval(this._mouthTimer); this._mouthTimer = null; }
     if (this._fitTicker) { try { this.app.ticker.remove(this._fitTicker); } catch (e) {} this._fitTicker = null; }
     if (this._fitTimers) { this._fitTimers.forEach(clearTimeout); this._fitTimers = null; }
-    if (this.model && this.app) {
-      try { this.app.stage.removeChild(this.model); this.model.destroy(); } catch (e) {}
+    if (this.model) {
+      // 销毁子节点：否则纹理/渲染目标残留，反复切换模型会越叠越多
+      try { this.model.destroy({ children: true }); } catch (e) {}
     }
-    this.model = null; this.ready = false;
+    this.model = null; this.ready = false; this._fitScale = null;
+    // 兜底：stage 里绝不能残留任何模型。
+    // epoch 守卫只能拦住「本轮加载晚到」的情况；若 destroy 抛错、或某些路径
+    // 直接 addChild 过，旧模型就会留在画布上和新模型叠在一起（视觉上像多个模型）。
+    if (this.app && this.app.stage) {
+      try { this.app.stage.removeChildren(); } catch (e) {}
+    }
   }
 }
 
@@ -1783,7 +1799,14 @@ async function handleUserInput(text) {
   addAffection(1);
   const txt = text.trim();
 
-  // ---------- 无 LLM key：正则意图路由（mock 兜底，保持零配置可玩） ----------
+  // ---------- 本地确定性意图优先 ----------
+  // 时间 / 提醒 / 天气 / 记忆 / 计算 / 开网站 / 宠物动作 这几类意图浏览器本地就能
+  // 100% 正确执行，不该交给模型 —— 快捷指令 chips 走的正是它们。原先这段只在
+  // 「无 LLM key」时才跑，一旦接入 API，6 个快捷语句就全被丢给模型，模型不一定
+  // 发出对应工具调用，表现为「点了没反应 / 执行不对」。
+  if (await handleMockIntent(txt, true) !== false) return;
+
+  // 无 key：走 mock 对话兜底，保持零配置可玩
   if (!window.llm.hasKey()) return handleMockIntent(txt);
 
   // ---------- LLM Function Calling（ReAct 多轮工具调用） ----------
@@ -1883,7 +1906,7 @@ async function plainChatStream(messages) {
 }
 
 // 无 key 时的正则意图路由（mock）
-async function handleMockIntent(txt) {
+async function handleMockIntent(txt, noFallback) {
   // 1. 提醒类
   const remindMatch = txt.match(/(\d+)\s*(分钟|秒钟|秒|小时|minutes?|mins?|hours?|seconds?|secs?)\s*(?:之后?|后)?\s*(?:提醒(?:我)?|叫我|告诉我|喊我|记得|remind\s*me(?:\s*to)?)\s*(.*)/i);
   if (remindMatch) {
@@ -1997,6 +2020,9 @@ async function handleMockIntent(txt) {
     return;
   }
   // 7. mock 对话兜底
+  // noFallback 模式（接了 API 时）：本地没命中任何确定性意图 → 返回 false，
+  // 交回调用方去走 LLM，而不是在这里随便回一句 canned reply
+  if (noFallback) return false;
   window.trace.add("llm_call", `chat("${txt.slice(0, 30)}${txt.length > 30 ? '…' : ''}")`);
   await new Promise(r => setTimeout(r, 300));
   const ask = (txt.endsWith('?') || txt.endsWith('？')) ? window.t("fb3q") : "";
