@@ -3,8 +3,8 @@
 	"FileReferences": {
 		"Moc": "hiyori_pro_t11.moc3",
 		"Textures": [
-			"hiyori_pro_t11.2048/texture_00.png",
-			"hiyori_pro_t11.2048/texture_01.png"
+			"hiyori_pro_t11.2048/texture_00.webp",
+			"hiyori_pro_t11.2048/texture_01.webp"
 		],
 		"Physics": "hiyori_pro_t11.physics3.json",
 		"Pose": "hiyori_pro_t11.pose3.json",

@@ -3,7 +3,7 @@
 	"FileReferences": {
 		"Moc": "hiyori_free_t08.moc3",
 		"Textures": [
-			"hiyori_free_t08.2048/texture_00.png"
+			"hiyori_free_t08.2048/texture_00.webp"
 		],
 		"Physics": "hiyori_free_t08.physics3.json",
 		"DisplayInfo": "hiyori_free_t08.cdi3.json",

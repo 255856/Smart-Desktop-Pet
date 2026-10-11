@@ -3,7 +3,7 @@
 	"FileReferences": {
 		"Moc": "miara_pro_t03.moc3",
 		"Textures": [
-			"miara_pro_t03.4096/texture_00.png"
+			"miara_pro_t03.4096/texture_00.webp"
 		],
 		"Physics": "miara_pro_t03.physics3.json",
 		"DisplayInfo": "miara_pro_t03.cdi3.json",
