@@ -686,7 +686,10 @@ class MemoryStore {
     try { return JSON.parse(localStorage.getItem(this.key)) || []; }
     catch { return []; }
   }
-  _save() { localStorage.setItem(this.key, JSON.stringify(this.items)); }
+  _save() {
+    try { localStorage.setItem(this.key, JSON.stringify(this.items)); }
+    catch (e) { log(`记忆写入失败（本地存储已满或被禁用）：${e.message || e}`, "err"); }
+  }
   remember(content, importance = 5) {
     const item = { content, importance, time: Date.now() };
     this.items.push(item);
@@ -723,10 +726,23 @@ window.memory = new MemoryStore();
 class ReminderStore {
   constructor() { this.key = "desktop_pet_reminders"; this.items = this._load(); }
   _load() { try { return JSON.parse(localStorage.getItem(this.key)) || []; } catch { return []; } }
-  _save() { localStorage.setItem(this.key, JSON.stringify(this.items)); }
+  _save() {
+    // localStorage 写满（QuotaExceededError）或隐私模式禁用时直接抛错，
+    // 会把调用方（add/remove/remember/setConfig）一起带崩 —— 降级为只读运行
+    try { localStorage.setItem(this.key, JSON.stringify(this.items)); }
+    catch (e) { log(`本地存储写入失败（可能已满或被禁用），本次改动不会保留：${e.message || e}`, "err"); }
+  }
+  // 唯一 id：不能用 Date.now() —— 同一毫秒内添加的两个提醒会拿到相同 id，
+  // delete_reminder 会一次删掉两个（LLM 在一轮里连调两次 add_reminder 就会撞上）
+  _nextId() {
+    this._seq = (this._seq || 0) + 1;
+    let id = Date.now() * 1000 + (this._seq % 1000);
+    while (this.items.some(x => x.id === id)) id++;
+    return id;
+  }
   add(content, minutes) {
     const fireAt = Date.now() + minutes * 60 * 1000;
-    const item = { id: Date.now(), content, fireAt };
+    const item = { id: this._nextId(), content, fireAt };
     this.items.push(item);
     this._save();
     log(`提醒已设：${minutes} 分钟后「${content}」`, "ok");
@@ -763,6 +779,74 @@ class ReminderStore {
 }
 window.reminders = new ReminderStore();
 window.reminders.start();
+
+// —— 倒计时（对齐桌面 countdown / list_countdowns / cancel_countdowns） ——
+// 与「提醒」的区别：提醒是到点触发一次，倒计时会持续显示剩余时间，
+// 并且在结束前 10 秒 / 5 秒 / 结束时各播报一次，贴近桌面版的体感。
+class CountdownStore {
+  constructor() { this.key = "desktop_pet_countdowns"; this.items = this._load(); this._timer = null; }
+  _load() { try { return JSON.parse(localStorage.getItem(this.key)) || []; } catch { return []; } }
+  _save() {
+    try { localStorage.setItem(this.key, JSON.stringify(this.items)); }
+    catch (e) { log(`倒计时写入失败（本地存储已满或被禁用）：${e.message || e}`, "err"); }
+  }
+  _nextId() {
+    this._seq = (this._seq || 0) + 1;
+    let id = Date.now() * 1000 + (this._seq % 1000);
+    while (this.items.some(x => x.id === id)) id++;
+    return id;
+  }
+  start(label, minutes) {
+    const totalMs = Math.max(1, Math.round(minutes * 60 * 1000));
+    const item = { id: this._nextId(), label, endAt: Date.now() + totalMs, totalMs, announced: {} };
+    this.items.push(item);
+    this._save();
+    if (!this._timer) this._timer = setInterval(() => this.tick(), 1000);
+    log(`倒计时开始：${label}（${minutes} 分钟）`, "ok");
+    return item;
+  }
+  list() {
+    const now = Date.now();
+    return this.items.map(x => ({
+      id: x.id, label: x.label,
+      remainSec: Math.max(0, Math.round((x.endAt - now) / 1000)),
+      totalSec: Math.round(x.totalMs / 1000),
+    }));
+  }
+  cancel(id) {
+    const before = this.items.length;
+    this.items = this.items.filter(x => x.id !== id);
+    if (before !== this.items.length) {
+      this._save();
+      log(`已取消倒计时（${before - this.items.length} 个）`);
+    }
+    if (!this.items.length && this._timer) { clearInterval(this._timer); this._timer = null; }
+    return before - this.items.length;
+  }
+  tick() {
+    const now = Date.now();
+    for (const c of this.items) {
+      const left = Math.round((c.endAt - now) / 1000);
+      for (const mark of [600, 300, 60]) {
+        if (left <= mark && left > mark - 5 && !c.announced[mark]) {
+          c.announced[mark] = true;
+          window.tts.speak(window.t("cd_mark", { n: left }));
+        }
+      }
+    }
+    const done = this.items.filter(x => x.endAt <= now);
+    for (const d of done) {
+      log(`倒计时结束：${d.label}`, "ok");
+      window.tts.speak(window.t("cd_done", { label: d.label }));
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification(window.t("cd_notify_title"), { body: d.label });
+      }
+    }
+    if (done.length) { this.items = this.items.filter(x => x.endAt > now); this._save(); }
+    if (!this.items.length && this._timer) { clearInterval(this._timer); this._timer = null; }
+  }
+}
+window.countdowns = new CountdownStore();
 
 // 请求通知权限（用户首次启动时）
 if ("Notification" in window && Notification.permission === "default") {
@@ -814,7 +898,8 @@ class LLMBridge {
     } catch { return {}; }
   }
   _saveCfg() {
-    localStorage.setItem("llm_cfg", JSON.stringify(this.cfg));
+    try { localStorage.setItem("llm_cfg", JSON.stringify(this.cfg)); }
+    catch (e) { log(`API 配置保存失败（本地存储不可用），本次仅在当前页面生效：${e.message || e}`, "err"); }
   }
   setConfig({ baseUrl, apiKey, model, systemPrompt }) {
     this.cfg = {
@@ -1258,7 +1343,7 @@ function restoreChatHistory() {
 }
 
 // ============================================================
-// 9.5 工具注册表：与桌面版 app/engine/tools 同名对齐（浏览器沙箱内可用的 18 个）
+// 9.5 工具注册表：与桌面版 app/engine/tools 同名对齐（浏览器沙箱内可用的部分）
 // ============================================================
 const ToolRegistry = {
   defs: new Map(),
@@ -1272,6 +1357,16 @@ const ToolRegistry = {
   },
 };
 window.tools = ToolRegistry;
+
+// 页脚/说明里的工具数不要写死 —— 之前硬编码「18 个 Agent 工具」，
+// 加工具后文案不会跟着变，属于典型的静默漂移。改成从注册表实时取。
+function syncToolCount() {
+  const n = ToolRegistry.names().length;
+  document.querySelectorAll("[data-tool-count]").forEach(el => { el.textContent = n; });
+}
+window.addEventListener("DOMContentLoaded", syncToolCount);
+if (window.I18N && window.I18N.onChange) window.I18N.onChange(syncToolCount);
+setTimeout(syncToolCount, 0);
 
 // —— 时间 / 日期（对齐桌面 fmt_time 格式） ——
 const WEEK_ZH = ["日", "一", "二", "三", "四", "五", "六"];
@@ -1287,6 +1382,76 @@ ToolRegistry.register("get_current_time", {
     parameters: { type: "object", properties: {} },
   },
 }, () => JSON.stringify({ now: fmtTime() }));
+
+// —— 倒计时（对齐桌面 countdown / list_countdowns / cancel_countdown） ——
+ToolRegistry.register("countdown", {
+  type: "function",
+  function: {
+    name: "countdown",
+    description: "启动一个倒计时。剩余 10 分钟 / 5 分钟 / 1 分钟以及结束时都会语音播报。",
+    parameters: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "倒计时内容，如「泡茶」" },
+        minutes: { type: "number", description: "分钟数（正数）" },
+      },
+      required: ["label", "minutes"],
+    },
+  },
+}, ({ label, minutes }) => {
+  const m = Number(minutes);
+  if (!Number.isFinite(m) || m <= 0) return "minutes 必须是正数";
+  const it = window.countdowns.start(label || "倒计时", m);
+  return JSON.stringify({ id: it.id, label: it.label, seconds: Math.round(it.totalMs / 1000) });
+});
+
+ToolRegistry.register("list_countdowns", {
+  type: "function",
+  function: {
+    name: "list_countdowns",
+    description: "列出当前所有正在运行的倒计时及其剩余秒数",
+    parameters: { type: "object", properties: {} },
+  },
+}, () => {
+  const list = window.countdowns.list();
+  return JSON.stringify(list.length ? list : { countdowns: [] });
+});
+
+ToolRegistry.register("cancel_countdown", {
+  type: "function",
+  function: {
+    name: "cancel_countdown",
+    description: "按 id 取消一个倒计时。id 可用 list_countdowns 查询。",
+    parameters: {
+      type: "object",
+      properties: { id: { type: "number", description: "list_countdowns 返回的倒计时 id" } },
+      required: ["id"],
+    },
+  },
+}, ({ id }) => {
+  const n = window.countdowns.cancel(Number(id));
+  return n > 0 ? `已取消 ${n} 个倒计时` : "没有找到该倒计时（可先用 list_countdowns 查看 id）";
+});
+
+// —— 宠物主动开口（对齐桌面 say_to_user） ——
+ToolRegistry.register("say_to_user", {
+  type: "function",
+  function: {
+    name: "say_to_user",
+    description: "让桌宠主动对用户说一句话（会显示气泡并朗读），不需要用户在提问",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string", description: "要说的话，≤200 字" } },
+      required: ["text"],
+    },
+  },
+}, ({ text }) => {
+  const t = String(text == null ? "" : text).slice(0, 200).trim();
+  if (!t) return "text 不能为空";
+  appendChatBubble("assistant", t);
+  window.tts.speak(t);
+  return "已对主人说话";
+});
 
 ToolRegistry.register("date_info", {
   type: "function",
@@ -1720,29 +1885,349 @@ ToolRegistry.register("play_animation", {
   window.demo.playMotion(g);
   return `已播放动作组: ${g}`;
 });
+// ============================================================
+// 9.6 养成系统：VPet 同款状态机（逐条对齐 app/engine/state.py）
+//     demo 是桌面端的展示门面，5 项状态 / 衰减回复 / 模式判定 /
+//     等级金币 / 签到 的数值规则必须和桌面端一致，否则展示就是假的。
+// ============================================================
+const STAT_MAX = 100;
+const LIKABILITY_MAX = 100;
+// demo 侧食物库：结构对齐桌面端（价格 + 各状态增益），
+// 具体条目桌面端从 items 数据文件加载，这里给一份精简内置库。
+const FOODS = [
+  { name: "面包",   price: 10, strength_food: 20, strength: 5,  feeling: 3, exp: 3 },
+  { name: "牛奶",   price: 8,  strength_drink: 25, feeling: 2,  exp: 2 },
+  { name: "便当",   price: 25, strength_food: 40, strength: 10, health: 5, exp: 5 },
+  { name: "奶茶",   price: 18, strength_drink: 15, strength_food: 10, feeling: 8, exp: 4 },
+  { name: "营养餐", price: 40, strength_food: 50, strength_drink: 50, health: 15, feeling: 5, exp: 8 },
+];
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+class PetState {
+  constructor() {
+    this.key = "desktop_pet_state";
+    this.s = {
+      strength: 100, strength_food: 100, strength_drink: 100,
+      feeling: 80, health: 100,
+      store_strength: 0, store_strength_food: 0, store_strength_drink: 0,
+      money: 100, exp: 0, level: 1, likability: 0, mode: "Normal",
+      decay_strength: 0.007, decay_strength_food: 0.007, decay_strength_drink: 0.007,
+      decay_feeling: 0.007,
+      regen_strength: 0.0035, regen_strength_food: 0.0035, regen_strength_drink: 0.0035,
+      regen_feeling: 0.0035, regen_threshold: 70, healthy_min: 40,
+      night_multiplier: 1.3,
+      lastInteractTs: 0,
+      feed_like_date: "", feed_like_count: 0,
+      checkin_date: "",
+      game_coin_date: "", game_coin_count: 0,
+    };
+    this._load();
+    this._tickTimer = null;
+    this._lastTick = Date.now();
+  }
+  _load() {
+    try {
+      const raw = localStorage.getItem(this.key);
+      if (raw) Object.assign(this.s, JSON.parse(raw));
+    } catch (e) { /* 存档损坏则用默认值 */ }
+    this.normalize();
+  }
+  _save() {
+    try { localStorage.setItem(this.key, JSON.stringify(this.s)); }
+    catch (e) { log(`养成存档写入失败（本地存储已满或被禁用）：${e.message || e}`, "err"); }
+  }
+  normalize() {
+    const s = this.s;
+    for (const k of ["strength", "strength_food", "strength_drink", "feeling", "health"]) {
+      s[k] = clamp(Number(s[k]) || 0, 0, STAT_MAX);
+    }
+    s.likability = clamp(Number(s.likability) || 0, 0, LIKABILITY_MAX);
+    for (const k of ["store_strength", "store_strength_food", "store_strength_drink",
+                     "money", "exp", "feed_like_count", "game_coin_count"]) {
+      s[k] = Math.max(0, Number(s[k]) || 0);
+    }
+    s.level = Math.max(1, parseInt(s.level, 10) || 1);
+  }
+  // —— 等级 / 经验（对齐 cal_level / level_up_need） ——
+  calLevel() { return this.s.exp < 0 ? 1 : Math.floor(Math.sqrt(this.s.exp) / 10) + 1; }
+  levelUpNeed() { return Math.pow(this.calLevel() * 10, 2); }
+  get expToNext() { return Math.max(0, this.levelUpNeed() - this.s.exp); }
+  _maybeLevelup() {
+    const nl = this.calLevel();
+    if (nl > this.s.level) {
+      this.s.level = nl;
+      log(`升级到 Lv.${nl}（exp=${this.s.exp.toFixed(1)}）`, "ok");
+      if (window.tts) window.tts.speak(window.t("lv_up", { lv: nl }));
+    }
+  }
+  // —— 状态模式判定（对齐 cal_mode） ——
+  calMode() {
+    const s = this.s;
+    let realhel = 60;
+    if (s.feeling >= 80) realhel -= 12;
+    if (s.likability >= 80) realhel -= 12;
+    else if (s.likability >= 40) realhel -= 6;
+    if (s.health <= realhel) return s.health <= realhel / 2 ? "Ill" : "PoorCondition";
+    let realfel = 0.90;
+    if (s.likability >= 80) realfel -= 0.20;
+    else if (s.likability >= 40) realfel -= 0.10;
+    const felps = s.feeling / STAT_MAX;
+    if (felps >= realfel) return "Happy";
+    if (felps <= realfel / 2) return "PoorCondition";
+    return "Normal";
+  }
+  _reevaluateMode() {
+    const nm = this.calMode();
+    if (nm !== this.s.mode) {
+      log(`状态：${this.s.mode} → ${nm}`);
+      this.s.mode = nm;
+    }
+  }
+  // —— 通用累加入口（对齐 feed） ——
+  feed(d = {}) {
+    const s = this.s;
+    s.strength = clamp(s.strength + (d.strength || 0), 0, STAT_MAX);
+    s.strength_food = clamp(s.strength_food + (d.strength_food || 0), 0, STAT_MAX);
+    s.strength_drink = clamp(s.strength_drink + (d.strength_drink || 0), 0, STAT_MAX);
+    s.feeling = clamp(s.feeling + (d.feeling || 0), 0, STAT_MAX);
+    s.health = clamp(s.health + (d.health || 0), 0, STAT_MAX);
+    s.likability = clamp(s.likability + (d.likability || 0), 0, LIKABILITY_MAX);
+    if (d.exp) { s.exp += d.exp; this._maybeLevelup(); }
+    if (d.money_delta) s.money = Math.max(0, s.money + d.money_delta);
+    this._reevaluateMode();
+    this._save();
+  }
+  // —— 进食（对齐 eat_food：数值一半入主值、一半入 store） ——
+  eatFood(d = {}) {
+    const s = this.s;
+    const half = [["strength", "store_strength"], ["strength_food", "store_strength_food"],
+                  ["strength_drink", "store_strength_drink"]];
+    for (const [main, store] of half) {
+      const v = (d[main] || 0) / 2;
+      s[main] = clamp(s[main] + v, 0, STAT_MAX);
+      s[store] += v;
+    }
+    s.feeling = clamp(s.feeling + (d.feeling || 0), 0, STAT_MAX);
+    s.health = clamp(s.health + (d.health || 0), 0, STAT_MAX);
+    s.likability = clamp(s.likability + (d.likability || 0), 0, LIKABILITY_MAX);
+    if (d.exp) { s.exp += d.exp; this._maybeLevelup(); }
+    this._reevaluateMode();
+    this._save();
+  }
+  // —— store 缓慢回补（对齐 take_store，1/8） ——
+  takeStore() {
+    const s = this.s;
+    for (const [main, store] of [["strength", "store_strength"], ["strength_food", "store_strength_food"],
+                                ["strength_drink", "store_strength_drink"]]) {
+      const v = s[store];
+      if (v < 1.0) { s[store] = 0; continue; }
+      const d = v / 8.0;
+      s[store] = Math.max(0, v - d);
+      s[main] = clamp(s[main] + d, 0, STAT_MAX);
+    }
+  }
+  addMoney(delta) { this.s.money = Math.max(0, this.s.money + delta); this._save(); }
+  // —— 心情衰减：10 分钟无互动翻倍（对齐 _feeling_decay） ——
+  _feelingDecay() {
+    if (this.s.lastInteractTs && (Date.now() / 1000 - this.s.lastInteractTs) > 600) {
+      return this.s.decay_feeling * 2.0;
+    }
+    return this.s.decay_feeling;
+  }
+  static isNight(d = new Date()) { const h = d.getHours(); return h >= 22 || h < 6; }
+  tick(dtSeconds, { isNight = false, talkingPause = false, sleeping = false } = {}) {
+    if (talkingPause) return;
+    const s = this.s;
+    const mult = isNight ? s.night_multiplier : 1.0;
+    if (sleeping) {
+      s.strength = clamp(s.strength + 0.20 * dtSeconds, 0, STAT_MAX);
+      s.strength_food = clamp(s.strength_food + 0.10 * dtSeconds, 0, STAT_MAX);
+      s.strength_drink = clamp(s.strength_drink + 0.10 * dtSeconds, 0, STAT_MAX);
+      s.feeling = clamp(s.feeling + 0.05 * dtSeconds, 0, STAT_MAX);
+      s.health = clamp(s.health + 0.05 * dtSeconds, 0, STAT_MAX);
+      this.takeStore(); this._reevaluateMode(); this._save();
+      return;
+    }
+    for (const [name, decayVal, regenVal] of [
+      ["strength", s.decay_strength, s.regen_strength],
+      ["strength_food", s.decay_strength_food, s.regen_strength_food],
+      ["strength_drink", s.decay_strength_drink, s.regen_strength_drink],
+      ["feeling", this._feelingDecay(), s.regen_feeling],
+    ]) {
+      const cur = Math.max(0, s[name]);
+      let v = cur - decayVal * dtSeconds * mult;
+      if (cur > s.regen_threshold) v += regenVal * dtSeconds;
+      s[name] = clamp(v, 0, STAT_MAX);
+    }
+    const food = s.strength_food, drink = s.strength_drink, feeling = s.feeling;
+    if (food < s.healthy_min && drink < s.healthy_min && feeling < s.healthy_min) {
+      s.health = Math.max(0, s.health - 0.03 * dtSeconds * mult);
+    } else if (food > s.healthy_min && drink > s.healthy_min && feeling > 60.0) {
+      s.health = Math.min(STAT_MAX, s.health + 0.02 * dtSeconds);
+    }
+    this.takeStore();
+    this._reevaluateMode();
+    this._save();
+  }
+  // —— 互动（对齐 on_interact） ——
+  onInteract({ feelingGain = 0, likabilityGain = 0, feed = false } = {}) {
+    this.s.lastInteractTs = Date.now() / 1000;
+    if (feelingGain) this.s.feeling = clamp(this.s.feeling + feelingGain, 0, STAT_MAX);
+    if (likabilityGain) this.s.likability = clamp(this.s.likability + likabilityGain, 0, LIKABILITY_MAX);
+    if (feed) this.feed({ strength_food: 20, strength_drink: 20, feeling: 10, exp: 2 });
+    this._reevaluateMode();
+    this._save();
+  }
+  static today() { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; }
+  addFoodLikability(like) {
+    const today = PetState.today();
+    if (this.s.feed_like_date !== today) { this.s.feed_like_date = today; this.s.feed_like_count = 0; }
+    const allowed = Math.max(0, 5.0 - this.s.feed_like_count);
+    const added = Math.min(Math.max(0, like), allowed);
+    this.s.feed_like_count += added;
+    if (added > 0) {
+      this.s.likability = clamp(this.s.likability + added, 0, LIKABILITY_MAX);
+      this._save();
+    }
+    return added;
+  }
+  hasCheckedInToday() { return this.s.checkin_date === PetState.today(); }
+  dailyCheckin(reward = 100.0) {
+    const today = PetState.today();
+    if (this.s.checkin_date === today) return [false, 0];
+    this.s.checkin_date = today;
+    this.s.money = Math.max(0, this.s.money + Math.max(0, reward));
+    this._save();
+    return [true, Math.max(0, reward)];
+  }
+  addGameReward(amount) {
+    const today = PetState.today();
+    if (this.s.game_coin_date !== today) { this.s.game_coin_date = today; this.s.game_coin_count = 0; }
+    const added = Math.min(Math.max(0, amount), Math.max(0, 100 - this.s.game_coin_count));
+    this.s.game_coin_count += added;
+    if (added > 0) { this.s.money += added; this._save(); }
+    return added;
+  }
+  gameCoinRemaining() {
+    const c = this.s.game_coin_date === PetState.today() ? this.s.game_coin_count : 0;
+    return Math.max(0, 100 - c);
+  }
+  // —— 展示摘要（逐字对齐桌面 stats_summary 的排版） ——
+  statsSummary() {
+    const s = this.s;
+    const f = v => v.toFixed(0);
+    return `Lv.${s.level}  💪${f(s.strength)}  🍚${f(s.strength_food)}  💧${f(s.strength_drink)}  `
+         + `😊${f(s.feeling)}  ❤️${f(s.health)}  💕${f(s.likability)}/${f(LIKABILITY_MAX)}  `
+         + `💰${f(s.money)}  [${s.mode}]`;
+  }
+  start() {
+    if (this._tickTimer) return;
+    this._lastTick = Date.now();
+    this._tickTimer = setInterval(() => {
+      const now = Date.now();
+      const dt = (now - this._lastTick) / 1000;
+      this._lastTick = now;
+      if (dt <= 0 || dt > 3600) return;   // 标签页挂起后不要一次补算几小时
+      this.tick(dt, { isNight: PetState.isNight() });
+      this._paint();
+    }, 1000);
+  }
+  stop() { if (this._tickTimer) { clearInterval(this._tickTimer); this._tickTimer = null; } }
+  // 状态条同步到页面（复用桌面端「左上 5 项状态」的展示位）
+  _paint() {
+    const el = document.getElementById("pet-state-bar");
+    if (el) el.textContent = this.statsSummary();
+    const aff = document.getElementById("affection");
+    if (aff) aff.textContent = `❤ ${Math.round(this.s.likability)}`;
+  }
+}
+window.petState = new PetState();
+window.petState.start();
+window.petState._paint();
+
+// —— 互动入口：原来的 pet_affection 计数已并入 likability，这里保持 API 兼容 ——
+function getAffection() { return Math.round(window.petState.s.likability); }
+function addAffection(n = 1) {
+  window.petState.onInteract({ likabilityGain: n, feelingGain: n * 0.5 });
+  window.petState._paint();
+  return getAffection();
+}
+
 ToolRegistry.register("get_pet_status", {
   type: "function",
   function: {
     name: "get_pet_status",
-    description: "查询宠物状态：当前模型、亲密度、设置",
+    description: "查询宠物完整状态：5 项状态（体力/饱食/水分/心情/健康）、等级、经验、金币、亲密度、状态模式",
     parameters: { type: "object", properties: {} },
   },
-}, () => JSON.stringify({
-  model: (window.demo.model && window.demo.model.internalModel.settings.name) || "unknown",
-  affection: getAffection(),
-  auto_speak: settings.autoSpeak,
-  proactive: settings.proactive,
-}));
+}, () => {
+  const s = window.petState.s;
+  return JSON.stringify({
+    summary: window.petState.statsSummary(),
+    model: (window.demo.model && window.demo.model.internalModel.settings.name) || "unknown",
+    level: s.level, exp: +s.exp.toFixed(1), exp_to_next: +window.petState.expToNext.toFixed(1),
+    money: s.money, likability: +s.likability.toFixed(1), mode: s.mode,
+    strength: +s.strength.toFixed(1), strength_food: +s.strength_food.toFixed(1),
+    strength_drink: +s.strength_drink.toFixed(1), feeling: +s.feeling.toFixed(1),
+    health: +s.health.toFixed(1),
+    checked_in_today: window.petState.hasCheckedInToday(),
+    auto_speak: settings.autoSpeak, proactive: settings.proactive,
+  });
+});
 
-// —— 亲密度（摸头 / 聊天累积，localStorage 持久化） ——
-function getAffection() { return parseInt(localStorage.getItem("pet_affection")) || 0; }
-function addAffection(n = 1) {
-  const v = Math.min(getAffection() + n, 9999);
-  localStorage.setItem("pet_affection", String(v));
-  const el = document.getElementById("affection");
-  if (el) el.textContent = `❤ ${v}`;
-  return v;
-}
+// —— 喂食（对齐桌面 feed_self） ——
+ToolRegistry.register("feed_self", {
+  type: "function",
+  function: {
+    name: "feed_self",
+    description: `投喂桌宠。可选食物：${FOODS.map(f => f.name).join("、")}。会扣金币、涨状态和经验`,
+    parameters: {
+      type: "object",
+      properties: { food_name: { type: "string", description: "食物名，如「便当」" } },
+      required: ["food_name"],
+    },
+  },
+}, ({ food_name }) => {
+  const P = window.petState;
+  const it = FOODS.find(x => x.name === String(food_name || "").trim());
+  if (!it) return `错误：没有叫「${food_name}」的食物。可选：${FOODS.map(f => f.name).join("、")}`;
+  if (P.s.money < it.price) {
+    return `错误：钱不够（需要 ${it.price} 金币，现有 ${P.s.money.toFixed(0)}），没吃掉任何东西。`;
+  }
+  P.s.money -= it.price;
+  P.eatFood({ strength: it.strength, strength_food: it.strength_food,
+              strength_drink: it.strength_drink, feeling: it.feeling,
+              health: it.health || 0, exp: it.exp });
+  P.addFoodLikability(1);
+  P._save();
+  applyEmotion("happy");
+  log(`吃掉了「${it.name}」，花 ${it.price} 金币。现在状态：${P.statsSummary()}`, "ok");
+  return `吃掉了「${it.name}」，花 ${it.price} 金币。现在状态：${P.statsSummary()}`;
+});
+
+// —— 每日签到（对齐桌面 daily_checkin，每天一次 +100 金币） ——
+ToolRegistry.register("daily_checkin", {
+  type: "function",
+  function: {
+    name: "daily_checkin",
+    description: "每日签到领金币，每天一次。今天已签过会返回已领取。",
+    parameters: { type: "object", properties: {} },
+  },
+}, () => {
+  const P = window.petState;
+  const [ok, reward] = P.dailyCheckin(100);
+  if (!ok) return "今天已经签过到啦，明天再来～";
+  const reply = `签到成功，拿到 ${reward} 金币！现在状态：${P.statsSummary()}`;
+  appendChatBubble("assistant", reply);
+  window.tts.speak(window.t("checkin_ok", { coin: reward }));
+  log(reply, "ok");
+  return reply;
+});
+
+// —— 旧实现保留但不再挂到注册表（避免与上面的完整版重复） ——
+
+// —— 亲密度：已并入 PetState.likability（见上），旧的 pet_affection 计数已删除 ——
 
 // 摸宠爱心特效（位置/字号用 CSPRNG 抖动）
 function spawnHearts(x, y, count = 5) {
@@ -1788,7 +2273,23 @@ function toolTraceArgs(args) {
   try { return JSON.stringify(args).slice(0, 90); } catch (e) { return ""; }
 }
 
+// 并发闸门：没有这把锁时，连点 chips 或狂按发送会同时跑多个 ReAct 循环 ——
+// chatHistory 的「末条即本条」去重假设被打破（.slice(0,-1) 会切错条目），
+// 流式气泡互相覆盖，LLM 也会拿到错乱的上下文。
 async function handleUserInput(text) {
+  if (window._chatBusy) {
+    log(window.t("busy_hint"), "err");
+    return;
+  }
+  window._chatBusy = true;
+  try {
+    return await _handleUserInput(text);
+  } finally {
+    window._chatBusy = false;
+  }
+}
+
+async function _handleUserInput(text) {
   if (!text || !window.demo.ready) {
     if (!window.demo.ready) toast(window.t("not_ready"), "err");
     return;

@@ -649,6 +649,7 @@
         <div class="model-meta">
           <div class="model-title">Hiyori <span class="badge-pro">Pro</span></div>
           <div class="model-sub"><span data-i18n="model_official">Live2D 官方样例模型</span> · <span class="affection" id="affection">❤ 0</span></div>
+          <div class="model-sub" id="pet-state-bar">Lv.1</div>
         </div>
         <div class="model-actions">
           <button id="switch-model-btn" title="切换模型" data-i18n-title="switch_model">
@@ -758,7 +759,7 @@
   </div>
 
   <div class="footer-note" data-i18n-html="footer_note">
-    Live2D 渲染 · TTS · ASR · 18 个 Agent 工具（Function Calling） · 长期记忆 · 主动搭话 · Agent Trace。
+    Live2D 渲染 · TTS · ASR · <span data-tool-count>18</span> 个 Agent 工具（Function Calling） · 长期记忆 · 主动搭话 · Agent Trace。
     内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong> 用于演示，模型来自
     <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。
     <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>
@@ -835,6 +836,12 @@
       hold_to_talk: "按住说话",
       listening: "正在听…",
       not_ready: "模型还在加载中，马上就好～",
+  busy_hint: "上一条还在处理中，等它说完再发～",
+  cd_mark: "还有 {n} 秒哦～",
+  cd_done: "{label} 时间到啦！",
+  cd_notify_title: "倒计时结束",
+  lv_up: "升级啦！我现在是 Lv.{lv} 了～",
+  checkin_ok: "签到成功，拿到 {coin} 金币！",
       chat_placeholder: "和桌宠聊天：搜索、记忆、提醒…",
       send: "发送",
       welcome_bubble: "你好呀，我是你的桌宠～可以让我查时间、天气、搜索、设提醒、记事情，也可以直接和我聊天！",
@@ -844,7 +851,7 @@
       chip_weather: "⛅ 查一下北京天气",
       chip_search: "🔍 搜索今天的科技新闻",
       chip_website: "🌐 打开B站首页",
-      footer_note: 'Live2D 渲染 · TTS · ASR · <strong>18 个 Agent 工具（Function Calling）</strong> · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong>，模型来自 <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
+      footer_note: 'Live2D 渲染 · TTS · ASR · <strong><span data-tool-count>18</span> 个 Agent 工具（Function Calling）</strong> · 长期记忆 · 主动搭话 · Agent Trace。内置 <strong>Live2D 官方样例模型 Hiyori / Miara</strong>，模型来自 <a href="https://www.live2d.com/zh-CHS/learn/sample/" target="_blank" rel="noopener">Live2D 官方样例</a>。<a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">文档</a>',
 
       loading_model: "加载模型…",
       status_loading: "加载中…",
@@ -1004,6 +1011,12 @@
       hold_to_talk: "Hold to talk",
       listening: "Listening…",
       not_ready: "Model is still loading, one sec~",
+  busy_hint: "Still working on the last one — wait for it to finish~",
+  cd_mark: "{n} seconds to go~",
+  cd_done: "{label} — time's up!",
+  cd_notify_title: "Countdown finished",
+  lv_up: "Level up! I'm Lv.{lv} now~",
+  checkin_ok: "Checked in — {coin} coins!",
       chat_placeholder: "Chat with your pet: search, remember, remind…",
       send: "Send",
       welcome_bubble: "Hi, I'm your desktop pet! Ask me for time, weather, search, reminders or memory — or just chat with me.",
@@ -1013,7 +1026,7 @@
       chip_weather: "⛅ Weather in Beijing",
       chip_search: "🔍 Search today's tech news",
       chip_website: "🌐 Open a website",
-      footer_note: 'Live2D · TTS · ASR · <strong>18 Agent tools (Function Calling)</strong> · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample models Hiyori / Miara</strong>; models from <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noopener">Live2D official samples</a>. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
+      footer_note: 'Live2D · TTS · ASR · <strong><span data-tool-count>18</span> Agent tools (Function Calling)</strong> · Long-term memory · Proactive chat · Agent Trace. Ships with the official <strong>Live2D sample models Hiyori / Miara</strong>; models from <a href="https://www.live2d.com/en/learn/sample/" target="_blank" rel="noopener">Live2D official samples</a>. <a href="https://github.com/255856/Smart-Desktop-Pet" target="_blank">Docs</a>',
 
       loading_model: "Loading model…",
       status_loading: "Loading…",
