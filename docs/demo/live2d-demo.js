@@ -347,7 +347,28 @@ class Live2DDemo {
   }
   setExpression(name) {
     if (!this.model || !name) return;
-    try { return this.model.expression(name); } catch (e) { log(`设置表情失败：${e.message || e}`, "err"); }
+    try {
+      const em = this.model.internalModel && this.model.internalModel.expressionManager;
+      if (em) {
+        // Cubism 4 的 expression 是叠加的——「特殊 飞头」会隐藏身体只显示飘起的头，
+        // 切到其他 expression 后「飞头」仍 active，结果页面只显示一个头且变不回来。
+        // 修法：set 飞头时 reset 全部其他 expression；切到非飞头时 reset 飞头类。
+        // 保留其他叠加行为（飞头 + 表情 → 飞头 reset 表情；表情 + 表情 → 保留）。
+        const isFlyHead = /飞头/.test(name);
+        if (isFlyHead) {
+          const list = (this.model.internalModel.settings.expressions || []);
+          for (const e of list) {
+            const n = e.Name || e.name;
+            if (n !== name) { try { em.resetExpression(n); } catch (e) {} }
+          }
+        } else {
+          for (const n of ["特殊 飞头", "特殊 飞头（无脖）"]) {
+            try { em.resetExpression(n); } catch (e) {}
+          }
+        }
+      }
+      return this.model.expression(name);
+    } catch (e) { log(`设置表情失败：${e.message || e}`, "err"); return false; }
   }
   // 真实 TTS 口型同步：传入音频时长，每帧更新 mouth 参数
   startTalk(durationMs = 0) {
@@ -1736,8 +1757,27 @@ ToolRegistry.register("open_website", {
 }, ({ url }) => {
   const u = String(url || "").trim();
   if (!/^https?:\/\//i.test(u)) return `错误：仅支持 http(s) URL，收到 ${u.slice(0, 60)}`;
+  // 第一次尝试：直接 window.open（通常能成）
   const w = window.open(u, "_blank", "noopener");
-  return w ? `已打开 ${u}` : `浏览器拦截了弹窗，请允许弹窗后重试：${u}`;
+  if (w) return `已打开 ${u}`;
+  // 被浏览器拦截了。window.open 必须在 user gesture（点击/键盘）里调，
+  // 否则所有浏览器都会拦。弹一个 Modal 让用户点「重试打开」按钮 →
+  // 用户点击瞬间 window.open 是合法的，弹窗会真的打开。
+  if (window.UI && typeof window.UI.confirm === "function") {
+    window.UI.confirm(
+      `「${u}」被浏览器拦截了（弹窗保护）。\n点击下方「重试打开」按钮重试——浏览器地址栏右侧可能需要先允许此站点的弹窗。`,
+      { title: "浏览器拦截了弹窗", okText: "重试打开" }
+    ).then((ok) => {
+      if (!ok) return;
+      const w2 = window.open(u, "_blank", "noopener");
+      if (w2) {
+        toast(`已打开 ${u}`);
+      } else {
+        toast("还是被拦截了，请检查浏览器弹窗设置", "err", 4200);
+      }
+    });
+  }
+  return `浏览器拦截了弹窗（已显示重试按钮）：${u}`;
 });
 ToolRegistry.register("clipboard_copy", {
   type: "function",
