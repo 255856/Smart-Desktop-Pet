@@ -265,7 +265,10 @@ class UIController(QObject):
                 log.debug("reminder 动画触发失败", exc_info=True)
         alarm = getattr(self, "alarm", None)
         if alarm is not None:
-            alarm.fire(text, kind=kind, sound=True, speak=False)
+            # speak=True：让桌宠朗读提醒内容（"⏰ 闹钟到点啦~ 喝水"）。
+            # 之前默认 False，但用户明确要求「希望桌宠能够朗读提醒」——
+            # TTS 引擎若不可用，alarm.fire 内部 try/except 兜底，不会影响其他通道。
+            alarm.fire(text, kind=kind, sound=True, speak=True)
         # 系统通知失败也没关系：桌宠自己的置顶窗已经是可靠通道了
         from app.core import toast
         toast.show(kind, text)

@@ -761,7 +761,9 @@ class ReminderStore {
     const fire = this.items.filter(x => x.fireAt <= now);
     for (const r of fire) {
       log(`提醒触发：${r.content}`, "ok");
-      window.tts.speak(window.t("rem_tts", { c: r.content }));
+      // force=true：提醒是用户明确要求的事件，无论「自动朗读」开关是否打开都要念。
+      // 否则用户关了自动朗读，结果该响的提醒也不响，会以为 demo 整个提醒坏了。
+      window.tts.speak(window.t("rem_tts", { c: r.content }), null, { force: true });
       // 浏览器通知（如已授权）
       if ("Notification" in window && Notification.permission === "granted") {
         new Notification(window.t("rem_notify_title"), { body: r.content });
