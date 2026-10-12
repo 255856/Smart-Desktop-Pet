@@ -53,6 +53,10 @@ jobs:
           cp main/docs/demo/index.html _demo/
           cp main/docs/demo/live2d-demo.js _demo/
           cp main/docs/demo/favicon.ico _demo/
+          # core.js：纯逻辑模块（PetState / CountdownStore / 食物库），
+          # index.html 会 <script src="core.js"> 引用；漏 cp 会让线上页面
+          # 找不到脚本卡在「初始化」界面。
+          cp main/docs/demo/core.js _demo/
 
           # 渲染库（必须，否则线上无法加载 Live2D）
           # pixi-live2d-display（cubism4.min.js）最容易被漏掉：漏了线上就只能退回
