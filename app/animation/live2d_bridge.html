@@ -44,6 +44,14 @@ window.live2d = {
     fitFactor: 0.94,   // 模型占画布比例（留一点边距）
     hiddenWatermarkDrawables: [],  // 被隐藏的水印图层 index
 
+    // 闲置降帧（性能）：无交互、非说话、非动作 4s 后降到 _idleFps。
+    // 透明窗口每帧都要重新合成，静置时 15fps 对呼吸/眨眼/待机物理完全足够，
+    // 能把 WebEngine 渲染与宿主透明合成开销减半。
+    _activeFps: 30,
+    _idleFps: 15,
+    _lastActive: 0,
+    _isIdle: false,
+
     // ---------- QWebChannel ----------
     initBridge() {
         return new Promise((resolve) => {
@@ -207,6 +215,9 @@ window.live2d = {
                 this.app.ticker.maxFPS = (maxFps === undefined || maxFps === null)
                     ? 30 : Math.max(5, Number(maxFps));
             } catch (err) { /* 旧版 ticker 无 maxFPS */ }
+            this._activeFps = this.app.ticker.maxFPS;
+            this._lastActive = performance.now();
+            this._init_idle_watch();
             console.log("Live2D model loaded, expressions:", this.expressions);
             this._py("onReady", JSON.stringify(this.expressions));
         } catch (err) {
@@ -330,6 +341,7 @@ window.live2d = {
         if (!this.model) return false;
         try {
             this.model.expression(name);
+            this.markActive();
             return true;
         } catch (e) {
             console.warn("setExpression failed:", name, e);
@@ -449,6 +461,7 @@ window.live2d = {
                 catch (e) { /* 无此参数 */ }
                 this._keptParams[String(id)] = v;
             });
+            this.markActive();
             return true;
         } catch (e) {
             console.warn("applyParams failed:", e);
@@ -470,6 +483,7 @@ window.live2d = {
             try { core.setPartOpacityById(String(id), v); } catch (e) { /* 无此部件 */ }
             this._keptParts[String(id)] = v;
         });
+        this.markActive();
         return true;
     },
 
@@ -495,6 +509,11 @@ window.live2d = {
             } else {
                 this.model.motion(group, index);
             }
+            // 动作播放期间保持高帧（动作一般 1-5s），3.5s 后解除 busy
+            this._motionBusy = true;
+            this.markActive();
+            if (this._motionBusyTimer) clearTimeout(this._motionBusyTimer);
+            this._motionBusyTimer = setTimeout(() => { this._motionBusy = false; }, 3500);
         } catch (e) {
             console.warn("playMotion failed:", group, e);
         }
@@ -514,6 +533,7 @@ window.live2d = {
         try {
             const dm = this.model.internalModel.dragManager;
             if (dm) dm.set(x * this.app.screen.width, y * this.app.screen.height);
+            this.markActive();   // 拖拽期间保持高帧
         } catch (e) { /* ignore */ }
     },
 
@@ -540,23 +560,77 @@ window.live2d = {
         try { if (this.app) this.app.ticker.stop(); } catch (e) { /* ignore */ }
     },
     resume() {
-        try { if (this.app) this.app.ticker.start(); } catch (e) { /* ignore */ }
+        try {
+            if (this.app) {
+                this.app.ticker.start();
+                // 重置闲置状态：重新给 4s 宽限评估，避免恢复后仍停在低帧/mask
+                this._isIdle = false;
+                this.app.ticker.maxFPS = this._activeFps;
+                this._lastActive = performance.now();
+                this._py("onIdleExit", "1");
+            }
+        } catch (e) { /* ignore */ }
     },
 
     // 运行时调整渲染帧率上限（设置面板 Live2D 页）
     setMaxFps(fps) {
         try {
-            if (this.app) this.app.ticker.maxFPS = Math.max(5, Number(fps) || 30);
+            if (this.app) {
+                this.app.ticker.maxFPS = Math.max(5, Number(fps) || 30);
+                if (!this._isIdle) this._activeFps = this.app.ticker.maxFPS;
+            }
         } catch (e) { /* ignore */ }
+    },
+
+    // ---- 闲置降帧 ----
+    _init_idle_watch() {
+        if (this._idleWatching) return;
+        this._idleWatching = true;
+        // 鼠标交互（移动 / 进入 / 按下 / 拖拽）都标记活跃
+        const mark = () => this.markActive();
+        const stage = document.getElementById("stage");
+        const targets = [window, stage];
+        for (const el of targets) {
+            if (!el) continue;
+            el.addEventListener("pointermove", mark, { passive: true });
+            el.addEventListener("pointerdown", mark, { passive: true });
+            el.addEventListener("pointerenter", mark, { passive: true });
+            el.addEventListener("dragstart", mark, { passive: true });
+        }
+        // 每帧检测：静置超时则降帧；说话/动作期间保持高帧
+        this.app.ticker.add(() => {
+            const busy = this._talking || this._motionBusy;
+            if (this._isIdle) {
+                if (busy) this.markActive();
+                return;
+            }
+            if (!busy && performance.now() - this._lastActive > 4000) {
+                this._isIdle = true;
+                try { this.app.ticker.maxFPS = this._idleFps; } catch (e) { /* ignore */ }
+                this._py("onIdleEnter", "1");   // 通知 python 停 mask 采样
+            }
+        });
+    },
+
+    markActive() {
+        const wasIdle = this._isIdle;
+        this._lastActive = performance.now();
+        if (wasIdle) {
+            this._isIdle = false;
+            try { this.app.ticker.maxFPS = this._activeFps; } catch (e) { /* ignore */ }
+            this._py("onIdleExit", "1");    // 通知 python 恢复 mask 采样
+        }
     },
 
     // 口型同步：说话期间每帧开合嘴巴（param 如 ParamMouthOpenY）
     startTalk(param) {
         this._talkParam = String(param || "ParamMouthOpenY");
         this._talking = true;
+        this.markActive();
     },
     stopTalk() {
         this._talking = false;
+        this.markActive();
         try {
             if (this.model && this._talkParam) {
                 this.model.internalModel.coreModel

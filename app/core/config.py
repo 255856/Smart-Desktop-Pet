@@ -93,7 +93,7 @@ class SpriteConfig(BaseModel):
 
 
 class ASRConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False          # 默认关闭：启动慢、占内存、识别卡主线程
     model_size: str = "base"       # tiny/base/small/medium/large-v3
     language: str = "zh"
 
@@ -169,9 +169,9 @@ class Live2DConfig(BaseModel):
     random_expression: bool = True
     random_expression_min_s: int = 25
     random_expression_max_s: int = 70
-    # 渲染帧率上限（性能）：桌宠待机 30fps 足够顺滑，满帧只会让风扇狂转。
-    # 桌宠隐藏到托盘时渲染会完全暂停（零开销）。
-    max_fps: int = 30
+    # 渲染帧率上限（性能）：24fps 为电影帧率，口型、动作与物理都足够顺滑，
+    # 比 30fps 更省电；隐藏到托盘时渲染会完全暂停（零开销）。
+    max_fps: int = 24
 
 
 class PetConfig(BaseModel):

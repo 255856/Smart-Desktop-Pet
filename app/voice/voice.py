@@ -133,8 +133,12 @@ class TTS:
         # 启动时清理过期缓存（7 天前的 mp3）
         self._clean_expired_cache()
 
-    def _clean_expired_cache(self, max_age_days: int = 7) -> None:
-        """清理超过 max_age_days 天的 TTS 缓存文件。"""
+    def _clean_expired_cache(self, max_age_days: int = 7,
+                             max_total_mb: int = 80) -> None:
+        """清理 TTS 缓存。两道闸：
+          1) 删 max_age_days 天前的 mp3（旧的同一句话也基本不会被再用到）
+          2) 总大小超 max_total_mb 时按 mtime 删最老的一半，LRU 风格截断
+        """
         try:
             import time as _t
             cutoff = _t.time() - max_age_days * 86400
@@ -145,6 +149,15 @@ class TTS:
                     removed += 1
             if removed:
                 log.info("TTS 缓存清理：删除 %d 个过期文件", removed)
+            # 总大小截断：超 max_total_mb 时砍掉最老的一半
+            files = sorted(self.cache_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            total = sum(p.stat().st_size for p in files)
+            if total > max_total_mb * 1024 * 1024 and len(files) > 4:
+                keep = len(files) // 2    # 砍掉一半最老的，保留 50%
+                for p in files[:-keep]:
+                    p.unlink()
+                    removed += 1
+                log.info("TTS 缓存清理：超 %dMB 截断，删 %d 个最老文件", max_total_mb, len(files) - keep)
         except Exception as e:  # noqa: BLE001
             log.warning("TTS 缓存清理失败：%s", e)
 

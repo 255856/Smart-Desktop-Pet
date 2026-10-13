@@ -884,8 +884,6 @@ class UIController(QObject):
             cw.thinking_stopped.connect(self._on_thinking_stopped)
             cw.show()
             self._chat_window = cw
-            # chat_window 已建好，启动语音唤醒监听
-            self._apply_wake_word_setting()
         else:
             cw.raise_()
             cw.activateWindow()
@@ -1280,23 +1278,3 @@ class UIController(QObject):
         """退出应用。"""
         from app.core.qt_compat import QApplication
         QApplication.instance().quit()
-
-    def _apply_wake_word_setting(self) -> None:
-        """启动时根据 settings.json 决定是否打开语音唤醒监听。"""
-        cw = getattr(self, "_chat_window", None)
-        ww = getattr(cw, "wake_word", None) if cw else None
-        if ww is None:
-            return
-        try:
-            enabled = self.settings_window.settings_store.get("wake_word_enabled", True)
-        except Exception:
-            enabled = True
-        if enabled and not ww._enabled:
-            try:
-                ww.start()
-                log.info("语音唤醒已启动")
-            except Exception:  # noqa: BLE001
-                log.exception("WakeWord 启动失败")
-        elif not enabled and ww._enabled:
-            ww.stop()
-            log.info("语音唤醒已停止")

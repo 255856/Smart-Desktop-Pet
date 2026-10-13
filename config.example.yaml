@@ -47,8 +47,10 @@ sprite:
   fallback: "assets/sprites/body_front.png"
 
 # ---- 语音输入（ASR） ----
+# ASR 长按说话——已默认关闭（启动慢、占 ~300MB 内存、每次识别卡主线程）。
+# 想要回语音输入：把 enabled 改 true，并装 sounddevice + faster-whisper。
 asr:
-  enabled: true
+  enabled: false
   model_size: "base"      # tiny/base/small/medium/large-v3
   language: "zh"          # zh=中文，en=英文
 

@@ -11,7 +11,7 @@ Desktop Pet · Live2D Demo 本地服务器
   - 提供根目录浏览，方便用户复制模型 *.model3.json 的完整 URL
   - 所有响应带 CORS 头，方便直接托管到 GitHub Pages 后仍能从本机拉模型
 
-⚠️ 模型版权说明 / Model Copyright Notice
+模型版权说明 / Model Copyright Notice
 -----------------------------------------
 本服务**不内置任何 Live2D 模型**。请用 --model-dir 指向你自己拥有合法授权的
 模型目录。常见来源（如官方 Cubism 样例 Hiyori）是允许在个人项目中本地加载的，
@@ -166,18 +166,18 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             href = f"{rel_prefix}/{urllib.parse.quote(entry.name)}"
             if entry.is_dir():
                 rows.append(
-                    f'<li>📁 <a href="{href}/">{entry.name}/</a></li>'
+                    f'<li><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> <a href="{href}/">{entry.name}/</a></li>'
                 )
             elif entry.suffix.lower() == ".model3.json":
                 # 重点：复制按钮（兼容所有浏览器）
                 full_url = f"http://{self.headers.get('host', '127.0.0.1:8765')}{href}"
                 rows.append(
-                    f'<li>🎭 <a href="{href}">{entry.name}</a> '
+                    f'<li><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l2.5 5 5.5.8-4 3.9.9 5.5L12 15.6 7.1 18.2l.9-5.5-4-3.9 5.5-.8z"/></svg> <a href="{href}">{entry.name}</a> '
                     f'<button class="copy" data-url="{full_url}">复制 URL</button></li>'
                 )
             else:
                 rows.append(
-                    f'<li>📄 <a href="{href}">{entry.name}</a></li>'
+                    f'<li><svg class="ic" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <a href="{href}">{entry.name}</a></li>'
                 )
 
         # 当前路径面包屑
@@ -198,7 +198,9 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
   h1 {{ font-size:18px; }}
   ul {{ list-style:none; padding:0; }}
   li {{ padding:6px 12px; margin:2px 0; background:rgba(255,255,255,.04);
-        border-radius:6px; }}
+        border-radius:6px; display:flex; align-items:center; gap:4px; }}
+  .ic {{ width:14px; height:14px; flex:none; fill:none; stroke:#a8b0c0;
+        stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }}
   button.copy {{
     margin-left:8px; padding:2px 10px; font-size:11px;
     background:#6c5ce7; color:white; border:0; border-radius:4px;
@@ -211,10 +213,10 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
            padding:8px 12px; border-radius:4px; font-size:12px;
            margin-bottom:16px; color:#ffce5c; }}
 </style></head><body>
-<h1>📂 Index of {rel_prefix}</h1>
+<h1>Index of {rel_prefix}</h1>
 <div class="breadcrumb">{breadcrumb}</div>
 <div class="note">
-  ⚠️ 本服务器仅 serve 你指定的本地目录，<strong>不内置任何 Live2D 模型</strong>。
+  本服务器仅 serve 你指定的本地目录，<strong>不内置任何 Live2D 模型</strong>。
   模型版权属原作者，请使用合法授权的模型。
 </div>
 <ul>
@@ -277,7 +279,7 @@ def main() -> int:
     args = parse_args()
     root = args.root.resolve()
     if not (root / "index.html").exists():
-        print(f"⚠️  警告：{root}/index.html 不存在，浏览器可能 404", file=sys.stderr)
+        print(f"警告：{root}/index.html 不存在，浏览器可能 404", file=sys.stderr)
 
     DemoHandler.server_root = root
     DemoHandler.model_dir = args.model_dir.resolve() if args.model_dir else None
@@ -299,7 +301,7 @@ def main() -> int:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\n👋 已停止")
+            print("\n已停止")
     return 0
 
 

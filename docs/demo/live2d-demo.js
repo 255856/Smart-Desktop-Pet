@@ -289,12 +289,25 @@ class Live2DDemo {
     const w = this.app.screen.width, h = this.app.screen.height;
     // fitFactor 0.7 留 30% 边距（桌面默认 0.94，demo 用更大边距让 UI 不被遮挡）
     const { mw, mh } = this._modelSize();
-    const scale = Math.min((w / mw) * this.fitFactor, (h / mh) * this.fitFactor);
+    // 宽屏：右侧固定聊天栏（340px），角色在左侧区域居中，避免被气泡覆盖；
+    // 窄屏：聊天栏浮层，角色用整宽居中。
+    const wide = w >= 880;
+    const chatW = wide ? 340 : 0;
+    const areaW = w - chatW;
+    // 地面线：底部预留「chips（最多 2 行约 70px）+ 聊天栏（约 60px）+ 间距」。
+    // 角色以底部为锚点对齐地面线，脚永远不会探入 chips/输入栏。
+    const bottomPad = 190;
+    const groundY = h - bottomPad;
+    const topPad = 22;
+    const fitH = groundY - topPad;
+    const scale = Math.min((areaW / mw) * this.fitFactor, (fitH / mh) * this.fitFactor);
     this._fitScale = scale;   // 目标缩放存档：pulse() 以此为基准，避免复利放大
     this.model.scale.set(scale);
-    try { this.model.anchor.set(0.5, 0.5); } catch (e) {}
-    this.model.x = w / 2;
-    this.model.y = h / 2;
+    try { this.model.anchor.set(0.5, 1); } catch (e) {
+      this.model.anchor.set(0.5, 0.5);
+    }
+    this.model.x = areaW / 2;
+    this.model.y = groundY;
   }
   _refreshControls() {
     const ctrl = document.getElementById("controls");
@@ -1233,13 +1246,18 @@ function randIndex(n) {
   return (Date.now() + performance.now()) % n | 0;
 }
 
-const AVATARS = { user: "🙂", assistant: "🐾", proactive: "💭" };
+// 头像不使用 emoji：桌宠用 favicon.ico（与顶栏 logo 一致），用户用 SVG 人形图标
+const AVATAR_HTML = {
+  user: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  assistant: '<img src="favicon.ico" width="19" height="19" alt="">',
+  proactive: '<img src="favicon.ico" width="19" height="19" alt="">',
+};
 function _makeMsg(role) {
   const wrap = document.createElement("div");
   wrap.className = `msg msg-${role}`;
   const av = document.createElement("div");
   av.className = "avatar";
-  av.textContent = AVATARS[role] || "🐾";
+  av.innerHTML = AVATAR_HTML[role] || AVATAR_HTML.assistant;
   const b = document.createElement("div");
   b.className = `bubble bubble-${role}`;
   wrap.appendChild(av); wrap.appendChild(b);
@@ -1259,7 +1277,10 @@ function appendChatBubble(role, text, { restore = false, save = true } = {}) {
   chatEl.appendChild(wrap);
   while (chatEl.children.length > 12) chatEl.removeChild(chatEl.firstChild);
   chatEl.scrollTop = chatEl.scrollHeight;
-  if (!restore && save) window.chatHistory.add(role, text);
+  if (!restore && save) {
+    window.chatHistory.add(role, text);
+    _showChatTemporary();
+  }
 }
 // 打字中指示器（流式回复占位）
 let _typingEl = null;
@@ -1271,11 +1292,54 @@ function showTyping() {
   chatEl.appendChild(wrap);
   chatEl.scrollTop = chatEl.scrollHeight;
   _typingEl = wrap;
+  _showChatPersistent();
   return bubble;
 }
 function hideTyping() {
   if (_typingEl) { _typingEl.remove(); _typingEl = null; }
 }
+// 窄屏聊天记录显隐：默认收起（不浮在角色身上），新消息时临时显示、自动隐藏；
+// 点聊天栏历史按钮可手动展开（pin 住，不自动隐藏）。宽屏聊天栏常驻右侧，无需此逻辑。
+let _chatHideTimer = null;
+let _chatPinned = false;
+function _isNarrow() { return window.innerWidth < 760; }
+function _showChatTemporary() {
+  if (!_isNarrow() || _chatPinned || !chatEl) return;
+  chatEl.classList.remove("history-collapsed");
+  if (_chatHideTimer) clearTimeout(_chatHideTimer);
+  _chatHideTimer = setTimeout(() => {
+    if (!_chatPinned) chatEl.classList.add("history-collapsed");
+  }, 6000);
+}
+function _showChatPersistent() {
+  if (!_isNarrow() || _chatPinned || !chatEl) return;
+  chatEl.classList.remove("history-collapsed");
+  if (_chatHideTimer) { clearTimeout(_chatHideTimer); _chatHideTimer = null; }
+}
+function _toggleHistory() {
+  if (!_isNarrow() || !chatEl) return;
+  _chatPinned = !_chatPinned;
+  if (_chatPinned) {
+    chatEl.classList.remove("history-collapsed");
+    if (_chatHideTimer) { clearTimeout(_chatHideTimer); _chatHideTimer = null; }
+  } else {
+    chatEl.classList.add("history-collapsed");
+  }
+  const btn = document.getElementById("history-toggle");
+  if (btn) btn.classList.toggle("active", _chatPinned);
+}
+window.addEventListener("resize", () => {
+  if (!_isNarrow()) {
+    chatEl.classList.remove("history-collapsed");
+    if (_chatHideTimer) { clearTimeout(_chatHideTimer); _chatHideTimer = null; }
+  } else if (!_chatPinned) {
+    chatEl.classList.add("history-collapsed");
+  }
+});
+document.addEventListener("DOMContentLoaded", () => {
+  const btn = document.getElementById("history-toggle");
+  if (btn) btn.addEventListener("click", _toggleHistory);
+});
 // 恢复上次对话历史（刷新不丢，对齐桌面版 chat_history.json）
 function restoreChatHistory() {
   const items = window.chatHistory.items;
@@ -1284,6 +1348,8 @@ function restoreChatHistory() {
   } else {
     appendChatBubble("proactive", window.t("welcome_bubble"), { save: false });
   }
+  // 窄屏初始收起历史（角色完整可见），宽屏始终显示
+  if (_isNarrow()) chatEl.classList.add("history-collapsed");
 }
 
 // ============================================================
@@ -1976,20 +2042,25 @@ ToolRegistry.register("daily_checkin", {
 
 // —— 亲密度：已并入 PetState.likability（见上），旧的 pet_affection 计数已删除 ——
 
-// 摸宠爱心特效（位置/字号用 CSPRNG 抖动）
+// 摸宠爱心特效（位置/字号用 CSPRNG 抖动；SVG 心形，不使用 emoji）
+const HEART_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21s-6.7-4.35-9.5-8.5C.8 10 2 6.5 5.2 6.5c2 0 3.3 1.2 4 2.2.7-1 2-2.2 4-2.2 3.2 0 4.4 3.5 2.7 6C18.7 16.65 12 21 12 21z"/></svg>';
+const HEART_COLORS = ["#ff6b9d", "#ff8fb0", "#c79bff"];
 function spawnHearts(x, y, count = 5) {
   const layer = document.getElementById("fx-layer");
   if (!layer) return;
   for (let i = 0; i < count; i++) {
     const h = document.createElement("span");
     h.className = "heart-fx";
-    h.textContent = ["❤", "💕", "✨"][randIndex(3)];
+    const size = 13 + randIndex(10);
+    h.style.width = size + "px";
+    h.style.height = size + "px";
+    h.style.color = HEART_COLORS[randIndex(HEART_COLORS.length)];
+    h.innerHTML = HEART_SVG;
     h.style.left = `${x + randIndex(45) - 22}px`;
     h.style.top = `${y + randIndex(21) - 10}px`;
     h.style.setProperty("--dx", `${randIndex(51) - 25}px`);
     h.style.setProperty("--rot", `${randIndex(41) - 20}deg`);
     h.style.animationDelay = `${i * 90}ms`;
-    h.style.fontSize = `${13 + randIndex(10)}px`;
     layer.appendChild(h);
     setTimeout(() => h.remove(), 1600);
   }
@@ -3090,7 +3161,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // 恢复上次对话历史（刷新不丢）+ 亲密度显示
   restoreChatHistory();
   const aff = document.getElementById("affection");
-  if (aff) aff.textContent = `❤ ${getAffection()}`;
+  if (aff) aff.textContent = `好感 ${getAffection()}`;
   (async () => {
     try { if (window.__sdkReady) await window.__sdkReady; }
     catch (e) {

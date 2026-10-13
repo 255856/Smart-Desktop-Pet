@@ -85,6 +85,14 @@ class _BridgeProxy(QObject):
     def onError(self, error: str) -> None:
         self._renderer._on_model_error(error)
 
+    @Slot(str)
+    def onIdleEnter(self, _payload: str) -> None:
+        self._renderer.on_idle_state(True)
+
+    @Slot(str)
+    def onIdleExit(self, _payload: str) -> None:
+        self._renderer.on_idle_state(False)
+
 
 class _ConsolePage(QWebEnginePage):
     """把 JS console 消息转发到 Python logging。"""
@@ -392,6 +400,13 @@ class Live2DRenderer(PetRenderer):
     def resume(self) -> None:
         """恢复渲染循环（桌宠重新显示）。"""
         self._js("window.live2d.resume();")
+
+    def on_idle_state(self, idle: bool) -> None:
+        """JS 闲置/活跃状态切换：通知 pet_window 停/启遮罩采样（静置时零 grab）。"""
+        win = self.view.window() if self.view else None
+        cb = getattr(win, "on_renderer_idle", None)
+        if callable(cb):
+            cb(idle)
 
     def _check_ready_timeout(self) -> None:
         if not self._ready and not self._error:

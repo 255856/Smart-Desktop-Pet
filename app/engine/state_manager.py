@@ -63,6 +63,7 @@ class StateManager(QObject):
         self.reminders = ReminderStore(rem_path)
         # 转发 reminder_triggered 信号
         self.reminders.reminder_triggered.connect(self.reminder_fired.emit)
+        self._last_tick_ts: float = 0.0   # 上次状态 tick 时间：按真实 dt 推进，支持降频
 
     def start(self) -> None:
         """启动自动存档定时器。"""
@@ -77,10 +78,20 @@ class StateManager(QObject):
             log.warning("退出存档失败：%s", e)
 
     def state_tick_once(self, is_sleeping: bool = False) -> None:
-        """每秒推进一次状态（衰减 + 跨夜）。"""
+        """按真实流逝时间推进状态（衰减 + 跨夜）。
+
+        状态衰减对 dt 完全线性，所以 tick 不必每秒执行；外层定时器降频后，
+        这里按上次 tick 的实际间隔传 dt，结果与逐秒一致。
+        """
         now = time.time()
+        if not self._last_tick_ts:
+            dt = 1.0
+        else:
+            # 间隔上限 60s：避免首次 tick、或长时间休眠后一次性衰减过多
+            dt = min(max(now - self._last_tick_ts, 0.0), 60.0)
+        self._last_tick_ts = now
         self.state.tick(
-            dt_seconds=1.0,
+            dt_seconds=dt,
             is_night=is_night(now),
             sleeping=is_sleeping,
         )

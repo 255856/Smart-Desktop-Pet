@@ -33,6 +33,43 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+
+def _detect_nvidia_gpu() -> bool:
+    """检测系统是否有 NVIDIA 独立 GPU。强启 GPU 加速可能让无 GPU / 集显机器渲染崩，
+    所以只对检测到 NVIDIA 驱动的机器加 --ignore-gpu-blacklist（绕过 Chromium 黑名单）。
+    其他情况让 Chromium 默认决策。
+    """
+    if sys.platform != "win32":
+        return True    # macOS / Linux 默认有 GPU
+    # 1) NVIDIA 控制面板 / 驱动目录存在？
+    for prefix_var in ("ProgramW6432", "ProgramFiles"):
+        prefix = os.environ.get(prefix_var)
+        if prefix and (Path(prefix) / "NVIDIA Corporation").exists():
+            return True
+    # 2) NVIDIA 驱动 DLL 存在？
+    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+    if (Path(sys_root) / "System32" / "nvapi64.dll").exists():
+        return True
+    return False
+
+
+_HAVE_NVIDIA = _detect_nvidia_gpu()
+# 启用 PyQtWebEngine 的 GPU 加速 —— 不然 Chromium 默认在 Windows + PyQt5 上经常走软件渲染，
+# pixi.js + Cubism Web 全靠 CPU 跑，桌宠一启动 CPU 就冲高、GPU 几乎不动。
+# 实测：用户 RTX 4060 + 最新驱动下未启用时，桌宠主进程 CPU 高，
+# QtWebEngineProcess 子进程 CPU 也高（软件路径）。开启后两者都降，GPU 起来。
+# 关键：Chromium 进程命令行实测拿到了 --use-gl=desktop 但 GPU 仍 0%——说明 desktop GL
+# context 创建失败（驱动 / 黑名单），静默 fallback 到 swiftshader 软渲染。
+# 修法：强制走 ANGLE（Chromium 在 Windows 上的稳定 GL 路径，DirectX 11 桥）+ 显式 D3D11 backend。
+# --ignore-gpu-blacklist：仅当检测到 NVIDIA 驱动时启用（绕过 Chromium 对某些驱动的黑名单误判）
+# --enable-gpu-rasterization：让 2D canvas 也走 GPU 合成（pixi 用 canvas）
+# --enable-zero-copy：避免 WebView 复制帧到主进程
+_GPU_FLAGS = "--use-gl=angle --use-angle=gl-d3d11"
+if _HAVE_NVIDIA:
+    _GPU_FLAGS += " --ignore-gpu-blacklist"
+_GPU_FLAGS += " --enable-gpu-rasterization --enable-zero-copy"
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _GPU_FLAGS)
+
 try:
     import faster_whisper  # noqa: F401
 except Exception:  # noqa: BLE001
@@ -521,6 +558,16 @@ class App:
         else:
             banner.info("TTS 已关闭")
 
+        # TTS 缓存自动清理：每 1 小时跑一次，删 3 天前 mp3 + 总大小 > 80MB 时清掉一半最老。
+        # 之前只在 __init__ 调一次，缓存永久只增不减（实测攒到 100MB+）。
+        # 注意：App 不是 QObject，所以 QTimer 不传 parent（孤儿 timer 由 Python GC 兜底），
+        # 同 self._state_tick = QTimer() 的写法。
+        self._tts_cache_timer = QTimer()
+        self._tts_cache_timer.setInterval(3600 * 1000)   # 1 小时
+        self._tts_cache_timer.timeout.connect(
+            lambda: self.tts._clean_expired_cache(max_age_days=3))
+        self._tts_cache_timer.start()
+
         banner.section("④ 桌宠窗口")
         self._asset_root = _get_assets_root()
         sprite_subdir = cfg.sprite.directory
@@ -624,9 +671,12 @@ class App:
         QTimer.singleShot(50, self.motion.start)
 
         self._state_tick = QTimer()
-        self._state_tick.setInterval(1000)
+        # 状态衰减对 dt 线性，30s 一次即可（按真实 dt 推进，结果与逐秒一致），大幅省电
+        self._state_tick.setInterval(30000)
         self._state_tick.timeout.connect(self._state_tick_once)
         self._state_tick.start()
+        # 首次先跑一次，记录 _last_tick_ts 基准
+        QTimer.singleShot(1000, self._state_tick_once)
 
         self.state_mgr.mode_changed.connect(self._on_mode_changed)
         self.brain.connect_tool_animation(self.pet)
@@ -910,6 +960,14 @@ def _main_inner() -> int:
         # 真正的加载在 AppContext 里做，那里会给出可操作的错误提示。
         log.debug("ignored: %s", e)
     banner.title(char_name)
+
+    # 启用桌面 OpenGL：Live2D（WebGL/Canvas）经 PyQtWebEngine 走 Chromium 时，
+    # 默认 Qt 用 software rasterizer；显式选 AA_UseDesktopOpenGL 让 Chromium 跑真正的 GPU 路径。
+    try:
+        from PyQt5.QtCore import Qt as _Qt2
+        _QCA.setAttribute(_Qt2.AA_UseDesktopOpenGL, True)
+    except Exception:  # noqa: BLE001
+        pass
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

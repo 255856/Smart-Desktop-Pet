@@ -176,6 +176,15 @@
       try { _storage().setItem(this.key, JSON.stringify(this.s)); }
       catch (e) { _log(`养成存档写入失败（本地存储已满或被禁用）：${e.message || e}`, "err"); }
     }
+    // tick 专用：每秒 JSON.stringify + 同步 localStorage 写是纯浪费
+    // （状态每秒都在变，"没变就不写" 的判断永远不成立），节流到 10s 一次。
+    // 离散操作（喂食/签到/互动）仍走 _save() 立即落盘。
+    _saveTick() {
+      const now = _now();
+      if (now - (this._lastSaveTs || 0) < 10000) return;
+      this._lastSaveTs = now;
+      this._save();
+    }
     reset() {
       try { _storage().removeItem(this.key); } catch (e) {}
       const fresh = new PetState(this.key);
@@ -293,7 +302,7 @@
         s.strength_drink = clamp(s.strength_drink + 0.10 * dtSeconds, 0, STAT_MAX);
         s.feeling = clamp(s.feeling + 0.05 * dtSeconds, 0, STAT_MAX);
         s.health = clamp(s.health + 0.05 * dtSeconds, 0, STAT_MAX);
-        this.takeStore(); this._reevaluateMode(); this._save();
+        this.takeStore(); this._reevaluateMode(); this._saveTick();
         return;
       }
       const rows = [
@@ -316,7 +325,7 @@
       }
       this.takeStore();
       this._reevaluateMode();
-      this._save();
+      this._saveTick();
     }
     onInteract(opts) {
       opts = opts || {};
@@ -367,9 +376,9 @@
     statsSummary() {
       const s = this.s;
       const f = (v) => v.toFixed(0);
-      return `Lv.${s.level}  💪${f(s.strength)}  🍚${f(s.strength_food)}  💧${f(s.strength_drink)}  `
-           + `😊${f(s.feeling)}  ❤️${f(s.health)}  💕${f(s.likability)}/${f(LIKABILITY_MAX)}  `
-           + `💰${f(s.money)}  [${s.mode}]`;
+      return `Lv.${s.level}  体力${f(s.strength)}  饱食${f(s.strength_food)}  口渴${f(s.strength_drink)}  `
+           + `心情${f(s.feeling)}  健康${f(s.health)}  好感${f(s.likability)}/${f(LIKABILITY_MAX)}  `
+           + `金币${f(s.money)}  [${s.mode}]`;
     }
   }
 

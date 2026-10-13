@@ -8,13 +8,13 @@
 
 ---
 
-## 🌐 在线 Demo / Online Demo
+## 在线 Demo / Online Demo
 
 部署完成后访问：
 
 > **https://255856.github.io/Smart-Desktop-Pet/**
 
-部署步骤见 [DEPLOY.md](DEPLOY.md)。
+部署步骤见下方「部署到 GitHub Pages」章节。
 
 > **技术栈**：PIXI v7.4.0 + 原生 Cubism Core + `pixi-live2d-display` 0.3.0 真实
 > Live2D 渲染管线（与桌面版 `app/animation/live2d_bridge.html` 桥接版一致）。
@@ -23,7 +23,7 @@
 
 ---
 
-## ⚠️ 模型版权说明 / Model Copyright Notice
+## 模型版权说明 / Model Copyright Notice
 
 > **本演示页不包含任何 Live2D 模型文件。**
 >
@@ -44,7 +44,7 @@
 
 ---
 
-## 📂 文件清单 / Files
+## 文件清单 / Files
 
 | 文件 | 作用 |
 |---|---|
@@ -58,7 +58,7 @@
 
 ---
 
-## 🚀 本地运行 / Run Locally
+## 本地运行 / Run Locally
 
 ### 最简方式（仅静态页，不挂载模型）
 
@@ -81,7 +81,7 @@ python docs/demo/serve.py --model-dir "E:\live2d-models\Hiyori"
 3. 把模型 `*.model3.json` 文件拖到浏览器窗口加载，**或**
 4. 在顶部 URL 框输入：`http://127.0.0.1:8765/models/Hiyori/Hiyo.model3.json`
 
-> 💡 如果模型目录是标准 Cubism 结构（`xxx.model3.json` + 同名 `.moc3` + `textures/` + `motions/`），
+> 提示：如果模型目录是标准 Cubism 结构（`xxx.model3.json` + 同名 `.moc3` + `textures/` + `motions/`），
 > 直接拖 `xxx.model3.json` 进来即可，**不要拖整个文件夹**。
 
 ### 高级用法
@@ -104,29 +104,29 @@ Start-Process python -ArgumentList "docs/demo/serve.py","--model-dir","E:\live2d
 1. 复制 `custom-models.example.js` 为 `custom-models.js`（已 gitignore），登记模型；
 2. 本地：`--custom-dir` 挂载，或把模型目录拷进 `docs/demo/custom_models/`；
 3. 线上：模型放进 **gh-pages 分支**的 `custom_models/`，Actions 会自动注入并生成注册表
-   —— master 分支永远没有模型文件，完整步骤与安全边界见 [DEPLOY.md](DEPLOY.md)。
+   —— master 分支永远没有模型文件，线上模型放在 gh-pages 分支。
 
 ---
 
-## 🎮 页面交互 / Controls
+## 页面交互 / Controls
 
 | 控件 | 功能 |
 |---|---|
 | **快捷指令 chips** | 聊天框上方一排常用指令（时间 / 提醒 / 记忆 / 天气 / 搜索 / 打开网站），点击即发送 |
 | **聊天输入框** | 自然语言对话：LLM Function Calling 自动选工具，无 key 时正则意图 + mock 回复 |
-| **按住说话 🎤** | 浏览器 SpeechRecognition 语音输入 |
+| **按住说话** | 浏览器 SpeechRecognition 语音输入 |
 | **拖拽 `.model3.json` 链接** | 拖入 http(s) 模型链接直接加载（本地文件受浏览器沙箱限制，会给出提示） |
 | **模型 URL 输入框** | 功能面板「模型」组，粘贴 `https://…/xxx.model3.json` 加载 |
 | **动作 / 表情下拉 + 播放** | 播放所选动作组 / 表情 |
-| **💬 测试口型** | 模拟说话嘴型同步 |
+| **测试口型** | 模拟说话嘴型同步 |
 | **自动朗读 / 主动搭话开关** | 偏好设置，localStorage 持久化 |
-| **查看记忆 / 遗忘 / 提醒列表** | 每条记忆与提醒支持 ✕ 单独删除 |
+| **查看记忆 / 遗忘 / 提醒列表** | 每条记忆与提醒支持单独删除 |
 | **清空对话 / 导出对话** | 聊天历史管理（导出为 .txt） |
 | **工具清单** | 查看网页版 18 个与桌面版同名对齐的工具 |
 | **鼠标移动 / 点击模型** | 视线跟随；点击摸头 → 爱心特效 + 亲密度 +1 |
-| **↺ 重置 / 切换模型** | 内置 Hiyori Pro/Free、Miara Pro 循环切换 |
+| **重置 / 切换模型** | 内置 Hiyori Pro/Free、Miara Pro 循环切换 |
 
-## 🤖 Agent 工具对齐 / Tool Alignment
+## Agent 工具对齐 / Tool Alignment
 
 网页 Demo 注册了 **18 个与桌面版 `app/engine/tools/` 同名**的工具（浏览器沙箱内可用的子集），
 配置 LLM Key 后由模型通过 **Function Calling 自主多轮调用**（ReAct：调用 → 观察 → 总结），
@@ -142,7 +142,7 @@ Start-Process python -ArgumentList "docs/demo/serve.py","--model-dir","E:\live2d
 
 ---
 
-## 🌐 部署到 GitHub Pages / Deploy
+## 部署到 GitHub Pages / Deploy
 
 演示页是**纯静态**的，可以直接托管：
 
@@ -170,7 +170,7 @@ GitHub Pages 设置：`Settings → Pages → Branch: gh-pages / root`。
 
 ---
 
-## 🔧 技术细节 / Tech Notes
+## 技术细节 / Tech Notes
 
 ### 与 `live2d_bridge.html` 的差异
 
@@ -196,14 +196,14 @@ GitHub Pages 设置：`Settings → Pages → Branch: gh-pages / root`。
 
 | 浏览器 | 版本 | 状态 |
 |---|---|---|
-| Chrome / Edge | 100+ | ✅ 完美 |
-| Firefox | 100+ | ✅ 完美 |
-| Safari | 15.4+ | ✅ 完美（File API + clipboard） |
-| 移动浏览器 | 任意 | ⚠️ 演示用，桌面应用不需要 |
+| Chrome / Edge | 100+ | 完美 |
+| Firefox | 100+ | 完美 |
+| Safari | 15.4+ | 完美（File API + clipboard） |
+| 移动浏览器 | 任意 | 演示用，桌面应用不需要 |
 
 ---
 
-## 🐛 故障排查 / Troubleshooting
+## 故障排查 / Troubleshooting
 
 | 问题 | 原因 / 解法 |
 |---|---|
@@ -216,7 +216,7 @@ GitHub Pages 设置：`Settings → Pages → Branch: gh-pages / root`。
 
 ---
 
-## 📜 License
+## License
 
 MIT（与主项目一致）
 

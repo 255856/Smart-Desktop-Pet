@@ -55,7 +55,9 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px;}
   .stat{background:var(--card);border:1px solid var(--border);border-radius:16px;
     padding:16px 18px;box-shadow:var(--shadow-sm);position:relative;overflow:hidden;}
-  .stat .ico{font-size:18px;}
+  .stat .ico{font-size:18px;display:flex;align-items:center;gap:0;}
+  .stat .ico .ic{display:block;}
+  .ic{display:inline-block;vertical-align:-3px;flex:none;}
   .stat .num{font-size:28px;font-weight:700;margin-top:6px;line-height:1.1;}
   .stat .label{font-size:12px;color:var(--sub);margin-top:4px;}
   .stat .bar{position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent);}
@@ -65,9 +67,10 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .stat.violet .bar{background:var(--accent);} .stat.violet .num{color:var(--accent-d);}
 
   /* 标签页 */
-  .tabs{display:flex;gap:6px;margin-bottom:18px;}
-  .tab{padding:9px 20px;border-radius:11px;cursor:pointer;font-weight:600;font-size:14px;
-    color:var(--sub);background:transparent;border:1px solid transparent;transition:.15s;}
+  .tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:nowrap;}
+  .tab{padding:9px 18px;border-radius:11px;cursor:pointer;font-weight:600;font-size:14px;
+    color:var(--sub);background:transparent;border:1px solid transparent;transition:.15s;
+    white-space:nowrap;display:inline-flex;align-items:center;gap:6px;}
   .tab:hover{background:var(--accent-bg);color:var(--accent-d);}
   .tab.active{background:var(--accent);color:#fff;box-shadow:0 4px 12px rgba(124,108,240,.3);}
   .view{display:none;} .view.active{display:block;}
@@ -197,9 +200,9 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <div class="stats" id="stats"></div>
 
   <div class="tabs">
-    <div class="tab active" data-view="sessions">💬 会话记录</div>
-    <div class="tab" data-view="memory">🧠 长期记忆</div>
-    <div class="tab" data-view="tools">🔧 工具统计</div>
+    <div class="tab active" data-view="sessions" data-icon="chat">会话记录</div>
+    <div class="tab" data-view="memory" data-icon="brain">长期记忆</div>
+    <div class="tab" data-view="tools" data-icon="wrench">工具统计</div>
   </div>
 
   <!-- 会话 -->
@@ -218,7 +221,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
         <div class="run-list" id="runList"></div>
       </div>
       <div class="panel" id="detailPanel">
-        <div class="empty"><div class="big">🔍</div><div>选择左侧会话，查看完整执行过程</div></div>
+        <div class="empty"><div class="big" data-icon="search" data-size="40"></div><div>选择左侧会话，查看完整执行过程</div></div>
       </div>
     </div>
   </div>
@@ -226,7 +229,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <!-- 记忆 -->
   <div class="view" id="view-memory">
     <div class="panel" style="padding:18px;">
-      <div class="sub-head" style="margin-top:0;">🧠 桌宠记住的事 <span id="memCount" class="mini-tag"></span></div>
+      <div class="sub-head" style="margin-top:0;" data-icon="brain">桌宠记住的事 <span id="memCount" class="mini-tag"></span></div>
       <div class="grid2" id="memGrid"></div>
     </div>
   </div>
@@ -246,6 +249,27 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 "use strict";
 const $ = (s, el=document) => el.querySelector(s);
 const $$ = (s, el=document) => [...el.querySelectorAll(s)];
+
+// 统一 SVG 线条图标（Lucide 风格，currentColor；不使用 emoji，唯一例外是 logo 的鲸鱼）
+const ICONS = {
+  chat:'<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
+  check:'<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+  wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  zap:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  brain:'<path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>',
+  search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  compass:'<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
+  eye:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  info:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  xcircle:'<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>',
+  alert:'<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  hourglass:'<path d="M5 22h14M5 2h14M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/>',
+};
+function icon(name, size){
+  return '<svg class="ic" width="'+(size||17)+'" height="'+(size||17)+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(ICONS[name]||"")+'</svg>';
+}
+
 
 const TOOL_NAME = {
   open_app:"打开应用", open_website:"打开网址", date_info:"查询日期",
@@ -308,11 +332,11 @@ function renderStats(){
   const s = state.stats; if(!s) return;
   const rate = Math.round((s.success_rate||0)*100);
   const cards=[
-    {cls:"violet", ico:"💬", num:s.total_runs??0, label:"总会话数"},
-    {cls:"green", ico:"✅", num:rate+"%", label:`成功率（${s.success_runs||0}/${s.total_runs||0}）`},
-    {cls:"blue", ico:"🔧", num:s.total_tool_calls??0, label:"工具调用次数"},
-    {cls:"amber", ico:"⚡", num:s.avg_steps??0, label:"平均步骤"},
-    {cls:"violet", ico:"⏱️", num:fmtDur(s.avg_duration), label:"平均耗时"},
+    {cls:"violet", ico:icon("chat"), num:s.total_runs??0, label:"总会话数"},
+    {cls:"green", ico:icon("check"), num:rate+"%", label:`成功率（${s.success_runs||0}/${s.total_runs||0}）`},
+    {cls:"blue", ico:icon("wrench"), num:s.total_tool_calls??0, label:"工具调用次数"},
+    {cls:"amber", ico:icon("zap"), num:s.avg_steps??0, label:"平均步骤"},
+    {cls:"violet", ico:icon("clock"), num:fmtDur(s.avg_duration), label:"平均耗时"},
   ];
   $("#stats").innerHTML = cards.map(c=>`
     <div class="stat ${c.cls}"><div class="bar"></div>
@@ -334,8 +358,8 @@ function renderRunList(){
   const scrollTop=box.scrollTop;
   box.innerHTML=list.map(r=>{
     const tags=[];
-    if(r.tool_calls>0) tags.push(`<span class="mini-tag">🔧 ${r.tool_calls}</span>`);
-    if(r.total_steps>0) tags.push(`<span class="mini-tag">⚡ ${r.total_steps}</span>`);
+    if(r.tool_calls>0) tags.push(`<span class="mini-tag">${icon("wrench", 12)} ${r.tool_calls}</span>`);
+    if(r.total_steps>0) tags.push(`<span class="mini-tag">${icon("zap", 12)} ${r.total_steps}</span>`);
     return `<div class="run-item ${r.id===state.selectedId?"active":""}" data-id="${r.id}">
       <div class="goal">${esc(r.goal||"(无内容)")}</div>
       <div class="meta">${badge(r.status)}<span class="t">${timeAgo(r.started_at)}</span>${tags.join("")}</div>
@@ -377,7 +401,7 @@ function renderToolCard(p){
       <button class="expand-btn" onclick="toggleResult('${rid}',this)">展开结果 ▾</button>`;
   }
   return `<div class="tl-card tool">
-    <div class="cap">🔧 ${esc(cn)}<span class="mini-tag">${esc(name)}</span></div>
+    <div class="cap">${icon("wrench")} ${esc(cn)}<span class="mini-tag">${esc(name)}</span></div>
     ${kvHtml}${resultHtml}
   </div>`;
 }
@@ -385,11 +409,11 @@ function renderToolCard(p){
 function renderPlanCard(p){
   const steps=p.steps||[];
   return `<div class="tl-card">
-    <div class="cap" style="color:#1d4ed8;">🧭 执行计划</div>
+    <div class="cap" style="color:#1d4ed8;">${icon("compass")} 执行计划</div>
     <ol style="margin:4px 0 0;padding-left:20px;">
       ${steps.map(s=>`<li style="margin-bottom:6px;font-size:12.5px;line-height:1.6;">
         <div>${esc(s.thought||"")}</div>
-        ${s.tool_name?`<span class="mini-tag" style="margin-top:3px;">🔧 ${esc(TOOL_NAME[s.tool_name]||s.tool_name)}</span>`:""}
+        ${s.tool_name?`<span class="mini-tag" style="margin-top:3px;">${icon("wrench", 12)} ${esc(TOOL_NAME[s.tool_name]||s.tool_name)}</span>`:""}
       </li>`).join("")}
     </ol>
   </div>`;
@@ -414,25 +438,25 @@ function renderDetail(r){
     tlHtml=`<div class="timeline">${tl.map(e=>{
       const p=e.payload||{};
       if(e.kind==="tool")
-        return `<div class="tl-item tool"><div class="node">🔧</div>${renderToolCard(p)}</div>`;
+        return `<div class="tl-item tool"><div class="node">${icon("wrench")}</div>${renderToolCard(p)}</div>`;
       if(e.kind==="plan")
-        return `<div class="tl-item plan"><div class="node">🧭</div>${renderPlanCard(p)}</div>`;
+        return `<div class="tl-item plan"><div class="node">${icon("compass")}</div>${renderPlanCard(p)}</div>`;
       if(e.kind==="reflection")
-        return `<div class="tl-item reflection"><div class="node">💭</div>
-          <div class="tl-card"><div class="cap" style="color:var(--accent-d);">💭 反思评估</div>
+        return `<div class="tl-item reflection"><div class="node">${icon("eye")}</div>
+          <div class="tl-card"><div class="cap" style="color:var(--accent-d);">${icon("eye")} 反思评估</div>
           <div style="font-size:12.5px;">${esc(p.comment||"")}
           ${p.verdict?`<span class="mini-tag" style="margin-left:6px;">${esc(p.verdict)}</span>`:""}</div></div></div>`;
       if(e.kind==="meta"){
         const label=p.event==="force_retry"?"自动重试":p.event||"内部事件";
         const note=p.reason||p.intent||"";
-        return `<div class="tl-item meta"><div class="node">ℹ️</div>
-          <div class="tl-card"><div class="cap" style="color:var(--sub);">ℹ️ ${esc(label)}</div>
+        return `<div class="tl-item meta"><div class="node">${icon("info")}</div>
+          <div class="tl-card"><div class="cap" style="color:var(--sub);">${icon("info")} ${esc(label)}</div>
           <div style="font-size:12.5px;color:var(--sub);">${esc(note)}</div></div></div>`;
       }
       return "";
     }).join("")}</div>`;
   } else {
-    tlHtml=`<div class="hint">💬 这是一条普通对话，没有调用工具或额外步骤。</div>`;
+    tlHtml=`<div class="hint">${icon("chat")} 这是一条普通对话，没有调用工具或额外步骤。</div>`;
   }
 
   // 折叠：生成过程文本 + 原始事件
@@ -451,23 +475,23 @@ function renderDetail(r){
       ${badge(r.status)}
     </div>
     <div class="d-meta">
-      <span class="meta-cell">🕐 ${fmtTime(r.started_at)}</span>
-      <span class="meta-cell">⏱️ 耗时 <b>${fmtDur(dur)}</b></span>
+      <span class="meta-cell">${icon("clock")} ${fmtTime(r.started_at)}</span>
+      <span class="meta-cell">${icon("clock")} 耗时 <b>${fmtDur(dur)}</b></span>
       <span class="meta-cell">模式 <b>${MODE_CN[r.mode]||esc(r.mode)}</b></span>
-      <span class="meta-cell">⚡ ${r.total_steps} 步 · 🔧 ${r.tool_calls} 次</span>
+      <span class="meta-cell">${icon("zap")} ${r.total_steps} 步 · ${icon("wrench")} ${r.tool_calls} 次</span>
       ${model?`<span class="meta-cell">模型 <b>${esc(model)}</b></span>`:""}
       ${emo?`<span class="meta-cell">情绪 <b>${esc(emo)}</b></span>`:""}
     </div>
 
-    ${isFail&&errMsg?`<div class="section-title">❌ 错误信息</div>
-      <div class="error-banner"><span>⚠️</span><div>${esc(errMsg)}</div></div>`:""}
+    ${isFail&&errMsg?`<div class="section-title">${icon("xcircle")} 错误信息</div>
+      <div class="error-banner"><span>${icon("alert")}</span><div>${esc(errMsg)}</div></div>`:""}
 
-    <div class="section-title">💬 最终回答</div>
+    <div class="section-title">${icon("chat")} 最终回答</div>
     ${answerDupError
-      ? `<div class="hint">⚠️ 本次生成在出错前未产生有效回答，原因见上方错误信息。</div>`
+      ? `<div class="hint">${icon("alert")} 本次生成在出错前未产生有效回答，原因见上方错误信息。</div>`
       : `<div class="answer ${r.status==="failed"?"error":""}">${miniMd(answer)||"(空)"}</div>`}
 
-    <div class="section-title">🧭 执行过程</div>
+    <div class="section-title">${icon("compass")} 执行过程</div>
     ${tlHtml}
     ${streamHtml}
     ${rawHtml}
@@ -477,12 +501,12 @@ function renderDetail(r){
 async function selectRun(id){
   state.selectedId=id;
   renderRunList();
-  $("#detailPanel").innerHTML=`<div class="empty"><div class="big">⏳</div><div>加载中…</div></div>`;
+  $("#detailPanel").innerHTML=`<div class="empty"><div class="big">${icon("hourglass", 40)}</div><div>加载中…</div></div>`;
   try{
     const r=await api("/api/runs/"+id);
     if(state.selectedId===id){ state.detail=r; renderDetail(r); }
   }catch(e){
-    $("#detailPanel").innerHTML=`<div class="empty"><div class="big">⚠️</div><div>加载失败：${esc(e.message)}</div></div>`;
+    $("#detailPanel").innerHTML=`<div class="empty"><div class="big">${icon("alert", 40)}</div><div>加载失败：${esc(e.message)}</div></div>`;
   }
 }
 
@@ -490,7 +514,7 @@ function renderMemory(data){
   const items=(data&&data.items)||[];
   $("#memCount").textContent=items.length+" 条";
   if(!items.length){
-    $("#memGrid").innerHTML=`<div class="empty" style="grid-column:1/-1;min-height:220px;"><div class="big">🧠</div><div>还没有记住任何事</div></div>`;
+    $("#memGrid").innerHTML=`<div class="empty" style="grid-column:1/-1;min-height:220px;"><div class="big">${icon("brain", 40)}</div><div>还没有记住任何事</div></div>`;
     return;
   }
   $("#memGrid").innerHTML=items.map(m=>`
@@ -582,6 +606,12 @@ $("#liveBox").onclick=()=>{
   $(".dot",$("#liveBox")).classList.toggle("pulse",state.auto);
   $("#liveText").textContent=state.auto?("自动刷新中"):"已暂停";
 };
+
+// 填充静态 HTML 中的 data-icon 占位（统一从 ICONS 取 SVG）
+$$("[data-icon]").forEach(el=>{
+  const sz = el.dataset.size ? parseInt(el.dataset.size, 10) : 15;
+  el.insertAdjacentHTML("afterbegin", icon(el.dataset.icon, sz));
+});
 
 refresh();
 setInterval(()=>{ if(state.auto) refresh(); },5000);

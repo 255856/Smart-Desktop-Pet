@@ -151,29 +151,10 @@ class ChatWindow(QWidget):
             self.asr.error.connect(self._on_asr_error)
             self.asr.recording_started.connect(self._on_recording_start)
             self.asr.recording_finished.connect(self._on_recording_finish)
-            # ASR 模型加载完（首次较慢），共享给 wake_word 避免重复加载
-            self.asr.model_loaded.connect(self._share_asr_model_to_wake_word)
             # 预热：延迟 1s 在主线程调度 _get_model()，让首次说话瞬时返回
             self._warmup_asr_model()
         else:
             log.warning("ASR 不可用（未安装 sounddevice / faster-whisper，或配置关闭），语音输入按钮将隐藏")
-
-        # 语音唤醒（WakeWord）：后台始终监听麦克风
-        # 默认未启动；用户设置面板里勾选后由 ui_controller 调 start()
-        self.wake_word = None
-        if asr_available():
-            try:
-                from app.voice.wake_word import WakeWordRecognizer, wake_available
-                if wake_available():
-                    self.wake_word = WakeWordRecognizer(
-                        model_size=self.asr_model or "tiny",
-                        language=self.asr_language or "zh",
-                    )
-                    self.wake_word.command_ready.connect(self._on_speech_text)
-                    log.info("WakeWordRecognizer 已实例化（未启动，由 ui_controller 决定）")
-            except Exception:  # noqa: BLE001
-                log.exception("WakeWordRecognizer 初始化失败")
-                self.wake_word = None
 
         self.setWindowTitle(f"和 {char_cfg.name} 聊天")
         # 设置窗口图标
@@ -865,17 +846,6 @@ class ChatWindow(QWidget):
         """录音已停止（等待识别结果）。"""
         # 已在 _on_mic_released 处理
 
-    def _share_asr_model_to_wake_word(self, model) -> None:
-        """ASR 模型加载完（首次较慢），共享给 wake_word 避免重复加载。"""
-        ww = getattr(self, "wake_word", None)
-        if ww is None:
-            return
-        try:
-            ww.set_shared_model(model)
-            log.info("WakeWord 共享 ASR 模型")
-        except Exception:  # noqa: BLE001
-            log.exception("WakeWord set_shared_model failed")
-
     def _warmup_asr_model(self) -> None:
         """预热 ASR 模型（ctranslate2 首次初始化 3~5s）。
 
@@ -899,7 +869,6 @@ class ChatWindow(QWidget):
                         log.debug("ASR 模型预热第 %d 次失败：%s", attempt, e)
                 if model is not None:
                     log.info("ASR 模型预热完成（首次加载已缓存）")
-                    self._share_asr_model_to_wake_word(model)
                 else:
                     log.debug("ASR 模型预热 2 次都失败（首次说话时会再尝试）")
 
