@@ -688,9 +688,11 @@ class PetWindow(QWidget):
 
     def _resume_timers(self) -> None:
         """显示时恢复常驻定时器（按隐藏前的状态）。"""
-        if self._mask_timer is not None:
+        # 尊重闲置停用状态：否则 hide/show 之后遮罩/视线定时器会一直跑，
+        # 后续的 idle 事件又因为 _idle_mask_stopped 仍为 True 而不再停它。
+        if self._mask_timer is not None and not self._idle_mask_stopped:
             self._mask_timer.start(self._mask_timer.interval())
-        if self._look_timer is not None:
+        if self._look_timer is not None and not self._idle_mask_stopped:
             self._look_timer.start(200)
         if self._sticker_timer is not None:
             self._arm_sticker_timer()
@@ -1058,11 +1060,20 @@ class PetWindow(QWidget):
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
-        # 尺寸变化后旧遮罩坐标失效：清掉重建（模型重新 fit 需要一点时间）
+        # 尺寸变化后旧遮罩坐标失效，需要重建（模型重新 fit 需要一点时间）。
+        # 这里【不要】clearMask()：清掉之后整窗变成不透明，点击穿透直接失效，
+        # 而重建要等 800ms 后的 _sample_base_mask —— 那期间用户点不动后面的窗口，
+        # 万一那次采样又拿到空帧就再也回不来了。保留旧遮罩，等新的覆盖上去即可
+        # （遮罩只会变大不会缩小，旧的在视觉上无害）。
         self._mask_base = None
         self._mask_prev_region = None
-        self.clearMask()
+        self._mask_sig = None
+        self._mask_stable_count = 0
         QTimer.singleShot(800, self._sample_base_mask)
+        # 闲置时遮罩定时器是停的，尺寸变了没人负责重建 —— 这里主动补一次
+        if self._mask_timer is not None and not self._mask_timer.isActive():
+            self._idle_mask_stopped = False
+            self._mask_timer.start(1500)
 
     # 点击穿透遮罩的降采样倍率。遮罩只需判断「这一块是不是透明」，
     # 不需要逐像素精度；降到 1/4 后 numpy 运算量变 1/16，逐行构造 QRegion 的
@@ -1186,7 +1197,9 @@ class PetWindow(QWidget):
             if cur is None:
                 return
             if not cur.any() and self._mask_base is None:
-                self.clearMask()
+                # 抓到全透明帧：说明「这一帧没法作为剪影依据」，而不是「模型没了」。
+                # 绝不能在这里 clearMask() —— 闲置时遮罩定时器已停，清掉就再也
+                # 没人重建，整窗会永久变成不透明、点不穿。保留上一次的好遮罩。
                 return
             # 当前帧 ∪ 极限姿势下限
             m = cur if self._mask_base is None else (cur | self._mask_base)
@@ -1232,8 +1245,13 @@ class PetWindow(QWidget):
     def on_renderer_idle(self, idle: bool) -> None:
         """JS 闲置/活跃切换：闲置时停 mask + look（静置零开销），活跃时恢复。"""
         if idle:
-            # 先做一次采样确保静置剪影已纳入遮罩，再停
+            # 兑现注释：先做一次采样，确保静置剪影已纳入遮罩，再停。
+            # 少了这一步，模型会在「冻结的旧遮罩」和「真实姿态」之间错位，
+            # 点击穿透边界对不上。
             if self._mask_timer is not None and not self._idle_mask_stopped:
+                if self.isVisible():
+                    self._mask_sig = None      # 强制重算，别被签名短路挡掉
+                    self._update_click_mask()
                 self._idle_mask_stopped = True
                 self._mask_timer.stop()
             if self._look_timer is not None:
