@@ -110,6 +110,11 @@ class ChatWindow(QWidget):
         self._chat_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
+        # 在 AI 气泡上方展示「已执行操作 · N」卡片（开关见 ChatConfig.show_tool_steps），
+        # 主人如果嫌啰嗦可以在 config.yaml / 设置面板里关掉。
+        self._show_tool_steps: bool = (
+            chat_cfg.show_tool_steps if chat_cfg is not None else True
+        )
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
         self.tts = tts
         # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
@@ -1760,7 +1765,7 @@ class ChatWindow(QWidget):
         thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
         execs_html = self._execs_html(getattr(msg, "execs", []) or [])
         file_edits_html = self._file_edits_html(msg.tools)
-        tools_html = self._tool_steps_html(msg.tools) if msg.tools else ""
+        tools_html = self._tool_steps_html(msg.tools) if (msg.tools and self._show_tool_steps) else ""
         prepend_html = (
             (thoughts_html + execs_html + file_edits_html + tools_html) if not is_user else ""
         )

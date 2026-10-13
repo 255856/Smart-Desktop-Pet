@@ -132,9 +132,25 @@ class ReminderStore(QObject):
             return
         try:
             raw = json.loads(self.data_file.read_text("utf-8"))
-            self._items = [ReminderItem(**r) for r in raw]
+            loaded = [ReminderItem(**r) for r in raw]
         except Exception as e:  # noqa: BLE001
             log.warning("加载 reminders 失败：%s", e)
+            return
+        # 启动清理：已 done 的 + fire_at 早已过期的（>1 天前）丢弃。
+        # 否则桌宠关几天再开，磁盘里堆的过期提醒一启动全 fire，主人会被一串闹钟吵醒。
+        # 留 1 天 grace period：刚过期的还可能有用（比如关掉几小时又开）。
+        cutoff = time.time() - 86400
+        before = len(loaded)
+        self._items = [it for it in loaded if not it.done and it.fire_at > cutoff]
+        dropped = before - len(self._items)
+        if dropped:
+            log.info("ReminderStore: 启动清理 %d 个过期 reminders", dropped)
+            self._save()
+        # 重复提醒太多时给主人提个醒：>5 条历史同时 fire 就像闹钟炸弹。
+        if len(self._items) >= 5:
+            log.warning("ReminderStore: 当前有 %d 个未触发的提醒，"
+                        "右键菜单 → 提醒列表 可以批量清理", len(self._items))
+            self._save()
 
     def _save(self) -> bool:
         """落盘。返回是否成功（原来只 log.warning 吞掉，工具层无从得知）。"""

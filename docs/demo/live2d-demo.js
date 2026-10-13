@@ -347,28 +347,7 @@ class Live2DDemo {
   }
   setExpression(name) {
     if (!this.model || !name) return;
-    try {
-      const em = this.model.internalModel && this.model.internalModel.expressionManager;
-      if (em) {
-        // Cubism 4 的 expression 是叠加的——「特殊 飞头」会隐藏身体只显示飘起的头，
-        // 切到其他 expression 后「飞头」仍 active，结果页面只显示一个头且变不回来。
-        // 修法：set 飞头时 reset 全部其他 expression；切到非飞头时 reset 飞头类。
-        // 保留其他叠加行为（飞头 + 表情 → 飞头 reset 表情；表情 + 表情 → 保留）。
-        const isFlyHead = /飞头/.test(name);
-        if (isFlyHead) {
-          const list = (this.model.internalModel.settings.expressions || []);
-          for (const e of list) {
-            const n = e.Name || e.name;
-            if (n !== name) { try { em.resetExpression(n); } catch (e) {} }
-          }
-        } else {
-          for (const n of ["特殊 飞头", "特殊 飞头（无脖）"]) {
-            try { em.resetExpression(n); } catch (e) {}
-          }
-        }
-      }
-      return this.model.expression(name);
-    } catch (e) { log(`设置表情失败：${e.message || e}`, "err"); return false; }
+    try { return this.model.expression(name); } catch (e) { log(`设置表情失败：${e.message || e}`, "err"); }
   }
   // 真实 TTS 口型同步：传入音频时长，每帧更新 mouth 参数
   startTalk(durationMs = 0) {
@@ -1907,6 +1886,11 @@ PetState.prototype._paint = function () {
 };
 window.petState.start();
 window.petState._paint();
+// tick 写盘已节流到 10s 一次，关页/切后台时补一次，避免丢掉最后的衰减量
+window.addEventListener("pagehide", () => window.petState._save());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") window.petState._save();
+});
 
 
 // —— 互动入口：原来的 pet_affection 计数已并入 likability，这里保持 API 兼容 ——

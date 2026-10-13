@@ -177,3 +177,33 @@ class TestFailsafeForLastSave:
         # 重新触发一次来确认工具读取 last_save_ok
         result = tool.fn(text="disk fail", delay_minutes=10)
         assert "错误" in result or "没能保存" in result, f"工具应该警告，got: {result}"
+
+class TestReminderCleanupOnLoad:
+    """启动清理：堆在 JSON 里的过期 reminders 不该在桌宠一开机就全 fire。"""
+
+    def test_drop_done_items_on_load(self, qapp, tmp_path):
+        import json as _json, time as _time
+        path = tmp_path / "reminders.json"
+        now = _time.time()
+        path.write_text(_json.dumps([
+            {"id": "r1", "text": "已 fire", "fire_at": now + 600, "created_at": now, "done": True},
+            {"id": "r2", "text": "未来", "fire_at": now + 600, "created_at": now, "done": False},
+        ], ensure_ascii=False), encoding="utf-8")
+        s = ReminderStore(path)
+        assert [it.id for it in s.list()] == ["r2"], "已 done 的应被启动清理"
+
+    def test_drop_overdue_items_on_load(self, qapp, tmp_path):
+        import json as _json, time as _time
+        path = tmp_path / "reminders.json"
+        now = _time.time()
+        path.write_text(_json.dumps([
+            # 8 天前过期的（超过 1 天 grace period）→ 丢
+            {"id": "r1", "text": "远古", "fire_at": now - 86400 * 8, "created_at": now - 86400 * 9, "done": False},
+            # 刚过期 1 小时（grace 期内）→ 保留（启动后立即 fire）
+            {"id": "r2", "text": "刚过期", "fire_at": now - 3600, "created_at": now - 7200, "done": False},
+            # 未来 → 保留
+            {"id": "r3", "text": "未来", "fire_at": now + 600, "created_at": now, "done": False},
+        ], ensure_ascii=False), encoding="utf-8")
+        s = ReminderStore(path)
+        ids = [it.id for it in s.list()]
+        assert ids == ["r2", "r3"], f"应保留 r2（grace 期内）+ r3（未来），实际 {ids}"

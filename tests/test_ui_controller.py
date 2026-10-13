@@ -158,9 +158,9 @@ class TestFireAlarm:
         # 2) 动画触发（reminder 场景）
         controller.pet.animator.trigger_scene.assert_called_with("reminder")
 
-        # 3) 置顶闹钟窗（关键：sound=True；speak=False 由 _speak_alarm 单独管）
+        # 3) 置顶闹钟窗（关键：sound=True；speak=True 让桌宠朗读提醒）
         controller.alarm.fire.assert_called_once_with(
-            "吃药", kind="⏰ 提醒", sound=True, speak=False,
+            "吃药", kind="⏰ 提醒", sound=True, speak=True,
         )
 
         # 4) 系统通知
@@ -240,15 +240,12 @@ class TestSpeakAlarm:
         controller._speak_alarm("吃药")  # 不应抛
 
     def test_fire_alarm_invokes_speak_via_alarm_presenter(self, controller):
-        """alarm.fire 接受 speak_fn 但默认 speak=False —— 由 presenter 决定何时 TTS。
-        验证 _fire_alarm 没把 TTS 路径写穿。
+        """_fire_alarm 调 alarm.fire 时把 speak=True 传下去——桌宠到点要朗读提醒。
         """
         controller.alarm = MagicMock()
         controller._fire_alarm("吃药")
-        # speak 应在 presenter 内部处理（speak=False 时 presenter 不主动 TTS，
-        # 等到主人点「知道了」才 speak）
         kwargs = controller.alarm.fire.call_args.kwargs
-        assert kwargs["speak"] is False
+        assert kwargs["speak"] is True, "主人明确要求「希望桌宠朗读提醒」后 _fire_alarm 必须 speak=True"
 
 
 # =============================================================================
@@ -286,5 +283,5 @@ class TestSignalRouting:
                              lambda kind, text: None)
         controller._on_alarm_fired("煮面时间到", kind="⏰ 倒计时结束")
         controller.alarm.fire.assert_called_once_with(
-            "煮面时间到", kind="⏰ 倒计时结束", sound=True, speak=False,
+            "煮面时间到", kind="⏰ 倒计时结束", sound=True, speak=True,
         )

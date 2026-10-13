@@ -134,8 +134,11 @@ class ChatConfig(BaseModel):
 
     request_timeout_s: 单次 chat 请求的整体超时（秒）。覆盖 LLMConfig.timeout，
     解决「每个上层各自传 llm_cfg,忘了设超时」的硬编码问题。0 表示无限等待。
+    show_tool_steps: 在 AI 气泡上方展示「已执行操作 · N」卡片（工具名/参数/成败），
+        关闭后气泡更简洁，但主人看不到工具调用历史。默认 True（保持现状）。
     """
     request_timeout_s: int = 20
+    show_tool_steps: bool = True
 
 
 class BrainConfig(BaseModel):
