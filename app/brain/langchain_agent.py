@@ -175,6 +175,8 @@ class LangChainAgent:
         cfg: Optional[LangChainAgentConfig] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         thread_id: str = "default",
+        cwd: Optional[str] = None,
+        extra_docs_paths: Optional[list] = None,
     ):
         self.llm_cfg = llm_cfg
         self.registry = registry
@@ -182,6 +184,11 @@ class LangChainAgent:
         self.cfg = cfg or LangChainAgentConfig()
         self.cancel_check = cancel_check
         self.thread_id = thread_id
+        # 项目级指令:从 cwd 向上找 AGENTS.md / CLAUDE.md,加上主程序注入的 extra_paths
+        self._cwd = cwd
+        self._extra_docs_paths: list = list(extra_docs_paths or [])
+        # 缓存最近一次加载的项目指令(避免每次 _ensure_agent 重读)
+        self._cached_project_docs: str = ""
         self._agent: Optional[Any] = None
         self._middlewares: Optional[list] = None  # 给测试/调试用
         # RiskyToolConfirm 控制器 —— 立刻建好,这样 confirm_tool_call /
@@ -326,11 +333,24 @@ class LangChainAgent:
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
 
-        # system_prompt 直接用人设原文（LLMClient 的 sanitize 已在此层处理）
+        # system_prompt = persona + 项目级指令(AGENTS.md / CLAUDE.md)
+        # dynamic_prompt middleware 会在这个基础上再加反幻觉 / 时间 / confirm 协议
+        try:
+            from app.brain.project_docs import load_project_docs
+            self._cached_project_docs = load_project_docs(
+                cwd=self._cwd, extra_paths=self._extra_docs_paths,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("ProjectDocs 加载失败,降级无项目指令: %s", e)
+            self._cached_project_docs = ""
+        base_sp = self.persona or "你是一个有用的桌面助手。"
+        if self._cached_project_docs:
+            base_sp = base_sp + self._cached_project_docs
+
         self._agent = create_agent(
             model=self._model,
             tools=tools,
-            system_prompt=self.persona or "你是一个有用的桌面助手。",
+            system_prompt=base_sp,
             checkpointer=checkpointer,
             middleware=middlewares,
         )
