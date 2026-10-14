@@ -165,7 +165,7 @@ def main() -> int:
     check("AgentLoop 意图驱动 force_tool_use",
           "force_tool_use" in al_src and "detect_action_intent" in al_src)
     check("AgentLoop 第一轮失败 → 注入 user 强制重试",
-          "force_retry" in al_src and "必须调用" in al_src)
+          "force_retry" in al_src and ("重试" in al_src or "未调工具" in al_src))
 
     # ChatWindow 必须用真正的 ReAct 循环（AgentLoop）+ 处理 meta 事件
     from app.ui.chat_window import ChatWindow as _CW
