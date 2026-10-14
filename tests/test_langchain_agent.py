@@ -372,14 +372,25 @@ class TestHallucinationGuard:
                         and getattr(m, "tool_call_id", None) == "orphan_id")
                    for m in kept)
 
-    def test_build_middlewares_returns_three(self):
-        """middleware 列表必须包含 orphan_tool_pruner + grounding + risky_tool_logger。"""
-        from app.brain.hallucination_guard import build_hallucination_middlewares
-        mw = build_hallucination_middlewares()
+    def test_build_middlewares_returns_tuple(self):
+        """build 返回 (3 个标准中间件, RiskyToolConfirm controller)。
+
+        2026-10-15:从只返回 list 改为返回 tuple;并把 confirm 中间件拆出去,
+        让 caller 自己用 ctrl.as_middleware() 生成(保证 state 挂在同一个
+        agent 上,跨 astream 持续生效)。
+        """
+        from app.brain.hallucination_guard import (
+            RiskyToolConfirm,
+            build_hallucination_middlewares,
+        )
+        mw, ctrl = build_hallucination_middlewares()
+        assert isinstance(mw, list)
+        assert isinstance(ctrl, RiskyToolConfirm)
         names = {getattr(m, "name", "?") for m in mw}
         assert "orphan_tool_pruner" in names
         assert "grounding_dynamic_prompt" in names
         assert "risky_tool_logger" in names
+        assert len(mw) == 3
 
 
 class TestCheckpointRecovery:

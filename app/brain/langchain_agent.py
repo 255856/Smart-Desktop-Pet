@@ -183,6 +183,16 @@ class LangChainAgent:
         self.cancel_check = cancel_check
         self.thread_id = thread_id
         self._agent: Optional[Any] = None
+        self._middlewares: Optional[list] = None  # 给测试/调试用
+        # RiskyToolConfirm 控制器 —— 立刻建好,这样 confirm_tool_call /
+        # reject_tool_call / on_confirm_needed 在 _ensure_agent() 跑之前
+        # 也能用(UI 可能在 agent 第一次构建前就订阅回调)。
+        try:
+            from app.brain.hallucination_guard import RiskyToolConfirm
+            self._confirm_ctrl: Optional[RiskyToolConfirm] = RiskyToolConfirm()
+        except Exception as e:  # noqa: BLE001
+            log.warning("RiskyToolConfirm 初始化失败: %s", e)
+            self._confirm_ctrl = None
         self._checkpointer_cm: Optional[Any] = None
         self._checkpointer: Optional[Any] = None
         self._model: Optional[Any] = None
@@ -249,6 +259,40 @@ class LangChainAgent:
         # Qt 信号回调路径：仅做标记，真正释放由 worker 协程做
         # 不抛异常以保证 _on_done / _on_failed 不会中断 UI
 
+    # -------------------- 高风险工具 confirm(HITL) --------------------
+    def confirm_tool_call(self, tool_call_id: str) -> None:
+        """主程序 / UI 在确认弹窗点「确认」后调用。
+
+        把该 tool_call_id 加进确认集合。后续该 ID 的重试会直接放行
+        (无需走 __confirmed=True 协议)。
+        """
+        if self._confirm_ctrl is not None:
+            try:
+                self._confirm_ctrl.confirm(tool_call_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("confirm_tool_call 失败: %s", e)
+
+    def reject_tool_call(self, tool_call_id: str) -> None:
+        """主程序 / UI 拒绝后调用 —— 该 ID 永远不通过。"""
+        if self._confirm_ctrl is not None:
+            try:
+                self._confirm_ctrl.reject(tool_call_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("reject_tool_call 失败: %s", e)
+
+    def on_confirm_needed(self, callback) -> None:
+        """注册一个拦截回调 callback(tool_call_id, tool_name, args)。
+
+        触发时机:每次高风险工具被拦截(任何 astream 轮次里都可能触发)。
+        主程序通常在这里弹 confirm dialog,等用户点完按钮再调用 confirm_tool_call
+        / reject_tool_call 推进 agent。
+        """
+        if self._confirm_ctrl is not None:
+            try:
+                self._confirm_ctrl.on_blocked(callback)
+            except Exception as e:  # noqa: BLE001
+                log.warning("on_confirm_needed 失败: %s", e)
+
     async def _ensure_agent(self) -> None:
         """异步构建 agent（model + tools + checkpointer）。首次调用时构建，后续复用。
 
@@ -268,10 +312,16 @@ class LangChainAgent:
             await self._build_checkpointer()
         checkpointer = self._checkpointer
 
-        # 抗幻觉 middleware（dynamic_prompt + risky tool logger）
+        # 抗幻觉 middleware（dynamic_prompt + risky tool logger + confirm interceptor）
         try:
             from app.brain.hallucination_guard import build_hallucination_middlewares
-            middlewares = build_hallucination_middlewares()
+            std_mws, _new_ctrl = build_hallucination_middlewares()
+            # _new_ctrl 是 build 临时构造的,丢弃。confirm 中间件单独用
+            # self._confirm_ctrl.as_middleware() 生成,这样跨 astream 的
+            # confirm/reject 状态能持续生效。
+            middlewares = list(std_mws)
+            if self._confirm_ctrl is not None:
+                middlewares.append(self._confirm_ctrl.as_middleware())
         except Exception as e:  # noqa: BLE001
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
@@ -284,6 +334,9 @@ class LangChainAgent:
             checkpointer=checkpointer,
             middleware=middlewares,
         )
+        # 把中间件列表挂在 agent 上,供测试 / 调试取用。
+        # CompiledStateGraph 不暴露 .middleware,所以我们手动留一份。
+        self._middlewares = middlewares
         log.info("LangChainAgent ready: tools=%d, checkpointer=%s, middlewares=%d",
                  len(tools), "on" if checkpointer else "off", len(middlewares))
 
@@ -380,6 +433,23 @@ class LangChainAgent:
                 elif isinstance(chunk, ToolMessage):
                     name = chunk.name or ""
                     result = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    # 高风险工具 confirm 拦截 sentinel:ToolMessage 内容是 JSON,
+                    # status="awaiting_confirmation" / "rejected"。识别后除了
+                    # yield tool 事件让 UI 正常显示,还要 yield confirm_needed
+                    # 让上层有机会弹 confirm dialog + 调 confirm_tool_call。
+                    try:
+                        import json as _json
+                        parsed = _json.loads(result)
+                        if isinstance(parsed, dict) and parsed.get("status") in (
+                            "awaiting_confirmation", "rejected",
+                        ):
+                            tc_id = getattr(chunk, "tool_call_id", "") or ""
+                            args_view = parsed.get("args") or {}
+                            yield ("tool", name, "", result)
+                            yield ("confirm_needed", tc_id, name, args_view)
+                            continue
+                    except (ValueError, TypeError):
+                        pass  # 普通工具结果,走默认路径
                     yield ("tool", name, "", result)
             yield ("done", "".join(final_text_parts))
             return
