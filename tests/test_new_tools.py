@@ -40,7 +40,7 @@ class TestNewToolsRegistration:
     def test_filesearch_registers(self):
         from app.engine.tools import _filesearch
         reg = ToolRegistry(); _filesearch.register(reg)
-        assert set(reg.names()) == {"search_files", "grep_files"}
+        assert {"search_files", "grep_files", "glob_files"} <= set(reg.names())
 
     def test_webfetch_registers(self):
         from app.engine.tools import _webfetch

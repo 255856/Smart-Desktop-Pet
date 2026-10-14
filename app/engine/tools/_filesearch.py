@@ -248,5 +248,94 @@ def register(reg: ToolRegistry) -> None:
     reg.register(search_files)
     reg.register(grep_files)
 
+    @tool(
+        description="按 glob 路径模式（如 src/**/*.py）在指定目录下查找文件，按修改时间倒序。"
+                    "沙箱限定在用户主目录下。比 search_files 更精确（用模式而非子串）。",
+        parameters={"type": "object",
+                    "properties": {
+                        "pattern": {"type": "string",
+                                    "description": "glob 模式（支持 ** 递归，**/*.py 这种）"},
+                        "directory": {"type": "string",
+                                      "description": "搜索根目录，绝对路径或 ~/xxx；空则桌面"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 2000,
+                                        "description": "最多返回多少个文件"},
+                        "include_dirs": {"type": "boolean",
+                                         "description": "是否包含目录（默认仅文件）"},
+                    },
+                    "required": ["pattern"]},
+    )
+    def glob_files(pattern: str, directory: str = "", max_results: int = 200,
+                   include_dirs: bool = False) -> str:
+        """按 glob 模式递归匹配文件路径。"""
+        if not pattern or not pattern.strip():
+            return "错误：pattern 不能为空"
+        if directory:
+            base = Path(directory).expanduser()
+        else:
+            base = _HOME / "Desktop"
+        if not _is_safe_path(base):
+            return f"错误：路径必须在用户主目录下（拒绝 {base}）"
+        if not base.exists():
+            return f"目录不存在：{base}"
+        max_results = max(1, min(int(max_results if max_results else 200), 2000))
+
+        # glob 模式里用户写正斜杠很正常（"src/**/*.py"），但 pathlib 在 Windows 上
+        # 严格按 OS 分隔符来；统一替换成 OS 的分隔符，行为可预测。
+        import os as _os
+        norm_pattern = pattern.replace("/", _os.sep)
+
+        visited = 0
+        deadline = time.monotonic() + _TIME_BUDGET_S
+        truncated = False
+        matches: list[tuple[Path, float]] = []
+        try:
+            for p in base.glob(norm_pattern):
+                visited += 1
+                if visited > _MAX_VISIT or time.monotonic() > deadline:
+                    truncated = True
+                    break
+                if not include_dirs and not p.is_file():
+                    continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                matches.append((p, mtime))
+                if len(matches) >= max_results * 4:
+                    # 多收一些再按 mtime 排序截断，避免「遍历到的第一个 pattern
+                    # 命中都是旧文件、没截到的反而新」这种反直觉。
+                    pass
+        except (NotImplementedError, OSError) as e:
+            return f"错误：glob 失败：{e}"
+        except Exception as e:  # noqa: BLE001
+            return f"错误：扫描失败：{e}"
+
+        if not matches:
+            if truncated:
+                return (f"错误：在 {base} 用「{pattern}」扫描了 {visited} 个条目后达到时间/数量上限，"
+                        f"未找到匹配文件（结果不完整，不代表真的没有）。"
+                        f"建议指定更具体的 directory。")
+            return f"在 {base} 用「{pattern}」未找到匹配文件"
+
+        matches.sort(key=lambda t: t[1], reverse=True)  # mtime desc
+        if len(matches) > max_results:
+            truncated = True
+            matches = matches[:max_results]
+
+        lines = [f"找到 {len(matches)} 个匹配（按修改时间倒序，最多 {max_results}）："]
+        for p, _ in matches:
+            try:
+                size = p.stat().st_size
+                size_str = _fmt_size(size)
+            except OSError:
+                size_str = "?"
+            kind = "/" if p.is_dir() else ""
+            lines.append(f"  {p}{kind}  ({size_str})")
+        if truncated:
+            lines.append(f"（扫描/结果达到上限，部分匹配目录未遍历或被截断，建议缩小 directory）")
+        return "\n".join(lines)
+
+    reg.register(glob_files)
+
 
 __all__ = ["register"]
