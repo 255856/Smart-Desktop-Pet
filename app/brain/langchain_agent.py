@@ -181,12 +181,16 @@ class LangChainAgent:
         session_store: Optional[Any] = None,
         skills_dir: Optional[str] = None,
         auto_load_skills: Optional[list] = None,
+        memory_store: Optional[Any] = None,
     ):
         self.llm_cfg = llm_cfg
         self.registry = registry
         self.persona = persona
         self.cfg = cfg or LangChainAgentConfig()
         self.cancel_check = cancel_check
+        # 长期记忆(MemoryStore,可空);user-wide —— 跨 session 共享。
+        # system_prompt 注入时调 memory.system_block()。
+        self.memory_store = memory_store
         # 会话绑定:优先用 session_id 从 session_store 拿 thread_id。
         # 这样会话列表 / 续接在 store 层管理,agent 内部只认 thread_id。
         self._session_id: Optional[str] = session_id
@@ -499,6 +503,14 @@ class LangChainAgent:
             base_sp = base_sp + self._cached_project_docs
         if self._cached_skills:
             base_sp = base_sp + self._cached_skills
+        # 长期记忆(跨对话 / 跨 session 共享)—— 拼到 system_prompt
+        try:
+            if self.memory_store is not None and hasattr(self.memory_store, "system_block"):
+                mem_block = self.memory_store.system_block()
+                if mem_block:
+                    base_sp = base_sp + "\n\n" + mem_block
+        except Exception as e:  # noqa: BLE001
+            log.warning("MemoryStore.system_block 失败,跳过: %s", e)
 
         self._agent = create_agent(
             model=self._model,
