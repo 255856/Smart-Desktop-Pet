@@ -333,3 +333,50 @@ def test_langchain_agent_init_failure_resets_loop_singleton():
         mod.LangChainAgent._get_loop = original_get_loop
         # 显式 reset 以防前面失败留下半死状态
         mod.LangChainAgent._LOOP = None
+
+
+class TestHallucinationGuard:
+    """抗幻觉 middleware 的单元测试。"""
+
+    def test_prune_keeps_valid_tool_pair(self):
+        """完整 Human + AIMessage(tool_call) + ToolMessage + Human 应全部保留。"""
+        from app.brain.hallucination_guard import _prune_orphan_tool_messages
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        msgs = [
+            HumanMessage(content="现在几点了"),
+            AIMessage(content="",
+                      tool_calls=[{"id": "call_1", "name": "get_current_time", "args": {}}]),
+            ToolMessage(content='{"now": "12:00"}', tool_call_id="call_1"),
+            HumanMessage(content="谢谢"),
+        ]
+        kept = _prune_orphan_tool_messages(msgs)
+        assert len(kept) == 4, "完整 tool pair 不该丢任何消息"
+
+    def test_prune_drops_orphan_tool_message(self):
+        """孤立的 ToolMessage(前面没有匹配 AIMessage.tool_call)要被丢。"""
+        from app.brain.hallucination_guard import _prune_orphan_tool_messages
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        msgs = [
+            HumanMessage(content="hi"),
+            # 孤立:tool_call_id='orphan_id' 前面没 AIMessage 提供它
+            ToolMessage(content="12:00", tool_call_id="orphan_id"),
+            AIMessage(content="ok"),
+            HumanMessage(content="bye"),
+        ]
+        kept = _prune_orphan_tool_messages(msgs)
+        # 孤立的 ToolMessage 被丢,其余 3 条保留
+        assert len(kept) == 3
+        assert all(not (type(m).__name__ == "ToolMessage"
+                        and getattr(m, "tool_call_id", None) == "orphan_id")
+                   for m in kept)
+
+    def test_build_middlewares_returns_three(self):
+        """middleware 列表必须包含 orphan_tool_pruner + grounding + risky_tool_logger。"""
+        from app.brain.hallucination_guard import build_hallucination_middlewares
+        mw = build_hallucination_middlewares()
+        names = {getattr(m, "name", "?") for m in mw}
+        assert "orphan_tool_pruner" in names
+        assert "grounding_dynamic_prompt" in names
+        assert "risky_tool_logger" in names

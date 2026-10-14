@@ -69,13 +69,75 @@ def _log_risky_tool_call(tool_name: str, args: Any) -> None:
     )
 
 
+def _prune_orphan_tool_messages(messages):
+    """清掉孤立的 ToolMessage(其 tool_call_id 在前面的 AIMessage.tool_calls 里找不到)。
+
+    2026-10-14: 实测修复 ——MiniMax API 报 error 2013:
+      'invalid params, tool call result does not follow tool call'
+    原因:checkpointer 把上一会话的 ToolMessage/History 持久化了,但对应的
+    AIMessage.tool_call_id 在新 session 已经被剥离(LangChain schema 变化、
+    模型切换、或 astream 中途被打断)。这种孤立的 ToolMessage 仍然保留在
+    checkpointer 里,下次 astream 把它和新 HumanMessage 一起发到模型,
+    模型看到「tool result 找不到对应的 tool call」就 400 了。
+
+    修法:每次 before_model 走一遍 messages,丢掉任何「前面没有匹配
+    AIMessage.tool_calls 的 ToolMessage」,让模型只看到完整的 tool pair。
+
+    Returns:
+        list: 过滤后的 messages(原 list 不变)。
+    """
+    kept = []
+    # 累计到目前为止所有「合法的 tool_call_id」
+    valid_ids: set[str] = set()
+    for m in messages:
+        # 收集 AIMessage 提供的 tool_call_id
+        if hasattr(m, "tool_calls"):
+            for tc in (m.tool_calls or []):
+                tc_id = (tc.get("id") if isinstance(tc, dict) else None) or getattr(tc, "id", None)
+                if tc_id:
+                    valid_ids.add(tc_id)
+        # 过滤 ToolMessage
+        if type(m).__name__ == "ToolMessage":
+            tcid = getattr(m, "tool_call_id", None)
+            if tcid and tcid in valid_ids:
+                kept.append(m)
+            else:
+                log.warning(
+                    "HallucinationGuard: 丢弃孤立 ToolMessage tool_call_id=%s "
+                    "(前面没有匹配的 AIMessage.tool_call,推测 checkpoint 残留)",
+                    tcid,
+                )
+            continue
+        kept.append(m)
+    return kept
+
+
 def build_hallucination_middlewares():
     """构造一组 middleware 供 LangChainAgent._ensure_agent 接入。
 
     Returns:
         list: 可以传给 create_agent(middleware=...) 的 middleware 列表。
     """
-    from langchain.agents.middleware import dynamic_prompt, wrap_tool_call
+    from langchain.agents.middleware import AgentMiddleware, dynamic_prompt, wrap_tool_call
+
+    # 0) before_model 防御:清掉孤立 ToolMessage(防 MiniMax 'tool call result does not follow tool call' 2013)
+    class _OrphanToolPruner(AgentMiddleware):
+        """LangChain middleware: 在每次模型调用前过滤 messages。
+
+        用类而不是装饰器,因为 `before_model` 钩子在 AgentMiddleware 上更直接。
+        """
+        name = "orphan_tool_pruner"
+        def before_model(self, state, runtime):  # noqa: D401
+            try:
+                msgs = state.get("messages") or []
+                if msgs:
+                    pruned = _prune_orphan_tool_messages(msgs)
+                    if len(pruned) != len(msgs):
+                        # 替换 state.messages(AgentState 是 MessagesState 派生)
+                        return {"messages": pruned}
+            except Exception as e:  # noqa: BLE001
+                log.debug("OrphanToolPruner: %s", e)
+            return None
 
     # 1) dynamic_prompt: 每次调用都重新生成 system_prompt,加上防幻觉基线 + 当前时间
     grounding = dynamic_prompt(grounding_dynamic_prompt)
@@ -90,7 +152,7 @@ def build_hallucination_middlewares():
             _log_risky_tool_call(tool_name, args)
         return await handler(request)
 
-    return [grounding, risky_tool_logger]
+    return [_OrphanToolPruner(), grounding, risky_tool_logger]
 
 
-__all__ = ["build_hallucination_middlewares", "_RISKY_TOOLS"]
+__all__ = ["build_hallucination_middlewares", "_RISKY_TOOLS", "_prune_orphan_tool_messages"]
