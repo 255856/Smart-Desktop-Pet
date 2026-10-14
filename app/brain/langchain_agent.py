@@ -228,6 +228,107 @@ class LangChainAgent:
             LangChainAgent._LOOP = None
             raise
 
+        # 装上 Task 工具的 subagent factory,让主 agent 能派生子 agent。
+        # 单例状态:同时只有一个 factory 生效(同一进程只跑一个主 agent)。
+        try:
+            from app.engine.tools import _subagent
+            _subagent.set_subagent_factory(self._make_subagent_factory())
+        except Exception as e:  # noqa: BLE001
+            log.warning("Task 工具 subagent factory 装失败: %s", e)
+
+    def _build_subagent_registry(self) -> ToolRegistry:
+        """给子 agent 一个「安全」工具集:继承主 agent 的工具,但去掉
+        Task(防止无限递归)和高风险工具(子 agent 弹两次确认体验差)。
+
+        工具白名单/黑名单策略:
+          - 黑名单:Task(self)、lock_screen / kill_process / send_email 等 _RISKY_TOOLS
+          - 其余全部继承(主程序注册的子系统工具都能用)
+
+        返回新的 ToolRegistry(不修改 self.registry)。
+        """
+        from app.brain.hallucination_guard import _RISKY_TOOLS
+        sub_reg = ToolRegistry()
+        try:
+            for name, tool in self.registry._tools.items():
+                if name == "Task":
+                    continue   # 禁止递归
+                if name in _RISKY_TOOLS:
+                    continue   # 危险工具子 agent 不该有
+                sub_reg.register(tool)
+        except Exception as e:  # noqa: BLE001
+            log.warning("_build_subagent_registry 失败,降级空 registry: %s", e)
+        return sub_reg
+
+    def _make_subagent_factory(self):
+        """构造 Task 工具用的 subagent factory。
+
+        Factory 收到 (task_str, kwargs),开一个新 LangChainAgent,跑一次完整
+        对话,把所有 text 拼起来返回。
+        同步实现:用 ThreadPoolExecutor + asyncio.run 在子线程里跑(主 agent
+        本身已经在 event loop 里,不能 asyncio.run 嵌套)。
+        """
+        import asyncio
+        import concurrent.futures
+        import uuid as _uuid
+
+        parent_self = self
+
+        def factory(task_str: str, kwargs: dict) -> str:
+            agent_type = kwargs.get("agent_type", "general")
+            sub = LangChainAgent(
+                llm_cfg=parent_self.llm_cfg,
+                registry=parent_self._build_subagent_registry(),
+                persona=parent_self.persona,
+                cfg=parent_self.cfg,
+                thread_id=f"sub-{_uuid.uuid4().hex[:10]}",
+                cwd=parent_self._cwd,
+                extra_docs_paths=parent_self._extra_docs_paths,
+            )
+            # 子 agent 不用重新装 subagent factory(已经被本 factory 占用,
+            # 递归风险已经通过 _build_subagent_registry 去掉 Task 工具消除)。
+            try:
+                _subagent_module = __import__(
+                    "app.engine.tools._subagent",
+                    fromlist=["set_subagent_factory"],
+                )
+                _subagent_module.set_subagent_factory(None)
+            except Exception:
+                pass
+
+            async def _run():
+                events: list[str] = []
+                try:
+                    async for ev in sub.run(
+                        [{"role": "user", "content": task_str}],
+                    ):
+                        if ev[0] == "text":
+                            events.append(ev[1])
+                        elif ev[0] == "error":
+                            return f"[sub-agent error] {ev[1]}"
+                        elif ev[0] == "done":
+                            # done 可能带完整 final,优先用;否则拼接
+                            final = ev[1] if ev[1] else "".join(events)
+                            return final
+                    return "".join(events)
+                finally:
+                    # 释放 checkpointer 连接(避免 SQLite 句柄泄漏)
+                    try:
+                        await sub._release_checkpointer()
+                    except Exception:
+                        pass
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(asyncio.run, _run())
+                try:
+                    return future.result(timeout=300)   # 5 分钟 cap
+                except concurrent.futures.TimeoutError:
+                    return "错误: sub-agent 超时(5 分钟)"
+                except Exception as e:  # noqa: BLE001
+                    log.exception("sub-agent 失败")
+                    return f"错误: sub-agent 失败: {e}"
+
+        return factory
+
     def _build_model(self) -> ChatOpenAI:
         """OpenAI 兼容协议（DeepSeek / minimax / Ollama / 任何 base_url）。"""
         return ChatOpenAI(

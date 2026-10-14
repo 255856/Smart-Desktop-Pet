@@ -7,7 +7,7 @@ from ._core import Tool, ToolRegistry, is_safe_url
 from . import (
     _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search,
     _audio, _weather, _timer, _power, _filesearch, _webfetch, _ocr, _runner,
-    _tts_mute,
+    _tts_mute, _subagent,
 )
 
 
@@ -49,6 +49,9 @@ def build_default_tools(
     _ocr.register(reg)
     _runner.register(reg)
     _tts_mute.register(reg)
+    # Task(subagent)工具本身需要单独由主 agent 注入 factory 才能用,
+    # 永远注册但 factory 可空 —— 空时调 Task 会得到友好错误
+    _subagent.register(reg)
 
     # ---- 接线：把 UI hook 注入到用「全局 setter」而非参数传 hook 的模块 ----
     # 原先 _timer.set_say_hook / _power.set_bubble_clear_hook 全仓只有 tests
