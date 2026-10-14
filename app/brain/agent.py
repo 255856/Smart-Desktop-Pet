@@ -7,7 +7,8 @@ import logging
 import re
 from typing import AsyncIterator, Callable, Optional
 
-from app.brain.llm_client import LLMClient, detect_action_intent
+from app.brain.llm_client import (LLMClient, count_request_actions,
+                                  detect_action_intent)
 from app.engine.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -399,6 +400,9 @@ _INTENT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "open_app", "list_installed_apps", "open_website",
         "open_file_explorer", "open_terminal", "open_notepad",
         "list_desktop_files", "read_text_file", "get_current_time",
+        # 「打开网易云，顺便看看今天天气」这种组合句会落进本意图（open 优先），
+        # 白名单里没有 get_weather 就等于把天气那一半堵死。宁可多给。
+        "get_weather",
     ),
     # 【2026-10-04】闹钟意图只给 add_reminder，不再把 countdown 端上桌。
     # 现场：主人说「定一个1分钟闹钟」，模型在两者间选了 countdown ——
@@ -419,10 +423,22 @@ _INTENT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "get_volume", "get_brightness", "calculate", "convert_units",
         "date_info", "take_screenshot", "get_clipboard",
         "list_installed_apps", "list_processes", "get_tts_mute_status",
+        # 天气问句可能落到这条（「查一下天气」没有城市名时），
+        # 不给的话模型只能去爬网页（实测 58.9s + 独白泄漏）。
+        "get_weather",
+    ),
+    "get_weather": (
+        "get_weather", "get_current_time", "date_info", "say_to_user",
+        # 「查一下火星天气」这类非地球地点，内置 get_weather 地理编码必然失败，
+        # 这时要能退回去联网搜。留 web_search 作兜底，好过把路堵死。
+        "web_search",
     ),
     "web_search": (
         "web_search", "fetch_url_text", "open_website", "ocr_image",
         "read_text_file", "get_current_time", "list_installed_apps",
+        # 兜底：天气问句漏判到这条时，内置工具仍然可用，
+        # 好过逼模型去 web_search + fetch_url_text 爬气象台页面。
+        "get_weather",
     ),
 }
 
@@ -591,15 +607,25 @@ class AgentLoop:
         tools_used = 0
         executed_tools: list[tuple[str, str, str]] = []
         verify_corrections = 0   # 「工具失败却报喜」的纠正次数（最多 1 次）
+        partial_retries = 0     # 「多步任务只做一半」的纠正次数（最多 1 次）
         # 模型的原始输出被清洗规则全部剥掉（过度清洗）时置 True
         over_sanitized = False
 
         # 【抗幻觉】第 1 层：意图识别 → 第一轮 force_tool_use
-        intent = detect_action_intent(self._first_user_text(messages))
+        first_user_text = self._first_user_text(messages)
+        intent = detect_action_intent(first_user_text)
         force_first_turn = intent is not None
         if force_first_turn:
             log.info("AgentLoop: 检测到动作意图 %s，第一轮开启 force_tool_use",
                      intent)
+
+        # 【多步任务】主人这句话里并列了几件事。用来识别「只做了一半」。
+        # 纯语言层面的分句计数，不碰工具注册表——见 count_request_actions
+        # 的注释（为什么不能拿意图名/工具名去判）。
+        required_actions = count_request_actions(first_user_text)
+        if required_actions >= 2:
+            log.info("AgentLoop: 主人这句话含 %d 个并列要求，"
+                     "本轮若只完成一部分会纠正一次", required_actions)
 
         # 【工具裁剪】按意图只下发相关工具。识别不出意图就全量下发，
         # 不牺牲闲聊/复杂请求的能力。详见 _INTENT_TOOL_NAMES 的注释。
@@ -714,6 +740,40 @@ class AgentLoop:
                 # 由 LLMClient 统一发命中率最高的干净版本（9/12），这里只发 UI 事件。
                 consecutive_tool_only = 0
                 continue   # 进入下一轮
+
+            # 【多步任务只做了一半】给一次纠正机会。
+            #
+            # 判据是**数量**不是工具名：主人这句话并列了 N 件事
+            # （count_request_actions），而实际只执行了 M 个不同的工具，
+            # M < N 就说明有要求被静默吞掉了。现场就是这句
+            # 「查一下广州天气，提醒我明天带伞」——模型调完 get_weather
+            # 转头做总结，提醒那半没人提醒它，主人只看到一条天气播报。
+            #
+            # 为什么比大小而不比对工具名：见 count_request_actions 的注释，
+            # 「搜十月新番并打开B站」意图判成 open_app、实际调 web_search +
+            # open_website，拿名字比对会误判成一件都没做，白刷 3 轮。
+            #
+            # 严格限一次，且要求已经调过工具（补「调了一半」，
+            # 不碰 tools_used == 0 那条已经成熟的路径）。
+            if (force_first_turn and not tool_calls
+                    and required_actions >= 2
+                    and tools_used >= 1
+                    and len({n for n, _, _ in executed_tools}) < required_actions
+                    and partial_retries < 1
+                    and turn + 1 < self.max_turns
+                    and not (cancel_check and cancel_check())):
+                partial_retries += 1
+                done = sorted({n for n, _, _ in executed_tools})
+                log.warning(
+                    "AgentLoop: 主人要求 %d 件事，本轮只执行了 %d 个（%s），"
+                    "疑似只做一半，要求继续", required_actions, len(done), done)
+                yield ("meta", {"event": "partial_retry",
+                                "reason": f"{len(done)}/{required_actions} 项已完成",
+                                "required": required_actions,
+                                "done": done})
+                consecutive_tool_only = 0
+                continue   # 再给一轮：此时 force_tool_use 仍为 True，
+                           # LLMClient 会照常追加那条命中率最高的强制提示
 
             # 没调工具 → 本轮准备给最终答复。先核实结果：
             # 若关键动作失败/取消，模型却报喜且不提失败，给一次纠正重答机会。

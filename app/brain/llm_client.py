@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
+import asyncio
 
 import httpx
 
@@ -14,6 +15,13 @@ from app.core.config import LLMConfig
 from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
+
+# 瞬时故障重试：这些状态码是「服务端现在不行、过会儿行」，
+# 不是「请求本身有问题」。429 限流、5xx 网关/过载、529 MiniMax 集群繁忙。
+# 4xx（400 参数错 / 401 key 错 / 404 模型名错）重试没有意义，不在其中。
+_TRANSIENT_STATUS = (408, 409, 425, 429, 500, 502, 503, 504, 529)
+_TRANSIENT_MAX_ATTEMPTS = 3      # 含首次，共最多 3 次
+_TRANSIENT_BACKOFF_S = 1.5       # 线性退避：1.5s / 3.0s
 
 # 【已实测「发了 tool_choice 反而更糟」的模型】
 #
@@ -874,6 +882,38 @@ class LLMClient:
         """
         saw_content = False
         reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
+
+        # 【瞬时故障重试】压测抓到：MiniMax 返回 HTTP 529
+        # {"type":"overloaded_error","message":"当前服务集群负载较高"}
+        # 时，旧实现直接把 LLMError 抛上去，主人看到的是一个**空气泡**。
+        # 529/429/5xx 都是临时性的（过几秒就好），不该让主人为集群负载买单。
+        #
+        # 重试只包住「还没吐出任何字节」的阶段：_stream_once 一旦 yield 过
+        # text 事件就整体成功返回，不会重放，所以不会出现内容重复。
+        last_err: Exception | None = None
+        for attempt in range(_TRANSIENT_MAX_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(_TRANSIENT_BACKOFF_S * attempt)
+            try:
+                async for ev, data in self._stream_once(
+                        url, payload, headers, cancel_check):
+                    yield ev, data
+                return
+            except LLMError as e:
+                if (not _is_transient_llm_error(e)
+                        or attempt == _TRANSIENT_MAX_ATTEMPTS - 1):
+                    raise
+                last_err = e
+                log.warning("LLMClient: 瞬时故障（第 %d/%d 次）%s，%.1fs 后重试",
+                            attempt + 1, _TRANSIENT_MAX_ATTEMPTS,
+                            str(e)[:80], _TRANSIENT_BACKOFF_S * attempt)
+        if last_err is not None:   # 理论上到不了这行，兜底防止静默返回空流
+            raise last_err
+
+    async def _stream_once(self, url, payload, headers, cancel_check=None):
+        """真正发一次流式请求（不含重试逻辑）。"""
+        saw_content = False
+        reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -1052,6 +1092,24 @@ _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"查(?:一下)?\s*(?:cpu|内存|CPU|占用|天气|温度)|"
         r"(?:帮我)?(?:查|看看|了解)(?:一下)?\s*(?:系统|电脑|机器|配置|状态))",
         re.UNICODE)),
+    # 天气查询意图。
+    #
+    # 【2026-10-14 压测发现】原来的天气词只藏在 query / web_search 两条正则里，
+    # 而且两边都写错了：
+    #   「查一下天气」  → 命中 query，但 query 白名单里**没有** get_weather
+    #   「查一下广州天气」→ query 的 `查(?:一下)?\s*(?:...|天气|...)` 中间夹了
+    #                     城市名匹配不上，落到 web_search，而 web_search 白名单
+    #                     里**也没有** get_weather
+    # 结果就是模型只能去 web_search + fetch_url_text 爬中央气象台：实测单次
+    # 58.9s / 4 个请求，回复里还漏出「让我查广州天气。从最后一次抓取…��这类
+    # 工具爬取独白。内置的 get_weather 一次就够。
+    #
+    # 所以这里单独给天气一个意图，并且容忍「查…天气」中间夹城市名。
+    ("get_weather", re.compile(
+        r"(?:天气|气温|温度|降雨|降水概率|冷不冷|热不热|要不要带伞|该带伞)"
+        r"|查(?:一下|一查|查)?\s*[^，。！？\n]{0,8}?(?:天气|气温|温度)"
+        r"|[^，。！？\n]{0,8}?天气(?:怎么样|如何|如何呀|咋样|好吗)",
+        re.UNICODE)),
     # 搜索类（实时信息/时效性内容/未知答案）—— web_search 工具
     # 触发 force_tool_use 的关键词：
     # - 「最新一集/最近一期/最新剧情」类时效性词
@@ -1075,17 +1133,98 @@ def detect_action_intent(text: str) -> Optional[str]:
     """轻量判定用户消息是否需要工具调用。
 
     返回：
-        - None：自由文本（闲聊/情绪），不强制调工具
-        - str：命中的工具类别（"open_app"/"add_reminder"/"remember_fact"/"query"），
+        - None：自由文本（闲聊/情绪/否定），不强制调工具
+        - str：命中的工具类别（"open_app"/"add_reminder"/"remember_fact"/
+              "query"/"get_weather"/"web_search"），
               代表「这一轮必须调工具，否则就是幻觉」
     """
     if not text:
         return None
     text = text.strip()
     for intent, pat in _INTENT_TOOL_PATTERNS:
-        if pat.search(text):
-            return intent
+        m = pat.search(text)
+        if not m:
+            continue
+        # 【否定要认】压测抓到：「不要提醒我任何东西」照样命中「提醒我」，
+        # 于是桌宠去查了提醒列表，还回了一句「已经帮主人搞定啦~」——
+        # 主人说的是**别做**，它做完了还报喜。触发词前面带否定词的一律不算。
+        if _NEGATION_RE.search(text[max(0, m.start() - 8):m.start()]):
+            log.debug("detect_action_intent: %s 命中但前面有否定，跳过", intent)
+            continue
+        return intent
     return None
+
+
+# 否定词。只要出现在动作词**之前**的一个小窗口里就算数。
+#
+# 为什么不是紧邻匹配：「不用设提醒」的触发词实际落在「提醒」上，匹配点前面是
+# 「不用设」，紧邻判断会漏掉；「取消刚才的提醒」同理。
+#
+# 放在动作词**后面**的不算否定这个动作——「提醒我别忘了带伞」里的「别忘了」
+# 是在说提醒的内容，仍然该设提醒。
+_NEGATION_RE = re.compile(r"(?:不要|别|不用|不需要|无需|没必要|禁止|甭|勿|取消)")
+
+
+def count_request_actions(text: str) -> int:
+    """数出主人这句话里**并列了几件要做的事**（0 / 1 / 2 / 3+）。
+
+    为什么需要它：多步任务只做一半是这个项目最顽固的失败模式——
+    主人说「查一下广州天气，提醒我明天带伞」，模型调了 get_weather 拿到
+    结果就转头做总结，提醒那一半被静默吞掉，主人只看到一句天气播报。
+
+    为什么不用「意图名 / 工具名」来判：实测行不通。意图名不等于实际会用的
+    工具名——「帮我搜一下十月新番，并打开B站」意图判成 open_app，模型实际调
+    的是 web_search + open_website，拿 open_app 去比对就成了「一件都没做」，
+    白刷 3 轮重试。
+
+    所以这里只做**纯语言层面的分句计数**，不碰工具注册表：
+
+        「查一下广州天气，提醒我明天带伞」   → 2
+        「帮我搜一下十月新番，并打开B站」     → 2
+        「打开QQ」                            → 1
+        「今天天气怎么样」                    → 0（没有动作动词）
+        「你好呀」                            → 0
+
+    调用方拿它跟「实际执行了几个不同工具」比大小，来判断是不是只做了一半。
+    """
+    if not text:
+        return 0
+    # 并列连接词 / 标点。顿号和句号不算并列（「打开QQ、微信」是一个动作的宾语）
+    parts = re.split(r"[，,；;]|\s*(?:然后|接着|再帮|并且|并|同时|顺便|另外|以及|还有)\s*",
+                     text.strip())
+    n = 0
+    for p in parts:
+        if not p.strip():
+            continue
+        if _ACTION_VERB_RE.search(p):
+            n += 1
+    return n
+
+
+# 「要做一件事」的动词信号。刻意保守：宁可少算（漏判 = 保持现状），
+# 也不要多数（误判 = 白刷一轮重试）。
+_ACTION_VERB_RE = re.compile(
+    r"(?:查|搜|搜一|寻找|找一|打开|启动|运行|拉起|设置|设个|设一下|定个|定一个|加个|添加|"
+    r"记住|记一下|记下|提醒|叫我|到点|翻译|算一下|计算|下载|发送|发一下|安排|"
+    r"看看|看一下|看一下|列出|帮我查|帮我想|生成|写一个|新建|删除|关闭|锁屏)"
+)
+
+
+def _is_transient_llm_error(err: Exception) -> bool:
+    """这个 LLMError 是「等一下就好」还是「再试也没用」。
+
+    压测实测踩到：MiniMax 集群繁忙时返回 HTTP 529
+    （{"type":"overloaded_error"}）。这种必须重试——旧实现直接抛上去，
+    主人等了半天收到一个空气泡。
+
+    反过来，400（参数错）、401（key 错）、404（模型名错）重试多少次都一样，
+    白白让主人多等，所以不重试。
+    """
+    msg = str(err) if err else ""
+    for code in _TRANSIENT_STATUS:
+        if f"HTTP {code}" in msg:
+            return True
+    return False
 
 
 def _is_tool_choice_unsupported(err: Exception) -> bool:
