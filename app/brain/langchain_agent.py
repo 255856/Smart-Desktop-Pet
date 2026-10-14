@@ -313,6 +313,10 @@ class LangChainAgent:
             2) astream —— 流式产出 text/tool 事件
             3) yield done —— 全部结束
             4) finally —— await _release_checkpointer() 关闭 SQLite 连接
+
+        2026-10-14: 加「checkpoint 救援」—— MiniMax 报 2013 'tool call result
+        does not follow tool call' 时,怀疑是 checkpoint 里残留了
+        schema 失配的 ToolMessage;清掉本 thread 的 checkpoint 后重试一次。
         """
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
@@ -325,21 +329,48 @@ class LangChainAgent:
         input_payload: dict[str, Any] = {"messages": [*history, HumanMessage(content=last_user)]}
         config = {"configurable": {"thread_id": self.thread_id}}
 
+        try:
+            # 最多重试一次:MiniMax 2013 → 清 ckpt → 重跑
+            recovered = False
+            for attempt in range(2):
+                did_recover = False
+                async for ev in self._astream_with_retry(
+                    input_payload, config, cancel, recovered_after_retry=recovered,
+                ):
+                    yield ev
+                    if ev[0] == "_recovered_retry":
+                        # 清掉 ckpt 后请求再调一次;清在事件触发时已完成
+                        did_recover = True
+                if not did_recover:
+                    break
+                # 已经因为 2013 触发重试:把 recovered 标 True,第二次还会再跑
+                # 一遍同样的逻辑(但这次如果再失败就不会再重试)
+                recovered = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("LangChainAgent 失败")
+            yield ("error", str(e))
+
+    async def _astream_with_retry(self, input_payload, config, cancel,
+                                    recovered_after_retry: bool = False):
+        """单次 astream 跑,失败时区分是否 2013。
+
+        抛出事件:
+          - ("text", ...) / ("tool", ...) / ("done", ...) —— 正常输出
+          - ("error", ...)                       —— 终止
+          - ("_recovered_retry",)                —— 2013 已清 ckpt,让外层再跑一次
+        """
         final_text_parts: list[str] = []
         try:
-            # astream(stream_mode="messages") → (chunk, metadata)
-            # chunk 可能是 AIMessageChunk / ToolMessage / HumanMessage 等
             async for chunk, _meta in self._agent.astream(input_payload, config=config,
                                                           stream_mode="messages"):
                 if cancel and cancel():
                     yield ("error", "cancelled")
                     return
-                # 同时处理增量 (AIMessageChunk) 和完整消息 (AIMessage)：
-                # 有些模型/服务端组合下 LangGraph 会一次返回最终聚合的 AIMessage
                 if isinstance(chunk, (AIMessageChunk, AIMessage)):
                     text = chunk.content
                     if isinstance(text, list):
-                        # 多模态场景：拼成纯文本
                         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
                                        for p in text)
                     text = sanitize_text(text, is_final=False)
@@ -347,19 +378,69 @@ class LangChainAgent:
                         final_text_parts.append(text)
                         yield ("text", text)
                 elif isinstance(chunk, ToolMessage):
-                    # 工具执行结果
                     name = chunk.name or ""
                     result = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                     yield ("tool", name, "", result)
             yield ("done", "".join(final_text_parts))
-        except asyncio.CancelledError:
-            raise
+            return
+        except Exception as e:
+            msg = str(e)
+            if "2013" in msg and "tool call result does not follow tool call" in msg:
+                if recovered_after_retry:
+                    # 已经重试过一次还 2013 → 不再救
+                    log.warning("LangChainAgent: 2013 重试后仍失败")
+                    yield ("error", msg)
+                    return
+                # 清 ckpt;成功后告诉外层再跑一次
+                if self._clear_thread_checkpoint():
+                    log.warning(
+                        "LangChainAgent: 检测到 2013,清掉 thread=%s 的 checkpoint,准备重试",
+                        self.thread_id,
+                    )
+                    yield ("_recovered_retry",)
+                    return
+                # 没接 checkpointer 之类,清不掉 → 当 error
+                yield ("error", "checkpoint 2013 且无法清理")
+                return
+            raise  # 非 2013 → 让外层 try 接住
+
+    def _clear_thread_checkpoint(self) -> bool:
+        """清掉 self.thread_id 在 checkpoint DB 里的所有记录。
+
+        2026-10-14: 当 MiniMax 2013 (tool call result does not follow tool call)
+        触发,怀疑 checkpoint 残留了 schema 失配的 ToolMessage,清掉再试。
+        """
+        try:
+            if not self.cfg.enable_checkpointer or not self.cfg.checkpoint_db:
+                return False
+            from pathlib import Path
+            import sqlite3
+            db_path = Path(self.cfg.checkpoint_db)
+            if not db_path.is_file():
+                return False
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?",
+                    (self.thread_id,),
+                )
+                ckpt_n = cur.rowcount
+                cur = conn.execute(
+                    "DELETE FROM writes WHERE thread_id = ?",
+                    (self.thread_id,),
+                )
+                write_n = cur.rowcount
+                conn.commit()
+                log.info(
+                    "LangChainAgent: 清掉 thread=%s 的 checkpoint(ckpt=%d, write=%d)",
+                    self.thread_id, ckpt_n, write_n,
+                )
+                return ckpt_n + write_n > 0
+            finally:
+                conn.close()
         except Exception as e:  # noqa: BLE001
-            log.exception("LangChainAgent 失败")
-            yield ("error", str(e))
-        finally:
-            # 释放 checkpointer 连接；下次 _ensure_agent() 会重建
-            await self._release_checkpointer()
+            log.warning("清 checkpoint 失败:%s", e)
+            return False
 
     def run_sync(self, messages: list[dict],
                  cancel_check: Optional[Callable[[], bool]] = None,

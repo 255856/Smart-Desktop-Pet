@@ -380,3 +380,138 @@ class TestHallucinationGuard:
         assert "orphan_tool_pruner" in names
         assert "grounding_dynamic_prompt" in names
         assert "risky_tool_logger" in names
+
+
+class TestCheckpointRecovery:
+    """2013 'tool call result does not follow tool call' 时,LangChainAgent
+    应该清掉当前 thread 的 checkpoint 然后重试一次。"""
+
+    def test_clear_thread_checkpoint_deletes_rows(self, tmp_path):
+        """_clear_thread_checkpoint 必须真的从 SQLite 删掉对应 thread 的行。"""
+        # 手动建一个 fake checkpoint DB + 表
+        import sqlite3
+        db_path = tmp_path / "ckpt.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE checkpoints (
+                thread_id TEXT, checkpoint_ns TEXT DEFAULT '',
+                checkpoint_id TEXT, parent_checkpoint_id TEXT,
+                type TEXT, checkpoint BLOB, metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id));
+            CREATE TABLE writes (
+                thread_id TEXT, checkpoint_ns TEXT DEFAULT '',
+                checkpoint_id TEXT, task_id TEXT, idx INTEGER,
+                channel TEXT, type TEXT, value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx));
+        """)
+        # 插两行:一条目标 thread + 一条其它 thread(必须保留)
+        conn.execute(
+            "INSERT INTO checkpoints(thread_id, checkpoint_id, type, checkpoint, metadata) "
+            "VALUES (?, ?, ?, ?, ?)", ("default", "c1", "x", b"a", b"b"),
+        )
+        conn.execute(
+            "INSERT INTO checkpoints(thread_id, checkpoint_id, type, checkpoint, metadata) "
+            "VALUES (?, ?, ?, ?, ?)", ("other", "c2", "x", b"c", b"d"),
+        )
+        conn.commit()
+        conn.close()
+
+        reg = _make_registry()
+        llm = LLMConfig(api_key="sk-test", model="gpt-test", stream=False)
+        agent = LangChainAgent(
+            llm_cfg=llm, registry=reg, persona="x",
+            cfg=LangChainAgentConfig(
+                enable_checkpointer=True,
+                checkpoint_db=str(db_path),
+            ),
+            thread_id="default",
+        )
+
+        ok = agent._clear_thread_checkpoint()
+        assert ok is True, "应至少删 1 行"
+
+        # 验证 default 的全删了,other 的保留
+        conn = sqlite3.connect(str(db_path))
+        n_default = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id='default'"
+        ).fetchone()[0]
+        n_other = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id='other'"
+        ).fetchone()[0]
+        conn.close()
+        assert n_default == 0
+        assert n_other == 1
+
+    def test_run_retries_after_2013(self, tmp_path):
+        """第一次 astream 抛 2013 → 清 ckpt → 第二次 astream 正常完成。"""
+        from openai import BadRequestError
+        from langchain_core.messages import AIMessageChunk
+
+        # 先建好 ckpt DB(模拟已有脏数据)
+        import sqlite3
+        db_path = tmp_path / "ckpt.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE checkpoints (
+                thread_id TEXT, checkpoint_ns TEXT DEFAULT '',
+                checkpoint_id TEXT, parent_checkpoint_id TEXT,
+                type TEXT, checkpoint BLOB, metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id));
+            CREATE TABLE writes (
+                thread_id TEXT, checkpoint_ns TEXT DEFAULT '',
+                checkpoint_id TEXT, task_id TEXT, idx INTEGER,
+                channel TEXT, type TEXT, value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx));
+        """)
+        conn.execute(
+            "INSERT INTO checkpoints(thread_id, checkpoint_id, type, checkpoint, metadata) "
+            "VALUES (?, ?, ?, ?, ?)", ("default", "c1", "x", b"a", b"b"),
+        )
+        conn.commit()
+        conn.close()
+
+        reg = _make_registry()
+        llm = LLMConfig(api_key="sk-test", model="gpt-test", stream=False)
+        agent = LangChainAgent(
+            llm_cfg=llm, registry=reg, persona="x",
+            cfg=LangChainAgentConfig(
+                enable_checkpointer=True,
+                checkpoint_db=str(db_path),
+            ),
+            thread_id="default",
+        )
+
+        # patch _agent.astream:第一次 raise 2013,第二次 yield 正常
+        call_count = [0]
+
+        async def first_call(*args, **kwargs):
+            raise BadRequestError(
+                "Error code: 400 - invalid params, tool call result does not follow tool call (2013)",
+                response=MagicMock(status_code=400),
+                body=None,
+            )
+
+        async def second_call(*args, **kwargs):
+            yield AIMessageChunk(content="重试成功!", type="AIMessageChunk"), {}
+
+        async def fake_astream(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                await first_call(*args, **kwargs)
+            else:
+                async for x in second_call(*args, **kwargs):
+                    yield x
+
+        agent._agent = MagicMock()
+        agent._agent.astream = fake_astream
+
+        async def go():
+            events = []
+            async for ev in agent.run([{"role": "user", "content": "hi"}]):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(go())
+        assert any(ev[0] == "text" for ev in events), f"应收到 text 事件,got {events}"
+        assert any(ev[0] == "done" for ev in events), f"应收到 done 事件,got {events}"
+        assert call_count[0] == 2, f"应调用 2 次,实际 {call_count[0]}"
