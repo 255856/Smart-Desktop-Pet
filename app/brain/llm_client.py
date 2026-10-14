@@ -603,7 +603,9 @@ from app.core.errors import LLMError  # noqa: E402, F401
 @dataclass
 class ChatMessage:
     role: str
-    content: str
+    # content 可以是普通字符串,也可以是 multimodal list[dict]
+    # (OpenAI 风格: [{type: text|text, ...}, {type: image_url, ...}])
+    content: object
 
 
 def _extract_text_chunk(delta: dict) -> str:
@@ -668,6 +670,25 @@ class LLMClient:
             "max_tokens": self.cfg.max_tokens,
             "stream": self.cfg.stream,
         }
+
+    # -------------------- 视觉输入 --------------------
+    @staticmethod
+    def build_vision_messages(
+        text: str,
+        image_data_urls: list[str],
+        history: Optional[list[ChatMessage]] = None,
+    ) -> list[ChatMessage]:
+        """构造 multimodal message list:history + 一条 user (text + images)。
+
+        后端会自动 base64 解码 image_url,不需要再 base64 一次。
+        """
+        from app.brain.vision import build_multimodal_content
+        out: list[ChatMessage] = list(history or [])
+        out.append(ChatMessage(
+            role="user",
+            content=build_multimodal_content(text, image_data_urls),
+        ))
+        return out
 
     async def _fetch_non_streaming(self, messages: list[ChatMessage]) -> str:
         """非流式 fallback：拿 Ollama 自动拆分后的 message.content。"""
