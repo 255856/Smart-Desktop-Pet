@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
+import os
 import re
+import logging
+import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -67,19 +70,76 @@ _MIXER_LOCK = threading.Lock()
 
 
 def _ensure_mixer() -> bool:
-    """惰性初始化 pygame.mixer；返回是否成功。"""
+    """惰性初始化 pygame.mixer；返回是否成功。
+
+    SDL audio backend 选错（Win11 常见 DirectSound 失败）是桌宠播放无声的最大原因。
+    显式指定 frequency=32000 + 单声道（匹配 GPT-SoVITS 输出），并设
+    SDL_AUDIODRIVER=wasapi 让 SDL2 走 Win 11 现代音频 API，避开 DirectSound 的坑。
+    """
     global _MIXER_READY
     with _MIXER_LOCK:
         if _MIXER_READY:
             return True
         try:
             import pygame  # 延迟 import
-            pygame.mixer.init()
+            # SDL backend：wasapi 在 Win10+ 稳定，directsound 经常没声
+            os.environ.setdefault("SDL_AUDIODRIVER", "wasapi")
+            # 32000Hz + 单声道 + 16-bit 匹配 GPT-SoVITS 输出（实测单声道 wav 在
+            # 双声道 mixer 上会"只有左/右一个声道有声音"，看起来像没声音；
+            # init 直接传参比 pre_init 可靠——pygame 1.9.6+ pre_init 会被
+            # 后续的 init() 覆盖，pre_init 失败时 mixer init 用默认参数）
+            pygame.mixer.init(frequency=32000, size=-16, channels=1, buffer=1024)
+            log.info("pygame.mixer 初始化成功：%s", pygame.mixer.get_init())
             _MIXER_READY = True
             return True
         except Exception as e:  # noqa: BLE001
-            log.warning("pygame.mixer.init 失败：%s", e)
+            log.warning("pygame.mixer.init 失败：%s（可尝试设 SDL_AUDIODRIVER=directsound）", e)
             return False
+
+
+def _normalize_wav_loudness(path: Path, target_rms: float = 0.30, max_gain: float = 8.0) -> None:
+    """原地把 wav 振幅归一化到 target_rms（基于 RMS，不是 peak）。
+
+    背景：GPT-SoVITS 输出的 wav RMS 经常只有 0.05-0.10（-26 ~ -20 dB），
+    Windows Media Player 播出来极小声；pygame/winsound/.NET SoundPlayer 也是「能播但
+    几乎听不到」。这里检测 RMS，< 0.15 时等比放大到 target_rms。
+
+    幂等：已经归一化过的 wav（peak >= 0.7）会跳过。
+    """
+    try:
+        import wave
+        import numpy as np
+    except ImportError:
+        return
+    try:
+        with wave.open(str(path), "rb") as w:
+            params = w.getparams()
+            n = w.getnframes()
+            raw = w.readframes(n)
+        sw = params.sampwidth
+        if sw != 2:                       # 只处理 16-bit（GPT-SoVITS 默认输出）
+            return
+        arr = np.frombuffer(raw, dtype=np.int16).astype(np.float64)
+        if arr.size == 0:
+            return
+        # 取整段（不区分声道）：GPT-SoVITS 输出单声道 + 多声道都用全采样
+        peak = float(np.abs(arr).max()) / 32768.0
+        rms = float(np.sqrt(np.mean(arr * arr))) / 32768.0
+        if peak >= 0.95:
+            return                          # 已经接近满幅，强行放大只会削顶
+        if rms >= target_rms:
+            return                          # 目标音量已满足
+        if rms < 0.001:
+            return                          # 全静 wav，放大只会放底噪，跳过
+        gain = min(target_rms / rms, max_gain)
+        arr = np.clip(arr * gain, -32768, 32767).astype(np.int16)
+        with wave.open(str(path), "wb") as w:
+            w.setparams(params)
+            w.writeframes(arr.tobytes())
+        log.info("TTS 归一化：%s RMS %.3f -> %.3f (gain=%.1fx)",
+                 path.name, rms, min(target_rms, rms * gain), gain)
+    except Exception as e:                  # noqa: BLE001
+        log.warning("TTS wav 归一化失败（%s）: %s", path.name, e)
 
 
 def _cache_format_matches(path: Path, expected_ext: str) -> bool:
@@ -328,18 +388,113 @@ class TTS:
         await communicate.save(str(out_path))
 
     def _play(self, mp3_path: Path) -> None:
+        # GPT-SoVITS 输出 RMS 经常只有 0.05-0.10（-26dB），不归一化听起来几乎无声。
+        # 幂等：已经大声的 wav（peak>=0.95 或 RMS>=0.30）会直接跳过。
+        _normalize_wav_loudness(mp3_path)
+        # Windows 优先用 .NET System.Media.SoundPlayer 通过 PowerShell 调：
+        #  - 不依赖 SDL/SDL2（pygame mixer 的 DirectSound / wasapi backend 选错坑）
+        #  - 不受 PyCharm run config 注入的环境变量影响
+        #  - 支持任意 PCM 采样率（GPT-SoVITS 输出 32kHz；winsound.PlaySound 只支持
+        #    22.05/44.1kHz 静默拒绝 32kHz，所以之前 winsound 路径调用成功但无声）
+        #  - 异步 Play()，powershell 进程随音频播完退出
+        if os.name == "nt":
+            # 播放路径优先级（每个 path 都接受 32kHz mono wav）：
+            #  1. ffplay (ffmpeg)              → 走 DirectSound/WASAPI 任意 backend，**不
+            #                                   依赖桌宠进程的音频设备继承**，所以最稳
+            #  2. PowerShell .NET SoundPlayer  → 走 winmm/MCI，会继承桌宠进程
+            #                                   的默认音频设备（可能错/静音）
+            #  3. winsound                      → 走 winmm（不支持 32kHz 多数时候无声）
+            # 全部 fire-and-forget，不阻塞 worker 线程
+            sdl_driver = os.environ.get("SDL_AUDIODRIVER", "(unset)")
+            log.info("TTS: 准备播放 %s (%d 字节)  SDL_AUDIODRIVER=%s",
+                     mp3_path.name, mp3_path.stat().st_size, sdl_driver)
+
+            # Path 1: ffplay（最稳）—— **同步等播完**避免多句 LLM 回复并行
+            # 触发 Popen 多句同时播导致声音重叠（_speak_blocking 串行，
+            # 但 Popen 不阻塞 → 多 ffplay 进程同时持有 waveOut → 声音叠在一起）
+            try:
+                ffplay = shutil.which("ffplay")
+                if ffplay:
+                    import wave as _wave
+                    try:
+                        with _wave.open(str(mp3_path), "rb") as _w:
+                            _dur = _w.getnframes() / max(_w.getframerate(), 1)
+                    except Exception:
+                        _dur = 10.0
+                    log.info("TTS: ffplay 播放 → %s (%.1fs)", mp3_path.name, _dur)
+                    proc = subprocess.Popen(
+                        [ffplay, "-nodisp", "-autoexit", "-loglevel", "error",
+                         "-hide_banner", "-t", str(_dur + 0.5), str(mp3_path)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=(subprocess.CREATE_NO_WINDOW
+                                       if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
+                    )
+                    try:
+                        proc.wait(timeout=_dur + 3)   # 同步等播完
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    return
+                log.warning("ffplay 不在 PATH，跳过")
+            except Exception as e:
+                log.warning("ffplay 路径失败：%s", e)
+
+            # Path 2: PowerShell + .NET SoundPlayer（**PlaySync 同步**避免重叠）
+            try:
+                safe_path = str(mp3_path).replace("'", "''")
+                # PlaySync 阻塞到播完（不是 Play 异步），所以多句不会重叠
+                ps_cmd = f"(New-Object Media.SoundPlayer '{safe_path}').PlaySync()"
+                log_stderr_path = mp3_path.parent / "_ps_stderr.log"
+                stderr_file = open(log_stderr_path, "wb")
+                proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    stdout=stderr_file, stderr=stderr_file,
+                    creationflags=(subprocess.CREATE_NO_WINDOW
+                                   if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
+                )
+                try:
+                    proc.wait(timeout=15)   # PlaySync 最长等 15s（防 .NET 卡死）
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                stderr_file.flush()
+                with open(log_stderr_path, "rb") as f:
+                    err = f.read()
+                if err:
+                    log.warning("PowerShell stderr: %s",
+                                err.decode("utf-8", errors="ignore").strip()[:300])
+                return
+            except Exception as e:
+                log.warning("PS SoundPlayer 启动失败：%s", e)
+
+            # Path 3: winsound（兜底）
+            try:
+                import winsound
+                winsound.PlaySound(
+                    str(mp3_path),
+                    winsound.SND_FILENAME | winsound.SND_ASYNC
+                    | winsound.SND_NODEFAULT,
+                )
+                return
+            except Exception as e:
+                log.warning("winsound 也失败：%s", e)
+        # 跨平台 fallback：pygame（macOS / Linux + Windows 兜底）
         try:
             import pygame
             if not _ensure_mixer():
                 log.warning("pygame.mixer 未就绪，跳过播放 %s", mp3_path.name)
                 return
-            log.info("TTS: 播放 → %s (%d 字节)", mp3_path.name, mp3_path.stat().st_size)
-            # 复位 + 加载 + 播
+            sdl_driver = os.environ.get("SDL_AUDIODRIVER", "(unset)")
+            log.info("TTS: pygame 播放 → %s (%d 字节)  SDL_AUDIODRIVER=%s  mixer=%s",
+                     mp3_path.name, mp3_path.stat().st_size,
+                     sdl_driver, pygame.mixer.get_init())
             pygame.mixer.music.stop()
             pygame.mixer.music.load(str(mp3_path))
             pygame.mixer.music.play()
+            import time as _t
+            _t.sleep(0.1)
+            log.info("TTS: 播放 100ms 后 get_busy=%s", pygame.mixer.music.get_busy())
             while pygame.mixer.music.get_busy():
                 pygame.time.wait(100)
         except Exception as e:  # noqa: BLE001
             log.warning("播放 TTS 失败：%s（文件=%s）", e, mp3_path.name)
-        # 不再 quit(): mixer 留着进程级复用

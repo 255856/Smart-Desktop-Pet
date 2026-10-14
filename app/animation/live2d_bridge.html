@@ -48,7 +48,8 @@ window.live2d = {
     // 透明窗口每帧都要重新合成，静置时 15fps 对呼吸/眨眼/待机物理完全足够，
     // 能把 WebEngine 渲染与宿主透明合成开销减半。
     _activeFps: 30,
-    _idleFps: 15,
+    _idleFps: 30,   // 用户要求实时跟踪：闲置也不降帧（Win11 后台窗口浏览器
+                    // 会自动限频 RAF 到 1Hz，那是浏览器行为；不要在 JS 里再加层节流）
     _lastActive: 0,
     _isIdle: false,
 
