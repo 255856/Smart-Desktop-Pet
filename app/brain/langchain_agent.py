@@ -177,13 +177,29 @@ class LangChainAgent:
         thread_id: str = "default",
         cwd: Optional[str] = None,
         extra_docs_paths: Optional[list] = None,
+        session_id: Optional[str] = None,
+        session_store: Optional[Any] = None,
     ):
         self.llm_cfg = llm_cfg
         self.registry = registry
         self.persona = persona
         self.cfg = cfg or LangChainAgentConfig()
         self.cancel_check = cancel_check
-        self.thread_id = thread_id
+        # 会话绑定:优先用 session_id 从 session_store 拿 thread_id。
+        # 这样会话列表 / 续接在 store 层管理,agent 内部只认 thread_id。
+        self._session_id: Optional[str] = session_id
+        self._session_store = session_store
+        if session_id is not None:
+            if session_store is None:
+                raise ValueError("session_id given without session_store")
+            info = session_store.get(session_id)
+            if info is None:
+                raise ValueError(
+                    f"SessionStore: session_id={session_id!r} not found"
+                )
+            self.thread_id = info.thread_id
+        else:
+            self.thread_id = thread_id
         # 项目级指令:从 cwd 向上找 AGENTS.md / CLAUDE.md,加上主程序注入的 extra_paths
         self._cwd = cwd
         self._extra_docs_paths: list = list(extra_docs_paths or [])
@@ -299,6 +315,23 @@ class LangChainAgent:
                 self._confirm_ctrl.on_blocked(callback)
             except Exception as e:  # noqa: BLE001
                 log.warning("on_confirm_needed 失败: %s", e)
+
+    # -------------------- Session 同步 --------------------
+    def touch_session(self, *, message_count: Optional[int] = None,
+                      title: Optional[str] = None) -> bool:
+        """更新当前 session 的 last_used_at(可选同步 message_count / title)。
+
+        主程序每完成一轮对话就调一次,让「会话列表」按最近活跃度排序。
+        """
+        if self._session_store is None or self._session_id is None:
+            return False
+        try:
+            return self._session_store.touch(
+                self._session_id, message_count=message_count, title=title,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("touch_session 失败: %s", e)
+            return False
 
     async def _ensure_agent(self) -> None:
         """异步构建 agent（model + tools + checkpointer）。首次调用时构建，后续复用。
