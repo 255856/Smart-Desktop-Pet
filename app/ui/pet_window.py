@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.core.qt_compat import (
     QDragMoveEvent, QDropEvent, QEvent, QHBoxLayout, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
     QRegion, QSize, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
-    QGraphicsDropShadowEffect, QTransform,
+    QGraphicsDropShadowEffect, QTransform, QWheelEvent, QFrame,
     event_global_pos, event_local_pos,
 )
 from app.animation.animations import Animation, Frame
@@ -103,6 +104,12 @@ class PetWindow(QWidget):
     # sprite 设计尺寸（与生成器一致）
     SPRITE_SIZE = QSize(1000, 1000)
 
+    # 滚轮/菜单缩放范围与步进（与设置面板滑块 20~100 保持一致）
+    SCALE_MIN = 0.20
+    SCALE_MAX = 1.00
+    SCALE_STEP = 0.05
+    SCALE_DEFAULT = 0.40
+
     def __init__(self, sprite_dir: str | Path,
                  fallback_image: str | Path | None = None,
                  scale: float = 0.4,
@@ -169,8 +176,12 @@ class PetWindow(QWidget):
         self._setup_look_at()
 
         # live2d：透明区域点击穿透（按渲染 alpha 定时生成窗口遮罩）
-        self._setup_click_mask()
+        # 注意：必须先声明再 setup。原先声明写在 _setup_click_mask() 之后，
+        # 那一行会把刚创建好的 QTimer 立刻覆盖成 None —— 定时器对象仍在跑，
+        # 但 self._mask_timer 已为 None，导致 _mask_adapt_interval 抛异常，
+        # 异常发生在 setMask() 之前，于是遮罩一次都没设上，整窗不透明、点不穿。
         self._mask_timer = None
+        self._setup_click_mask()
 
         # 把渲染器的 widget 嵌入到 PetWindow
         display_widget = self.renderer.get_widget()
@@ -255,6 +266,11 @@ class PetWindow(QWidget):
         self._frame_timer: Optional[QTimer] = None
 
         self._build_window(always_on_top)
+        self._setup_scale_osd()
+        # wheel hook 默认不装：用户嫌"非激活桌宠被滚轮缩放"太敏感，
+        # 改由设置面板显式 opt-in（未来加 toggle）。方法 + 文件保留，需要时
+        # 调 self._setup_wheel_hook() 启用。
+        # self._setup_wheel_hook()
         # 默认播放待机
         self.animator.set_idle()
         # 立即显示第一帧并启动帧计时器
@@ -660,6 +676,8 @@ class PetWindow(QWidget):
 
     def hideEvent(self, evt) -> None:
         """隐藏（托盘）时暂停 live2d 渲染循环 + 所有常驻定时器：零 GPU/CPU 开销。"""
+        if getattr(self, "_wheel_hook", None) is not None:
+            self._wheel_hook.uninstall()
         pause = getattr(self.renderer, "pause", None)
         if callable(pause):
             pause()
@@ -668,6 +686,8 @@ class PetWindow(QWidget):
 
     def showEvent(self, evt) -> None:
         """重新显示时恢复渲染循环 + 常驻定时器。"""
+        if getattr(self, "_wheel_hook", None) is not None:
+            self._wheel_hook.install()
         resume = getattr(self.renderer, "resume", None)
         if callable(resume):
             resume()
@@ -800,6 +820,11 @@ class PetWindow(QWidget):
                 return True
             return False
 
+        # 滚轮缩放：delegate 全屏覆盖，顶层 wheelEvent 收不到，这里代为处理
+        if isinstance(evt, QWheelEvent):
+            self._handle_scale_wheel(evt)
+            return True
+
         # 文件拖拽：dragEnter/drop 只用 mimeData；dragMove 用坐标决定光标，
         # delegate/view/PetWindow 坐标完全重合，可直接转发原事件。
         if isinstance(evt, QDragEnterEvent):
@@ -928,7 +953,7 @@ class PetWindow(QWidget):
                 log.info("文件被吃掉（已回收站）：%s", path)
             else:
                 self.show_bubble("吃不了这个…", duration_ms=2000)
-                QMessageBox.warning(self, "错误", "无法将文件移到回收站")
+                ui_style.warn(self, "错误", "无法将文件移到回收站")
 
         elif action == "convert"and convert_suffix:
             # 转换格式
@@ -939,7 +964,7 @@ class PetWindow(QWidget):
                 log.info("文件转换成功：%s -> %s", path, dest)
             else:
                 self.show_bubble("转换失败了…", duration_ms=2000)
-                QMessageBox.warning(self, "转换失败", f"无法将 {path.name} 转换为 {convert_suffix}")
+                ui_style.warn(self, "转换失败", f"无法将 {path.name} 转换为 {convert_suffix}")
 
     def _emit_open_settings(self) -> None:
         self.open_settings_requested.emit()
@@ -1069,11 +1094,169 @@ class PetWindow(QWidget):
         self._mask_prev_region = None
         self._mask_sig = None
         self._mask_stable_count = 0
+        # 作废任何正在进行的异步 base 采样：缩放/连续缩放会触发多次延迟采样，
+        # 旧回调若继续把不同尺寸的帧塞进 _base_samples，最终 acc | s 会
+        # 因 shape 不一致而 broadcast 报错。用 epoch 令牌让过期回调直接作废。
+        self._mask_sample_epoch = getattr(self, "_mask_sample_epoch", 0) + 1
+        self._base_samples = []
+        self._base_poses = []
         QTimer.singleShot(800, self._sample_base_mask)
         # 闲置时遮罩定时器是停的，尺寸变了没人负责重建 —— 这里主动补一次
         if self._mask_timer is not None and not self._mask_timer.isActive():
             self._idle_mask_stopped = False
             self._mask_timer.start(1500)
+
+    # ---------- 滚轮 / 菜单缩放 ----------
+    def _setup_wheel_hook(self) -> None:
+        """非激活（前台是别的窗口）时也能滚轮缩放：挂 WH_MOUSE_LL 低级钩子。
+
+        桌宠永远不抢焦点，系统默认把滚轮发给前台窗口，前台是浏览器时滚轮
+        根本到不了桌宠；系统「悬停非活动窗口滚动」开关又因机器而异。
+        低级钩子自包含、不依赖系统设置，仅在窗口可见时挂载。
+        """
+        self._wheel_hook = None
+        if sys.platform != "win32":
+            return
+        try:
+            from app.ui.wheel_hook import WheelHook
+            self._wheel_hook = WheelHook(self._on_global_wheel)
+        except Exception:  # noqa: BLE001
+            log.exception("滚轮钩子初始化失败")
+            self._wheel_hook = None
+
+    def _on_global_wheel(self, x: int, y: int, dy: int, dx: int) -> bool:
+        """低级钩子回调：鼠标在角色上（透明区由 WindowFromPoint 返回下层窗口、
+        天然不命中）时消费滚轮做缩放，返回 True 吞掉；否则放行给前台窗口。"""
+        if not self.isVisible() or dy == 0:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            hwnd_under = u.WindowFromPoint(wintypes.POINT(x, y))
+            if not hwnd_under:
+                return False
+            own = int(self.winId())
+            if hwnd_under != own and not u.IsChild(own, hwnd_under):
+                return False
+            target = self._scale + (dy / 120.0) * self.SCALE_STEP
+            anchor = QPoint(x, y)
+            # 投递到事件循环，避免在钩子回调里直接 resize（低级钩子要求快速返回）
+            QTimer.singleShot(0, lambda: self._zoom_to(target, anchor_global=anchor))
+            return True
+        except Exception:  # noqa: BLE001
+            log.exception("滚轮缩放钩子处理失败")
+            return False
+
+    def _setup_scale_osd(self) -> None:
+        """缩放时的 OSD（深色圆角卡片：百分比 + 进度条），停在角色头顶上方。"""
+        self._scale_osd = QFrame(self)
+        self._scale_osd.setObjectName("scale_osd")
+        self._scale_osd.setStyleSheet("""
+            QFrame#scale_osd {
+                background: rgba(47, 43, 69, 0.92);
+                border: 1px solid rgba(255,255,255,0.20);
+                border-radius: 14px;
+            }
+            QLabel#scale_osd_pct {
+                color: #ffffff; font-size: 15px; font-weight: 700;
+                background: transparent;
+            }
+            QProgressBar#scale_osd_bar {
+                background: rgba(255,255,255,0.18);
+                border: none; border-radius: 4px; height: 6px;
+            }
+            QProgressBar#scale_osd_bar::chunk {
+                border-radius: 4px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #a78bfa, stop:1 #7c6cf0);
+            }
+        """)
+        lay = QVBoxLayout(self._scale_osd)
+        lay.setContentsMargins(16, 10, 16, 12)
+        lay.setSpacing(6)
+        self._scale_osd_pct = QLabel("100%")
+        self._scale_osd_pct.setObjectName("scale_osd_pct")
+        self._scale_osd_pct.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._scale_osd_pct)
+        self._scale_osd_bar = QProgressBar()
+        self._scale_osd_bar.setObjectName("scale_osd_bar")
+        self._scale_osd_bar.setRange(int(self.SCALE_MIN * 100),
+                                    int(self.SCALE_MAX * 100))
+        self._scale_osd_bar.setTextVisible(False)
+        self._scale_osd_bar.setFixedHeight(6)
+        self._scale_osd_bar.setFixedWidth(120)
+        lay.addWidget(self._scale_osd_bar)
+        self._scale_osd.hide()
+        self._scale_osd_timer = QTimer(self)
+        self._scale_osd_timer.setSingleShot(True)
+        self._scale_osd_timer.timeout.connect(self._scale_osd.hide)
+
+    def wheelEvent(self, evt: QWheelEvent) -> None:
+        """sprite 模式滚轮直接到顶层；live2d 模式由 eventFilter 转发到这里。"""
+        self._handle_scale_wheel(evt)
+        evt.accept()
+
+    def _handle_scale_wheel(self, evt: QWheelEvent) -> None:
+        delta = evt.angleDelta().y()
+        if delta == 0:
+            return
+        # 兼容 Qt5(globalPos) / Qt6(globalPosition)
+        if hasattr(evt, "globalPosition"):
+            gp = evt.globalPosition().toPoint()
+        else:
+            gp = evt.globalPos()
+        steps = delta / 120.0
+        self._zoom_to(self._scale + steps * self.SCALE_STEP, anchor_global=gp)
+
+    def _zoom_to(self, scale: float, anchor_global: Optional[QPoint] = None) -> None:
+        """缩放到指定值。anchor_global 为鼠标全局位置：缩放后该点保持在原地
+        （即「缩放在我指的地方」），不提供锚点时窗口左上角不动。
+
+        即使已到边界（尺寸没变化）也弹 OSD，给出「到极限了」的反馈。
+        """
+        new_scale = max(self.SCALE_MIN,
+                        min(self.SCALE_MAX, round(float(scale) / self.SCALE_STEP) * self.SCALE_STEP))
+        if abs(new_scale - self._scale) >= 0.001:
+            old_w, old_h = max(1, self.width()), max(1, self.height())
+            ax = ay = None
+            if anchor_global is not None:
+                tl = self.frameGeometry().topLeft()
+                ax = (anchor_global.x() - tl.x()) / old_w
+                ay = (anchor_global.y() - tl.y()) / old_h
+            self.apply_display_size(new_scale)
+            if anchor_global is not None and ax is not None and ay is not None:
+                self.move(int(anchor_global.x() - ax * self.width()),
+                          int(anchor_global.y() - ay * self.height()))
+            self.scale_changed.emit(new_scale)
+        # 必须在 resize 之后定位，否则会用旧窗口宽度算居中，OSD 跑到边缘
+        self._show_scale_osd(new_scale)
+
+    def _show_scale_osd(self, scale: Optional[float] = None) -> None:
+        sc = self._scale if scale is None else scale
+        pct = int(round(sc * 100))
+        self._scale_osd_pct.setText(f"{pct}%")
+        self._scale_osd_bar.setValue(pct)
+        self._scale_osd.adjustSize()
+        x = (self.width() - self._scale_osd.width()) // 2
+        y = int(self.height() * 0.14)
+        self._scale_osd.move(max(0, x), max(0, y))
+        self._scale_osd.raise_()
+        self._scale_osd.show()
+        self._scale_osd_timer.start(800)
+
+    def _zoom_step(self, direction: int) -> None:
+        """右键菜单：direction=+1 放大 / -1 缩小（以窗口中心为锚点）。"""
+        gp = self.frameGeometry().center()
+        self._zoom_to(self._scale + direction * self.SCALE_STEP, anchor_global=gp)
+
+    def _zoom_preset(self, scale: float) -> None:
+        """右键菜单：直接跳到预设比例（以窗口中心为锚点）。"""
+        self._zoom_to(scale, anchor_global=self.frameGeometry().center())
+
+    def _zoom_reset(self) -> None:
+        """右键菜单：还原默认大小。"""
+        self._zoom_preset(self.SCALE_DEFAULT)
 
     # 点击穿透遮罩的降采样倍率。遮罩只需判断「这一块是不是透明」，
     # 不需要逐像素精度；降到 1/4 后 numpy 运算量变 1/16，逐行构造 QRegion 的
@@ -1156,13 +1339,19 @@ class PetWindow(QWidget):
         self._base_poses = [(-0.95, 0.0), (0.95, 0.0),
                             (-0.9, 0.7), (0.9, 0.7), (0.0, 0.0)]
         self._base_samples: list = []
+        self._base_epoch = getattr(self, "_mask_sample_epoch", 0)
         self._sample_base_step()
 
     def _sample_base_step(self) -> None:
+        # 缩放已开启新一轮采样 → 本轮（旧尺寸）回调全部作废
+        if getattr(self, "_base_epoch", 0) != getattr(self, "_mask_sample_epoch", 0):
+            return
         if not getattr(self, "_base_poses", None):
             if self._base_samples:
                 acc = self._base_samples[0]
                 for s in self._base_samples[1:]:
+                    if s.shape != acc.shape:
+                        continue  # 尺寸不一致（缩放中途）跳过
                     acc = acc | s
                 self._mask_base = acc
                 self._update_click_mask()
@@ -1173,11 +1362,17 @@ class PetWindow(QWidget):
             look(dx, dy)
 
         def grab():
+            # 延迟期间若又缩放（epoch 变化），直接终止这轮采样
+            if self._base_epoch != getattr(self, "_mask_sample_epoch", 0):
+                return
             try:
                 if self.isVisible() and self.renderer is not None \
                         and getattr(self.renderer, "is_ready", lambda: False)():
                     cur = self._grab_opaque()
                     if cur is not None:
+                        if self._base_samples and self._base_samples[0].shape != cur.shape:
+                            # 尺寸中途变了，丢弃本轮全部旧样本，等下一轮重新采样
+                            self._base_samples = []
                         self._base_samples.append(cur)
             except Exception:  # noqa: BLE001
                 pass
@@ -1202,6 +1397,9 @@ class PetWindow(QWidget):
                 # 没人重建，整窗会永久变成不透明、点不穿。保留上一次的好遮罩。
                 return
             # 当前帧 ∪ 极限姿势下限
+            if self._mask_base is not None and self._mask_base.shape != cur.shape:
+                # 缩放后旧 base 与新帧尺寸不一致，丢弃旧 base（下轮采样会重建）
+                self._mask_base = None
             m = cur if self._mask_base is None else (cur | self._mask_base)
             # 签名短路：剪影没实质变化就不重建 QRegion、不调 setMask。
             # setMask 会触发窗口管理器重算合成区域，是这条路径上最贵的一步；
@@ -1228,22 +1426,31 @@ class PetWindow(QWidget):
                     region += QRegion(child.geometry())
             self.setMask(region)
             self._mask_prev_region = QRegion(region)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:  # noqa: BLE001
+            # 这里绝不能静默 pass：异常会在 setMask 之前中断整个流程，
+            # 遮罩一次都设不上，整窗不透明、点不穿，而且没有任何症状提示。
+            log.warning("[mask] 点击穿透遮罩更新失败：%s", _e)
 
     def _mask_adapt_interval(self, stable: bool) -> None:
         """活跃期间：剪影连续无变化时拉长到 3s，一变就恢复 1.5s 跟上动作。"""
+        # 定时器还没建好（sprite 模式 / 初始化早退）就直接跳过，
+        # 绝不能在这里抛异常——异常会中断 _update_click_mask，遮罩就设不上了
+        t = self._mask_timer
+        if t is None:
+            return
         if stable:
             self._mask_stable_count += 1
-            if self._mask_stable_count >= 2 and self._mask_timer.interval() != 3000:
-                self._mask_timer.start(3000)
+            if self._mask_stable_count >= 2 and t.interval() != 3000:
+                t.start(3000)
         else:
             self._mask_stable_count = 0
-            if self._mask_timer.interval() != 1500:
-                self._mask_timer.start(1500)
+            if t.interval() != 1500:
+                t.start(1500)
 
     def on_renderer_idle(self, idle: bool) -> None:
-        """JS 闲置/活跃切换：闲置时停 mask + look（静置零开销），活跃时恢复。"""
+        """JS 闲置/活跃切换：闲置时只停 mask（静置剪影稳定无需再 grab），
+        look 持续跑（每 200ms 读当前光标位置几乎零成本，关了反而要等用户动鼠标才恢复）。
+        """
         if idle:
             # 兑现注释：先做一次采样，确保静置剪影已纳入遮罩，再停。
             # 少了这一步，模型会在「冻结的旧遮罩」和「真实姿态」之间错位，
@@ -1254,8 +1461,8 @@ class PetWindow(QWidget):
                     self._update_click_mask()
                 self._idle_mask_stopped = True
                 self._mask_timer.stop()
-            if self._look_timer is not None:
-                self._look_timer.stop()
+            # 视线 timer 保持运行：闲置只是 Live2D 帧静止，但鼠标位置在变，
+            # 停下来会"上一帧固定姿势"而不是"鼠标去哪儿看哪儿"。
         else:
             if self._mask_timer is not None and self._idle_mask_stopped:
                 self._idle_mask_stopped = False
@@ -1525,6 +1732,30 @@ class PetWindow(QWidget):
         act_settings = QAction("设置面板", self)
         act_settings.triggered.connect(self._emit_open_settings)
         menu.addAction(act_settings)
+
+        # 大小：滚轮缩放之外，给不会用滚轮的用户一个可见入口（与滑块同范围）
+        size_menu = menu.addMenu("大小")
+        cur = QAction(f"当前 {int(round(self._scale * 100))}%（滚轮也可缩放）", self)
+        cur.setEnabled(False)
+        size_menu.addAction(cur)
+        size_menu.addSeparator()
+        a_zoom_in = QAction("放大", self)
+        a_zoom_in.triggered.connect(lambda: self._zoom_step(1))
+        size_menu.addAction(a_zoom_in)
+        a_zoom_out = QAction("缩小", self)
+        a_zoom_out.triggered.connect(lambda: self._zoom_step(-1))
+        size_menu.addAction(a_zoom_out)
+        a_zoom_reset = QAction("还原默认", self)
+        a_zoom_reset.triggered.connect(self._zoom_reset)
+        size_menu.addAction(a_zoom_reset)
+        size_menu.addSeparator()
+        for pct in (30, 50, 75, 100):
+            sc = pct / 100.0
+            a = QAction(f"{pct}%", self)
+            a.setCheckable(True)
+            a.setChecked(abs(sc - self._scale) < 0.001)
+            a.triggered.connect(lambda _=False, s=sc: self._zoom_preset(s))
+            size_menu.addAction(a)
         menu.addSeparator()
 
         emo_menu = menu.addMenu("切换表情")
