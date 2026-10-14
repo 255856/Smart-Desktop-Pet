@@ -335,6 +335,7 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     # 6) 最终阶段：逐句剥离 CoT 规划 / 元描述 / 规则复读（保留角色回答句）。
     #    循环到不再变化，处理"污染句被删后又暴露出新污染句"的嵌套情况。
     if is_final:
+        text = _strip_internal_checklist(text)
         prev_text = None
         while prev_text != text:
             prev_text = text
@@ -352,6 +353,86 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
         if _cjk_ratio(body_for_ratio) < 0.15:
             return ""
     return cleaned
+
+
+def _strip_internal_checklist(text: str) -> str:
+    """剥掉「编号 + 内部核对话术」的清单行。
+
+    2026-10-14 压测抓到模型把 AgentLoop 的核对清单原样复述给主人：
+
+        要查火星天气。1. 工具都成功执行了
+        2. 主人要求：查火星天气 - 我已经搜到了相关数据
+        3. 数据来源确认：
+        - 火星表面平均温度约-60°C
+
+    以及更常见的「工具结果回显」：
+
+        1. get_weather（成功）：广州 晴 33度
+        2. add_reminder（成功）：已设置提醒
+
+    这两类都不是「句子里混进工具名」那种形态（`_strip_meta_by_sentence`
+    逐句判污染，盖不住），得按**行**删：行首是序号，且行内出现内部过程词
+    或 `工具名（成功/失败/已取消）` 这种 schema 回显格式，就整行去掉。
+
+    只在最终阶段生效，且要求「序号 + 内部词」同时成立——
+    「第一步带伞、第二步关窗」这类主人自己的分步说明不会被误删。
+    """
+    if not text:
+        return text
+    keep = []
+    for line in text.split("\n"):
+        if _INTERNAL_CHECKLIST_LINE_RE.match(line) and _INTERNAL_VOCAB_RE.search(line):
+            continue
+        if _SCHEMA_ECHO_LINE_RE.match(line):
+            continue
+        keep.append(line)
+    text = "\n".join(keep)
+    # 行内序号：句号后面才开始清单（「要查火星天气。1. 工具都成功执行了」），
+    # 这种行首判定盖不住，把序号之前的引导句一起去掉。
+    text = re.sub(rf"[^。！？\n]*?{_LINE_INDEX_RE_BODY}[^\n]*?_INTERNAL_VOCAB_END",
+                  "", text)
+    # 无序号的单句叙述：「让我查广州天气。从最后一次抓取中央气象台的页面…」
+    text = _NARRATION_SENT_RE.sub("", text)
+    return text
+
+
+# 句内序号（不带行首锚点，供行内清理拼正则用）
+_LINE_INDEX_RE_BODY = r"\d{1,2}\s*[.、)）]\s*"
+# 以内部词结尾的清单行剩余部分（吃到换行）
+_INTERNAL_VOCAB_END = r"[^\n]*?(?:工具都成功执行了|数据来源确认|主人要求：)[^\n]*"
+
+# 只在**句级**使用的收窄词表。
+# 不能复用 _INTERNAL_VOCAB_RE：那里有「我查」「我搜」，
+# 而「我查到的天气是晴」是完全可以对主人说的话，按宽表删会把正文清空。
+# 真正只属于内部叙述的是「抓取/爬取页面」「调用了 schema」这类**动作来源**描述。
+_NARRATION_SENT_RE = re.compile(
+    r"[^。！？\n]*?(?:"
+    r"(?:让我|我来|我先)\s*(?:查|搜索|搜|看|打开|抓)[^。！？\n]{0,20}?"
+    r"(?:天气|信息|资料|内容|结果)?"
+    r"|从第?[一二三四五六七八九十\d]*次?(?:抓取|爬取|搜索|访问|打开)[^。！？\n]{0,25}"
+    r"|(?:抓取|爬取|爬虫)(?:了)?[^。！？\n]{0,20}"
+    r"|调用了?\s*schema[^。！？\n]{0,20}"
+    r"|(?:请|需要)?给(?:主人|用户)最终(?:答复|回答|总结)[^。！？\n]{0,10}"
+    r"|(?:给|对)主人(?:一个|一份)?(?:完整|最终)?(?:答案|答复|总结)[^。！？\n]{0,10}"
+    r"|工具(?:都|已)?(?:成功)?执行(?:了|完)?[^。！？\n]{0,15}"
+    r")[^。！？\n]*[。！？]?",
+    re.UNICODE)
+
+
+# 行首序号（1. / 1) / 1、/ 第1点）
+_LINE_INDEX_RE = r"^\s*(?:\d{1,2}\s*[.、)）]|[（(]\d{1,2}[)）]|第\s*\d{1,2}\s*[点项步])"
+# 内部过程词：这些词只可能出现在给模型看的核对清单里，不该给主人看
+_INTERNAL_VOCAB_RE = re.compile(
+    r"(工具(?:都|已)?(?:成功)?执行|本轮工具|执行结果|结果核对|数据来源|"
+    r"主人要求|逐条对照|核对(?:结果|过程|清单)|是否真的成功|"
+    r"主人原话|已搜到|搜到了相关数据|我(?:来|先)?查|我(?:来|先)?搜索|"
+    r"抓取(?:了)?(?:页面|内容)|爬(?:取|虫)|调用(?:了)?(?:工具|schema))",
+    re.UNICODE)
+# 「工具名（成功）」「工具名（失败）：…」这种 schema 结果回显
+_SCHEMA_ECHO_LINE_RE = re.compile(
+    _LINE_INDEX_RE + r"\s*[A-Za-z_][A-Za-z0-9_]{1,30}\s*[（(]\s*(?:成功|失败|已取消)\s*[)）]",
+    re.UNICODE)
+_INTERNAL_CHECKLIST_LINE_RE = re.compile(_LINE_INDEX_RE, re.UNICODE)
 
 
 def _cjk_ratio(text: str) -> float:

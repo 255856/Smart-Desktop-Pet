@@ -26,6 +26,12 @@ DANGEROUS_TOOLS = {"lock_screen", "kill_process", "run_script",
 # 连续多少轮纯调工具（无文字）后强制进入 final 阶段
 MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3
 
+# 同一个工具连续失败多少次后，本轮对话内不再提供它。
+# 压测抓到模型对一个打不开的网页连调 6 次 open_website，每次只换参数，
+# 既白等又占满轮次，最后还是失败。给 2 次机会（第一次可能是参数写错），
+# 第三次起直接停手并要求换路子或如实告知。
+_MAX_SAME_TOOL_FAIL = 2
+
 # 回复清洗：<think> 推理块 / 残留标记不进 UI 与 TTS
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 _THINK_TAG_RE = re.compile(r"</?(?:think|reasoning)>", re.I)
@@ -540,9 +546,13 @@ class AgentLoop:
         messages: list[dict],
         cancel_check: Optional[Callable[[], bool]] = None,
         intent: Optional[str] = None,
+        failed_tools: Optional[dict[str, int]] = None,
     ) -> AsyncIterator[tuple]:
         """并行执行所有工具调用，按原顺序 yield 结果。"""
         blocked = _INTENT_BLOCKED_TOOLS.get(intent or "", {})
+        # 同一工具反复失败的累计次数（由 run() 持有，跨轮次）。
+        # 为 None 时退化成「只看本轮」，行为与从前一致。
+        failed_tools = failed_tools if failed_tools is not None else {}
 
         async def _exec_one(i: int, tc: dict) -> tuple[int, str, str, str]:
             """在后台线程中执行单个工具，返回 (index, name, args, result)。"""
@@ -555,6 +565,17 @@ class AgentLoop:
                 msg = blocked[name]
                 log.warning("AgentLoop: 意图 %s 下拒绝调用 %s（已改用正确工具）",
                             intent, name)
+                return i, name, args, msg
+
+            # 失败次数硬闸：同一个工具已经失败 _MAX_SAME_TOOL_FAIL 次就别再试了。
+            # 压测抓到模型对一个打不开的网页连调 6 次 open_website，每次只换参数，
+            # 既白等又占满轮次，最后还是失败。这里直接停手，并告诉模型换条路。
+            if failed_tools.get(name, 0) >= _MAX_SAME_TOOL_FAIL:
+                msg = (f"错误：{name} 已经连续失败 {failed_tools[name]} 次，"
+                       "本轮不再提供它。请不要再调用同一个工具换参数重试，"
+                       "改用别的工具，或直接如实告诉主人这一步做不到、为什么。")
+                log.warning("AgentLoop: %s 已失败 %d 次，拒绝再次调用",
+                            name, failed_tools[name])
                 return i, name, args, msg
 
             # 危险工具确认
@@ -579,6 +600,13 @@ class AgentLoop:
         # 按原始顺序 yield 结果
         for i, name, args, result in sorted(results, key=lambda x: x[0]):
             yield "tool", name, args, result
+            # 累计失败次数（供下一轮 _exec_one 的失败闸使用）。
+            # 只数「工具自己说没成」，不数主人取消 / 确认超时——那不是工具的问题。
+            if (_tool_result_state(result) == "fail"
+                    and not _is_user_cancel(result)):
+                failed_tools[name] = failed_tools.get(name, 0) + 1
+            elif name in failed_tools:
+                failed_tools[name] = 0   # 成功了就把计数清零
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_calls[i]["id"] or f"call_{i}",
@@ -608,6 +636,9 @@ class AgentLoop:
         executed_tools: list[tuple[str, str, str]] = []
         verify_corrections = 0   # 「工具失败却报喜」的纠正次数（最多 1 次）
         partial_retries = 0     # 「多步任务只做一半」的纠正次数（最多 1 次）
+        # 同一工具连续失败次数（跨轮次）：连续 2 次就本轮不再提供它，
+        # 免得模型换个参数把同一个失败工具连调十几遍
+        failed_tools: dict[str, int] = {}
         # 模型的原始输出被清洗规则全部剥掉（过度清洗）时置 True
         over_sanitized = False
 
@@ -838,7 +869,7 @@ class AgentLoop:
             # 并行执行所有工具调用
             async for event in self._execute_tools_parallel(
                     tool_calls, messages, cancel_check=cancel_check,
-                    intent=intent):
+                    intent=intent, failed_tools=failed_tools):
                 yield event
                 if event[0] == "tool":
                     # event = ("tool", name, args, result)

@@ -80,8 +80,13 @@ winsdk>=1.0.0b10; sys_platform == "win32"
 # fetch_url_text 的正文提取
 # readability-lxml>=0.8.1
 
-# web_search 的 DuckDuckGo 降级后端（不装就只能用 Tavily）
-# ddgs>=9.0.0
+# web_search 的 DuckDuckGo 降级后端。
+# 【2026-10-14】原先这一行是注释掉的（旁边还写着"不装就只能用 Tavily"），
+# 结果 Tavily 一限流/欠费 web_search 就整个不可用，而且没有任何提示——
+# Tavily 的失败信息被吃掉后才轮到这里，报的是"未安装 ddgs"，
+# 主人只会看到一句搜索失败，完全不知道还有第二个后端没装。
+# 零 key、纯依赖，值得占一行。
+ddgs>=9.0.0
 
 # date_info 的农历
 # lunardate>=0.2.3
