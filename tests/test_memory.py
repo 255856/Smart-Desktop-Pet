@@ -2,6 +2,7 @@
 import os
 import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -224,7 +225,14 @@ class TestMemoryPersistence:
             os.unlink(tmp.name)
 
     def test_legacy_json_backward_compat(self):
-        """旧版 memory.json 没有 importance 字段也应能加载。"""
+        """旧版 memory.json 没有 importance 字段也应能加载(自动迁到 SQLite)。
+
+        2026-10-14: 升级为 SQLite 后,MemoryStore 检测到 .json 后缀会自动迁移
+        并删除源 JSON。所以此处断言:
+          1) 新 DB 文件已建
+          2) 源 JSON 已删
+          3) 数据完整导入,旧记录字段缺失用兜底默认
+        """
         import json
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False, encoding="utf-8")
@@ -238,8 +246,12 @@ class TestMemoryPersistence:
             store = MemoryStore(tmp.name, backend_name="tfidf")
             assert store.count() == 1
             assert store.all()[0].importance == 0.5   # 兜底默认
+            # 迁移副作用:DB 文件已建、源 JSON 已删
+            assert store.data_file.is_file()
+            assert not Path(tmp.name).exists()
         finally:
-            os.unlink(tmp.name)
+            # 收尾:删 DB 文件
+            Path(store.data_file).unlink(missing_ok=True)
 
 
 class TestMemoryRelevance:

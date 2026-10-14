@@ -255,6 +255,9 @@ class LangChainAgent:
         PR: 不在 _release_checkpointer 里关 httpx client 了——关闭 client 会让 LangChain
         内部缓存的 client 引用下次报 "client has been closed"。保留 _model 让下次重建走
         fast-path（只重建 graph，httpx client 复用）。
+
+        2026-10-14: 接入 hallucination_guard middleware（动态 prompt 防幻觉 +
+        高风险工具执行前打 WARNING），对齐参考项目 graphs.py 的 middleware 模式。
         """
         if self._agent is not None:
             return
@@ -265,15 +268,24 @@ class LangChainAgent:
             await self._build_checkpointer()
         checkpointer = self._checkpointer
 
+        # 抗幻觉 middleware（dynamic_prompt + risky tool logger）
+        try:
+            from app.brain.hallucination_guard import build_hallucination_middlewares
+            middlewares = build_hallucination_middlewares()
+        except Exception as e:  # noqa: BLE001
+            log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
+            middlewares = []
+
         # system_prompt 直接用人设原文（LLMClient 的 sanitize 已在此层处理）
         self._agent = create_agent(
             model=self._model,
             tools=tools,
             system_prompt=self.persona or "你是一个有用的桌面助手。",
             checkpointer=checkpointer,
+            middleware=middlewares,
         )
-        log.info("LangChainAgent ready: tools=%d, checkpointer=%s",
-                 len(tools), "on" if checkpointer else "off")
+        log.info("LangChainAgent ready: tools=%d, checkpointer=%s, middlewares=%d",
+                 len(tools), "on" if checkpointer else "off", len(middlewares))
 
     @staticmethod
     def _to_lc_history(messages: list[dict]) -> list:

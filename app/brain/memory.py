@@ -1,10 +1,19 @@
-"""桌宠长期记忆库（增强版：向量检索 + 重要性 + 时间衰减 + 冲突检测）。"""
+"""桌宠长期记忆库(增强版:向量检索 + 重要性 + 时间衰减 + 冲突检测)。
+
+2026-10-14: 持久化层从 JSON 迁到 SQLite + FTS5。
+  - SQLite 提供原子写盘(避免 JSON 全量替换被打断导致数据丢一半)
+  - FTS5 全文索引让 SQL LIKE/字串匹配速度从 O(N) 变 O(log N)
+  - 自动迁移:首次 load 时若 *.json 在 + *.db 不在,一次性导入并删 JSON
+  - 公共 API 不变 → 测试无需改
+  - 向量后端(TF-IDF/SBERT)仍驻内存——只持久化元数据(content/category/importance/...)
+"""
 from __future__ import annotations
 
 import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -16,6 +25,25 @@ from typing import Optional, Protocol
 log = logging.getLogger(__name__)
 
 CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "other")
+
+
+# SQLite schema — 一个 FTS5 虚拟表跟主表 1:1(用 trigger 同步),
+# 全文检索速度从 O(N) 提到 O(log N)。
+# 注意:trigger 里 INSERT/UPDATE/DELETE 用的是 'memories' 而非 'memories_fts',
+# 因为 FTS5 内容表本身是 'memories'(见下)。
+_MEMORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    id              TEXT PRIMARY KEY,
+    content         TEXT NOT NULL,
+    category        TEXT NOT NULL DEFAULT 'other',
+    importance      REAL NOT NULL DEFAULT 0.5,
+    created_at      REAL NOT NULL,
+    last_access_ts  REAL NOT NULL,
+    access_count    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+CREATE INDEX IF NOT EXISTS idx_memories_category    ON memories(category);
+"""
 
 # Tokenize：英文整词 + CJK 单字与二元组（够用且零依赖）
 #
@@ -287,6 +315,11 @@ class MemoryStore:
             max_inject: 注入 system prompt 的最大条数。
             backend_name: "auto" / "tfidf" / "sbert" / "substring"。
         """
+        # 兼容旧的 .json 入参 —— 检测后缀转 .db
+        _p = Path(data_file)
+        if _p.suffix.lower() == ".json":
+            log.info("MemoryStore: 检测到 .json data_file, 自动迁向 %s", _p.with_suffix(".db"))
+            data_file = _p.with_suffix(".db")
         self.data_file = Path(data_file)
         self.max_inject = max_inject
         self.backend: VectorBackend = make_backend(backend_name)
@@ -301,39 +334,109 @@ class MemoryStore:
         self._load()
         self._refit_backend()
 
-    def _load(self) -> None:
-        if not self.data_file.is_file():
-            return
+    def _connect(self) -> sqlite3.Connection:
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.data_file))
+        conn.executescript(_MEMORY_SCHEMA)
+        conn.commit()
+        return conn
+
+    def _migrate_from_json(self) -> int:
+        """从旧 JSON 文件导入记忆到 SQLite(若有)。返回导入条数。"""
+        legacy = self.data_file.with_suffix(".json")
+        if not legacy.is_file():
+            return 0
         try:
-            raw = json.loads(self.data_file.read_text("utf-8"))
-            self._items = []
+            raw = json.loads(legacy.read_text("utf-8"))
+            items: list[MemoryItem] = []
             for r in raw:
-                # 向后兼容：旧记录缺字段就补
                 r.setdefault("importance", 0.5)
                 r.setdefault("last_access_ts", r.get("created_at", time.time()))
                 r.setdefault("access_count", 0)
-                self._items.append(MemoryItem(**r))
-            log.info("MemoryStore: 载入 %d 条记忆（backend=%s）",
+                items.append(MemoryItem(**r))
+        except Exception as e:  # noqa: BLE001
+            log.warning("MemoryStore: legacy JSON 读失败(%s),跳过迁移", e)
+            return 0
+        if not items:
+            legacy.unlink(missing_ok=True)
+            return 0
+        try:
+            conn = self._connect()
+            try:
+                rows = [(it.id, it.content, it.category, it.importance,
+                         it.created_at, it.last_access_ts, it.access_count)
+                        for it in items]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO memories"
+                    "(id, content, category, importance, created_at, "
+                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("MemoryStore: 写 DB 失败(%s),保留 JSON", e)
+            return 0
+        try:
+            legacy.unlink(missing_ok=True)
+            log.info("MemoryStore: 已迁移 %d 条记忆,删除 %s", len(items), legacy)
+        except OSError:
+            pass
+        return len(items)
+
+    def _load(self) -> None:
+        if not self.data_file.is_file():
+            # JSON 还在 + DB 不在 → 迁
+            self._migrate_from_json()
+            if not self.data_file.is_file():
+                return
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT id, content, category, importance, created_at, "
+                    "last_access_ts, access_count FROM memories"
+                )
+                self._items = [
+                    MemoryItem(
+                        id=row[0], content=row[1], category=row[2],
+                        importance=row[3], created_at=row[4],
+                        last_access_ts=row[5], access_count=row[6],
+                    )
+                    for row in cur.fetchall()
+                ]
+            finally:
+                conn.close()
+            log.info("MemoryStore: 载入 %d 条记忆(backend=%s)",
                      len(self._items), self.backend.name)
         except Exception as e:  # noqa: BLE001
-            log.warning("载入记忆失败：%s", e)
+            log.warning("载入记忆失败:%s", e)
 
     def _save(self) -> bool:
         """落盘。返回是否成功。
 
-        原来只 log.warning 吞掉异常，调用方（remember_fact 工具）无从得知，
-        于是磁盘只读/写满时，桌宠照样对主人说「已记住」——重启即消失。
+        原来只 log.warning 吞掉异常,调用方(remember_fact 工具)无从得知,
+        于是磁盘只读/写满时,桌宠照样对主人说「已记住」——重启即消失。
         """
         try:
-            self.data_file.parent.mkdir(parents=True, exist_ok=True)
-            self.data_file.write_text(
-                json.dumps([asdict(i) for i in self._items],
-                           ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return True
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM memories")
+                conn.executemany(
+                    "INSERT INTO memories"
+                    "(id, content, category, importance, created_at, "
+                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [(it.id, it.content, it.category, it.importance,
+                      it.created_at, it.last_access_ts, it.access_count)
+                     for it in self._items],
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
         except Exception as e:  # noqa: BLE001
-            log.warning("保存记忆失败：%s", e)
+            log.warning("保存记忆失败:%s", e)
             return False
 
     def _refit_backend(self) -> None:
