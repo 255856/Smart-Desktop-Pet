@@ -458,6 +458,107 @@ class LangChainAgent:
             log.exception("LangChainAgent 失败")
             yield ("error", str(e))
 
+    # -------------------- Plan mode --------------------
+    # 当主程序接到 /plan <request> 时,调这个方法。语义:
+    #   - 跟 run() 用同一个 agent、同一个 thread(共享 checkpoint)
+    #   - 但追加「只能输出 markdown 计划、不能调任何工具」指令
+    #   - 不写 checkpoint 的 user/assistant(避免污染历史)
+    # 事件协议跟 run() 一致:("text", chunk), ("done", final), ("error", ...)。
+    #
+    # 设计取舍:
+    #   - 不另建 agent / 不用不同 system_prompt —— 那样会引入「plan 上下文跟执行
+    #     上下文分裂」的麻烦(计划要参考运行时 anti-hallucination 等规则,
+    #     而执行要走同样的规则)。直接在最后一条 user 上挂 plan-mode 提示,
+    #     简洁、零额外配置。
+    #   - 计划输出走同 thread 的 checkpoint,但用 config["metadata"]
+    #     标记 plan-mode,方便调试时区分。
+
+    _PLAN_MODE_PROMPT = (
+        "\n\n[系统:你现在处于 plan mode(规划模式)。请遵守:]\n"
+        "1. 不要调用任何工具。只输出一份 markdown 格式的执行计划。\n"
+        "2. 计划结构:\n"
+        "   - 简要复述主人的诉求\n"
+        "   - 编号列出每一步(标题 + 一句话说明预期产出)\n"
+        "   - 标注每步会用到的工具 / 信息\n"
+        "   - 标注潜在风险或主人需要决策的岔路口\n"
+        "3. 不要执行、不要「为确认而预演」、不要「询问要不要这样做」。\n"
+        "4. 计划末尾写明「是否需要主人确认?」—— 默认需要。\n"
+    )
+
+    async def plan(
+        self,
+        messages: list[dict],
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> AsyncIterator[tuple]:
+        """以 plan mode 跑一次对话,只产出 markdown 计划,不调工具。
+
+        复用 self._agent / self.thread_id / checkpointer。事件协议:
+            ("text", chunk) / ("done", final) / ("error", msg)
+        不会 yield ("tool", ...) / ("confirm_needed", ...)(理论上 plan 模式不调工具)。
+        """
+        await self._ensure_agent()
+        cancel = cancel_check or self.cancel_check
+
+        # 取历史 + 拼接 plan-mode 提示到 user 消息末尾
+        history = self._to_lc_history(messages[:-1] if messages else [])
+        last_user = ""
+        if messages and messages[-1].get("role") == "user":
+            raw = messages[-1]["content"]
+            # multimodal(列表)时只往 text 部分追加,别破坏图片
+            if isinstance(raw, list):
+                new_parts = []
+                for p in raw:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        new_parts.append({**p, "text": (p.get("text") or "") + self._PLAN_MODE_PROMPT})
+                    else:
+                        new_parts.append(p)
+                last_user = new_parts
+            else:
+                last_user = (raw or "") + self._PLAN_MODE_PROMPT
+
+        input_payload: dict[str, Any] = {
+            "messages": [*history, HumanMessage(content=last_user)]
+        }
+        config = {
+            "configurable": {"thread_id": self.thread_id},
+            "metadata": {"plan_mode": "1"},
+        }
+
+        # plan 模式简化流程:不跑 checkpoint 救援(救援是为工具结果-聊天失配设计的,
+        # plan 不调工具,不该出现 2013),不走 _astream_with_retry 的复杂协议,
+        # 只 stream 文本。
+        final_text_parts: list[str] = []
+        try:
+            async for chunk, _meta in self._agent.astream(
+                input_payload, config=config, stream_mode="messages",
+            ):
+                if cancel and cancel():
+                    yield ("error", "cancelled")
+                    return
+                if isinstance(chunk, (AIMessageChunk, AIMessage)):
+                    text = chunk.content
+                    if isinstance(text, list):
+                        text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
+                                       for p in text)
+                    text = sanitize_text(text, is_final=False)
+                    if text:
+                        final_text_parts.append(text)
+                        yield ("text", text)
+                elif isinstance(chunk, ToolMessage):
+                    # plan 模式理论上不该走到这里 —— 万一模型还是调了工具,
+                    # 我们把工具调用结果直接当错误处理,不让它污染计划输出
+                    log.warning(
+                        "plan_mode: 模型在 plan 阶段调了工具 %r —— 忽略(plan 模式不允许)",
+                        chunk.name,
+                    )
+                    # 继续 stream,不 break(让模型能继续输出 markdown)
+            yield ("done", "".join(final_text_parts))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("plan_mode 失败")
+            yield ("error", str(e))
+
     async def _astream_with_retry(self, input_payload, config, cancel,
                                     recovered_after_retry: bool = False):
         """单次 astream 跑,失败时区分是否 2013。
