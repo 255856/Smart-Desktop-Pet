@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
 import httpx
@@ -14,22 +15,68 @@ from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
 
-# 已经确认「服务端收下 tool_choice=required、但模型就是不肯调工具」的模型。
-# 这是**模型的能力特征**，不是单次请求的偶发，所以按模型名记在进程级：
-# 否则每条用户消息都会白等一次注定落空的 required 请求
-# （现场：第 0 轮多花 1.4s，连 5 轮重试时主人干等十几秒）。
-_TOOL_CHOICE_IGNORED: set[str] = set()
+# 【已实测「发了 tool_choice 反而更糟」的模型】
+#
+# 这不是「模型忽略 tool_choice」那么简单。2026-10-14 用真实失败输入
+# （113 条真实聊天历史 + 7 个提醒类工具 + 「查一下广州天气，提醒我明天带伞」）
+# 在 MiniMax-M3 上各跑 10~12 次，测出来的是**带 tool_choice 命中率反而崩掉**：
+#
+#   tool_choice="required"                 → 调工具 1/12
+#   tool_choice={"type":"function",...}     → 调工具 1/12   （官方文档支持的写法）
+#   完全不带 tool_choice                    → 调工具 4/12
+#   不带 tool_choice + 末尾追加一条强制 user 提示 → 调工具 8/12
+#
+# 官方 API 文档对 tool_choice 的取值说明只有 "auto" / "none" / 指定具体工具，
+# **"required" 不在其中**：服务端不报错、直接吞掉，但会让这一轮几乎必挂。
+#
+# 所以这里必须**预置**，不能等运行时探测——运行时探测要白等一次注定失败的
+# 请求，而且那次恰好占掉「第 1 轮」这个命中率最高的轮次。
+# 出厂预置：**不发** tool_choice 的模型（小写，比较前先 norm）。
+# 与运行期学到的条目分开存，测试才能把「出厂态」和「学到的」拆开还原。
+_TOOL_CHOICE_SEED: frozenset[str] = frozenset({"minimax-m3"})
+_TOOL_CHOICE_IGNORED: set[str] = set(_TOOL_CHOICE_SEED)
+
+# 运行期学到的名单落盘位置（重启后不用再白探测一次）。
+_TOOL_CHOICE_CACHE = Path("data/tool_choice_unsupported.json")
+
+
+def _norm_model(model: str) -> str:
+    """模型名归一化：config 里是 'MiniMax-M3'，预置表里是小写。
+    不归一化的话预置表永远命中不了（现场就踩过这个坑）。"""
+    return (model or "").strip().lower()
+
+
+def _load_tool_choice_ignored() -> None:
+    try:
+        if _TOOL_CHOICE_CACHE.is_file():
+            for name in json.loads(_TOOL_CHOICE_CACHE.read_text(encoding="utf-8")) or []:
+                if isinstance(name, str) and name.strip():
+                    _TOOL_CHOICE_IGNORED.add(_norm_model(name))
+    except Exception:  # noqa: BLE001 —— 缓存坏掉不该拖垮启动
+        log.debug("读取 tool_choice 黑名单失败，忽略", exc_info=True)
 
 
 def _note_tool_choice_ignored(model: str) -> None:
-    if model:
-        _TOOL_CHOICE_IGNORED.add(model)
-        log.info("LLMClient: 记录 %s 会忽略 tool_choice=required，"
-                 "后续请求直接用 prompt 强制", model)
+    key = _norm_model(model)
+    if not key or key in _TOOL_CHOICE_IGNORED:
+        return
+    _TOOL_CHOICE_IGNORED.add(key)
+    log.info("LLMClient: 记录 %s 会忽略 tool_choice=required，"
+             "后续请求直接用 prompt 强制", model)
+    try:  # 落盘：这是模型的行为特征，同一份配置不必每次重启都重新踩一遍
+        _TOOL_CHOICE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _TOOL_CHOICE_CACHE.write_text(
+            json.dumps(sorted(_TOOL_CHOICE_IGNORED), ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        log.debug("写 tool_choice 黑名单失败，忽略", exc_info=True)
 
 
 def _tool_choice_is_ignored(model: str) -> bool:
-    return model in _TOOL_CHOICE_IGNORED
+    return _norm_model(model) in _TOOL_CHOICE_IGNORED
+
+
+_load_tool_choice_ignored()
 
 # 推理模型的 think 标签（DeepSeek-r1 等原生标签格式）
 THINK_TAG_START = "<think>"
@@ -933,6 +980,7 @@ class LLMClient:
             "content": (
                 "[系统指令] 你**必须**调用上面 schema 里列出的工具来完成用户的需求，"
                 "**禁止**只用文本回复。请在这次响应里调用至少一个工具。"
+                "如果用户的要求不止一个，就在**同一次响应里把所有需要的工具都发出来**。"
             ),
         })
         async for ev, data in self._stream_with_optional_force(

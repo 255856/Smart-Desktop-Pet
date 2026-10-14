@@ -240,11 +240,15 @@ class TestAgentLoopReAct:
             and ev[1].get("event") == "force_retry"
         ]
         assert retry_events, "应有 force_retry meta 事件"
-        # 第 2 次 chat_stream_events 调用前 messages 里应有强制 user prompt
+        # 强制要贯穿重试阶段，而不是只第 0 轮
+        assert client.stream_calls[1]["force_tool_use"] is True, \
+            "第 2 次调用应继续 force_tool_use"
+        # 强制提示改由 LLMClient 统一注入，AgentLoop 不再自拼伪 user 消息
         msgs_at_2nd = client.stream_calls[1]["messages"]
-        force_prompt = [m for m in msgs_at_2nd
-                        if m.get("role") == "user" and "必须调用" in m.get("content", "")]
-        assert force_prompt, "应有强制 user prompt"
+        assert not [m for m in msgs_at_2nd
+                    if m.get("role") == "user"
+                    and "必须调用" in str(m.get("content", ""))], \
+            "AgentLoop 不应再注入自拼的强制 user 提示"
         # 最终应该有 tool 事件
         tool_events = [ev for ev in events if ev[0] == "tool"]
         assert tool_events

@@ -26,7 +26,7 @@ def _geocode(location: str) -> tuple[float, float, str]:
 
     注意返回顺序是 (lon, lat, name)，不是文档里写的 (lat, lon, name)。
     回落时**必须**改写 resolved_name：原实现保留用户传入的地名，于是网络抖动时
-    用户问「上海天气」会得到「📍 上海（39.9, 116.4）」——地名是上海的、
+    用户问「上海天气」会得到「地点：上海（39.9, 116.4）」——地名是上海的、
     数据是北京的，模型会照着回答上海的天气。静默的错误答案比报错更糟。
     """
     fallback_name = (f"{DEFAULT_LOCATION}（地名「{location}」解析失败，"
@@ -78,7 +78,12 @@ def register(reg: ToolRegistry) -> None:
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,humidity_2m",
+            # 注意：湿度在 open-meteo 的 current 里叫 relative_humidity_2m，
+            # 写 humidity_2m 会让整个请求 400（"Cannot initialize ...
+            # from invalid String value humidity_2m"）——也就是说天气工具
+            # 此前**每一次调用都失败**，只是没人报出来而已。
+            "current": ("temperature_2m,apparent_temperature,weather_code,"
+                        "wind_speed_10m,relative_humidity_2m"),
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
             "timezone": "auto",
             "forecast_days": days,
@@ -98,10 +103,10 @@ def register(reg: ToolRegistry) -> None:
         code = current.get("weather_code", 0)
         desc = _WEATHER_CODE.get(code, f"天气码 {code}")
         lines = [
-            f"📍 {resolved}（{lat:.1f}, {lon:.1f}）",
+            f"地点：{resolved}（{lat:.1f}, {lon:.1f}）",
             f"当前：{desc}，{current.get('temperature_2m', '?')}°C"
             f"（体感 {current.get('apparent_temperature', '?')}°C）",
-            f"湿度 {current.get('humidity_2m', '?')}%，"
+            f"湿度 {current.get('relative_humidity_2m', '?')}%，"
             f"风速 {current.get('wind_speed_10m', '?')} km/h",
         ]
         if days >= 1:

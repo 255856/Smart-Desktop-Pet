@@ -73,6 +73,31 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_slow)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tool_choice_denylist(tmp_path):
+    """把 tool_choice 黑名单**整体**隔离到临时目录（落盘路径 + 内存态），逐用例重置。
+
+    llm_client._TOOL_CHOICE_IGNORED 是模块级集合，且会落盘到
+    data/tool_choice_unsupported.json。测试里大量用例用 model="test" /
+    "fake-model-*" 这些假模型名去触发「运行时探测到该模型忽略 tool_choice」，
+    于是它们会：
+
+      1. 写脏用户的 data/tool_choice_unsupported.json（把 test 也存进去）；
+      2. 留在内存里，让**后面**的用例莫名其妙走 prompt 强制而失败
+         （现场：test_force_tool_use_required_in_payload 拿到 None 而不是 required）。
+
+    必须是**函数级**且逐用例还原——只还原一次（session 级）挡不住用例之间的污染。
+    """
+    from app.brain import llm_client as lc
+
+    lc._TOOL_CHOICE_CACHE = tmp_path / "denylist.json"
+    lc._TOOL_CHOICE_IGNORED.clear()
+    lc._TOOL_CHOICE_IGNORED.update(lc._TOOL_CHOICE_SEED)
+    yield
+    lc._TOOL_CHOICE_IGNORED.clear()
+    lc._TOOL_CHOICE_IGNORED.update(lc._TOOL_CHOICE_SEED)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """提供 QApplication 单例（Qt 测试需要）。"""

@@ -359,13 +359,18 @@ class TestAgentLoopForceTool:
         assert len(client.stream_calls) >= 2, (
             f"应触发重试，实际只调了 {len(client.stream_calls)} 次"
         )
-        # 第 2 次调用前，messages 里应该有 user 强制提示
+        # 第 2 次仍然要强制。旧实现在这里断言 force_tool_use is False
+        # （靠 AgentLoop 自己往 messages 里塞一条 user 强制提示来顶），
+        # 那条文案实测命中率只有 5/12，而且和 LLMClient 那条叠加后更差（4/12）。
+        # 现在统一由 LLMClient 发那条命中率 9/12 的干净提示，force 贯穿全程。
+        assert client.stream_calls[1]["force_tool_use"] is True, \
+            "第 2 次调用应继续 force_tool_use"
+        # AgentLoop 自己不再往对话里塞伪 user 消息（叠加会打回 4/12）
         msgs_at_2nd = client.stream_calls[1]["messages"]
-        force_msg = [m for m in msgs_at_2nd
-                     if m.get("role") == "user" and "必须调用" in m.get("content", "")]
-        assert force_msg, "第 2 次调用前应该注入了 user 强制提示"
-        # 第 2 次 force_tool_use 不强制（让 user prompt 起作用，避免 tool_choice 卡死）
-        assert client.stream_calls[1]["force_tool_use"] is False
+        assert not [m for m in msgs_at_2nd
+                    if m.get("role") == "user"
+                    and "必须调用" in str(m.get("content", ""))], \
+            "AgentLoop 不应再注入自拼的强制 user 提示"
         # 最终应该看到 tool 事件
         tool_events = [ev for ev in events if ev[0] == "tool"]
         assert tool_events, "重试后应该看到 tool 事件"
