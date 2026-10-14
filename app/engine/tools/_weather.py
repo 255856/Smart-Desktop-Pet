@@ -6,7 +6,8 @@ from urllib.parse import urlencode
 
 import httpx
 
-from ._core import Tool, ToolRegistry, is_safe_url
+from ._core import ToolRegistry, is_safe_url
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,23 @@ _WEATHER_CODE = {
 def register(reg: ToolRegistry) -> None:
     """注册天气查询工具。"""
 
+    @tool(
+        description="查询某城市当前天气 + 未来 1~7 天预报。"
+                    "location 不传则用默认（" + DEFAULT_LOCATION + "）。"
+                    "【重要】主人问「明天/后天/周末」等未来某天时，"
+                    "days 必须传够天数（明天传 2、后天传 3、否则就查不到那一天）；"
+                    "只关心现在才用 1。底层走 open-meteo（无需 API key），"
+                    "请求域名走白名单校验。",
+        parameters={"type": "object",
+                    "properties": {
+                        "location": {"type": "string",
+                                     "description": "城市名（中文 / 拼音 / 英文），空则默认"},
+                        "days": {"type": "integer", "minimum": 1, "maximum": 7,
+                                 "description": "预报天数，1~7，默认 1。"
+                                                "问未来某天时要传够：明天 2、后天 3、"
+                                                "本周 7，否则查不到那一天"},
+                    }},
+    )
     def get_weather(location: str = "", days: int = 1) -> str:
         """查天气。location: 城市名（中文 / 拼音 / 英文都行，空则默认北京）；days: 1~7 预报天数。"""
         try:
@@ -143,25 +161,7 @@ def register(reg: ToolRegistry) -> None:
                     lines.append(f"  {d}: {dc}，{lo}~{hi}°C，降水概率 {pop}%")
         return "\n".join(lines)
 
-    reg.register(Tool(
-        name="get_weather",
-        description="查询某城市当前天气 + 未来 1~7 天预报。"
-                    "location 不传则用默认（" + DEFAULT_LOCATION + "）。"
-                    "【重要】主人问「明天/后天/周末」等未来某天时，"
-                    "days 必须传够天数（明天传 2、后天传 3、否则就查不到那一天）；"
-                    "只关心现在才用 1。底层走 open-meteo（无需 API key），"
-                    "请求域名走白名单校验。",
-        parameters={"type": "object",
-                    "properties": {
-                        "location": {"type": "string",
-                                     "description": "城市名（中文 / 拼音 / 英文），空则默认"},
-                        "days": {"type": "integer", "minimum": 1, "maximum": 7,
-                                 "description": "预报天数，1~7，默认 1。"
-                                                "问未来某天时要传够：明天 2、后天 3、"
-                                                "本周 7，否则查不到那一天"},
-                    }},
-        fn=get_weather,
-    ))
+    reg.register(get_weather)
 
 
 __all__ = ["register"]

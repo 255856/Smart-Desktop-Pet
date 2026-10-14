@@ -8,7 +8,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ._core import Tool, ToolRegistry, is_safe_url
+from ._core import ToolRegistry, is_safe_url
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,18 @@ def _resolve_and_check(host: str) -> bool:
 def register(reg: ToolRegistry) -> None:
     """注册 fetch_url 工具。"""
 
+    @tool(
+        description="抓取 URL 正文（readability-lxml 提取主文）。"
+                    "host 校验：先黑名单 → IP 校验 → 域名 DNS 二次解析 → 防 DNS rebinding。"
+                    "区别 web_search（搜关键词）：本工具拿单页正文。",
+        parameters={"type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "目标 URL"},
+                        "max_chars": {"type": "integer", "minimum": 200, "maximum": 20000,
+                                      "description": "最大字符数，默认 4000"},
+                    },
+                    "required": ["url"]},
+    )
     def fetch_url_text(url: str, max_chars: int = 4000) -> str:
         """抓 URL 主文（readability-lxml）。host 先白名单校验，再 DNS 解析二次校验。"""
         if not url or not url.strip():
@@ -94,18 +107,7 @@ def register(reg: ToolRegistry) -> None:
             text = text[:max_chars] + f"\n\n...(截断，原文 {len(text)} 字)"
         return text
 
-    reg.register(Tool(name="fetch_url_text",
-        description="抓取 URL 正文（readability-lxml 提取主文）。"
-                    "host 校验：先黑名单 → IP 校验 → 域名 DNS 二次解析 → 防 DNS rebinding。"
-                    "区别 web_search（搜关键词）：本工具拿单页正文。",
-        parameters={"type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "目标 URL"},
-                        "max_chars": {"type": "integer", "minimum": 200, "maximum": 20000,
-                                      "description": "最大字符数，默认 4000"},
-                    },
-                    "required": ["url"]},
-        fn=fetch_url_text))
+    reg.register(fetch_url_text)
 
 
 __all__ = ["register"]

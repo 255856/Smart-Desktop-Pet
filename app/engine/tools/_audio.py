@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 import platform
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,14 @@ def _get_brightness_windows() -> str:
 def register(reg: ToolRegistry) -> None:
     """注册音量 / 亮度工具。"""
 
+    @tool(
+        description="把系统主音量调到 0~100（0=静音，100=最大）。"
+                    "Windows 通过 pycaw 控制；其他平台未实现。",
+        parameters={"type": "object",
+                    "properties": {"level": {"type": "integer",
+                                              "minimum": 0, "maximum": 100}},
+                    "required": ["level"]},
+    )
     def set_volume(level: int) -> str:
         """把系统主音量调到 0~100。0=静音，100=最大。"""
         if not IS_WINDOWS:
@@ -130,42 +139,38 @@ def register(reg: ToolRegistry) -> None:
             return _set_volume_windows(clamped / 100.0) + f"（{level} 已按 0~100 夹取）"
         return _set_volume_windows(lvl / 100.0)
 
+    @tool(
+        description="查询当前系统主音量（百分比）。",
+        parameters={"type": "object", "properties": {}},
+    )
     def get_volume() -> str:
         """查询当前系统主音量（百分比）。"""
         return _get_volume_windows() if IS_WINDOWS else "非 Windows 平台未实现"
 
-    def set_brightness(level: int) -> str:
-        """把屏幕亮度调到 0~100。需要管理员权限（首次）。"""
-        return _set_brightness_windows(level) if IS_WINDOWS else (
-            "非 Windows 平台未实现")
-
-    def get_brightness() -> str:
-        """查询屏幕当前亮度。"""
-        return _get_brightness_windows() if IS_WINDOWS else "非 Windows 平台未实现"
-
-    reg.register(Tool(name="set_volume",
-        description="把系统主音量调到 0~100（0=静音，100=最大）。"
-                    "Windows 通过 pycaw 控制；其他平台未实现。",
-        parameters={"type": "object",
-                    "properties": {"level": {"type": "integer",
-                                              "minimum": 0, "maximum": 100}},
-                    "required": ["level"]},
-        fn=set_volume))
-    reg.register(Tool(name="get_volume",
-        description="查询当前系统主音量（百分比）。",
-        parameters={"type": "object", "properties": {}},
-        fn=get_volume))
-    reg.register(Tool(name="set_brightness",
+    @tool(
         description="把屏幕亮度调到 0~100。Windows 走 WMI（需要管理员权限）。",
         parameters={"type": "object",
                     "properties": {"level": {"type": "integer",
                                               "minimum": 0, "maximum": 100}},
                     "required": ["level"]},
-        fn=set_brightness))
-    reg.register(Tool(name="get_brightness",
+    )
+    def set_brightness(level: int) -> str:
+        """把屏幕亮度调到 0~100。需要管理员权限（首次）。"""
+        return _set_brightness_windows(level) if IS_WINDOWS else (
+            "非 Windows 平台未实现")
+
+    @tool(
         description="查询屏幕当前亮度（百分比）。",
         parameters={"type": "object", "properties": {}},
-        fn=get_brightness))
+    )
+    def get_brightness() -> str:
+        """查询屏幕当前亮度。"""
+        return _get_brightness_windows() if IS_WINDOWS else "非 Windows 平台未实现"
+
+    reg.register(set_volume)
+    reg.register(get_volume)
+    reg.register(set_brightness)
+    reg.register(get_brightness)
 
 
 __all__ = ["register"]

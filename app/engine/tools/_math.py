@@ -4,7 +4,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 
 def _calc(expression: str) -> str:
@@ -176,27 +177,18 @@ def _date_info(date_str: str = "") -> str:
 def register(reg: ToolRegistry) -> None:
     """注册数学 / 单位换算 / 日期信息三类工具。"""
 
-    def calculate(expression: str) -> str:
-        return _calc(expression)
-
-    def convert_units(value: float, from_unit: str, to_unit: str) -> str:
-        return _convert(value, from_unit, to_unit)
-
-    def date_info(date_str: str = "") -> str:
-        return _date_info(date_str)
-
-    reg.register(Tool(
-        name="calculate",
+    @tool(
         description="安全计算数学表达式。支持 + - * / ( ) 以及 sqrt/sin/cos/tan/log/pi/e。",
         parameters={
             "type": "object",
             "properties": {"expression": {"type": "string", "description": "数学表达式，如 '2+3*4' 或 'sqrt(144)'"}},
             "required": ["expression"],
         },
-        fn=calculate,
-    ))
-    reg.register(Tool(
-        name="convert_units",
+    )
+    def calculate(expression: str) -> str:
+        return _calc(expression)
+
+    @tool(
         description="单位换算。支持长度(cm/m/ft/inch)、重量(kg/g/lb/oz)、温度(C/F/K)、速度(km/h/m/s/mph)。",
         parameters={
             "type": "object",
@@ -207,17 +199,23 @@ def register(reg: ToolRegistry) -> None:
             },
             "required": ["value", "from_unit", "to_unit"],
         },
-        fn=convert_units,
-    ))
-    reg.register(Tool(
-        name="date_info",
+    )
+    def convert_units(value: float, from_unit: str, to_unit: str) -> str:
+        return _convert(value, from_unit, to_unit)
+
+    @tool(
         description="获取日期信息：公历、农历、星期、生肖、星座、节日。date_str 为空则查今天。",
         parameters={
             "type": "object",
             "properties": {"date_str": {"type": "string", "description": "日期，如 '2026-01-15'，为空则查今天"}},
         },
-        fn=date_info,
-    ))
+    )
+    def date_info(date_str: str = "") -> str:
+        return _date_info(date_str)
+
+    reg.register(calculate)
+    reg.register(convert_units)
+    reg.register(date_info)
 
 
 __all__ = ["register"]

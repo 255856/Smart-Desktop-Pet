@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,14 @@ def register(
     """注册桌宠自身工具（需要 state / items / hooks）。"""
     hooks = hooks or {}
 
+    @tool(
+        description="用桌宠自己的金币买食物吃（食物名必须完全匹配 foods.json）。",
+        parameters={
+            "type": "object",
+            "properties": {"food_name": {"type": "string"}},
+            "required": ["food_name"],
+        },
+    )
     def feed_self(food_name: str = "") -> str:
         if items is None:
             return "错误：食物库未加载。"
@@ -60,8 +69,15 @@ def register(
         _fire_hook(hooks, "animation", "eat")
         return f"吃掉了「{it.name}」，花 {it.price} 金币。现在状态：{state.stats_summary()}"
 
+    @tool(
+        description="触发表情/动作动画。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise, stretch, jump, spin, swim, file",
+        parameters={
+            "type": "object",
+            "properties": {"anim_name": {"type": "string", "description": "动画名称"}},
+            "required": ["anim_name"],
+        },
+    )
     def play_animation(anim_name: str) -> str:
-        """触发表情动画。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise, stretch, jump, spin, swim, file"""
         name = (anim_name or "").strip().lower()
         if not name:
             return f"错误：动画名不能为空。可选：{', '.join(ANIMATIONS)}"
@@ -74,8 +90,15 @@ def register(
                     f"桌宠实际没有做出这个动作。")
         return f"已触发「{name}」动画"
 
+    @tool(
+        description="切换桌宠情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise",
+        parameters={
+            "type": "object",
+            "properties": {"emotion": {"type": "string", "description": "情绪名称"}},
+            "required": ["emotion"],
+        },
+    )
     def change_pet_emotion(emotion: str) -> str:
-        """切换桌宠情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise"""
         name = (emotion or "").strip().lower()
         if not name:
             return f"错误：情绪名不能为空。可选：{', '.join(EMOTIONS)}"
@@ -86,6 +109,14 @@ def register(
             return f"错误：情绪「{name}」没能投递给界面，实际没有切换。"
         return f"已切换到「{name}」情绪"
 
+    @tool(
+        description="在桌宠头顶气泡里冒一句话（不用等主人打开聊天窗）。适合补充说明、打招呼。",
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    )
     def say_to_user(text: str) -> str:
         content = (text or "").strip()
         if not content:
@@ -94,46 +125,10 @@ def register(
             return "错误：气泡通道不可用，这句话没能显示给主人。"
         return "已对主人说。"
 
-    reg.register(Tool(
-        name="feed_self",
-        description="用桌宠自己的金币买食物吃（食物名必须完全匹配 foods.json）。",
-        parameters={
-            "type": "object",
-            "properties": {"food_name": {"type": "string"}},
-            "required": ["food_name"],
-        },
-        fn=feed_self,
-    ))
-    reg.register(Tool(
-        name="play_animation",
-        description="触发表情/动作动画。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise, stretch, jump, spin, swim, file",
-        parameters={
-            "type": "object",
-            "properties": {"anim_name": {"type": "string", "description": "动画名称"}},
-            "required": ["anim_name"],
-        },
-        fn=play_animation,
-    ))
-    reg.register(Tool(
-        name="change_pet_emotion",
-        description="切换桌宠情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise",
-        parameters={
-            "type": "object",
-            "properties": {"emotion": {"type": "string", "description": "情绪名称"}},
-            "required": ["emotion"],
-        },
-        fn=change_pet_emotion,
-    ))
-    reg.register(Tool(
-        name="say_to_user",
-        description="在桌宠头顶气泡里冒一句话（不用等主人打开聊天窗）。适合补充说明、打招呼。",
-        parameters={
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-        },
-        fn=say_to_user,
-    ))
+    reg.register(feed_self)
+    reg.register(play_animation)
+    reg.register(change_pet_emotion)
+    reg.register(say_to_user)
 
 
 __all__ = ["register"]

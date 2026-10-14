@@ -6,7 +6,8 @@ import threading
 import time
 from typing import Callable, Optional
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -251,8 +252,8 @@ def cancel_all() -> int:
 
 def register(reg: ToolRegistry) -> None:
     """注册倒计时工具。"""
-    reg.register(Tool(
-        name="countdown",
+
+    @tool(
         description="启动秒级倒计时（最长 1 小时）。到点桌宠主动说话 + Windows 通知。"
                     "比 add_reminder 更适合秒级场景（煮面、休息几秒等）。",
         parameters={"type": "object",
@@ -263,23 +264,91 @@ def register(reg: ToolRegistry) -> None:
                                    "description": "到点说的话，空则默认「时间到啦~」"},
                     },
                     "required": ["seconds"]},
-        fn=countdown,
-    ))
-    reg.register(Tool(
-        name="list_countdowns",
+    )
+    def countdown(seconds: float, message: str = "") -> str:
+        """启动秒级倒计时（最长 1 小时）。到点让桌宠主动说话 + 桌面通知。"""
+        if seconds is None:
+            return "错误：缺秒数"
+        try:
+            s = float(seconds)
+        except (TypeError, ValueError):
+            return f"错误：seconds 必须是数字（{seconds!r}）"
+        if s <= 0:
+            return "错误：秒数必须 > 0"
+        if s > 3600:
+            return "错误：秒数最多 3600（1 小时）。更长的用 add_reminder"
+        cid = _add_countdown(s, message)
+        if s < 60:
+            ago = f"{int(s)} 秒"
+        elif s < 3600:
+            ago = f"{int(s // 60)} 分{int(s % 60)} 秒"
+        else:
+            ago = "1 小时"
+        # 兜底：即使桌宠进程没了，Windows 到点也会响
+        with _lock:
+            fire_ts = next((f for c, f, _ in _counters if c == cid),
+                           time.time() + s)
+        backup = _arm_backup(cid, fire_ts, (message or "").strip() or "时间到啦~")
+        if not _has_notify_channel():
+            return (f"已设定倒计时 {ago}（id={cid}），但**当前没有接入任何提醒通道**"
+                    f"（桌宠主动说话未接线，且未安装 win10toast），到点可能不会有任何通知。"
+                    f"请如实告诉主人这一点，不要说「到点会提醒你」。"
+                    + (f"{backup}。" if backup else ""))
+        return f"已设定倒计时 {ago}（id={cid}），到点主人会收到提醒{backup}"
+
+    @tool(
         description="列出当前所有未到点的倒计时。",
         parameters={"type": "object", "properties": {}},
-        fn=list_countdowns,
-    ))
-    reg.register(Tool(
-        name="cancel_countdown",
+    )
+    def list_countdowns() -> str:
+        """列出当前所有未到点的倒计时。"""
+        with _lock:
+            active = list(_counters)
+        if not active:
+            return "当前没有活跃倒计时"
+        now = time.time()
+        lines = []
+        for cid, fire_ts, label in active:
+            remain = max(0, int(fire_ts - now))
+            lines.append(f"  #{cid}  {remain} 秒后  {label or '(无话)'}")
+        return "活跃倒计时：\n" + "\n".join(lines)
+
+    @tool(
         description="取消一个活跃倒计时（用 list_countdowns 看 id）。",
         parameters={"type": "object",
                     "properties": {"counter_id": {"type": "integer",
                                                   "description": "倒计时 id"}},
                     "required": ["counter_id"]},
-        fn=cancel_countdown,
-    ))
+    )
+    def cancel_countdown(counter_id: int) -> str:
+        """取消一个活跃倒计时。"""
+        try:
+            cid = int(counter_id)
+        except (TypeError, ValueError):
+            return f"错误：counter_id 必须是整数（{counter_id!r}）"
+        with _lock:
+            before = len(_counters)
+            _counters[:] = [c for c in _counters if c[0] != cid]
+            removed = before - len(_counters)
+            ev = _cancel_events.get(cid)
+            if ev is not None:
+                ev.set()
+                _cancel_events.pop(cid, None)
+            th = _countdown_threads.get(cid)
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(timeout=2.0)
+        if removed == 0:
+            return f"错误：未找到 id={cid} 的倒计时"
+        try:
+            from app.core import win_alarm
+            win_alarm.disarm_key(f"cd{cid}")
+        except Exception:  # noqa: BLE001
+            pass
+        return f"已取消倒计时 #{cid}（到点不会再提醒）"
+
+    reg.register(countdown)
+    reg.register(list_countdowns)
+    reg.register(cancel_countdown)
 
 
 __all__ = ["register", "set_say_hook", "set_alarm_hook", "cancel_all"]

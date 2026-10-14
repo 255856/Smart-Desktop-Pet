@@ -9,7 +9,8 @@ import logging
 import os
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry, is_under_any
+from ._core import ToolRegistry, is_under_any
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -26,302 +27,320 @@ def _is_safe_path(p: Path) -> bool:
     return is_under_any(p, [_HOME])
 
 
-def register(reg: ToolRegistry) -> None:
-    """注册文件类工具。"""
+# ---------------------------------------------------------------------------
+# 文档检索 + 各格式解析器（module-level helpers,被 read_file 调用）
+# ---------------------------------------------------------------------------
 
-    def list_desktop_files() -> str:
-        """列出桌面文件（仅沙箱内）。"""
-        desktop = Path(os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"))
-        if not desktop.is_dir():
-            desktop = _HOME / "Desktop"
-        if not desktop.is_dir():
-            return "错误：找不到桌面目录"
-        files = sorted(desktop.iterdir(), key=lambda p: p.name)
-        if not files:
-            return "桌面是空的"
-        lines = [f"{'📁' if p.is_dir() else '📄'} {p.name}" for p in files[:50]]
-        total = len(files)
-        if total > 50:
-            lines.append(f"... 还有 {total - 50} 个文件")
-        return f"桌面共 {total} 个文件：\n" + "\n".join(lines)
+# 文档检索的有界配置：只扫常见文档目录，且检查文件数封顶。
+# （原先对整个家目录 rglob，找不到时会扫完 AppData / 缓存 / venv，
+# 在 CI runner 上表现为卡死、超时——3.11、3.12 假阳性的根因。）
+_DOC_DIR_NAMES = ("Desktop", "Documents", "Downloads", "OneDrive")
+_DOC_EXTS = (".md", ".txt", ".docx", ".pdf")
+_SKIP_DIR_NAMES = frozenset({
+    "appdata", "node_modules", ".git", "__pycache__",
+    "site-packages", ".venv", "venv", "cache", "caches",
+})
+_SCAN_BUDGET = 2000
+_BUDGET_EXHAUSTED = object()
 
-    def read_text_file(path: str, max_chars: int = _MAX_BYTES) -> str:
-        """读取文本文件（沙箱内，最多 max_chars 字符，默认 8000）。"""
-        if not path or not path.strip():
-            return "错误：path 不能为空"
-        p = Path(path).expanduser()
-        if not p.exists():
-            return f"错误：文件不存在：{p}"
-        if not p.is_file():
-            return f"错误：不是文件：{p}"
-        if not _is_safe_path(p):
-            return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
-        if p.stat().st_size > 1024 * 1024:    # 1 MB
-            return f"错误：文件太大（>{1} MB），用 read_file 走专门解析器"
-        try:
-            raw = p.read_text(encoding="utf-8", errors="replace")
-            cap = max(200, min(int(max_chars if max_chars else _MAX_BYTES), 50000))
-            if len(raw) > cap:
-                return raw[:cap] + f"\n\n... (截断，原文 {len(raw)} 字符)"
-            return raw
-        except Exception as e:  # noqa: BLE001
-            log.exception("read_text_file failed")
-            return f"错误：读取失败：{e}"
 
-    def read_file(path: str = "", question: str = "") -> str:
-        """按扩展名分发解析：PDF / Word / Excel / CSV / 图片 OCR / html / md。
-        path 为空则尝试用 question 搜家目录（仅 .md/.txt）。
-        沙箱内。
-        """
-        if not path or not path.strip():
-            # 用 question 在家目录搜常见文档
-            if question and question.strip():
-                found = _locate_doc(question)
-                if not found:
-                    return f"错误：未找到包含「{question}」的文档"
-                path = str(found)
-            else:
-                return "错误：path 不能为空"
-        p = Path(path).expanduser()
-        if not p.exists():
-            return f"错误：文件不存在：{p}"
-        if not p.is_file():
-            return f"错误：不是文件：{p}"
-        if not _is_safe_path(p):
-            return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
-        ext = p.suffix.lower()
-        try:
-            if ext == ".pdf":
-                return _read_pdf(p)
-            if ext in (".docx", ".doc"):
-                return _read_docx(p)
-            if ext in (".xlsx", ".xls"):
-                return _read_xlsx(p)
-            if ext == ".csv":
-                return _read_csv(p)
-            if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"):
-                return _read_image_ocr(p)
-            if ext in (".md", ".markdown"):
-                return _read_md(p)
-            if ext in (".html", ".htm"):
-                return _read_html(p)
-            if ext in (".txt", ".json", ".yaml", ".yml", ".csv", ".tsv"):
-                return _read_plain(p)
-            return f"错误：暂不支持该格式（{ext}）。已知：txt/md/pdf/docx/xlsx/csv/图片/HTML"
-        except Exception as e:  # noqa: BLE001
-            log.exception("read_file failed for %s", p)
-            return f"错误：读取失败：{e}"
+def _locate_doc(question: str) -> Path | None:
+    """在常见文档目录按文件名搜文档（浅层、有界，任何机器都快速返回）。
 
-    # 文档检索的有界配置：只扫常见文档目录，且检查文件数封顶。
-    # （原先对整个家目录 rglob，找不到时会扫完 AppData / 缓存 / venv，
-    # 在 CI runner 上表现为卡死、超时——3.11、3.12 假阳性的根因。）
-    _DOC_DIR_NAMES = ("Desktop", "Documents", "Downloads", "OneDrive")
-    _DOC_EXTS = (".md", ".txt", ".docx", ".pdf")
-    _SKIP_DIR_NAMES = frozenset({
-        "appdata", "node_modules", ".git", "__pycache__",
-        "site-packages", ".venv", "venv", "cache", "caches",
-    })
-    _SCAN_BUDGET = 2000
-    _BUDGET_EXHAUSTED = object()
+    扫家目录顶层文件 + 桌面 / 文档 / 下载 / OneDrive（递归），跳过
+    AppData、node_modules、缓存等，检查文件数封顶 2000；找不到也要快。
+    """
+    kw = question.lower()
+    state = {"budget": _SCAN_BUDGET}
 
-    def _locate_doc(question: str) -> Path | None:
-        """在常见文档目录按文件名搜文档（浅层、有界，任何机器都快速返回）。
-
-        扫家目录顶层文件 + 桌面 / 文档 / 下载 / OneDrive（递归），跳过
-        AppData、node_modules、缓存等，检查文件数封顶 2000；找不到也要快。
-        """
-        kw = question.lower()
-        state = {"budget": _SCAN_BUDGET}
-
-        def _check(dirpath: str, filenames):
-            for fn in filenames:
-                low = fn.lower()
-                if not low.endswith(_DOC_EXTS):
-                    continue
-                state["budget"] -= 1
-                if kw in low:
-                    cand = Path(dirpath) / fn
-                    if cand.is_file():
-                        return cand
-                if state["budget"] <= 0:
-                    return _BUDGET_EXHAUSTED
-            return None
-
-        # 1) 家目录顶层（只看文件，不递归）
-        try:
-            top_files = [n for n in os.listdir(_HOME)
-                         if os.path.isfile(_HOME / n)]
-            hit = _check(str(_HOME), top_files)
-            if hit is _BUDGET_EXHAUSTED:
-                return None
-            if hit is not None:
-                return hit
-        except OSError:
-            pass
-
-        # 2) 常见文档目录递归（剪枝 + 预算）
-        roots, seen = [], set()
-        for name in _DOC_DIR_NAMES:
-            d = _HOME / name
-            if d.is_dir():
-                key = os.path.normcase(os.path.abspath(d))
-                if key not in seen:
-                    seen.add(key)
-                    roots.append(d)
-        for root in roots:
-            try:
-                for dirpath, dirnames, filenames in os.walk(root):
-                    dirnames[:] = [
-                        d for d in dirnames
-                        if not d.startswith(".")
-                        and d.lower() not in _SKIP_DIR_NAMES
-                    ]
-                    hit = _check(dirpath, filenames)
-                    if hit is _BUDGET_EXHAUSTED:
-                        return None
-                    if hit is not None:
-                        return hit
-            except (PermissionError, OSError):
+    def _check(dirpath: str, filenames):
+        for fn in filenames:
+            low = fn.lower()
+            if not low.endswith(_DOC_EXTS):
                 continue
+            state["budget"] -= 1
+            if kw in low:
+                cand = Path(dirpath) / fn
+                if cand.is_file():
+                    return cand
+            if state["budget"] <= 0:
+                return _BUDGET_EXHAUSTED
         return None
 
-    def _read_pdf(p: Path) -> str:
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            return "错误：PDF 解析失败：未安装 pypdf（pip install pypdf）"
-        try:
-            reader = PdfReader(str(p))
-            text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception as e:  # noqa: BLE001
-            return f"错误：PDF 解析失败：{e}"
-        if not text.strip():
-            return "错误：PDF 内容为空（可能扫描版无 OCR 层）"
-        if len(text) > _MAX_BYTES:
-            text = text[:_MAX_BYTES] + f"\n\n... (截断，原文 {len(text)} 字符)"
-        return text
+    # 1) 家目录顶层（只看文件，不递归）
+    try:
+        top_files = [n for n in os.listdir(_HOME)
+                     if os.path.isfile(_HOME / n)]
+        hit = _check(str(_HOME), top_files)
+        if hit is _BUDGET_EXHAUSTED:
+            return None
+        if hit is not None:
+            return hit
+    except OSError:
+        pass
 
-    def _read_docx(p: Path) -> str:
+    # 2) 常见文档目录递归（剪枝 + 预算）
+    roots, seen = [], set()
+    for name in _DOC_DIR_NAMES:
+        d = _HOME / name
+        if d.is_dir():
+            key = os.path.normcase(os.path.abspath(d))
+            if key not in seen:
+                seen.add(key)
+                roots.append(d)
+    for root in roots:
         try:
-            import docx
-        except ImportError:
-            return "错误：DOCX 解析失败：未安装 python-docx（pip install python-docx）"
-        try:
-            d = docx.Document(str(p))
-            text = "\n\n".join(par.text for par in d.paragraphs)
-        except Exception as e:  # noqa: BLE001
-            return f"错误：DOCX 解析失败：{e}"
-        if not text.strip():
-            return "错误：DOCX 内容为空"
-        if len(text) > _MAX_BYTES:
-            text = text[:_MAX_BYTES] + f"\n\n... (截断)"
-        return text
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not d.startswith(".")
+                    and d.lower() not in _SKIP_DIR_NAMES
+                ]
+                hit = _check(dirpath, filenames)
+                if hit is _BUDGET_EXHAUSTED:
+                    return None
+                if hit is not None:
+                    return hit
+        except (PermissionError, OSError):
+            continue
+    return None
 
-    def _read_xlsx(p: Path) -> str:
-        try:
-            import openpyxl
-        except ImportError:
-            return "错误：XLSX 解析失败：未安装 openpyxl（pip install openpyxl）"
-        try:
-            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
-            lines = [f"# Sheet: {wb.sheetnames}"]
-            for sheet_name in wb.sheetnames[:5]:
-                ws = wb[sheet_name]
-                lines.append(f"\n## {sheet_name}")
-                for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-                    if i > 50:
-                        lines.append("... (截断，前 50 行)")
-                        break
-                    # 把 None 替换为 ""
-                    lines.append(" | ".join(str(c) if c is not None else "" for c in row[:20]))
-        except Exception as e:  # noqa: BLE001
-            return f"错误：XLSX 解析失败：{e}"
-        return "\n".join(lines)
 
-    def _read_csv(p: Path) -> str:
-        import csv
-        try:
-            with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
-                lines = []
-                reader = csv.reader(f)
-                for i, row in enumerate(reader, 1):
-                    if i > 200:
-                        lines.append("... (截断，前 200 行)")
-                        break
-                    lines.append(" | ".join(str(c) for c in row))
-        except Exception as e:  # noqa: BLE001
-            return f"错误：CSV 解析失败：{e}"
-        return "\n".join(lines) or "(空)"
+def _read_pdf(p: Path) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return "错误：PDF 解析失败：未安装 pypdf（pip install pypdf）"
+    try:
+        reader = PdfReader(str(p))
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as e:  # noqa: BLE001
+        return f"错误：PDF 解析失败：{e}"
+    if not text.strip():
+        return "错误：PDF 内容为空（可能扫描版无 OCR 层）"
+    if len(text) > _MAX_BYTES:
+        text = text[:_MAX_BYTES] + f"\n\n... (截断，原文 {len(text)} 字符)"
+    return text
 
-    def _read_image_ocr(p: Path) -> str:
-        """复用 _ocr 工具的实现。"""
-        from app.engine.tools._ocr import _ocr_simple
-        return _ocr_simple(str(p))
 
-    def _read_md(p: Path) -> str:
-        try:
-            raw = p.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:  # noqa: BLE001
-            return f"错误：读取失败：{e}"
-        if len(raw) > _MAX_BYTES:
-            return raw[:_MAX_BYTES] + f"\n\n... (截断)"
+def _read_docx(p: Path) -> str:
+    try:
+        import docx
+    except ImportError:
+        return "错误：DOCX 解析失败：未安装 python-docx（pip install python-docx）"
+    try:
+        d = docx.Document(str(p))
+        text = "\n\n".join(par.text for par in d.paragraphs)
+    except Exception as e:  # noqa: BLE001
+        return f"错误：DOCX 解析失败：{e}"
+    if not text.strip():
+        return "错误：DOCX 内容为空"
+    if len(text) > _MAX_BYTES:
+        text = text[:_MAX_BYTES] + f"\n\n... (截断)"
+    return text
+
+
+def _read_xlsx(p: Path) -> str:
+    try:
+        import openpyxl
+    except ImportError:
+        return "错误：XLSX 解析失败：未安装 openpyxl（pip install openpyxl）"
+    try:
+        wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+        lines = [f"# Sheet: {wb.sheetnames}"]
+        for sheet_name in wb.sheetnames[:5]:
+            ws = wb[sheet_name]
+            lines.append(f"\n## {sheet_name}")
+            for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+                if i > 50:
+                    lines.append("... (截断，前 50 行)")
+                    break
+                # 把 None 替换为 ""
+                lines.append(" | ".join(str(c) if c is not None else "" for c in row[:20]))
+    except Exception as e:  # noqa: BLE001
+        return f"错误：XLSX 解析失败：{e}"
+    return "\n".join(lines)
+
+
+def _read_csv(p: Path) -> str:
+    import csv
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
+            lines = []
+            reader = csv.reader(f)
+            for i, row in enumerate(reader, 1):
+                if i > 200:
+                    lines.append("... (截断，前 200 行)")
+                    break
+                lines.append(" | ".join(str(c) for c in row))
+    except Exception as e:  # noqa: BLE001
+        return f"错误：CSV 解析失败：{e}"
+    return "\n".join(lines) or "(空)"
+
+
+def _read_image_ocr(p: Path) -> str:
+    """复用 _ocr 工具的实现。"""
+    from app.engine.tools._ocr import _ocr_simple
+    return _ocr_simple(str(p))
+
+
+def _read_md(p: Path) -> str:
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return f"错误：读取失败：{e}"
+    if len(raw) > _MAX_BYTES:
+        return raw[:_MAX_BYTES] + f"\n\n... (截断)"
+    return raw
+
+
+def _read_html(p: Path) -> str:
+    try:
+        from bs4 import BeautifulSoup
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        soup = BeautifulSoup(raw, "html.parser")
+        text = soup.get_text(separator="\n", strip=True)
+    except ImportError:
+        return "HTML 解析失败：未安装 bs4（pip install beautifulsoup4）"
+    except Exception as e:  # noqa: BLE001
+        return f"HTML 解析失败：{e}"
+    if len(text) > _MAX_BYTES:
+        return text[:_MAX_BYTES] + f"\n\n... (截断)"
+    return text
+
+
+def _read_plain(p: Path) -> str:
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return f"错误：读取失败：{e}"
+    if len(raw) > _MAX_BYTES:
+        return raw[:_MAX_BYTES] + f"\n\n... (截断)"
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# 工具定义
+# ---------------------------------------------------------------------------
+
+@tool(
+    description="列出桌面上的文件和文件夹。",
+    parameters={"type": "object", "properties": {}},
+)
+def list_desktop_files() -> str:
+    """列出桌面文件（仅沙箱内）。"""
+    desktop = Path(os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"))
+    if not desktop.is_dir():
+        desktop = _HOME / "Desktop"
+    if not desktop.is_dir():
+        return "错误：找不到桌面目录"
+    files = sorted(desktop.iterdir(), key=lambda p: p.name)
+    if not files:
+        return "桌面是空的"
+    lines = [f"{'[目录]' if p.is_dir() else '[文件]'} {p.name}" for p in files[:50]]
+    total = len(files)
+    if total > 50:
+        lines.append(f"... 还有 {total - 50} 个文件")
+    return f"桌面共 {total} 个文件：\n" + "\n".join(lines)
+
+
+@tool(
+    description="读取纯文本文件（txt / json / yaml 等）。沙箱限定用户主目录，"
+                "超过 1MB 自动拒绝；超过 max_chars（默认 8000）会截断。",
+    parameters={"type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件绝对路径"},
+                    "max_chars": {"type": "integer", "minimum": 200, "maximum": 50000,
+                                  "description": "最大返回字符数"},
+                },
+                "required": ["path"]},
+)
+def read_text_file(path: str, max_chars: int = _MAX_BYTES) -> str:
+    """读取文本文件（沙箱内，最多 max_chars 字符，默认 8000）。"""
+    if not path or not path.strip():
+        return "错误：path 不能为空"
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"错误：文件不存在：{p}"
+    if not p.is_file():
+        return f"错误：不是文件：{p}"
+    if not _is_safe_path(p):
+        return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
+    if p.stat().st_size > 1024 * 1024:    # 1 MB
+        return f"错误：文件太大（>{1} MB），用 read_file 走专门解析器"
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        cap = max(200, min(int(max_chars if max_chars else _MAX_BYTES), 50000))
+        if len(raw) > cap:
+            return raw[:cap] + f"\n\n... (截断，原文 {len(raw)} 字符)"
         return raw
+    except Exception as e:  # noqa: BLE001
+        log.exception("read_text_file failed")
+        return f"错误：读取失败：{e}"
 
-    def _read_html(p: Path) -> str:
-        try:
-            from bs4 import BeautifulSoup
-            raw = p.read_text(encoding="utf-8", errors="replace")
-            soup = BeautifulSoup(raw, "html.parser")
-            text = soup.get_text(separator="\n", strip=True)
-        except ImportError:
-            return "HTML 解析失败：未安装 bs4（pip install beautifulsoup4）"
-        except Exception as e:  # noqa: BLE001
-            return f"HTML 解析失败：{e}"
-        if len(text) > _MAX_BYTES:
-            return text[:_MAX_BYTES] + f"\n\n... (截断)"
-        return text
 
-    def _read_plain(p: Path) -> str:
-        try:
-            raw = p.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:  # noqa: BLE001
-            return f"错误：读取失败：{e}"
-        if len(raw) > _MAX_BYTES:
-            return raw[:_MAX_BYTES] + f"\n\n... (截断)"
-        return raw
+@tool(
+    description="按扩展名分发解析：PDF / Word(docx) / Excel(xlsx) / CSV / "
+                "图片 OCR / Markdown / HTML / 纯文本。沙箱限定用户主目录。"
+                "path 可为空——空则用 question 在家目录搜 .md/.txt。",
+    parameters={"type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件绝对路径，空则用 question 搜"},
+                    "question": {"type": "string",
+                                 "description": "用文件名关键词搜（path 为空时生效）"},
+                }},
+)
+def read_file(path: str = "", question: str = "") -> str:
+    """按扩展名分发解析：PDF / Word / Excel / CSV / 图片 OCR / html / md。
 
-    reg.register(Tool(
-        name="list_desktop_files",
-        description="列出桌面上的文件和文件夹。",
-        parameters={"type": "object", "properties": {}},
-        fn=list_desktop_files,
-    ))
-    reg.register(Tool(
-        name="read_text_file",
-        description="读取纯文本文件（txt / json / yaml 等）。沙箱限定用户主目录，"
-                    "超过 1MB 自动拒绝；超过 max_chars（默认 8000）会截断。",
-        parameters={"type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "文件绝对路径"},
-                        "max_chars": {"type": "integer", "minimum": 200, "maximum": 50000,
-                                      "description": "最大返回字符数"},
-                    },
-                    "required": ["path"]},
-        fn=read_text_file,
-    ))
-    reg.register(Tool(
-        name="read_file",
-        description="按扩展名分发解析：PDF / Word(docx) / Excel(xlsx) / CSV / "
-                    "图片 OCR / Markdown / HTML / 纯文本。沙箱限定用户主目录。"
-                    "path 可为空——空则用 question 在家目录搜 .md/.txt。",
-        parameters={"type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "文件绝对路径，空则用 question 搜"},
-                        "question": {"type": "string",
-                                     "description": "用文件名关键词搜（path 为空时生效）"},
-                    }},
-        fn=read_file,
-    ))
+    path 为空则尝试用 question 搜家目录（仅 .md/.txt）。
+    沙箱内。
+    """
+    if not path or not path.strip():
+        # 用 question 在家目录搜常见文档
+        if question and question.strip():
+            found = _locate_doc(question)
+            if not found:
+                return f"错误：未找到包含「{question}」的文档"
+            path = str(found)
+        else:
+            return "错误：path 不能为空"
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"错误：文件不存在：{p}"
+    if not p.is_file():
+        return f"错误：不是文件：{p}"
+    if not _is_safe_path(p):
+        return f"错误：安全策略拒绝，路径必须在用户主目录下（{p}）"
+    ext = p.suffix.lower()
+    try:
+        if ext == ".pdf":
+            return _read_pdf(p)
+        if ext in (".docx", ".doc"):
+            return _read_docx(p)
+        if ext in (".xlsx", ".xls"):
+            return _read_xlsx(p)
+        if ext == ".csv":
+            return _read_csv(p)
+        if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"):
+            return _read_image_ocr(p)
+        if ext in (".md", ".markdown"):
+            return _read_md(p)
+        if ext in (".html", ".htm"):
+            return _read_html(p)
+        if ext in (".txt", ".json", ".yaml", ".yml", ".csv", ".tsv"):
+            return _read_plain(p)
+        return f"错误：暂不支持该格式（{ext}）。已知：txt/md/pdf/docx/xlsx/csv/图片/HTML"
+    except Exception as e:  # noqa: BLE001
+        log.exception("read_file failed for %s", p)
+        return f"错误：读取失败：{e}"
+
+
+def register(reg: ToolRegistry) -> None:
+    """注册文件类工具。"""
+    reg.register(list_desktop_files)
+    reg.register(read_text_file)
+    reg.register(read_file)
 
 
 __all__ = ["register"]

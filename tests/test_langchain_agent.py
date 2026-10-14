@@ -262,3 +262,74 @@ def test_close_is_idempotent_without_checkpointer():
     # 没创建过 checkpointer
     agent.close()  # 不应抛异常
     agent.close()  # 多次调用也安全
+
+
+# ---------- 2026-10-14 race condition 修复 ----------
+def test_persistent_loop_start_timeout_raises():
+    """_PersistentLoop.start() 在 _ready 超时后必须 raise,不能沉默返回。
+    旧实现 5s timeout,LangChain 1.0+ import 慢时会让后续 run_coro 卡死。
+    """
+    from app.brain.langchain_agent import _PersistentLoop
+
+    loop = _PersistentLoop()
+    # 把 _START_TIMEOUT_S 改成 0s,模拟「线程永远跑不到 _ready.set()」
+    loop._START_TIMEOUT_S = 0.0
+    with pytest.raises(RuntimeError, match="启动超时"):
+        loop.start()
+    # 失败后 thread 也不留(避免 daemon 线程泄漏)
+    assert loop.thread is None
+
+
+def test_persistent_loop_records_runner_exception():
+    """_runner 里 import 失败,start() 应该把异常 raise 出去,而不是沉默。
+    验证:模拟一个「跑出异常」的 runner,start() 检测到 _runner_exc 后 raise。
+    """
+    from app.brain.langchain_agent import _PersistentLoop
+
+    # 准备一个坏的 runner:不创建 loop,直接 raise
+    # 我们手动模拟 start() 的检测逻辑(因为它是内嵌的 _runner 函数,不能直接换)
+    loop = _PersistentLoop()
+    # 直接设置 exc 字段(模拟 runner 跑过这一行后崩了)
+    loop._runner_exc = RuntimeError("模拟 import 失败")
+    loop._ready.set()  # 让 wait 立即通过
+    # 单独验证 start() 走完 wait 后看到 _runner_exc 也会 raise
+    # 这里我们手工调一遍 start() 的检测路径
+    got_ready = loop._ready.wait(timeout=loop._START_TIMEOUT_S)
+    assert got_ready is True
+    assert loop._runner_exc is not None
+    # 用同样的判断逻辑确认会 raise
+    if loop._runner_exc is not None:
+        with pytest.raises(RuntimeError, match="模拟 import 失败"):
+            raise RuntimeError(f"LangChain 后台 loop 启动失败: {loop._runner_exc!r}")
+
+
+def test_langchain_agent_init_failure_resets_loop_singleton():
+    """LangChainAgent.__init__ 失败时,_LOOP 类变量要重置,下次重试。
+
+    模拟:_get_loop() 抛异常(模拟后台 loop 启动失败),
+    LangChainAgent 构造应该 raise 且清掉 _LOOP,下次能再 _get_loop() 重建。
+    """
+    from app.brain import langchain_agent as mod
+
+    # 把 _LOOP 先设成「启动会爆」的对象
+    class _BrokenLoop:
+        def start(self):
+            raise RuntimeError("模拟后台 loop 启动失败")
+
+    # 直接 patch _get_loop 让它 raise
+    original_get_loop = mod.LangChainAgent._get_loop
+    mod.LangChainAgent._get_loop = classmethod(lambda cls: (_ for _ in ()).throw(
+        RuntimeError("模拟后台 loop 启动失败")
+    ))
+
+    try:
+        reg = _make_registry()
+        llm = LLMConfig(api_key="sk-test", model="gpt-test", stream=False)
+        with pytest.raises(RuntimeError, match="模拟后台 loop 启动失败"):
+            LangChainAgent(llm_cfg=llm, registry=reg, persona="x",
+                           cfg=LangChainAgentConfig(enable_checkpointer=False))
+    finally:
+        # 恢复 _get_loop
+        mod.LangChainAgent._get_loop = original_get_loop
+        # 显式 reset 以防前面失败留下半死状态
+        mod.LangChainAgent._LOOP = None

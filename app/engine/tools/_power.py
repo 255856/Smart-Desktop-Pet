@@ -6,7 +6,8 @@ import platform
 import subprocess
 from typing import Optional
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -78,10 +79,18 @@ def _battery_windows() -> str:
 def register(reg: ToolRegistry) -> None:
     """注册电源 / 锁屏 / 进程 / 无线 / 剪贴板工具。"""
 
+    @tool(
+        description="查询笔记本电池电量（百分比 / 状态 / 续航）。Windows 走 WMI。",
+        parameters={"type": "object", "properties": {}},
+    )
     def get_battery() -> str:
         """查询笔记本电池电量（百分比 / 状态 / 续航）。"""
         return _battery_windows() if IS_WINDOWS else "非 Windows 平台未实现"
 
+    @tool(
+        description="锁屏（WorkStation Lock）。注意：危险工具，需用户在弹窗里确认。",
+        parameters={"type": "object", "properties": {}},
+    )
     def lock_screen() -> str:
         """锁屏（WorkStation Lock）。注意：危险工具，需要用户在弹窗里确认。"""
         if IS_WINDOWS:
@@ -92,6 +101,16 @@ def register(reg: ToolRegistry) -> None:
                 return f"错误：{e}"
         return "非 Windows 平台未实现"
 
+    @tool(
+        description="列出当前进程名 + PID + 内存。filter_name 为空按内存倒序，limit 默认 30。",
+        parameters={"type": "object",
+                    "properties": {
+                        "filter_name": {"type": "string",
+                                        "description": "按进程名子串过滤，空则全部"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200,
+                                  "description": "最多返回几条"},
+                    }},
+    )
     def list_processes(filter_name: str = "", limit: int = 30) -> str:
         """列出当前进程名 + PID。filter_name 为空则按内存倒序。"""
         limit = max(1, min(int(limit if limit else 30), 200))
@@ -120,6 +139,14 @@ def register(reg: ToolRegistry) -> None:
         except Exception as e:  # noqa: BLE001
             return f"错误：{e}"
 
+    @tool(
+        description="按 PID 或名称杀进程。危险工具，需用户确认。",
+        parameters={"type": "object",
+                    "properties": {
+                        "pid": {"type": "integer", "description": "进程 PID"},
+                        "name": {"type": "string", "description": "进程名（不带 .exe）"},
+                    }},
+    )
     def kill_process(pid: int = 0, name: str = "") -> str:
         """按 PID 或名称杀进程。危险工具，需用户确认。"""
         try:
@@ -148,6 +175,12 @@ def register(reg: ToolRegistry) -> None:
             return "未匹配到进程"
         return "已终止：" + ", ".join(killed)
 
+    @tool(
+        description="开 / 关 Wi-Fi。危险工具，需要管理员权限。",
+        parameters={"type": "object",
+                    "properties": {"enable": {"type": "boolean",
+                                              "description": "True=开，False=关"}}},
+    )
     def set_wifi(enable: bool = True) -> str:
         """开 / 关 Wi-Fi（危险工具，需要管理员）。"""
         if not IS_WINDOWS:
@@ -190,6 +223,12 @@ def register(reg: ToolRegistry) -> None:
             log.exception("set_wifi 异常")
             return f"错误：{action} Wi-Fi 失败（{type(e).__name__}），可能需要管理员权限"
 
+    @tool(
+        description="开 / 关蓝牙。危险工具，需要管理员权限。",
+        parameters={"type": "object",
+                    "properties": {"enable": {"type": "boolean",
+                                              "description": "True=开，False=关"}}},
+    )
     def set_bluetooth(enable: bool = True) -> str:
         """开 / 关蓝牙（危险工具，需要管理员）。"""
         if not IS_WINDOWS:
@@ -220,6 +259,10 @@ def register(reg: ToolRegistry) -> None:
             log.exception("set_bluetooth 异常")
             return f"错误：{action}蓝牙失败（{type(e).__name__}），可能需要管理员权限"
 
+    @tool(
+        description="读取当前剪贴板文本（区别 clipboard_copy 是写）。",
+        parameters={"type": "object", "properties": {}},
+    )
     def get_clipboard() -> str:
         """读取当前剪贴板文本（区别 clipboard_copy 写）。"""
         if IS_WINDOWS:
@@ -243,6 +286,10 @@ def register(reg: ToolRegistry) -> None:
         except Exception as e:  # noqa: BLE001
             return f"读剪贴板失败：{e}"
 
+    @tool(
+        description="隐藏桌宠头顶气泡（用户说别说了 / 屏幕太乱时用）。",
+        parameters={"type": "object", "properties": {}},
+    )
     def clear_bubble() -> str:
         """隐藏桌宠头顶气泡（用户说"别说了" / 屏幕太乱）。"""
         # hook 由 build_default_tools 统一注入（见 app/engine/tools/__init__.py）。
@@ -257,53 +304,14 @@ def register(reg: ToolRegistry) -> None:
         except Exception as e:  # noqa: BLE001
             return f"错误：隐藏气泡失败（{type(e).__name__}）"
 
-    # 注册
-    reg.register(Tool(name="get_battery",
-        description="查询笔记本电池电量（百分比 / 状态 / 续航）。Windows 走 WMI。",
-        parameters={"type": "object", "properties": {}},
-        fn=get_battery))
-    reg.register(Tool(name="lock_screen",
-        description="锁屏（WorkStation Lock）。注意：危险工具，需用户在弹窗里确认。",
-        parameters={"type": "object", "properties": {}},
-        fn=lock_screen))
-    reg.register(Tool(name="list_processes",
-        description="列出当前进程名 + PID + 内存。filter_name 为空按内存倒序，limit 默认 30。",
-        parameters={"type": "object",
-                    "properties": {
-                        "filter_name": {"type": "string",
-                                        "description": "按进程名子串过滤，空则全部"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 200,
-                                  "description": "最多返回几条"},
-                    }},
-        fn=list_processes))
-    reg.register(Tool(name="kill_process",
-        description="按 PID 或名称杀进程。危险工具，需用户确认。",
-        parameters={"type": "object",
-                    "properties": {
-                        "pid": {"type": "integer", "description": "进程 PID"},
-                        "name": {"type": "string", "description": "进程名（不带 .exe）"},
-                    }},
-        fn=kill_process))
-    reg.register(Tool(name="set_wifi",
-        description="开 / 关 Wi-Fi。危险工具，需要管理员权限。",
-        parameters={"type": "object",
-                    "properties": {"enable": {"type": "boolean",
-                                              "description": "True=开，False=关"}}},
-        fn=set_wifi))
-    reg.register(Tool(name="set_bluetooth",
-        description="开 / 关蓝牙。危险工具，需要管理员权限。",
-        parameters={"type": "object",
-                    "properties": {"enable": {"type": "boolean",
-                                              "description": "True=开，False=关"}}},
-        fn=set_bluetooth))
-    reg.register(Tool(name="get_clipboard",
-        description="读取当前剪贴板文本（区别 clipboard_copy 是写）。",
-        parameters={"type": "object", "properties": {}},
-        fn=get_clipboard))
-    reg.register(Tool(name="clear_bubble",
-        description="隐藏桌宠头顶气泡（用户说别说了 / 屏幕太乱时用）。",
-        parameters={"type": "object", "properties": {}},
-        fn=clear_bubble))
+    reg.register(get_battery)
+    reg.register(lock_screen)
+    reg.register(list_processes)
+    reg.register(kill_process)
+    reg.register(set_wifi)
+    reg.register(set_bluetooth)
+    reg.register(get_clipboard)
+    reg.register(clear_bubble)
 
 
 # 全局 hook：clear_bubble 需要由主程序注入（调 pet.hide_bubble）

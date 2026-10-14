@@ -5,7 +5,8 @@ import datetime
 import json
 from typing import Optional
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 
 def fmt_time() -> str:
@@ -105,11 +106,13 @@ def parse_absolute_time(at_time: str) -> Optional[float]:
 
 
 def register(reg: ToolRegistry, *, state) -> None:
-    """注册 get_current_time + get_pet_status。"""
+    """注册 get_current_time + get_pet_status(2026-10-14 迁到 @tool 装饰器)。"""
 
+    @tool(description="获取当前的日期、时间和星期。")
     def get_current_time() -> str:
         return json.dumps({"now": fmt_time()}, ensure_ascii=False)
 
+    @tool(description="查看桌宠自己的状态：体力/饱食/口渴/心情/健康/金币/等级/好感度。")
     def get_pet_status() -> str:
         return json.dumps({
             "summary": state.stats_summary(),
@@ -124,18 +127,8 @@ def register(reg: ToolRegistry, *, state) -> None:
             "likability": round(state.likability, 1),
         }, ensure_ascii=False)
 
-    reg.register(Tool(
-        name="get_current_time",
-        description="获取当前的日期、时间和星期。",
-        parameters={"type": "object", "properties": {}},
-        fn=get_current_time,
-    ))
-    reg.register(Tool(
-        name="get_pet_status",
-        description="查看桌宠自己的状态：体力/饱食/口渴/心情/健康/金币/等级/好感度。",
-        parameters={"type": "object", "properties": {}},
-        fn=get_pet_status,
-    ))
+    reg.register(get_current_time)
+    reg.register(get_pet_status)
 
 
 __all__ = ["fmt_time", "parse_absolute_time", "register"]

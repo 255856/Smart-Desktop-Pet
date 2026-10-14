@@ -4,14 +4,15 @@ from __future__ import annotations
 import datetime
 import time
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 from ._time import parse_absolute_time
 
 
 def _arm_backup(item, when_desc: str) -> str:
     """给提醒注册一个 Windows 计划任务兜底，并把结果**如实**告诉模型。
 
-    桌宠自己的定时器在进程里：崩了、关��、或那条「QTimer 在工作线程 start
+    桌宠自己的定时器在进程里：崩了、关掉、或那条「QTimer 在工作线程 start
     无效」的老 bug 复发，闹钟就哑了。注册一次性计划任务后由 Windows 内核负责
     到点拉起提示，和桌宠进程无关。
 
@@ -34,6 +35,18 @@ def _arm_backup(item, when_desc: str) -> str:
 def register(reg: ToolRegistry, *, reminders) -> None:
     """注册 reminder 三件套。"""
 
+    @tool(
+        description="设置一个定时提醒。可以用 delay_minutes（多少分钟后）或 at_time（绝对时间）二选一。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "提醒内容"},
+                "delay_minutes": {"type": "number", "description": "多少分钟后提醒"},
+                "at_time": {"type": "string", "description": "绝对时间，支持 '08:00'、'2026-09-12 08:00'、'明天 08:00' 等格式"},
+            },
+            "required": ["text"],
+        },
+    )
     def add_reminder(text: str, delay_minutes: float = None, at_time: str = None) -> str:
         """设置提醒。
 
@@ -78,6 +91,10 @@ def register(reg: ToolRegistry, *, reminders) -> None:
                 f"（id={item.id}）"
                 + _arm_backup(item, f"{mins:g} 分钟后触发"))
 
+    @tool(
+        description="列出所有待触发的提醒。",
+        parameters={"type": "object", "properties": {}},
+    )
     def list_reminders() -> str:
         items = [i for i in reminders.list() if not i.done]
         if not items:
@@ -89,6 +106,14 @@ def register(reg: ToolRegistry, *, reminders) -> None:
             rows.append(f"id={i.id} 「{i.text}」 还有 {left_min:.0f} 分钟")
         return "待触发提醒：\n" + "\n".join(rows)
 
+    @tool(
+        description="删除一个提醒。id 从 list_reminders 获得。",
+        parameters={
+            "type": "object",
+            "properties": {"reminder_id": {"type": "string"}},
+            "required": ["reminder_id"],
+        },
+    )
     def delete_reminder(reminder_id: str) -> str:
         if not reminders.remove(reminder_id):
             return f"错误：找不到 id={reminder_id} 的提醒，什么都没删掉。"
@@ -100,36 +125,9 @@ def register(reg: ToolRegistry, *, reminders) -> None:
             pass
         return "已删除。"
 
-    reg.register(Tool(
-        name="add_reminder",
-        description="设置一个定时提醒。可以用 delay_minutes（多少分钟后）或 at_time（绝对时间）二选一。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "提醒内容"},
-                "delay_minutes": {"type": "number", "description": "多少分钟后提醒"},
-                "at_time": {"type": "string", "description": "绝对时间，支持 '08:00'、'2026-09-12 08:00'、'明天 08:00' 等格式"},
-            },
-            "required": ["text"],
-        },
-        fn=add_reminder,
-    ))
-    reg.register(Tool(
-        name="list_reminders",
-        description="列出所有待触发的提醒。",
-        parameters={"type": "object", "properties": {}},
-        fn=list_reminders,
-    ))
-    reg.register(Tool(
-        name="delete_reminder",
-        description="删除一个提醒。id 从 list_reminders 获得。",
-        parameters={
-            "type": "object",
-            "properties": {"reminder_id": {"type": "string"}},
-            "required": ["reminder_id"],
-        },
-        fn=delete_reminder,
-    ))
+    reg.register(add_reminder)
+    reg.register(list_reminders)
+    reg.register(delete_reminder)
 
 
 __all__ = ["register"]

@@ -9,7 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 # 和 _check_explorable 里的 p.resolve() 保持同一形态，
 # 否则家目录本身是符号链接时会误判成「家目录之外」。
@@ -57,6 +58,11 @@ def _check_explorable(raw: str) -> tuple[Path | None, str]:
 def register(reg: ToolRegistry) -> None:
     """注册 Windows 快捷启动工具（仅这几个不与 open_app 重复的）。"""
 
+    @tool(
+        description="打开文件资源管理器，可指定目录。",
+        parameters={"type": "object",
+                    "properties": {"path": {"type": "string", "description": "目录路径，为空则打开默认"}}},
+    )
     def open_file_explorer(path: str = "") -> str:
         if not (path or "").strip():
             try:
@@ -73,6 +79,8 @@ def register(reg: ToolRegistry) -> None:
             return f"错误：无法打开 {p}（{type(e).__name__}）"
         return f"已用文件资源管理器打开 {p}"
 
+    @tool(description="打开 PowerShell 终端。",
+          parameters={"type": "object", "properties": {}})
     def open_terminal() -> str:
         try:
             proc = subprocess.Popen(["powershell.exe"])
@@ -80,6 +88,9 @@ def register(reg: ToolRegistry) -> None:
             return f"错误：无法启动 PowerShell（{type(e).__name__}）"
         return f"已打开 PowerShell 终端（pid={proc.pid}）"
 
+    @tool(description="打开记事本，可选初始文本。",
+          parameters={"type": "object",
+                      "properties": {"text": {"type": "string", "description": "初始文本，为空则打开空白"}}})
     def open_notepad(text: str = "") -> str:
         if not (text or "").strip():
             try:
@@ -102,17 +113,9 @@ def register(reg: ToolRegistry) -> None:
             return f"错误：已写入 {tmp}，但无法打开记事本（{type(e).__name__}）"
         return f"已打开记事本（{len(text)} 字符，临时文件 {tmp.name}）"
 
-    reg.register(Tool(name="open_file_explorer",
-        description="打开文件资源管理器，可指定目录。",
-        parameters={"type": "object",
-                    "properties": {"path": {"type": "string", "description": "目录路径，为空则打开默认"}}},
-        fn=open_file_explorer))
-    reg.register(Tool(name="open_terminal", description="打开 PowerShell 终端。",
-        parameters={"type": "object", "properties": {}}, fn=open_terminal))
-    reg.register(Tool(name="open_notepad", description="打开记事本，可选初始文本。",
-        parameters={"type": "object",
-                    "properties": {"text": {"type": "string", "description": "初始文本，为空则打开空白"}}},
-        fn=open_notepad))
+    reg.register(open_file_explorer)
+    reg.register(open_terminal)
+    reg.register(open_notepad)
 
 
 __all__ = ["register"]

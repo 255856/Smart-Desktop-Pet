@@ -76,28 +76,58 @@ class _PersistentLoop:
     关键：所有 LangChain 资源（httpx client、AsyncSqliteSaver）都在这个 loop 里创建，
     永不切换 loop → 彻底避免 "Event loop is closed" 问题。
     """
+    # LangChain 1.0+ 第一次 import 慢（含 langchain / langgraph / openai 几个大包），
+    # 后台线程里 `_runner` 跑完才能 `self._ready.set()`。旧 5 秒经常不够，会让
+    # 后续 `run_coro` 拿到 `self.loop is None` 卡死。30 秒足够冷启动。
+    _START_TIMEOUT_S = 30.0
+
     def __init__(self) -> None:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
+        self._runner_exc: Optional[BaseException] = None   # 记录线程里 import / 设 loop 失败
 
     def start(self) -> None:
         if self.thread is not None:
             return
         self._ready.clear()
+        self._runner_exc = None
+
         def _runner():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self.loop = loop
-            self._ready.set()
             try:
-                loop.run_forever()
-            finally:
-                loop.close()
-                self.loop = None
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self.loop = loop
+                self._ready.set()
+                try:
+                    loop.run_forever()
+                finally:
+                    loop.close()
+                    self.loop = None
+            except BaseException as e:  # noqa: BLE001
+                # 记录 import 失败等异常,start() 收到 _ready 超时后能看到
+                self._runner_exc = e
+                self._ready.set()   # 解锁 start() 的 wait,让 raise 出去
+                raise
+
         self.thread = threading.Thread(target=_runner, daemon=True, name="lc-persistent-loop")
         self.thread.start()
-        self._ready.wait(timeout=5)
+        got_ready = self._ready.wait(timeout=self._START_TIMEOUT_S)
+        if not got_ready:
+            log.error(
+                "LangChain 后台 loop 启动超时（>%.0fs）。可能 LangChain 包导入慢或线程卡死。",
+                self._START_TIMEOUT_S,
+            )
+            # 释放 thread 引用(daemon 线程已泄漏,引用清掉避免下次误判已启动)
+            self.thread = None
+            raise RuntimeError(
+                f"LangChain 后台 loop 启动超时（>{self._START_TIMEOUT_S:.0f}s）"
+            )
+        if self._runner_exc is not None:
+            log.error("LangChain 后台 loop 启动失败: %r", self._runner_exc)
+            # runner 已经 raise 出去,thread 会自然结束,但还是清引用保持一致
+            self.thread = None
+            raise RuntimeError(f"LangChain 后台 loop 启动失败: {self._runner_exc!r}")
 
     def stop(self) -> None:
         if self.loop is not None:
@@ -112,7 +142,9 @@ class _PersistentLoop:
     def run_coro(self, coro: Any, timeout: Optional[float] = None) -> Any:
         if self.loop is None:
             self.start()
-        assert self.loop is not None
+        if self.loop is None:
+            # start() 之后仍 None → 启动失败,抛错而不是传给 run_coroutine_threadsafe
+            raise RuntimeError("LangChain 持久 loop 不可用，请查看上面 ERROR 日志")
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=timeout)
 
@@ -154,8 +186,14 @@ class LangChainAgent:
         self._checkpointer_cm: Optional[Any] = None
         self._checkpointer: Optional[Any] = None
         self._model: Optional[Any] = None
-        # 启动持久 loop（懒初始化）
-        self._get_loop()
+        # 启动持久 loop（懒初始化）。失败时清掉类级 _LOOP,
+        # 避免一次启动失败后整个进程里所有 LangChainAgent 都跟着挂掉。
+        try:
+            self._get_loop()
+        except Exception:
+            # 启动失败,把 _LOOP 重置,下次再 _get_loop() 重新尝试
+            LangChainAgent._LOOP = None
+            raise
 
     def _build_model(self) -> ChatOpenAI:
         """OpenAI 兼容协议（DeepSeek / minimax / Ollama / 任何 base_url）。"""

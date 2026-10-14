@@ -95,8 +95,51 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
-        self._tools[tool.name] = tool
+    def register(self, tool: Union[Tool, "_DecoratedTool", Callable]) -> None:
+        """注册一个 tool,同时支持:
+        - `Tool(name=..., description=..., parameters=..., fn=...)` 老风格
+        - `@tool` 装饰后的函数(自动从 type hints 推 parameters)
+        - 普通 callable(走 @tool 默认推断,无装饰器)
+
+        2026-10-14: 加 `@tool` 支持,与 `app/engine/tools/_decorator.py` 配套。
+
+        注意:`@tool` 装饰后返回的是「带 .name/.description/.parameters/.fn 属性的
+        普通函数」(不是 `_DecoratedTool` 实例,这样 `tool_fn()` 直接调用也 OK)。
+        所以检测靠「有没有这三个属性」,不只是 `isinstance(_DecoratedTool)`。
+        """
+        from ._decorator import _DecoratedTool  # 局部 import 避免循环
+        if isinstance(tool, Tool):
+            self._tools[tool.name] = tool
+            return
+        if isinstance(tool, _DecoratedTool):
+            self._tools[tool.name] = Tool(
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+                fn=tool.fn,
+            )
+            return
+        # @tool 装饰过的函数:有 .name / .parameters / .fn 三个属性
+        if (callable(tool)
+                and hasattr(tool, "name")
+                and hasattr(tool, "parameters")
+                and hasattr(tool, "fn")):
+            self._tools[tool.name] = Tool(
+                name=tool.name,
+                description=getattr(tool, "description", ""),
+                parameters=tool.parameters,
+                fn=tool.fn,
+            )
+            return
+        # 兜底:普通 callable,装饰一下
+        from ._decorator import tool as _tool_decorator
+        decorated = _tool_decorator(tool)
+        self._tools[decorated.name] = Tool(
+            name=decorated.name,
+            description=decorated.description,
+            parameters=decorated.parameters,
+            fn=decorated.fn,
+        )
 
     def names(self) -> list[str]:
         return list(self._tools)

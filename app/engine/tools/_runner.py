@@ -6,7 +6,8 @@ import platform
 import subprocess
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry, is_under_any
+from ._core import ToolRegistry, is_under_any
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,20 @@ def _command_for(script: Path) -> list[str]:
 def register(reg: ToolRegistry) -> None:
     """注册脚本执行工具。"""
 
+    @tool(
+        description="在用户主目录下的脚本执行本地脚本（.py / .ps1 / .bat / .sh）。"
+                    "危险工具，需用户确认。仅沙箱目录：家目录、~/scripts。",
+        parameters={"type": "object",
+                    "properties": {
+                        "script_path": {"type": "string",
+                                        "description": "脚本路径"},
+                        "timeout_s": {"type": "integer", "minimum": 1, "maximum": 300,
+                                      "description": "超时秒数，默认 60"},
+                        "args": {"type": "string",
+                                 "description": "传给脚本的参数，shlex 切分"},
+                    },
+                    "required": ["script_path"]},
+    )
     def run_script(script_path: str, timeout_s: int = 60, args: str = "") -> str:
         """执行本地脚本（沙箱限定家目录）。危险工具，需用户确认。
         支持 .py / .ps1 / .bat / .sh。
@@ -113,20 +128,7 @@ def register(reg: ToolRegistry) -> None:
             return f"错误：脚本执行失败（退出码 {proc.returncode}），\n{body}"
         return body
 
-    reg.register(Tool(name="run_script",
-        description="在用户主目录下的脚本执行本地脚本（.py / .ps1 / .bat / .sh）。"
-                    "危险工具，需用户确认。仅沙箱目录：家目录、~/scripts。",
-        parameters={"type": "object",
-                    "properties": {
-                        "script_path": {"type": "string",
-                                        "description": "脚本路径"},
-                        "timeout_s": {"type": "integer", "minimum": 1, "maximum": 300,
-                                      "description": "超时秒数，默认 60"},
-                        "args": {"type": "string",
-                                 "description": "传给脚本的参数，shlex 切分"},
-                    },
-                    "required": ["script_path"]},
-        fn=run_script))
+    reg.register(run_script)
 
 
 __all__ = ["register"]

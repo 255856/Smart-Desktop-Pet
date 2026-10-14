@@ -6,7 +6,8 @@ import re
 import urllib.parse
 from typing import Optional
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +22,25 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
         request_timeout_s: HTTP 超时
     """
 
+    @tool(
+        description="在网络上搜索关键词，返回前 N 条结果的标题/摘要/链接。"
+                    "主用 Tavily（advanced depth + 近 30 天过滤，结果更精准更新）；"
+                    "降级 DuckDuckGo（免 key）。"
+                    "**query 写法建议**：要拿时效性内容（如「最新一集」「最近新闻」「今年榜单」）时，"
+                    "请在 query 里加具体时间词（2024/2025/最新/本月/上周），否则容易搜到几年前的老内容。"
+                    "例：搜「无职转生 最新一集 剧情」不如「无职相对飞龙 2025 最新剧透」精准。"
+                    "可代替「打开浏览器搜 XXX」—— 你拿到结果后直接总结给用户，不要再说「已打开浏览器」。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "搜索关键词（必填）。时效性内容务必带年份/月份/最新等时间词。"},
+                "max_n": {"type": "integer",
+                          "description": "返回结果数，1~10，默认 5"},
+            },
+            "required": ["query"],
+        },
+    )
     def web_search(query: str, max_n: Optional[int] = None) -> str:
         """在网络上搜索 query，返回前 N 条结果的标题/摘要/链接（Markdown）。
 
@@ -75,27 +95,7 @@ def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
                     f"可让主人手动访问：https://www.bing.com/search?q="
                     + urllib.parse.quote(query.strip()))
 
-    reg.register(Tool(
-        name="web_search",
-        description="在网络上搜索关键词，返回前 N 条结果的标题/摘要/链接。"
-                    "主用 Tavily（advanced depth + 近 30 天过滤，结果更精准更新）；"
-                    "降级 DuckDuckGo（免 key）。"
-                    "**query 写法建议**：要拿时效性内容（如「最新一集」「最近新闻」「今年榜单」）时，"
-                    "请在 query 里加具体时间词（2024/2025/最新/本月/上周），否则容易搜到几年前的老内容。"
-                    "例：搜「无职转生 最新一集 剧情」不如「无职相对飞龙 2025 最新剧透」精准。"
-                    "可代替「打开浏览器搜 XXX」—— 你拿到结果后直接总结给用户，不要再说「已打开浏览器」。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string",
-                          "description": "搜索关键词（必填）。时效性内容务必带年份/月份/最新等时间词。"},
-                "max_n": {"type": "integer",
-                          "description": "返回结果数，1~10，默认 5"},
-            },
-            "required": ["query"],
-        },
-        fn=web_search,
-    ))
+    reg.register(web_search)
 
 
 def _tavily_search(query: str, n: int, api_key: str, timeout_s: float) -> list[dict]:

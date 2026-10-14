@@ -16,7 +16,8 @@ import platform
 import tempfile
 from pathlib import Path
 
-from ._core import Tool, ToolRegistry
+from ._core import ToolRegistry
+from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,17 @@ def _ocr(image_path: str) -> str:
 def register(reg: ToolRegistry) -> None:
     """注册 OCR 工具。"""
 
+    @tool(
+        description="对图片做 OCR（提取图中文字）。"
+                    "image_path 空则自动截屏后识别。"
+                    "需要先装 OCR 后端（winsdk 或 pytesseract+tesseract），"
+                    "否则会明确告诉你不可用——不可用时请不要凭猜测描述图片。",
+        parameters={"type": "object",
+                    "properties": {
+                        "image_path": {"type": "string",
+                                       "description": "图片路径（PNG/JPG），空则自动截屏"},
+                    }},
+    )
     def ocr_image(image_path: str = "") -> str:
         """对图片做 OCR（提取图中文字）。image_path 不传则截全屏后识别。"""
         tmp_path = None
@@ -147,17 +159,7 @@ def register(reg: ToolRegistry) -> None:
                 except OSError:
                     pass
 
-    reg.register(Tool(name="ocr_image",
-        description="对图片做 OCR（提取图中文字）。"
-                    "image_path 空则自动截屏后识别。"
-                    "需要先装 OCR 后端（winsdk 或 pytesseract+tesseract），"
-                    "否则会明确告诉你不可用——不可用时请不要凭猜测描述图片。",
-        parameters={"type": "object",
-                    "properties": {
-                        "image_path": {"type": "string",
-                                       "description": "图片路径（PNG/JPG），空则自动截屏"},
-                    }},
-        fn=ocr_image))
+    reg.register(ocr_image)
 
 
 __all__ = ["register"]
