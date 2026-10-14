@@ -179,6 +179,8 @@ class LangChainAgent:
         extra_docs_paths: Optional[list] = None,
         session_id: Optional[str] = None,
         session_store: Optional[Any] = None,
+        skills_dir: Optional[str] = None,
+        auto_load_skills: Optional[list] = None,
     ):
         self.llm_cfg = llm_cfg
         self.registry = registry
@@ -205,6 +207,10 @@ class LangChainAgent:
         self._extra_docs_paths: list = list(extra_docs_paths or [])
         # 缓存最近一次加载的项目指令(避免每次 _ensure_agent 重读)
         self._cached_project_docs: str = ""
+        # Skills:启动时加载的 skill 名字列表
+        self._skills_dir = skills_dir
+        self._auto_load_skills: list = list(auto_load_skills or [])
+        self._cached_skills: str = ""
         self._agent: Optional[Any] = None
         self._middlewares: Optional[list] = None  # 给测试/调试用
         # RiskyToolConfirm 控制器 —— 立刻建好,这样 confirm_tool_call /
@@ -467,7 +473,7 @@ class LangChainAgent:
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
 
-        # system_prompt = persona + 项目级指令(AGENTS.md / CLAUDE.md)
+        # system_prompt = persona + 项目级指令(AGENTS.md / CLAUDE.md) + skills
         # dynamic_prompt middleware 会在这个基础上再加反幻觉 / 时间 / confirm 协议
         try:
             from app.brain.project_docs import load_project_docs
@@ -477,9 +483,22 @@ class LangChainAgent:
         except Exception as e:  # noqa: BLE001
             log.warning("ProjectDocs 加载失败,降级无项目指令: %s", e)
             self._cached_project_docs = ""
+        try:
+            from app.brain.skills import load_skills
+            if self._skills_dir is not None:
+                self._cached_skills = load_skills(
+                    self._skills_dir, self._auto_load_skills or None,
+                )
+            else:
+                self._cached_skills = ""
+        except Exception as e:  # noqa: BLE001
+            log.warning("Skills 加载失败,降级无 skills: %s", e)
+            self._cached_skills = ""
         base_sp = self.persona or "你是一个有用的桌面助手。"
         if self._cached_project_docs:
             base_sp = base_sp + self._cached_project_docs
+        if self._cached_skills:
+            base_sp = base_sp + self._cached_skills
 
         self._agent = create_agent(
             model=self._model,
