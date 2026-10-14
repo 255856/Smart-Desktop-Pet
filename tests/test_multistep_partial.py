@@ -195,3 +195,35 @@ def test_partial_correction_is_capped_at_one():
     metas, _, _ = _collect(agent, "查一下广州天气，提醒我明天带伞")
     n = sum(1 for m in metas if m.get("event") == "partial_retry")
     assert n == 1, f"应该正好纠正一次，实际 {n}：{metas}"
+
+
+# ------------------------------------------------------ 空回复兜底（压测发现）
+
+
+def test_agent_never_emits_an_empty_bubble():
+    """任何路径都不许「一条文字都不给」。
+
+    压测抓到：主人的话跑了 6 轮、9 次工具调用，最后回复是空的。原有两条兜底
+    各有前提（要 executed_tools 非空 / 要 over_sanitized 为真），两条都不成立
+    时就什么都��不发——主人面对空气泡，这是最伤的 UX 失败模式。
+
+    这里构造最窄的缝：模型既没调工具、也没吐出任何内容。
+    """
+    from app.brain.agent import _EMPTY_REPLY_FALLBACK
+
+    class _SilentClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_stream_events(self, messages, tools=None, cancel_check=None,
+                                     force_tool_use=False):
+            self.calls += 1
+            # 既无 content 也无 tool_calls：finish 一律空
+            yield "finish", {"content": "", "tool_calls": [], "reason": "stop"}
+
+    agent = AgentLoop(_SilentClient(), _Reg(["get_weather"]), max_turns=3)
+    _, _, texts = _collect(agent, "你好呀")
+    assert texts, "一条文字都没产出——主人会看到空气泡"
+    assert "".join(texts).strip(), "产出的是空白"
+    assert "".join(texts) == _EMPTY_REPLY_FALLBACK
+

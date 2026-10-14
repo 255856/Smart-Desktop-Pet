@@ -876,5 +876,15 @@ class AgentLoop:
             log.warning("AgentLoop: 输出被过度清洗且无工具兜底，使用空回复话术")
             yield "text", final_text
 
+        # 兜底三：**无条件**。上面两条兜底各有前提（要 executed_tools 非空、
+        # 要 over_sanitized 为真），两条都不成立时主人就只能对着空气泡。
+        # 压测抓到过：「记一下我讨厌香菜，然后提醒我今晚吃饭」跑了 6 轮、
+        # 9 次工具调用，最后一条文字都没产出。
+        # 让主人面对空气泡是最伤的 UX 失败模式——宁可给一句诚实的「我没说完」。
+        if not final_text.strip():
+            final_text = _EMPTY_REPLY_FALLBACK
+            log.warning("AgentLoop: 所有路径都没产出文字，使用空回复兜底话术")
+            yield "text", final_text
+
         yield "done", final_text
 
