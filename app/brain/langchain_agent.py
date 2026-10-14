@@ -341,7 +341,7 @@ class LangChainAgent:
 
     def _build_model(self) -> ChatOpenAI:
         """OpenAI 兼容协议（DeepSeek / minimax / Ollama / 任何 base_url）。"""
-        return ChatOpenAI(
+        kwargs = dict(
             base_url=self.llm_cfg.base_url,
             api_key=self.llm_cfg.api_key or "EMPTY",     # Ollama 接受任意非空字符串
             model=self.llm_cfg.model,
@@ -350,6 +350,12 @@ class LangChainAgent:
             timeout=self.llm_cfg.timeout,
             streaming=True,
         )
+        # 推理强度:OpenAI o1/o3、部分推理模型支持。
+        # 没设或为空就不传(避免给不支持的后端塞错字段报错)。
+        effort = getattr(self.llm_cfg, "reasoning_effort", None)
+        if effort:
+            kwargs["reasoning_effort"] = effort
+        return ChatOpenAI(**kwargs)
 
     async def _build_checkpointer(self):
         """构建 AsyncSqliteSaver 实例（已 aenter，可直接给 create_agent 用）。

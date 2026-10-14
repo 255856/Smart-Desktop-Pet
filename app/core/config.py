@@ -18,6 +18,10 @@ class LLMConfig(BaseModel):
     temperature: float = 0.8
     max_tokens: int = 1024
     timeout: int = 60
+    # 推理强度:仅 OpenAI o1/o3 / 部分推理模型支持(DeepSeek-R1 / MiniMax 也可能)。
+    # "low" / "medium" / "high",None 表示不传(让后端用默认)。
+    # 主程序可让主人按场景调:闲聊低、复杂任务高。
+    reasoning_effort: Optional[str] = None
 
 
 class VoiceProfile(BaseModel):
@@ -136,9 +140,15 @@ class ChatConfig(BaseModel):
     解决「每个上层各自传 llm_cfg,忘了设超时」的硬编码问题。0 表示无限等待。
     show_tool_steps: 在 AI 气泡上方展示「已执行操作 · N」卡片（工具名/参数/成败），
         关闭后气泡更简洁，但主人看不到工具调用历史。默认 True（保持现状）。
+    user_avatar_path: 主人头像图片绝对路径(PNG/JPG)。空 = 用默认首字「我」头像。
+        文件由 ChatWindow 持久化到 data/avatars/user.png，不入库。
+    bot_avatar_path: 桌宠头像图片绝对路径。空 = 用 assets/icon.ico → 角色首帧回退。
+        文件由 ChatWindow 持久化到 data/avatars/bot.png。
     """
     request_timeout_s: int = 20
     show_tool_steps: bool = True
+    user_avatar_path: str = ""
+    bot_avatar_path: str = ""
 
 
 class BrainConfig(BaseModel):
@@ -244,8 +254,31 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     return Config.model_validate(merged)
 
 
+def save_chat_overrides(path: str | Path, cfg: Config) -> None:
+    """把 cfg.chat 的 3 个可改字段(user_avatar_path / bot_avatar_path / show_tool_steps /
+    request_timeout_s)写回 config.yaml 的 chat: 段(merge,不动其它段)。
+
+    用途：用户从 UI 改了头像/工具步骤开关,需要持久化到磁盘。
+    不重写整个 yaml(避免覆盖用户手工改的 llm/character 段)。
+    """
+    p = Path(path)
+    raw: dict[str, Any] = {}
+    if p.is_file():
+        with p.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    raw.setdefault("chat", {})
+    # 同步 chat 段里的可改字段
+    raw["chat"]["user_avatar_path"] = cfg.chat.user_avatar_path
+    raw["chat"]["bot_avatar_path"] = cfg.chat.bot_avatar_path
+    raw["chat"]["show_tool_steps"] = cfg.chat.show_tool_steps
+    raw["chat"]["request_timeout_s"] = cfg.chat.request_timeout_s
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
+
+
 __all__ = [
-    "Config", "load_config",
+    "Config", "load_config", "save_chat_overrides",
     "LLMConfig", "CharacterConfig", "WindowConfig", "ReminderConfig",
     "AppConfig", "SpriteConfig", "ASRConfig", "BrainConfig",
     "AgentConfig", "LangChainConfig", "MCPConfig", "ChatConfig",

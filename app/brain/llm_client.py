@@ -663,13 +663,18 @@ class LLMClient:
     def _build_payload(self, messages: list[ChatMessage]) -> dict:
         full = [ChatMessage(role="system", content=self.system_prompt).__dict__]
         full.extend({"role": m.role, "content": m.content} for m in messages)
-        return {
+        payload = {
             "model": self.cfg.model,
             "messages": full,
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
             "stream": self.cfg.stream,
         }
+        # 推理强度:仅推理模型支持;非空才带,免得给不支持的后端传错字段
+        effort = getattr(self.cfg, "reasoning_effort", None)
+        if effort:
+            payload["reasoning_effort"] = effort
+        return payload
 
     # -------------------- 视觉输入 --------------------
     @staticmethod
@@ -923,6 +928,10 @@ class LLMClient:
             "max_tokens": self.cfg.max_tokens,
             "stream": True,
         }
+        # 推理强度:仅推理模型支持;非空才带
+        effort = getattr(self.cfg, "reasoning_effort", None)
+        if effort:
+            payload["reasoning_effort"] = effort
         if tools:
             payload["tools"] = tools
             if tool_choice:
