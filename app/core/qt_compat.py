@@ -4,7 +4,7 @@ from __future__ import annotations
 try:
     from PyQt5 import QtCore
     from PyQt5.QtCore import (
-        pyqtSignal as Signal, pyqtSlot as Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
+        pyqtSignal as Signal, pyqtSlot as Slot, pyqtSlot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
         QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray, QSettings,
     )
     from PyQt5.QtCore import Qt as _Qt
@@ -62,6 +62,7 @@ except ImportError:
     # PySide6 fallback（开发环境备用）
     from PySide6 import QtCore
     from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray, QSettings
+    from PySide6.QtCore import Slot as pyqtSlot
     from PySide6.QtGui import (
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
@@ -136,7 +137,7 @@ def is_qobject_alive(obj) -> bool:
 
 
 __all__ = [
-    "BACKEND", "Signal", "Slot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
+    "BACKEND", "Signal", "Slot", "pyqtSlot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
     "QEventLoop", "QEvent", "QUrl", "QBuffer", "QByteArray", "QSettings",
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",

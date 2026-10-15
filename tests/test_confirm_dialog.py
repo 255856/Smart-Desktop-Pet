@@ -181,3 +181,110 @@ class TestConfirmBypassRegression:
             "send_email 在 _RISKY_TOOLS 但不在 DANGEROUS_TOOLS 之类。"
             "如果列表已统一,这个测试可以删,但仍建议保留 audit 防回潮。"
         )
+
+
+class TestConfirmCrossThreadDispatch:
+    """2026-10-15:用户实测「高危操作没弹窗」+ probe 复现 root cause:
+    _confirm_dangerous_tool 在 child thread 调 QTimer.singleShot(0, lambda: ...)
+    投递任务到主线程 —— PyQt5 5.x 的 QTimer.singleShot 在 child thread 调用时
+    内部创建的 QTimer 是 child thread-owned,child thread 没 event loop →
+    永远不 fire,弹窗代码根本不被主线程派发,变成 60s 静默超时。
+
+    修复:改用 QMetaObject.invokeMethod + Qt.QueuedConnection(官方保证跨线程)。
+    关键:被 invokeMethod 调的方法必须存在且是 @pyqtSlot 装饰的方法名,
+    callback 自身通过 self._pending_confirm_dispatch 间接调用(Q_ARG 传 callable
+    不被 Qt 5 接受)。
+
+    这个测试类做源码静态守卫:确保 _confirm_dangerous_tool 真的用 invokeMethod,
+    而不是又回退到 QTimer.singleShot(会让用户实测再次失败)。
+    """
+
+    def test_confirm_uses_invokemethod_not_single_shot(self):
+        """_confirm_dangerous_tool 里不能再用 QTimer.singleShot(0, lambda ...) 跨线程投递。
+        PyQt5 5.x 在 child thread 调 singleShot 会被静默丢(用户实测 bug 7 root cause)。
+        但允许 singleShot(0, self._xxx) 这种主线程兜底调用(例如 _close_confirm_box)。
+        """
+        import ast
+        from pathlib import Path
+        src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_confirm_dangerous_tool":
+                target = node
+                break
+        assert target is not None
+        # 找 singleShot(0, <lambda>) 或 singleShot(<int>, <lambda>) 调用
+        # 模式:second arg 是 Lambda,意味着 cross-thread 投递
+        for sub in ast.walk(target):
+            if (isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "singleShot"
+                    and len(sub.args) >= 2
+                    and isinstance(sub.args[1], ast.Lambda)):
+                pytest.fail(
+                    "_confirm_dangerous_tool 不能再用 QTimer.singleShot(N, lambda ...) —— "
+                    "child thread 调用会被 PyQt5 静默丢,弹窗永远不出现。"
+                    "改用 QMetaObject.invokeMethod + Qt.QueuedConnection。"
+                )
+
+    def test_confirm_uses_invokemethod_invokeMethod_call(self):
+        """反向守卫:必须存在 QMetaObject.invokeMethod 调用,目标方法是
+        _invoke_confirm_dispatch_slot。"""
+        import ast
+        from pathlib import Path
+        src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        # 找 _confirm_dangerous_tool 函数
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_confirm_dangerous_tool":
+                target = node
+                break
+        assert target is not None
+        # 必须有 QMetaObject.invokeMethod 调用
+        found_invoke = False
+        for sub in ast.walk(target):
+            if (isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "invokeMethod"):
+                found_invoke = True
+                # 第二个位置参数应该是字符串 literal "_invoke_confirm_dispatch_slot"
+                if len(sub.args) >= 2 and isinstance(sub.args[1], ast.Constant):
+                    assert sub.args[1].value == "_invoke_confirm_dispatch_slot", (
+                        f"invokeMethod 目标方法必须是 '_invoke_confirm_dispatch_slot',"
+                        f"实际 {sub.args[1].value!r}"
+                    )
+        assert found_invoke, (
+            "_confirm_dangerous_tool 必须用 QMetaObject.invokeMethod 跨线程投递弹窗任务"
+        )
+
+    def test_dispatch_slot_decorated_with_pyqtSlot(self):
+        """_invoke_confirm_dispatch_slot 必须用 @pyqtSlot 装饰,否则 QMetaObject.invokeMethod
+        找不到该方法(QMetaObject::invokeMethod: No such method)。"""
+        import ast
+        from pathlib import Path
+        src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_invoke_confirm_dispatch_slot":
+                target = node
+                break
+        assert target is not None, "_invoke_confirm_dispatch_slot 必须存在"
+        # 检查装饰器
+        deco_names = []
+        for deco in target.decorator_list:
+            if isinstance(deco, ast.Name):
+                deco_names.append(deco.id)
+            elif isinstance(deco, ast.Attribute):
+                deco_names.append(deco.attr)
+            elif isinstance(deco, ast.Call) and isinstance(deco.func, ast.Name):
+                deco_names.append(deco.func.id)
+            elif isinstance(deco, ast.Call) and isinstance(deco.func, ast.Attribute):
+                deco_names.append(deco.func.attr)
+        assert any("pyqtSlot" in n for n in deco_names), (
+            f"_invoke_confirm_dispatch_slot 必须有 @pyqtSlot 装饰,"
+            f"否则 QMetaObject.invokeMethod 找不到它。"
+            f"实际装饰器: {deco_names}"
+        )

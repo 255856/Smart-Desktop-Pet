@@ -41,7 +41,7 @@ from app.core.qt_compat import (
     Qt, QTextBrowser, QTextCursor, QToolButton,
     QVBoxLayout, QWidget, Signal, QTimer, QColor, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
-    QBuffer, QByteArray,
+    QBuffer, QByteArray, pyqtSlot,
 )
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
@@ -1286,9 +1286,39 @@ class ChatWindow(QWidget):
             result["ok"] = ok
             result_event.set()    # 唤醒子线程 wait()
 
-        QTimer.singleShot(
-            0,
-            lambda: self._show_confirm_box(name, args_pretty, _on_result))
+        # 2026-10-15 关键修复(用户实测 + probe 复现):
+        # 之前 QTimer.singleShot(0, lambda) 跨 child thread → main thread
+        # 投递,在 PyQt5 5.x 上静默失败 —— QTimer 是 child thread-owned,
+        # child thread 没 event loop,永远不 fire。这是用户反馈
+        # 「高危工具没弹窗」的真因:模型调 lock_screen,中间件拦下来 →
+        # _confirm_dangerous_tool 走 QTimer.singleShot → 静默挂死 → 60s 后
+        # 子线程 wait 超时 → 拒绝执行,弹窗根本不会出现。
+        #
+        # 唯一可靠的跨线程投递方式: QMetaObject.invokeMethod + Qt.QueuedConnection。
+        # 这是 Qt 官方保证的方式 —— Qt 在主线程 event queue 投递一个
+        # QEvent::MetaCall,主线程派发时调 slot。child thread 不需要 event loop。
+        # 关键约束:被 invokeMethod 调的方法必须是已定义的 slot(@pyqtSlot 装饰),
+        # 用动态字符串 invokeMethod 是 PyQt5 不支持的。
+        # 解法:chat_window 上挂一个固定 slot `_invoke_confirm_dispatch_slot`,
+        # 内部读 `self._pending_confirm_dispatch` 决定要调哪个 lambda。
+        # 同时只能有一个 _confirm_dangerous_tool 在飞(被 _confirm_in_progress 锁
+        # 保证),所以单 slot 够用。
+        self._pending_confirm_dispatch = lambda: self._show_confirm_box(
+            name, args_pretty, _on_result,
+        )
+        from PyQt5.QtCore import QMetaObject
+        from app.core.qt_compat import Qt as _Qt
+        # PyQt5 5.x 上 invokeMethod 返回值不可靠(可能 None/0/1 都出现),
+        # 但实际 slot 派发是工作正常的(slot 被主线程调到了)。所以不去看 ok 值,
+        # 而是在 slot 里检查 _pending_confirm_dispatch 是否还在,如果 invokeMethod
+        # 真的派发了,主线程派发 slot 时会调 fn,result_event 会被 set。
+        # 如果 invokeMethod 失败,主线程不会派发 slot,result_event 永远不 set,
+        # 子线程 wait 超时后走 60s 超时路径。
+        QMetaObject.invokeMethod(
+            self,
+            "_invoke_confirm_dispatch_slot",
+            _Qt.QueuedConnection,
+        )
         # 子线程阻塞等主线程弹完弹窗（60s 超时防卡死）
         if not result_event.wait(timeout=_CONFIRM_TIMEOUT_S):
             # 超时：把还留在屏幕上的弹窗关掉。原实现直接 return，
@@ -1314,6 +1344,26 @@ class ChatWindow(QWidget):
             pass
         except Exception:  # noqa: BLE001
             log.debug("关闭确认弹窗失败", exc_info=True)
+
+    @pyqtSlot()
+    def _invoke_confirm_dispatch_slot(self) -> None:
+        """主线程槽:QMetaObject.invokeMethod + QueuedConnection 跨线程投递后,
+        主线程 event loop 派发到这里。读 self._pending_confirm_dispatch 调真版。
+
+        为什么不用 QTimer.singleShot:PyQt5 5.x 在 child thread 调
+        QTimer.singleShot(0, lambda) 时,内部创建的 QTimer 是 child thread-owned,
+        child thread 没 event loop → 永远不 fire,弹窗静默挂死(用户实测)。
+        QMetaObject.invokeMethod 是 Qt 官方保证的跨线程 slot 调用方式。
+        """
+        fn = getattr(self, "_pending_confirm_dispatch", None)
+        if fn is None:
+            return
+        # 清掉 attribute 后再调 fn,避免 fn 内重入导致 attribute 还在
+        self._pending_confirm_dispatch = None
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            log.exception("_invoke_confirm_dispatch_slot 异常")
 
     def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
         """主线程槽：弹 QMessageBox → 调 on_done（Event.set() 唤醒子线程）。"""
