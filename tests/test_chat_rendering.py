@@ -873,7 +873,9 @@ def test_v6_command_completer_textChanged():
 
 
 def test_v6_english_commands_with_plan_skills():
-    """v6 调整 3: 命令改为英文, 加 /plan / /skills。"""
+    """v6 调整 3: 命令改为英文, 加 /plan / /skills。
+    v7 升级: /help 输出的 helper 文案改成中文 ('常用命令'), 命令字面量保留英文。
+    """
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
 
@@ -898,49 +900,73 @@ def test_v6_english_commands_with_plan_skills():
     # _handle_command 接受英文命令 (直接调, 不通过按钮)
     # /help 路径: 走 if cmd in ("/help", "/?") 分支, 调用 _render_message 输出到 chat_view
     cw._handle_command("/help")
-    # 验证 chat_view 内容含 "Common commands"
+    # v7: 帮助文案改成中文, "常用命令" 是关键 marker
     text = cw.chat_view.toPlainText()
-    assert "Common commands" in text, (
-        f"/help 必须在 chat_view 里渲染 Common commands 列表. 实际: {text!r}"
+    assert "常用命令" in text, (
+        f"/help 必须在 chat_view 里渲染「常用命令」列表. 实际: {text!r}"
+    )
+    # 命令字面量仍然以 / 开头 + 英文显示 (cmd 列里也仍可见)
+    assert "/help" in text and "/plan" in text and "/skills" in text, (
+        f"/help 输出应保留英文命令字面量. 实际: {text!r}"
     )
 
-    print("[OK] v6: 命令改英文 + 加 /plan / /skills")
+    print("[OK] v6/v7: 命令改英文 + /plan / /skills + 帮助文案中文化")
 
 
-def test_v6_ast_guard_no_chinese_commands():
-    """AST 守卫: chat_window/_handle_command 里不能有中文命令字符串。
-    防止下次重构又把 /帮助 /记忆 /时间 等加回去。
+def test_v7_ast_guard_command_literals_english():
+    """v7 AST 守卫: _handle_command 体内所有「命令字面量」(以 / 开始的字符串
+    literal, 长度 1~32) 都必须是英文 (ASCII), 用来防止下次重构把
+    /帮助 /记忆 /时间 等中文命令又加回比较分支。
+
+    v6 旧版是「体内不允许有任何中文字符」, 太严格了 —— 把 UI 文案改成中文后就
+    会误伤。改成精确匹配: 只检查「形似命令」的字符串 literal, 不碰叙述性中文。
     """
     import ast as _ast
+    import re as _re
+
     src_path = (Path(__file__).resolve().parent.parent
                 / "app" / "ui" / "chat_window" / "__init__.py")
     src = src_path.read_text(encoding="utf-8")
     tree = _ast.parse(src)
-    for node in _ast.walk(tree):
-        if (isinstance(node, _ast.FunctionDef)
-                and node.name == "_handle_command"):
-            body_nodes = node.body
-            if (body_nodes
-                    and isinstance(body_nodes[0], _ast.Expr)
-                    and isinstance(body_nodes[0].value, _ast.Constant)
-                    and isinstance(body_nodes[0].value.value, str)):
-                body_nodes = body_nodes[1:]
-            body_src = ' '.join(_ast.dump(s) for s in body_nodes)
-            # 不能有中文命令字符串 (chinese chars in command checks)
-            for ch in body_src:
-                if '一' <= ch <= '鿿':
-                    raise AssertionError(
-                        f"_handle_command 体内不能有中文字符 (用户实测命令需要用英文), "
-                        f"实际: {body_src[:200]}"
-                    )
-            # 必须有 /plan / /skills / /help / /memory (字符串字面量, 不带引号
-            # 因为 _ast.dump 不保留字符串引号)
-            for cmd_name in ("/plan", "/skills", "/help", "/memory"):
-                assert cmd_name in body_src, (
-                    f"_handle_command 缺 {cmd_name} 路径"
-                )
-            print("[OK] AST 守卫: _handle_command 无中文命令 + 含 /plan / /skills")
-            return
+
+    # 类似「命令 literal」的字符串匹配规则: 1~32 字符, 必须以 "/" 开头, 不含空格
+    cmd_pat = _re.compile(r"^/[A-Za-z0-9_\-?]{0,31}$")
+
+    for fn in _ast.walk(tree):
+        if not (isinstance(fn, _ast.FunctionDef)
+                and fn.name == "_handle_command"):
+            continue
+        # 扫函数体里所有 ast.Constant 字符串 literal (跳过 docstring 头一条)
+        body = fn.body
+        if (body and isinstance(body[0], _ast.Expr)
+                and isinstance(body[0].value, _ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body = body[1:]
+        bad: list[str] = []
+        for sub in _ast.walk(fn):
+            if not isinstance(sub, _ast.Constant):
+                continue
+            if not isinstance(sub.value, str):
+                continue
+            v = sub.value
+            if not cmd_pat.match(v):
+                continue
+            # 必须是纯英文 ASCII
+            for ch in v:
+                if not (ch.isascii() and ch != ""):
+                    bad.append(v)
+                    break
+        assert not bad, (
+            f"_handle_command 体内有非英文命令字面量 (用户实测命令需英文): {bad}"
+        )
+        # 必须有 /plan / /skills / /help / /memory 的分支 (确保 v6 的命令都在)
+        body_dump = ' '.join(_ast.dump(n) for n in body)
+        for cmd_name in ("/plan", "/skills", "/help", "/memory"):
+            assert cmd_name in body_dump, (
+                f"_handle_command 缺 {cmd_name} 分支"
+            )
+        print("[OK] v7 AST 守卫: 命令字面量全部纯英文 (含 /plan / /skills)")
+        return
     raise AssertionError("_handle_command 函数未找到")
 
 
