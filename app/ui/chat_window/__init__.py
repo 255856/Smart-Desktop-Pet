@@ -35,6 +35,29 @@ def _safe_qapp():
     except Exception:  # noqa: BLE001
         return None
 
+
+def _convert_loaded_tools(stored_tools):
+    """把 ChatStore 读回的 tools（JSON 序列化的 list-of-lists）转为
+    Message dataclass 期望的 list[tuple[str, str, str]] 形态。
+
+    SQLite 里存的是 tools_json = JSON，每个工具是 [name, args, result] 三元 list。
+    _on_done 里写入是 tools_list = [list(t) for t in self._current_bot_msg.tools]，
+    反序列化后应当还原成 tuple 给 Message(... tools=...)，否则 _msg_html 渲染时
+    isintance 检查失败，"已执行操作" 工具卡片丢失（Bug 2：重进聊天窗没工具信息）。
+
+    兼容旧版 2 元组 (name, summary)；丢掉一切损坏项（避免单条坏数据搞挂整次加载）。
+    """
+    out = []
+    for t in (stored_tools or []):
+        if isinstance(t, (list, tuple)) and len(t) >= 3:
+            out.append((str(t[0]), str(t[1]), str(t[2])))
+        elif isinstance(t, (list, tuple)) and len(t) == 2:
+            # 旧版 2 元组 (name, summary)
+            out.append((str(t[0]), "", str(t[1])))
+        # 其他形态：跳过（防御性，不抛）
+    return out
+
+
 from app.core.qt_compat import (
     QApplication, QFileDialog, QFont, QFrame, QHBoxLayout, QKeyEvent,
     QLabel, QMenu, QMessageBox, QPixmap, QPlainTextEdit, QPushButton,
@@ -892,7 +915,12 @@ class ChatWindow(QWidget):
                     emotion = Emotion(sm.emotion)
                 except ValueError:
                     pass
-            msg = Message(role=sm.role, content=sm.content, emotion=emotion)
+            # 把 ChatStore 反序列化的 list-of-lists 还原成 tuple，让 Message 的
+            # tools 字段在重进聊天窗时也被填上（Bug 2：旧版 _load_history 没传
+            # sm.tools，导致"已执行操作"卡片丢失）。
+            tools_loaded = _convert_loaded_tools(sm.tools)
+            msg = Message(role=sm.role, content=sm.content,
+                          emotion=emotion, tools=tools_loaded)
             self._render_message(msg)
             self.history.append(msg)
         # 历史是从磁盘读的，可能远超过条数/字符上限（ChatStore 存 200 条）。
@@ -1612,6 +1640,11 @@ class ChatWindow(QWidget):
 
         2026-10-15:也处理外部链接(http/https),因为 setOpenExternalLinks(False)
         关掉了自动打开,需要我们手动用 QDesktopServices.openUrl。
+
+        2026-10-15 v2:加 _current_bot_msg 守卫 —— _on_done 后 _current_bot_msg
+        被设成 None,这时点链接会走到 _render_message(None) 把整个 chat 写空
+        (用户实测 chat 突然变空白)。新状态保留在 self._tools_collapsed,
+        下次 _render_message 新 bot 消息时自动生效。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
@@ -1625,8 +1658,9 @@ class ChatWindow(QWidget):
             if cmd == "toggle_tools":
                 self._tools_collapsed = not getattr(
                     self, "_tools_collapsed", True)
-                # 重新渲染当前 bot message 段
-                if self._current_bot_msg is not None:
+                # 只在 bot 消息还在「流式/未完成」时 refresh(已有 anchor)
+                if (self._current_bot_msg is not None
+                        and getattr(self, "_streaming_anchor_pos", None) is not None):
                     self._refresh_streaming_message()
             return
         # 外部链接:手动打开(setOpenExternalLinks=False 不会自动开)

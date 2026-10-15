@@ -450,4 +450,128 @@ def test_set_custom_avatar_copies_and_persists():
         finally:
             os.chdir(old_cwd)
     print("[OK] _set_custom_avatar copies file, updates state, persists to config.yaml")
+
+
+# ============================================================
+# Bug 2 regression: 重进聊天窗，"已执行操作" 工具卡片必须被加载
+# ============================================================
+
+def test_bug2_convert_loaded_tools_purity():
+    """Bug 2 单元层：JSON 反序列化后 tools 是 list-of-lists。
+    _convert_loaded_tools 必须把它还原成 list[tuple[str,str,str]]
+    —— Message(tools=...) 不传/传错都会让 _msg_html 渲染时丢掉"已执行操作"卡片。
+    """
+    from app.ui.chat_window import _convert_loaded_tools
+    # 基本 3 元 list (真实 SQLite 反序列化形态)
+    assert _convert_loaded_tools([
+        ["add_reminder", '{"content":"今晚 7 点开会"}', "已设置提醒"],
+    ]) == [("add_reminder", '{"content":"今晚 7 点开会"}', "已设置提醒")]
+    # 元组输入（万一某些路径走 cached）
+    assert _convert_loaded_tools([
+        ("add_reminder", '{"x":1}', "ok"),
+    ]) == [("add_reminder", '{"x":1}', "ok")]
+    # 旧版 2 元组 (name, summary) 兼容
+    assert _convert_loaded_tools([
+        ("calculate", "结果是7"),
+    ]) == [("calculate", "", "结果是7")]
+    # 空 / None / 损坏项：不要抛，留空
+    assert _convert_loaded_tools([]) == []
+    assert _convert_loaded_tools(None) == []
+    assert _convert_loaded_tools(["garbage", 42, {"k": "v"}]) == []
+    print("[OK] Bug 2: _convert_loaded_tools 反序列化兜底")
+
+def test_bug2_end_to_end_sqlite_round_trip():
+    """Bug 2 穿透层：完整 SQLite IO 链路。
+    ChatStore.add(tools=...) → JSON 落盘 → chat_store.all() → 反序列化
+    → _convert_loaded_tools → Message.tools 必须被填回。
+    """
+    from app.engine.chat_store import ChatStore
+    from app.ui.chat_window.message import Message
+    from app.ui.chat_window import _convert_loaded_tools
+
+    tmp = Path(tempfile.mkdtemp(prefix="chatstore_bug2_"))
+    db = tmp / "chat.db"
+    cs = ChatStore(str(db))
+    # 这就是 _on_done 真写入 ChatStore 的形态（_on_done 里
+    # tools_list = [list(t) for t in self._current_bot_msg.tools]）
+    cs.add("user", "今晚 7 点提醒我开会", emotion="")
+    cs.add("assistant", "好的，已经设置好提醒啦~", emotion="happy",
+           tools=[["add_reminder", '{"content":"今晚 7 点开会"}', "已设置提醒"]],
+           )
+    stored = cs.all()
+    assert len(stored) == 2
+    bot = [m for m in stored if m.role == "assistant"][0]
+    # 验证 SQLite 反序列化形态
+    assert isinstance(bot.tools[0], list), \
+        f"反序列化后应是 list-of-lists: {bot.tools!r}"
+    # 走真实 _load_history 调用接线（同源代码内的转换）
+    tools_loaded = _convert_loaded_tools(bot.tools)
+    msg = Message(role=bot.role, content=bot.content, emotion=None,
+                  tools=tools_loaded)
+    assert msg.tools == [
+        ("add_reminder", '{"content":"今晚 7 点开会"}', "已设置提醒"),
+    ], msg.tools
+    print("[OK] Bug 2: ChatStore → 反序列化 → Message.tools 走通真实链路")
+
+def test_bug2_ast_guard_load_history_uses_helper():
+    """Bug 2 AST 守卫：保证下次有人重构 _load_history 时，不会偷偷把
+    _convert_loaded_tools(sm.tools) 这条接线去掉。
+    """
+    import ast as _ast
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "ui" / "chat_window" / "__init__.py").read_text(
+        encoding="utf-8",
+    )
+    tree = _ast.parse(src)
+    found_helper = False
+    found_tools_attr = False
+    found_tools_loaded = False
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == "_load_history":
+            for sub in _ast.walk(node):
+                if isinstance(sub, _ast.Call):
+                    func = sub.func
+                    if (isinstance(func, _ast.Name)
+                            and func.id == "_convert_loaded_tools"):
+                        found_helper = True
+                        if (sub.args
+                                and isinstance(sub.args[0], _ast.Attribute)):
+                            found_tools_attr = True
+                if isinstance(sub, _ast.Name) and sub.id == "tools_loaded":
+                    found_tools_loaded = True
+    assert found_helper, "_load_history 没调 _convert_loaded_tools"
+    assert found_tools_attr, "_convert_loaded_tools 参数不是 .tools 属性访问"
+    assert found_tools_loaded, "tools_loaded 没被使用 (没传给 Message)"
+    print("[OK] Bug 2 AST 守卫: _load_history 真在调 _convert_loaded_tools(sm.tools)")
+
+
+def test_bug1_ast_guard_anchor_click_doesnt_refresh_when_done():
+    """Bug 1 AST 守卫: 点 chat 上的 cmd:toggle_tools 链接 (post _on_done)
+    时, _on_chat_anchor_clicked 不能调 _refresh_streaming_message。
+    这是因为 _on_done 之后 _current_bot_msg = None, _streaming_anchor_pos = None,
+    此时调用 _refresh_streaming_message 会因为 anchor 不存在而把整段 HTML 抹掉 → 空白。"""
+    import ast as _ast
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "ui" / "chat_window" / "__init__.py").read_text(
+        encoding="utf-8",
+    )
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.FunctionDef)
+                and node.name == "_on_chat_anchor_clicked"):
+            body_src = _ast.dump(node)
+            # 必须有守卫（_current_bot_msg 检查 + _streaming_anchor_pos 检查）
+            assert "_current_bot_msg" in body_src
+            assert "_streaming_anchor_pos" in body_src
+            # 守卫必须在 _refresh_streaming_message 之前出现
+            pos_guard = body_src.find("_current_bot_msg")
+            pos_refresh = body_src.find("_refresh_streaming_message")
+            assert pos_guard < pos_refresh, (
+                "_current_bot_msg 守卫必须在 _refresh_streaming_message 之前"
+            )
+            print("[OK] Bug 1 AST 守卫: anchor click 不会在 _current_bot_msg=None 时 refresh")
+            return
+    raise AssertionError("_on_chat_anchor_clicked 函数未找到")
+
+
     print("All chat rendering tests passed!")
