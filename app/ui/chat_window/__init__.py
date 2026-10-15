@@ -258,12 +258,9 @@ class ChatWindow(QWidget):
         # 富文本圆形头像（QTextBrowser 对 document 资源在 clear() 后会失效，
         # 改用自包含的 data URI：<img src="data:image/png;base64,...">）
         self._avatar_data_bot: str = ""
-        self._avatar_data_user: str = ""
-        # 2026-10-14 美化：用户和桌宠头像可自定义(从 chat_cfg.user_avatar_path / bot_avatar_path 读)
-        # 空字符串 = 走原默认(桌宠用 assets/icon.ico 回退 / 用户用首字+渐变)
-        self._user_avatar_path: str = (
-            chat_cfg.user_avatar_path if chat_cfg is not None else ""
-        ) or ""
+        # 2026-10-15 v2: 用户头像已移除(用户实测指定"把更改头像中的我的头像功能去除,
+        # 只保留桌宠头像"), 不再需要 _avatar_data_user / _user_avatar_path。
+        # 桌宠头像保留 (chat_cfg.bot_avatar_path)。
         self._bot_avatar_path: str = (
             chat_cfg.bot_avatar_path if chat_cfg is not None else ""
         ) or ""
@@ -314,14 +311,43 @@ class ChatWindow(QWidget):
     def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
         """生成圆形头像 QPixmap（外圈 2px 白边）。
 
-        2026-10-14 美化：用户和桌宠头像可自定义。优先级：
-            1) self._<role>_avatar_path（用户在设置面板选的图，已持久化到 data/avatars/）
-            2) bot 默认 assets/icon.ico → 角色首帧；user 默认首字「我」+ 蓝色渐变
-
-        bot 角色：统一使用项目图标 assets/icon.ico（居中裁剪成圆）；
-                  图标缺失时回退角色首帧，再无图则用首字 + 粉紫渐变。
-        user 角色：首字「我」+ 蓝色渐变。
+        2026-10-15 v2:用户头像已移除,_make_avatar_pixmap('user', ...) 现在
+        直接返回空 QPixmap(不再生成「我」字蓝渐变)。chat 内部不再 render
+        用户头像,所以这个方法对 user 角色来说没用了, 但保留入口以防
+        外部代码意外调用, 给出空 pixmap 比生成假图更安全。
         """
+        if role != "bot":
+            # user 角色已禁用,返回空 pixmap
+            return QPixmap()
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+
+        # 1) 优先用用户自定义头像
+        custom = self._load_custom_avatar_pixmap("bot")
+        if custom is not None and not custom.isNull():
+            self._draw_avatar_from_pixmap(p, custom, size)
+            p.end()
+            return pm
+
+        # bot 默认: assets/icon.ico → 角色首帧 → 首字渐变
+        icon = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
+        src = QPixmap(str(icon)) if icon.is_file() else QPixmap()
+        if src.isNull() and self._avatar_path:
+            src = QPixmap(str(self._avatar_path))
+        if not src.isNull():
+            self._draw_avatar_from_pixmap(p, src, size)
+        else:
+            grad = QLinearGradient(0, 0, size, size)
+            grad.setColorAt(0.0, QColor("#f9a8d4"))
+            grad.setColorAt(1.0, QColor("#ec6aa9"))
+            p.setBrush(grad)
+            p.drawEllipse(0, 0, size, size)
+            self._draw_avatar_char(p, (self.char_cfg.name or "宠")[:1], size)
+        p.end()
+        return pm
         pm = QPixmap(size, size)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
@@ -361,10 +387,13 @@ class ChatWindow(QWidget):
         return pm
 
     def _load_custom_avatar_pixmap(self, role: str) -> Optional[QPixmap]:
-        """读用户自定义头像(返回 None = 没设/读不到,继续走默认)。"""
-        path = (
-            self._user_avatar_path if role == "user" else self._bot_avatar_path
-        )
+        """读用户自定义头像(返回 None = 没设/读不到,继续走默认)。
+
+        2026-10-15 v2: 只支持 bot (桌宠) 角色;user 角色已移除。
+        """
+        if role != "bot":
+            return None
+        path = self._bot_avatar_path
         if not path:
             return None
         p = Path(path)
@@ -415,9 +444,11 @@ class ChatWindow(QWidget):
         return "data:image/png;base64," + base64.b64encode(bytes(ba)).decode("ascii")
 
     def _register_avatar_resources(self) -> None:
-        """生成并缓存两枚圆形头像的 data URI（bot/user，40px）。"""
+        """生成并缓存桌宠圆形头像的 data URI（40px）。
+
+        2026-10-15 v2: 只生成 bot 头像;user 头像已移除。
+        """
         self._avatar_data_bot = self._pixmap_to_data_uri(self._make_avatar_pixmap("bot", 40))
-        self._avatar_data_user = self._pixmap_to_data_uri(self._make_avatar_pixmap("user", 40))
 
     def set_avatar(self, path: Path) -> None:
         """外部更新角色头像（切换角色时用）。"""
@@ -429,22 +460,11 @@ class ChatWindow(QWidget):
         self._register_avatar_resources()
 
     # 2026-10-14 美化：用户和桌宠头像自定义入口
-    def pick_user_avatar(self, parent=None) -> bool:
-        """弹文件选择对话框让用户选头像;选完复制到 data/avatars/user.png 并刷新 UI。
-        返回 True = 选了文件并已生效;False = 用户取消或选了无效文件。"""
-        from PyQt5.QtWidgets import QFileDialog
-        src, _ = QFileDialog.getOpenFileName(
-            parent or self,
-            "选择你的头像",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif)",
-        )
-        if not src:
-            return False
-        return self._set_custom_avatar("user", src)
-
     def pick_bot_avatar(self, parent=None) -> bool:
-        """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。"""
+        """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。
+
+        2026-10-15 v2: 用户头像已移除,只保留桌宠头像。
+        """
         from PyQt5.QtWidgets import QFileDialog
         src, _ = QFileDialog.getOpenFileName(
             parent or self,
@@ -459,9 +479,13 @@ class ChatWindow(QWidget):
     def _set_custom_avatar(self, role: str, src_path: str) -> bool:
         """复制 src_path 到 data/avatars/<role>.png,更新 self._<role>_avatar_path,刷新 UI。
 
+        2026-10-15 v2: 只支持 bot 角色;user 角色已移除。
+
         选空文件 / 复制失败 / 加载 QPixmap 失败 → 返回 False,不污染当前状态。
         """
         import shutil
+        if role != "bot":
+            return False
         src = Path(src_path)
         if not src.is_file():
             return False
@@ -469,18 +493,15 @@ class ChatWindow(QWidget):
         test_pm = QPixmap(str(src))
         if test_pm.isNull():
             return False
-        # 复制到 data/avatars/{user|bot}.png(覆盖)
+        # 复制到 data/avatars/bot.png(覆盖)
         dst = AVATAR_DIR / f"{role}.png"
         try:
             shutil.copy2(src, dst)
         except OSError:
             return False
-        if role == "user":
-            self._user_avatar_path = str(dst)
-        else:
-            self._bot_avatar_path = str(dst)
+        self._bot_avatar_path = str(dst)
         # 标题栏头像(桌宠那个)
-        if role == "bot" and self.avatar_label is not None:
+        if self.avatar_label is not None:
             self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 44))
             self.avatar_label.setFixedSize(44, 44)
         # 富文本头像缓存(影响之后的新消息)
@@ -497,7 +518,6 @@ class ChatWindow(QWidget):
             chat_cfg = _CC(
                 request_timeout_s=self._chat_timeout_s or 20,
                 show_tool_steps=self._show_tool_steps,
-                user_avatar_path=self._user_avatar_path,
                 bot_avatar_path=self._bot_avatar_path,
             )
             # 构造一个最小 Config 实例(只 chat 段会被 save_chat_overrides 用到)
@@ -608,6 +628,23 @@ class ChatWindow(QWidget):
         self.btn_min.setToolTip("最小化")
         self.btn_min.clicked.connect(self.showMinimized)
         hl.addWidget(self.btn_min)
+
+        # 2026-10-15 v2: 加最大化/还原按钮 —— 跟常见窗口右上角控件一致
+        # (用户实测"右上角要有全屏和窗口功能")
+        self.btn_max = QToolButton()
+        self.btn_max.setObjectName("win_btn")
+        self.btn_max.setText("▢")
+        self.btn_max.setToolTip("最大化")
+        self.btn_max.clicked.connect(self._toggle_maximized)
+        hl.addWidget(self.btn_max)
+
+        # 2026-10-15 v2: 全屏切换按钮 (F11 / 第二次点 退出全屏)
+        self.btn_fullscreen = QToolButton()
+        self.btn_fullscreen.setObjectName("win_btn")
+        self.btn_fullscreen.setText("⛶")
+        self.btn_fullscreen.setToolTip("全屏 (F11)")
+        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
+        hl.addWidget(self.btn_fullscreen)
 
         self.btn_close = QToolButton()
         self.btn_close.setObjectName("win_btn_close")
@@ -786,19 +823,60 @@ class ChatWindow(QWidget):
         self._memory_dlg.activateWindow()
 
     def _on_avatar_menu(self) -> None:
-        """标题栏「头像」按钮：弹菜单选「换我 / 换桌宠」,触发对应文件选择。"""
-        menu = QMenu(self)
-        act_user = menu.addAction("换我的头像")
-        act_bot = menu.addAction("换桌宠头像")
-        chosen = menu.exec_(self.btn_avatar.mapToGlobal(self.btn_avatar.rect().bottomLeft()))
-        if chosen is act_user:
-            ok = self.pick_user_avatar(self)
-        elif chosen is act_bot:
-            ok = self.pick_bot_avatar(self)
-        else:
-            return
+        """标题栏「头像」按钮：2026-10-15 v2 用户头像已移除,直接弹桌宠头像选择。
+
+        旧版曾提供「换我的头像 / 换桌宠头像」两个选项, 现在只留桌宠。
+        """
+        ok = self.pick_bot_avatar(self)
         if ok:
             self._append_system_msg("头像已更新（保存在 data/avatars/）")
+
+    def _toggle_maximized(self) -> None:
+        """最大化 / 还原 切换 (2026-10-15 加)。
+
+        全屏状态下要先退出全屏, 否则 maximize 会被忽略。"""
+        if self.isFullScreen():
+            self.showNormal()
+        if self.isMaximized():
+            self.showNormal()
+            self.btn_max.setText("▢")
+            self.btn_max.setToolTip("最大化")
+        else:
+            self.showMaximized()
+            self.btn_max.setText("❐")
+            self.btn_max.setToolTip("还原")
+
+    def _toggle_fullscreen(self) -> None:
+        """全屏 / 退出全屏 切换 (2026-10-15 加)。
+
+        全屏时把标题栏藏起来, 退出时恢复。"""
+        if self.isFullScreen():
+            self.showNormal()
+            self._titlebar.setVisible(True)
+            self.btn_fullscreen.setText("⛶")
+            self.btn_fullscreen.setToolTip("全屏 (F11)")
+        else:
+            # 最大化状态下进入全屏: 先还原再全屏, 避免两个状态叠加
+            if self.isMaximized():
+                self.showNormal()
+                self.btn_max.setText("▢")
+                self.btn_max.setToolTip("最大化")
+            self.showFullScreen()
+            self._titlebar.setVisible(False)
+            self.btn_fullscreen.setText("⛘")
+            self.btn_fullscreen.setToolTip("退出全屏 (F11)")
+
+    def keyPressEvent(self, event):
+        """F11 = 全屏切换 (跟常见窗口一致)。"""
+        try:
+            from app.core.qt_compat import Qt
+            if event.key() == Qt.Key.Key_F11:
+                self._toggle_fullscreen()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().keyPressEvent(event)
 
     def _open_demo(self) -> None:
         """打开纯静态 Live2D Demo（本地 8765）。"""
@@ -1635,18 +1713,14 @@ class ChatWindow(QWidget):
         return cleaned
 
     def _on_chat_anchor_clicked(self, url):
-        """chat_view 上 <a href> 被点击,处理内部命令 + 外部链接。
+        """chat_view 上 <a href> 被点击,处理内部命令 (toggle_tools) + 外部链接。
 
-        Qt QTextBrowser 不支持 <details> 折叠交互 —— 我们用 <a href="cmd:...">
-        模拟:点击后切换 _tools_collapsed 状态,重渲染当前 bot message。
-
-        2026-10-15:也处理外部链接(http/https),因为 setOpenExternalLinks(False)
-        关掉了自动打开,需要我们手动用 QDesktopServices.openUrl。
-
-        2026-10-15 v2:加 _current_bot_msg 守卫 —— _on_done 后 _current_bot_msg
-        被设成 None,这时点链接会走到 _render_message(None) 把整个 chat 写空
-        (用户实测 chat 突然变空白)。新状态保留在 self._tools_collapsed,
-        下次 _render_message 新 bot 消息时自动生效。
+        2026-10-15 v3:cmd:toggle_tools 处理保留(用户实测"功能还要"),
+        但 head 文字里去掉了"点击展开/收起"。Bug 1 守卫
+        (_current_bot_msg is not None + _streaming_anchor_pos is not None)
+        仍然挡在 _refresh_streaming_message 之前 —— _on_done 后
+        _current_bot_msg=None,此时点链接会执行"从 anchor 删到末尾 +
+        插新内容",anchor 不存在 → 整段 chat 变空白。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
@@ -1660,12 +1734,12 @@ class ChatWindow(QWidget):
             if cmd == "toggle_tools":
                 self._tools_collapsed = not getattr(
                     self, "_tools_collapsed", True)
-                # 只在 bot 消息还在「流式/未完成」时 refresh(已有 anchor)
+                # Bug 1 守卫: 只在 bot 消息还在「流式/未完成」时 refresh(已有 anchor)
                 if (self._current_bot_msg is not None
                         and getattr(self, "_streaming_anchor_pos", None) is not None):
                     self._refresh_streaming_message()
             return
-        # 外部链接:手动打开(setOpenExternalLinks=False 不会自动开)
+        # 外部链接:手动打开(setOpenExternalLinks(False) 不会自动开)
         if scheme in ("http", "https", "mailto"):
             try:
                 from PyQt5.QtGui import QDesktopServices
@@ -2150,16 +2224,52 @@ class ChatWindow(QWidget):
             pass
         super().moveEvent(ev)
 
+    def changeEvent(self, event):
+        """窗口状态变化(最大化/全屏)时,同步更新右上角按钮图标。
+
+        2026-10-15 加 —— 拖动窗口到屏幕顶端触发系统最大化时, 按钮文字
+        也要跟着切到「还原」, 否则按钮状态和实际窗口状态对不上。"""
+        try:
+            from app.core.qt_compat import QEvent
+            if event.type() == QEvent.Type.WindowStateChange:
+                # 全屏态优先判断
+                if self.isFullScreen():
+                    if hasattr(self, "btn_fullscreen"):
+                        self.btn_fullscreen.setText("⛘")
+                        self.btn_fullscreen.setToolTip("退出全屏 (F11)")
+                    if hasattr(self, "_titlebar"):
+                        self._titlebar.setVisible(False)
+                else:
+                    if hasattr(self, "btn_fullscreen"):
+                        self.btn_fullscreen.setText("⛶")
+                        self.btn_fullscreen.setToolTip("全屏 (F11)")
+                    if hasattr(self, "_titlebar"):
+                        self._titlebar.setVisible(True)
+                    # 最大化/还原
+                    if hasattr(self, "btn_max"):
+                        if self.isMaximized():
+                            self.btn_max.setText("❐")
+                            self.btn_max.setToolTip("还原")
+                        else:
+                            self.btn_max.setText("▢")
+                            self.btn_max.setToolTip("最大化")
+        except Exception:
+            pass
+        super().changeEvent(event)
+
     def _tool_steps_html(self, tools: list) -> str:
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
 
         工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
 
-        2026-10-15:默认折叠 —— Qt QTextBrowser 不支持 <details> 折叠
-        交互(实测发现 <details> 内容总是展开),改为一个可点击的 <a href> 链
-        接 (cmd:toggle_tools),点击后由 chat_view.anchorClicked handler 切
-        到 _tool_steps_expanded_html 重新 setHtml。
+        2026-10-15 v3:保留点击折叠/展开的 toggle 功能 (cmd:toggle_tools),
+        但 head 文本里只显示「已执行操作 · N ▾ / ▴」,不再出现"点击展开"/
+        "点击收起"字样 —— 用户实测 2026-10-15「去掉点击展开这4个文字,
+        功能还要」。Bug 1 (_current_bot_msg=None 时点链接 chat 变空白)
+        由 _on_chat_anchor_clicked 里的守卫挡住, 不影响功能。
         """
+        if not tools:
+            return ""
         rows = []
         for i, t in enumerate(tools):
             name, args, result = _unpack_tool(t)
@@ -2177,21 +2287,17 @@ class ChatWindow(QWidget):
                 if target else ""
             )
             rows.append(
-                '<table width="100%" cellspacing="0" cellpadding="0" style="margin:1px 0;">'
-                '<tr>'
-                '<td style="width:14px;color:#8b5cf6;font-size:9pt;padding:1px 4px 1px 0;'
-                'vertical-align:middle;white-space:nowrap;">' + num + '</td>'
-                '<td style="font-size:9pt;color:#3f3f46;vertical-align:middle;">'
-                + _html_escape(cn) + target_html + '</td>'
-                '<td align="right" style="font-size:8pt;vertical-align:middle;'
-                'white-space:nowrap;padding-left:8px;">' + mark + '</td>'
-                '</tr></table>'
+                '<div class="tool-row">'
+                f'<span class="tool-num">{num}</span>'
+                f'<span class="tool-name">{_html_escape(cn)}</span>'
+                f'{target_html}'
+                f'<span class="tool-mark">{mark}</span>'
+                '</div>'
             )
         n = len(tools)
-        # 用 cmd:toggle_tools_0 触发 chat_view.anchorClicked 切换显示。
-        # 状态存 self._tools_collapsed (单 bot message 维度,新轮 reset)
         if getattr(self, "_tools_collapsed", True):
-            # 折叠态:head + 1 行「点击展开 ▾」
+            # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
+            # 不出现"点击展开"字样,只靠箭头指示
             first_name, first_args, first_result = _unpack_tool(tools[0])
             first_cn, first_target = _tool_label(first_name, first_args)
             preview = (
@@ -2202,28 +2308,20 @@ class ChatWindow(QWidget):
                 '</div>'
             )
             return (
-                '<div class="tools" style="margin:2px 0;background:#fafafa;'
-                'border:1px solid #e5e7eb;border-radius:4px;padding:3px 8px;'
-                'font-size:9pt;color:#6b7280;">'
-                '<a href="cmd:toggle_tools" style="color:#8b5cf6;'
-                'font-weight:bold;text-decoration:none;cursor:pointer;'
-                'display:inline-block;">'
-                '已执行操作 · ' + str(n) + '  ▾ (点击展开)'
+                '<div class="tools">'
+                f'<a href="cmd:toggle_tools" class="tools-head-link">'
+                f'已执行操作 · {n}&nbsp;&nbsp;▾'
                 '</a>'
                 + preview +
                 '</div>'
             )
-        # 展开态:head + 完整列表 + 收起链接
+        # 展开态:head + 完整列表 + 收起箭头
         return (
-            '<div class="tools" style="margin:2px 0;background:#fafafa;'
-            'border:1px solid #e5e7eb;border-radius:4px;padding:3px 8px;'
-            'font-size:9pt;color:#6b7280;">'
-            '<a href="cmd:toggle_tools" style="color:#8b5cf6;'
-            'font-weight:bold;text-decoration:none;cursor:pointer;'
-            'display:inline-block;">'
-            '已执行操作 · ' + str(n) + '  ▴ (点击收起)'
+            '<div class="tools">'
+            f'<a href="cmd:toggle_tools" class="tools-head-link">'
+            f'已执行操作 · {n}&nbsp;&nbsp;▴'
             '</a>'
-            '<div style="margin-top:3px;">' + "".join(rows) + '</div>'
+            '<div class="tools-body">' + "".join(rows) + '</div>'
             '</div>'
         )
 

@@ -337,10 +337,15 @@ def test_tool_calls_display():
     # 未知工具名兜底显示原名
     msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
     assert "my_custom_thing" in cw._msg_html(msg3)
-    # 折叠态用 anchor link 触发 toggle
+    # 折叠态用 anchor link 触发 toggle —— 2026-10-15 v3: head 文字
+    # 只显示「已执行操作 · N ▾」,不再出现"点击展开/点击收起"字样
+    # (用户实测指定), 但 cmd:toggle_tools 仍保留 (toggle 功能还要)
     assert 'href="cmd:toggle_tools"' in html
-    assert "点击展开" in html
-    assert "收起" not in html
+    assert "▾" in html  # 折叠态箭头
+    assert "点击展开" not in html, (
+        f"「点击展开」字样不应出现 (用户实测要求去掉), 实际: {html}"
+    )
+    assert "点击收起" not in html
 
     # === 展开态 ===
     cw._tools_collapsed = False
@@ -353,9 +358,10 @@ def test_tool_calls_display():
     # 原始英文工具名 / 原始结果文本不直接展示给主人
     assert "add_reminder" not in html2
     assert "已设置提醒" not in html2
-    # 展开态有「点击收起」链接
-    assert "点击收起" in html2
+    # 展开态只显示箭头「▴」,不再出现"点击展开/点击收起"字样
+    assert "▴" in html2
     assert "点击展开" not in html2
+    assert "点击收起" not in html2
     print("[OK] Tool calls rendered as step card")
 
 
@@ -541,55 +547,68 @@ if __name__ == "__main__":
 
 
 def test_custom_avatar_loaded_from_path():
-    """chat_cfg.user_avatar_path 有值时,_make_avatar_pixmap('user') 真的去读这个图。"""
+    """chat_cfg.bot_avatar_path 有值时,_make_avatar_pixmap('bot') 真的去读这个图。
+
+    2026-10-15 v2:用户头像已移除,只验证 bot (桌宠) 头像流程。
+    """
     from app.core.config import LLMConfig, CharacterConfig, ChatConfig
-    # 准备一个 32x32 红图作为 user 自定义头像
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        red_png = tmp_path / "red_user.png"
-        # 用 QPixmap 生成真图(否则 QPixmap.isNull() 拒收)
+        red_png = tmp_path / "red_bot.png"
         from app.core.qt_compat import QPixmap, QColor, QImage
         img = QImage(32, 32, QImage.Format.Format_ARGB32)
         img.fill(QColor(255, 0, 0))
         assert QPixmap.fromImage(img).save(str(red_png), "PNG")
 
-        chat_cfg = ChatConfig(user_avatar_path=str(red_png))
+        chat_cfg = ChatConfig(bot_avatar_path=str(red_png))
         cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                         'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg)
-        pm = cw._make_avatar_pixmap("user", 40)
+        pm = cw._make_avatar_pixmap("bot", 40)
         assert not pm.isNull()
-        # 不应再走默认「我」字+蓝渐变路径(user 角色有自定义 path 时)
-        # 简单判定：非 32x32 缩放(我们画的是 40x40 圆头像,中心像素应不是蓝渐变)
         pixel = pm.toImage().pixel(20, 20)
         r = (pixel >> 16) & 0xff
         g = (pixel >> 8) & 0xff
         b = pixel & 0xff
-        # 中心是红色(255,0,0),不应是蓝渐变(0x60,0xa5,0xfa 之类)
+        # 中心是红色(255,0,0),不应是默认紫渐变
         assert r > 200 and g < 50 and b < 50, f"中心像素 {r},{g},{b} 应为红色"
-        print("[OK] custom user_avatar_path is loaded into avatar pixmap")
+        print("[OK] custom bot_avatar_path is loaded into avatar pixmap")
 
 
-def test_custom_avatar_fallback_when_missing():
-    """user_avatar_path 指向不存在的文件 → 回退默认首字+蓝渐变,不崩。"""
-    from app.core.config import LLMConfig, CharacterConfig, ChatConfig
-    chat_cfg = ChatConfig(user_avatar_path="Z:/no/such/file.png")
-    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
-                    'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg)
+def test_user_avatar_removed_entirely():
+    """2026-10-15 v2:用户头像已彻底移除。_make_avatar_pixmap('user') 不再
+    生成真图 (返回 null QPixmap), 也不应有 _user_avatar_path / _avatar_data_user
+    这些字段。"""
+    from app.core.config import LLMConfig
+    char_cfg = CharacterConfig(name='test')
+    cw = ChatWindow(LLMConfig(), char_cfg, 'assets/sprites', asr_enabled=False)
+    # 不应有 _user_avatar_path
+    assert not hasattr(cw, "_user_avatar_path"), (
+        "_user_avatar_path 字段应已移除 (用户实测指定" +
+        "「把更改头像中的我的头像功能去除」)"
+    )
+    # 不应有 _avatar_data_user
+    assert not hasattr(cw, "_avatar_data_user"), \
+        "_avatar_data_user 字段应已移除"
+    # 不应有 pick_user_avatar 方法
+    assert not hasattr(cw, "pick_user_avatar"), \
+        "pick_user_avatar 方法应已移除"
+    # _make_avatar_pixmap('user', ...) 应返回空 pixmap, 不能崩
     pm = cw._make_avatar_pixmap("user", 40)
-    # 不应崩,应回退到默认(中心蓝渐变像素)
-    assert not pm.isNull()
-    print("[OK] missing user_avatar_path falls back to default")
+    assert pm.isNull(), "_make_avatar_pixmap('user', ...) 应返回空 pixmap"
+    print("[OK] user avatar feature removed entirely")
 
 
 def test_set_custom_avatar_copies_and_persists():
-    """_set_custom_avatar 复制源图到 data/avatars/<role>.png,更新 cfg 字段并写回 config.yaml。"""
+    """_set_custom_avatar 复制源图到 data/avatars/bot.png, 更新 cfg 并写回 yaml。
+
+    2026-10-15 v2:用户头像已移除,只测 bot 角色。user 角色调用必须返回 False。
+    """
     from app.core.config import LLMConfig, CharacterConfig, ChatConfig, load_config
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         cfg_path = tmp_path / "config.yaml"
         cfg_path.write_text("chat:\n  request_timeout_s: 30\n", encoding="utf-8")
 
-        # 准备一个 16x16 真 PNG 当头像源
         from app.core.qt_compat import QImage, QPixmap, QColor
         src_img = tmp_path / "source.png"
         img = QImage(16, 16, QImage.Format.Format_ARGB32)
@@ -597,12 +616,10 @@ def test_set_custom_avatar_copies_and_persists():
         assert QPixmap.fromImage(img).save(str(src_img), "PNG")
 
         chat_cfg = ChatConfig(request_timeout_s=30)
-        # 改 cwd 让 AVATAR_DIR (data/avatars) 落在 tmp 下
         import os
         old_cwd = os.getcwd()
         try:
             os.chdir(tmp_path)
-            # 改 AVATAR_DIR 到 tmp 下
             import app.ui.chat_window as cw_mod
             from pathlib import Path as _P
             cw_mod.AVATAR_DIR = _P(tmp_path) / "data" / "avatars"
@@ -611,22 +628,22 @@ def test_set_custom_avatar_copies_and_persists():
             cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                             'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg,
                             cfg_path=str(cfg_path))
-            ok = cw._set_custom_avatar("user", str(src_img))
+            ok = cw._set_custom_avatar("bot", str(src_img))
             assert ok is True
-            # self._user_avatar_path 应指向 .../data/avatars/user.png
-            assert Path(cw._user_avatar_path).name == "user.png"
-            assert "avatars" in Path(cw._user_avatar_path).parts
-            # 文件应真在 tmp/data/avatars/user.png
-            dst = cw_mod.AVATAR_DIR / "user.png"
+            assert Path(cw._bot_avatar_path).name == "bot.png"
+            assert "avatars" in Path(cw._bot_avatar_path).parts
+            dst = cw_mod.AVATAR_DIR / "bot.png"
             assert dst.is_file()
-            # 重新加载验证内容是源图
             pm = QPixmap(str(dst))
             assert not pm.isNull()
-            # config.yaml 写回 chat.user_avatar_path
+            # config.yaml 写回 chat.bot_avatar_path
             saved = load_config(cfg_path)
-            assert Path(saved.chat.user_avatar_path).name == "user.png"
-            assert "avatars" in Path(saved.chat.user_avatar_path).parts
-            assert saved.chat.request_timeout_s == 30    # 其它字段保留
+            assert Path(saved.chat.bot_avatar_path).name == "bot.png"
+            # user 角色 _set_custom_avatar 必须返回 False (已禁用)
+            assert cw._set_custom_avatar("user", str(src_img)) is False, (
+                "_set_custom_avatar('user', ...) 必须返回 False (已禁用)"
+            )
+            assert saved.chat.request_timeout_s == 30
         finally:
             os.chdir(old_cwd)
     print("[OK] _set_custom_avatar copies file, updates state, persists to config.yaml")
@@ -755,3 +772,109 @@ def test_bug1_ast_guard_anchor_click_doesnt_refresh_when_done():
 
 
     print("All chat rendering tests passed!")
+
+
+def test_msg_user_right_aligned():
+    """用户消息靠右 (主人实测指定 "我发出的消息应该要保持在右侧")。
+    CSS: .msg-user .msg-body { text-align: right; display:block; margin-left:auto; }
+    """
+    from app.ui import ui_style as _us
+    qss = _us.CHAT_MD_CSS
+    # msg-user body 应 text-align:right 且 margin-left:auto
+    assert "text-align:right" in qss
+    assert ".msg-user .msg-body" in qss
+    assert "margin-left:auto" in qss
+    # assistant 仍走左对齐
+    assert ".msg-assistant .msg-body" in qss
+    print("[OK] CSS: .msg-user 右对齐 + .msg-assistant 左对齐")
+
+
+def test_tool_steps_no_click_text():
+    """调整 1 验证: 工具卡片 head 不再出现「点击展开/点击收起」字样,
+    只保留箭头 ▾ / ▴。toggle 功能 (cmd:toggle_tools href) 保留。"""
+    char_cfg = CharacterConfig(name='测试')
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites", asr_enabled=False)
+
+    msg = Message(role="assistant", content="完成", tools=[
+        ("add_reminder", '{"x":1}', "OK"),
+        ("web_search", '{}', "找到"),
+    ])
+    cw._tools_collapsed = True
+    html = cw._tool_steps_html(msg.tools)
+    assert "点击展开" not in html, f"「点击展开」字样不应出现: {html}"
+    assert "点击收起" not in html, f"「点击收起」字样不应出现: {html}"
+    assert 'href="cmd:toggle_tools"' in html, \
+        "toggle 功能保留, href 必须在"
+    assert "▾" in html, "折叠态应显示下箭头"
+
+    cw._tools_collapsed = False
+    html2 = cw._tool_steps_html(msg.tools)
+    assert "点击展开" not in html2
+    assert "点击收起" not in html2
+    assert "▴" in html2, "展开态应显示上箭头"
+    print("[OK] 工具 head 不出现「点击展开/收起」字样 (toggle 功能保留)")
+
+
+def test_input_box_style_matches_display():
+    """调整 4 验证: chat_view 与 input_container 共享 QSS 规则。"""
+    from app.ui import ui_style
+    qss = ui_style.CHAT_QSS
+    assert "QTextBrowser#chat_view, QFrame#input_container" in qss, (
+        "chat_view 与 input_container 必须在同一 QSS 规则里共享样式"
+    )
+    marker = "QTextBrowser#chat_view, QFrame#input_container"
+    idx = qss.find(marker)
+    assert idx > 0
+    snippet = qss[idx:idx + 500]
+    assert "background:" in snippet
+    assert "border:" in snippet
+    assert "border-radius:" in snippet
+    print("[OK] chat_view 与 input_container 共享同一 QSS 规则")
+
+
+def test_window_controls_present():
+    """调整 5 验证: 标题栏右上角 4 个窗口控制按钮齐全。
+
+    主人实测指定 "右上角要有全屏和窗口功能"。"""
+    from app.core.config import LLMConfig
+    from app.core.qt_compat import QToolButton
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    for name in ('btn_min', 'btn_max', 'btn_fullscreen', 'btn_close'):
+        assert hasattr(cw, name), f"标题栏缺 {name} 按钮"
+        btn = getattr(cw, name)
+        assert isinstance(btn, QToolButton), f"{name} 必须是 QToolButton"
+    assert cw.btn_min.toolTip() == "最小化"
+    assert "最大化" in cw.btn_max.toolTip() or "还原" in cw.btn_max.toolTip()
+    assert "全屏" in cw.btn_fullscreen.toolTip()
+    assert cw.btn_close.toolTip() == "关闭"
+    assert callable(getattr(cw, "_toggle_maximized", None))
+    assert callable(getattr(cw, "_toggle_fullscreen", None))
+    print("[OK] 标题栏右上角 4 个窗口控制按钮齐全 (min/max/fullscreen/close)")
+
+
+def test_anchor_click_handler_keeps_toggle_guard():
+    """Bug 1 守卫依然有效 + toggle 还在。"""
+    import ast as _ast
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "ui" / "chat_window" / "__init__.py").read_text(
+        encoding="utf-8",
+    )
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.FunctionDef)
+                and node.name == "_on_chat_anchor_clicked"):
+            body = _ast.dump(node)
+            assert "toggle_tools" in body, (
+                "cmd:toggle_tools 处理不能丢 —— 工具卡片 toggle 还要"
+            )
+            pos_guard = body.find("_current_bot_msg")
+            pos_refresh = body.find("_refresh_streaming_message")
+            assert pos_guard > 0 and pos_refresh > 0
+            assert pos_guard < pos_refresh, (
+                "Bug 1 守卫顺序错了"
+            )
+            print("[OK] toggle_tools + Bug 1 守卫共存")
+            return
+    raise AssertionError("_on_chat_anchor_clicked 函数未找到")
