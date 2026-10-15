@@ -2320,12 +2320,13 @@ def test_v13_endpoint_paths_default_to_minimax():
     _multimodal.setup_config({
         "llm": {"base_url": "https://api.minimaxi.com/v1"},
     })
+    # v17 实际: MiniMax video 是 v2 端点 (api.minimax.io/v2/video_generation)
     assert _multimodal._endpoint_path("image") == "image_generation", (
         f"minimax 域 image endpoint 应是 image_generation, 实际: "
         f"{_multimodal._endpoint_path('image')}"
     )
-    assert _multimodal._endpoint_path("video") == "video_generation", (
-        f"minimax 域 video endpoint 应是 video_generation, 实际: "
+    assert _multimodal._endpoint_path("video") == "v2/video_generation", (
+        f"minimax 域 video endpoint 应是 v2/video_generation, 实际: "
         f"{_multimodal._endpoint_path('video')}"
     )
     assert _multimodal._endpoint_path("audio") == "t2a_v2", (
@@ -2727,12 +2728,13 @@ def test_v15_endpoint_path_auto_judges_by_domain():
     from app.engine.tools import _multimodal
     cases = [
         # (base_url, image, video, audio)
+        # v17: MiniMax video 实际是 v2 端点 (/v2/video_generation)
         ("https://api.minimaxi.com/v1",
-         "image_generation", "video_generation", "t2a_v2"),
+         "image_generation", "v2/video_generation", "t2a_v2"),
         ("https://api.minimaxi.cn/v1",
-         "image_generation", "video_generation", "t2a_v2"),
+         "image_generation", "v2/video_generation", "t2a_v2"),
         ("https://api.minimaxi.chat/v1",
-         "image_generation", "video_generation", "t2a_v2"),
+         "image_generation", "v2/video_generation", "t2a_v2"),
         # openai / 其他走 OpenAI 兼容
         ("https://api.openai.com/v1",
          "images/generations", "videos/generations", "audio/speech"),
@@ -2869,3 +2871,118 @@ def test_v16_post_json_other_http_error_unchanged():
         _multimodal.setup_config({})
 
     print("[OK] v16: 非 1004 错不被误判为 plan key 错")
+
+
+
+# ============================================================
+# v17 调整 (2026-10-15):
+#   1) chat 渲染 markdown image 缩略图限制 (主人实测 1024x1024 太大):
+#      width=240 height=auto + CSS max-width:240px max-height:240px
+#   2) 识图功能 (主人说「分析一下这张图片」):
+#      understand_image tool 调 MiniMax M3 chat completion 多模态
+#      (image_url data URL), 不需要装 winsdk / tesseract
+#      ocr_image 仍保留, 描述改成「只提文字, 理解用 understand_image」
+# ============================================================
+
+
+def test_v17_render_markdown_image_thumb_size_240():
+    """v17: chat 渲染 markdown image 限制 width=240 / max-width:240 /
+    max-height:240, 主人实测 1024x1024 太大改缩略图。"""
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.core.qt_compat import QPixmap, QColor
+    import tempfile
+    from pathlib import Path
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "v17_thumb.png"
+        pix = QPixmap(1024, 1024)
+        pix.fill(QColor("#abcabc"))
+        pix.save(str(png), "PNG")
+        file_url = "file:///" + str(png).replace("\\", "/").lstrip("/")
+        md = f"![主人上传]({file_url})"
+        msg = Message(role="assistant", content=md)
+        html = cw._msg_html(msg)
+        # 验证 _render_markdown 输出含 width=240 + max-width:240 + max-height:240
+        assert 'width="240"' in html, (
+            f"v17 应在 img 上加 width=240。 实际: {html[:500]}"
+        )
+        assert 'max-width:240px' in html, (
+            f"v17 应加 max-width:240px。 实际: {html[:500]}"
+        )
+        assert 'max-height:240px' in html, (
+            f"v17 应加 max-height:240px。 实际: {html[:500]}"
+        )
+        # 旧的 max-width:320 不应再出现
+        assert 'max-width:320px' not in html, (
+            f"v17 应移除旧 max-width:320px。 实际: {html[:500]}"
+        )
+
+    print("[OK] v17: chat 渲染 img 限制 width=240 max-width:240 max-height:240")
+
+
+def test_v17_understand_image_tool_registered():
+    """v17: ocr 工具包 register 时同时注册 understand_image, 调 MiniMax M3
+    多模态 chat completion 理解图片内容。"""
+    from app.engine.tools._ocr import register
+    from app.engine.tools._core import ToolRegistry
+
+    reg = ToolRegistry()
+    register(reg)
+    # ocr_image 跟 understand_image 都应注册
+    ocr = reg.get("ocr_image")
+    und = reg.get("understand_image")
+    assert ocr is not None, "ocr_image 应注册"
+    assert und is not None, "understand_image 应注册 (v17 新增)"
+    # understand_image description 提到不需要装 OCR 后端
+    assert "ocr" in und.description.lower() or "OCR" in und.description, (
+        f"understand_image description 应提到跟 ocr 区别。 实际: {und.description[:200]}"
+    )
+    assert "minimax" in und.description.lower() or "M3" in und.description, (
+        f"understand_image description 应提到 MiniMax M3。 实际: {und.description[:200]}"
+    )
+
+    print("[OK] v17: understand_image 工具注册, 跟 ocr_image 区分清晰")
+
+
+def test_v17_understand_image_missing_file_returns_clear_error():
+    """v17: understand_image(image_path) 文件不存在时给清晰错, 不抛。"""
+    from app.engine.tools._ocr import register
+    from app.engine.tools._core import ToolRegistry
+    reg = ToolRegistry()
+    register(reg)
+    und = reg.get("understand_image")
+    out = und.fn(image_path="/no/such/file.png")
+    assert "不存在" in out, f"应给「不存在」提示。 实际: {out}"
+    assert "/no/such/file.png" in out, f"应含原路径。 实际: {out}"
+
+    print("[OK] v17: understand_image 文件不存在给清晰错")
+
+
+def test_v17_understand_image_missing_config_returns_clear_error():
+    """v17: understand_image 缺 base_url / api_key 时给清晰错, 不抛。"""
+    from app.engine.tools._ocr import register
+    from app.engine.tools._core import ToolRegistry
+    from app.engine.tools import _multimodal
+    import tempfile
+    from pathlib import Path
+    from PIL import Image
+    reg = ToolRegistry()
+    register(reg)
+    und = reg.get("understand_image")
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "v17_test.png"
+        Image.new("RGB", (4, 4), color="red").save(png, "PNG")
+        # 清掉 multimodal cfg
+        _multimodal.setup_config({})
+        try:
+            out = und.fn(image_path=str(png), prompt="描述图片")
+            assert "base_url" in out or "api_key" in out, (
+                f"应给「缺 base_url / api_key」提示。 实际: {out}"
+            )
+        finally:
+            _multimodal.setup_config({})
+
+    print("[OK] v17: understand_image 缺 cfg 给清晰错")

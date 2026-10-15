@@ -7,13 +7,21 @@
     `_ocr_windows` 声明 `-> str` 却 `return None`，被调用时会返回字面量 "None"；
   - Tesseract 调用没有 timeout，坏图/超大图会把桌宠永久卡死；
   - description 宣称「优先走 System.Windows.Media.Ocr」，与实际后端不符。
+
+2026-10-15 v17 主人实测反馈「识图怎么解决」(分析一下这张图片):
+  - ocr_image 只提文字, 不满足「理解图片内容」的需求
+  - 新增 understand_image 工具: 走 MiniMax M3 chat completion 多模态 (image content),
+    让模型理解图片主体 / 场景 / 含义; OCR 仍保留给"提取图中文字"用
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from ._core import ToolRegistry
@@ -103,14 +111,102 @@ def _ocr(image_path: str) -> str:
     return _NO_BACKEND
 
 
+# v17: 视觉理解 — 调 MiniMax M3 chat completion 多模态 (image_url data URL)
+def _vision(image_path: str, prompt: str) -> str:
+    """v17 主人实测反馈「识图怎么解决」 — 调 MiniMax M3 多模态 chat completion,
+    把图片 base64 内联到 image_url 字段, 让模型理解图片内容 (主体 / 场景 / 含义)。
+
+    v16 复用 _multimodal._CONFIG, base_url / api_key 从 llm 段共享 (主人 plan 是统一 key)。
+    """
+    # 1) 读图 + base64 内联
+    from app.brain.vision import (
+        image_path_to_data_url,
+        build_multimodal_content,
+    )
+    try:
+        data_url = image_path_to_data_url(image_path)
+    except FileNotFoundError:
+        return f"错误：图片不存在：{image_path}"
+    except ValueError as e:
+        return f"错误：图片处理失败: {e}"
+
+    # 2) 从 _multimodal._CONFIG 读 base_url / api_key / model
+    #    (v16 复用: llm 段共享, 兜底 multimodal 段)
+    try:
+        from . import _multimodal
+        base_url = _multimodal._cfg("base_url", "").rstrip("/")
+        api_key = _multimodal._cfg("api_key", "")
+        # 视觉用主 chat 用的 M3 model, 跟 chat 保持一致
+        model = _multimodal._cfg("model", "MiniMax-M3")
+    except Exception:  # noqa: BLE001
+        base_url = ""
+        api_key = ""
+        model = "MiniMax-M3"
+
+    if not base_url or not api_key:
+        return (
+            "错误：vision 缺 base_url / api_key, 主人去 config.yaml llm 段填。"
+            "（v16 复用 _multimodal 配置）"
+        )
+
+    # 3) POST chat completion with image content
+    url = f"{base_url}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": build_multimodal_content(
+                    prompt or "请描述这张图片的内容。",
+                    [data_url],
+                ),
+            }
+        ],
+        "stream": False,
+        "max_tokens": 1024,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        # v16: 1004 错给清晰 plan key 提示
+        if '"statuscode":1004' in body_text or 'login fail' in body_text.lower():
+            return (
+                "vision 401 鉴权失败 (MiniMax 1004): API key 跟 base_url 不匹配。\n"
+                "  主人用的是 MiniMax Plan 订阅 key (sk-cp- 开头), "
+                "应该走 plan 接入指南里给的 base_url, 不是任意 minimaxi 域都通。\n"
+                "  主人去 MiniMax 后台「套餐详情」找 plan 专属的 base_url, "
+                "填到 config.yaml 的 llm.base_url 字段。"
+            )
+        return f"vision HTTP {e.code}: {body_text[:300]}"
+    except urllib.error.URLError as e:
+        return f"vision 网络错误: {e.reason}"
+
+    choices = obj.get("choices") or []
+    if not choices:
+        return f"vision 响应里没 choices: {json.dumps(obj)[:300]}"
+    msg = choices[0].get("message") or {}
+    content = msg.get("content") or ""
+    return content.strip() or "(模型没返回内容)"
+
+
 def register(reg: ToolRegistry) -> None:
-    """注册 OCR 工具。"""
+    """注册 OCR + 视觉理解工具。"""
 
     @tool(
         description="对图片做 OCR（提取图中文字）。"
                     "image_path 空则自动截屏后识别。"
                     "需要先装 OCR 后端（winsdk 或 pytesseract+tesseract），"
-                    "否则会明确告诉你不可用——不可用时请不要凭猜测描述图片。",
+                    "否则会明确告诉你不可用——不可用时请不要凭猜测描述图片。"
+                    "「理解图片内容 / 描述图片」请改用 understand_image, 那个不需要装 OCR 后端。",
         parameters={"type": "object",
                     "properties": {
                         "image_path": {"type": "string",
@@ -159,7 +255,31 @@ def register(reg: ToolRegistry) -> None:
                 except OSError:
                     pass
 
+    @tool(
+        description="理解 / 描述一张图片的内容 (主体 / 场景 / 含义), 走 MiniMax M3 多模态 chat completion。"
+                    "跟 ocr_image 的区别: 这个理解图片整体, 不需要装 winsdk / tesseract;"
+                    "ocr_image 专门提取图中文字。"
+                    "用法: understand_image(image_path='/path/to/img.png', prompt='描述图片里的内容')"
+                    "image_path 必须传本地图片路径。",
+        parameters={"type": "object",
+                    "properties": {
+                        "image_path": {"type": "string",
+                                       "description": "图片绝对路径 (PNG/JPG/WebP)"},
+                        "prompt": {"type": "string",
+                                   "description": "问模型的问题, 如「描述图片内容」「这是什么」「图里有什么文字」"},
+                    },
+                    "required": ["image_path"]},
+    )
+    def understand_image(image_path: str, prompt: str = "请描述这张图片的内容。") -> str:
+        """v17: 调 MiniMax M3 多模态 chat completion 理解图片内容。"""
+        if not (image_path or "").strip():
+            return "错误: image_path 不能为空, 主人传图片绝对路径"
+        if not os.path.isfile(image_path):
+            return f"错误: 图片不存在: {image_path}"
+        return _vision(image_path, prompt)
+
     reg.register(ocr_image)
+    reg.register(understand_image)
 
 
 __all__ = ["register"]

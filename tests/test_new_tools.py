@@ -50,7 +50,10 @@ class TestNewToolsRegistration:
     def test_ocr_registers(self):
         from app.engine.tools import _ocr
         reg = ToolRegistry(); _ocr.register(reg)
-        assert reg.names() == ["ocr_image"]
+        # v17: understand_image 也注册了 (视觉理解, 调 MiniMax M3 多模态)
+        names = reg.names()
+        assert "ocr_image" in names
+        assert "understand_image" in names
 
     def test_runner_registers(self):
         from app.engine.tools import _runner
