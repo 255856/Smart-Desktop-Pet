@@ -67,7 +67,7 @@ log = logging.getLogger(__name__)
 # 工具 UI 元数据 + 工具结果状态 + 工具元组解包 — 拆到 chat_window.utils
 from .utils import (  # noqa: F401
     _TOOL_UI_META, _CIRCLED_NUMS, _TOOL_FAIL_MARKERS,
-    _unpack_tool, _tool_label, _tool_status,
+    _unpack_tool, _tool_label, _tool_status, _unpack_status_mark,
 )
 
 
@@ -147,6 +147,9 @@ class ChatWindow(QWidget):
         self._show_tool_steps: bool = (
             chat_cfg.show_tool_steps if chat_cfg is not None else True
         )
+        # 工具步骤默认折叠 —— Qt QTextBrowser 不支持 <details>,用 anchorClicked
+        # 切回 setHtml 模拟。新一轮 chat 起始 reset 成 True。
+        self._tools_collapsed: bool = True
         # 2026-10-14 美化：用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
@@ -602,6 +605,12 @@ class ChatWindow(QWidget):
         self.chat_view = QTextBrowser()
         self.chat_view.setObjectName("chat_view")
         self.chat_view.setOpenExternalLinks(True)
+        # 2026-10-15:挂 anchorClicked 拦截 cmd:toggle_tools 等内部命令
+        # (Qt QTextBrowser 不支持 <details> 折叠交互,改用 <a href> + handler
+        # 重新 setHtml 模拟)。注意 setOpenExternalLinks(True) + 自定义 scheme
+        # 同时启用:Qt 文档说自定义 scheme 不会被打开外部链接拦截。
+        from app.core.qt_compat import QUrl
+        self.chat_view.anchorClicked.connect(self._on_chat_anchor_clicked)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
         chat_font.setPointSize(10)
@@ -1368,15 +1377,23 @@ class ChatWindow(QWidget):
     def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
         """主线程槽：弹危险工具确认弹窗 → 调 on_done（Event.set() 唤醒子线程）。
 
-        2026-10-15 改用自定义 _DangerConfirmDialog(QDialog) 而不是 QMessageBox:
+        2026-10-15 改用自定义 _DangerConfirmDialog(QDialog):
         - QMessageBox 在 FramelessWindowHint + WA_TranslucentBackground 父窗口
           下被 Qt 当 transient child 立刻 dismiss(用户实测「只闪一下」)
         - 自定义 QDialog 显式控制所有 flags,不被父窗口属性干扰
-        - 显式 ApplicationModal + StaysOnTopHint + 完整 window 标志(不用父)
+
+        2026-10-15 v2 修正:parent 改回 self(chat_window)而不是 None。
+        用户反馈「弹窗不能在聊天窗口弹出进行确认」,希望弹窗在 chat 窗口内
+        显示。parent=self 时:
+          - z-order 跟随 chat_window(在 chat 上面)
+          - 焦点自动回到 chat
+          - 关闭 chat 时弹窗自动关
+        _DangerConfirmDialog 自己有完整 window flags(不是依赖父),
+        所以不会触发 QMessageBox 那种「transient child 被 dismiss」的问题。
         """
         try:
             from app.ui.chat_window.confirm_dialog import _DangerConfirmDialog
-            dlg = _DangerConfirmDialog(name=name, args_pretty=args_pretty, parent=None)
+            dlg = _DangerConfirmDialog(name=name, args_pretty=args_pretty, parent=self)
             self._confirm_box = dlg      # 供超时路径 _close_confirm_box 用
             dlg.show()
             dlg.raise_()
@@ -1458,6 +1475,8 @@ class ChatWindow(QWidget):
                 meta={"model": self.llm_cfg.model,
                       "base_url": self.llm_cfg.base_url[:60]},
             )
+        # 2026-10-15:新一轮 chat 起始,工具步骤 reset 成折叠
+        self._tools_collapsed = True
 
         self._generating = True
         self.send_btn.setEnabled(False)
@@ -1586,6 +1605,30 @@ class ChatWindow(QWidget):
             cleaned.append(ChatMessage(role=m.role, content=m.content))
         return cleaned
 
+    def _on_chat_anchor_clicked(self, url):
+        """chat_view 上 <a href> 被点击,处理内部命令。
+
+        Qt QTextBrowser 不支持 <details> 折叠交互 —— 我们用 <a href="cmd:...">
+        模拟:点击后切换 _tools_collapsed 状态,重渲染当前 bot message。
+        """
+        try:
+            scheme = url.scheme() if hasattr(url, "scheme") else ""
+        except Exception:  # noqa: BLE001
+            scheme = ""
+        if scheme == "cmd":
+            try:
+                cmd = url.path().lstrip("/") if hasattr(url, "path") else str(url).split(":", 1)[-1]
+            except Exception:  # noqa: BLE001
+                cmd = ""
+            if cmd == "toggle_tools":
+                self._tools_collapsed = not getattr(
+                    self, "_tools_collapsed", True)
+                # 重新渲染当前 bot message 段
+                if self._current_bot_msg is not None:
+                    self._refresh_streaming_message()
+            return
+        # 其他 scheme(external links)Qt 自己处理,这里不拦
+
     def _on_tool(self, name: str, args: str, result: str) -> None:
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""
         if self._current_bot_msg is None:
@@ -1600,10 +1643,20 @@ class ChatWindow(QWidget):
         if self.trace is not None and self._trace_run_id:
             try:
                 import json as _json
+                # 2026-10-15:LangChainAgent._astream_with_retry yield 工具事件时
+                # args 是空字符串("")(它只携带 ToolMessage.name + content,真实
+                # args 在 AIMessage.tool_calls 上但 stream 模式没保留)。_json.loads("")
+                # 会抛 JSONDecodeError,被 except 吞 → trace 里看不到 tool 事件
+                # → dashboard 调试面板「执行过程」不显示工具。修法:空字符串
+                # 视为空 dict,非空才解析。
+                if isinstance(args, str):
+                    _args = _json.loads(args) if args.strip() else {}
+                else:
+                    _args = args or {}
                 self.trace.record(self._trace_run_id, "tool", {
                     "name": name,
-                    "args": _json.loads(args) if isinstance(args, str) else args,
-                    "result": result.replace("\n", " ")[:80],
+                    "args": _args,
+                    "result": (result or "").replace("\n", " ")[:80],
                 })
             except Exception:  # noqa: BLE001
                 pass
@@ -2057,6 +2110,11 @@ class ChatWindow(QWidget):
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
 
         工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
+
+        2026-10-15:默认折叠 —— Qt QTextBrowser 不支持 <details> 折叠
+        交互(实测发现 <details> 内容总是展开),改为一个可点击的 <a href> 链
+        接 (cmd:toggle_tools),点击后由 chat_view.anchorClicked handler 切
+        到 _tool_steps_expanded_html 重新 setHtml。
         """
         rows = []
         for i, t in enumerate(tools):
@@ -2085,23 +2143,44 @@ class ChatWindow(QWidget):
                 'white-space:nowrap;padding-left:8px;">' + mark + '</td>'
                 '</tr></table>'
             )
-        head = (
-            '已执行操作 · ' + str(len(tools))
-        )
-        # 2026-10-14 美化：默认折叠成 <details>，主人点开才看每条详情。
-        # 标题用已执行操作 · N 即可，背景色/边框与 _thoughts_html 保持一致风格。
+        n = len(tools)
+        # 用 cmd:toggle_tools_0 触发 chat_view.anchorClicked 切换显示。
+        # 状态存 self._tools_collapsed (单 bot message 维度,新轮 reset)
+        if getattr(self, "_tools_collapsed", True):
+            # 折叠态:head + 1 行「点击展开 ▾」
+            first_name, first_args, first_result = _unpack_tool(tools[0])
+            first_cn, first_target = _tool_label(first_name, first_args)
+            preview = (
+                '<div style="color:#9ca3af;font-size:9pt;margin:2px 0 0 0;">'
+                '▸ ' + _html_escape(first_cn) +
+                (' · ' + _html_escape(first_target[:40]) if first_target else '') +
+                '  ' + (_unpack_status_mark(first_result)) +
+                '</div>'
+            )
+            return (
+                '<div class="tools" style="margin:2px 0;background:#fafafa;'
+                'border:1px solid #e5e7eb;border-radius:4px;padding:3px 8px;'
+                'font-size:9pt;color:#6b7280;">'
+                '<a href="cmd:toggle_tools" style="color:#8b5cf6;'
+                'font-weight:bold;text-decoration:none;cursor:pointer;'
+                'display:inline-block;">'
+                '已执行操作 · ' + str(n) + '  ▾ (点击展开)'
+                '</a>'
+                + preview +
+                '</div>'
+            )
+        # 展开态:head + 完整列表 + 收起链接
         return (
-            '<details class="tools" style="margin:2px 0;background:#fafafa;'
-            'border:1px solid #e5e7eb;border-radius:4px;padding:2px 8px;'
+            '<div class="tools" style="margin:2px 0;background:#fafafa;'
+            'border:1px solid #e5e7eb;border-radius:4px;padding:3px 8px;'
             'font-size:9pt;color:#6b7280;">'
-            '<summary style="cursor:pointer;color:#8b5cf6;'
-            'font-weight:bold;list-style:none;">'
-            + _html_escape(head) +
-            '</summary>'
-            '<div style="margin-top:4px;">'
-            + "".join(rows) +
+            '<a href="cmd:toggle_tools" style="color:#8b5cf6;'
+            'font-weight:bold;text-decoration:none;cursor:pointer;'
+            'display:inline-block;">'
+            '已执行操作 · ' + str(n) + '  ▴ (点击收起)'
+            '</a>'
+            '<div style="margin-top:3px;">' + "".join(rows) + '</div>'
             '</div>'
-            '</details>'
         )
 
     def _thoughts_html(self, thoughts: list) -> str:
@@ -2304,10 +2383,18 @@ class ChatWindow(QWidget):
         )
 
     def _clean_content(self, text: str) -> str:
-        """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行。"""
+        """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行，折叠连续空行。
+
+        2026-10-15:折叠 3+ 连续空行 → 2 行,避免 read_file PDF/Word 解析输出
+        时多个段落间空行被放大成整段空白(用户实测「内容排版有问题,太多
+        换行」)。`\n\n` 段间隔保留(语义需要),但 `\n\n\n\n+` 折叠。
+        """
+        import re
         # 字面量 \n（反斜杠+n）→ 实际换行
         text = text.replace("\\n", "\n")
-        # 去掉首尾空白和多余空行
+        # 折叠 3+ 连续空行 → 2 行
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        # 去掉首尾空白
         text = text.strip()
         return text
 

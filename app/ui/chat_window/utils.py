@@ -68,7 +68,13 @@ _TOOL_UI_META = {
 
 _CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
-_TOOL_FAIL_MARKERS = ("失败", "错误", "无法", "未安装", "没有找到", "找不到")
+# 工具结果失败标记 —— 必须以「错误:」开头(明确错误格式),不要任意包含
+# 「失败」「错误」字样 —— 否则 read_file 输出 PDF/Word 内容里如果出现这些
+# 汉字会被误判为工具失败(用户实测:明明 read_file 调成功了 chat 里
+# 标 ✗ 失败)。
+# 历史:之前用 ("失败", "错误", "无法", "未安装", "没有找到", "找不到") 任意
+# in 文本判断,误判严重。
+_TOOL_FAIL_MARKERS = ("错误：", "错误:", "失败：", "失败:", "未安装：", "未安装:")
 
 
 def _unpack_tool(t):
@@ -112,7 +118,7 @@ def _tool_label(name: str, args: str) -> Tuple[str, str]:
 def _tool_status(result: str) -> str:
     """工具结果状态：'cancel' / 'fail' / 'ok'。
 
-    失败标记涵盖：取消 / 失败 / 错误 / 未安装 / 找不到 等。
+    失败标记涵盖：取消 / 错误: 前缀、失败: 前缀、未安装 等。
     """
     r = result or ""
     if "取消" in r:
@@ -120,6 +126,16 @@ def _tool_status(result: str) -> str:
     if any(k in r for k in _TOOL_FAIL_MARKERS):
         return "fail"
     return "ok"
+
+
+def _unpack_status_mark(result: str) -> str:
+    """返回工具结果对应的彩色 mark html,用于折叠态预览行。"""
+    status = _tool_status(result)
+    if status == "cancel":
+        return '<span style="color:#9ca3af;">⊘ 取消</span>'
+    if status == "fail":
+        return '<span style="color:#dc2626;">✕ 失败</span>'
+    return '<span style="color:#16a34a;">✓</span>'
 
 
 def _html_escape(text: str) -> str:
@@ -142,6 +158,6 @@ def _format_time_short(ts: float) -> str:
 __all__ = [
     "_DANGEROUS_LABELS", "_CONFIRM_TIMEOUT_S",
     "_TOOL_UI_META", "_CIRCLED_NUMS", "_TOOL_FAIL_MARKERS",
-    "_unpack_tool", "_tool_label", "_tool_status",
+    "_unpack_tool", "_tool_label", "_tool_status", "_unpack_status_mark",
     "_html_escape", "_format_time_short",
 ]

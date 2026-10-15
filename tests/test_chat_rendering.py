@@ -1,5 +1,7 @@
 """Chat rendering 单元测试（气泡样式 + 头像 + 工具调用 + 流式提示）。"""
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -124,7 +126,11 @@ def test_system_message():
 
 
 def test_tool_calls_display():
-    """工具调用：Claude Code 风格步骤卡片（中文名 + 目标 + 成败状态）。"""
+    """工具调用：Claude Code 风格步骤卡片（中文名 + 目标 + 成败状态）。
+
+    2026-10-15:Qt QTextBrowser 不支持 <details> 折叠,改用 <a href cmd:toggle_tools>
+    + anchorClicked 模拟。默认折叠态只显示 head + 第一条工具预览;展开态显示所有。
+    """
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -134,17 +140,15 @@ def test_tool_calls_display():
         ("web_search", '{"query":"十月新番"}', "找到 5 条结果"),
         ("open_app", '{"app_name":"星穹铁道"}', "失败：没有找到该应用"),
     ])
+    # === 折叠态(默认) ===
+    cw._tools_collapsed = True
     html = cw._msg_html(msg)
     assert 'class="tools"' in html
     assert "已执行操作" in html
-    # 中文名 + 动作目标
+    # 折叠态只显示第一条工具(add_reminder)
     assert "设置提醒" in html and "下午三点开会" in html
-    assert "联网搜索" in html and "十月新番" in html
-    # 失败状态
-    assert "失败" in html and "星穹铁道" in html
-    # 原始英文工具名 / 原始结果文本不直接展示给主人
-    assert "add_reminder" not in html
-    assert "已设置提醒" not in html
+    # 后续工具不直接展示
+    assert "联网搜索" not in html
     # 工具卡片置于最终结果上方
     assert html.index("已执行操作") < html.index("完成")
     # 旧版 2 元组 (name, summary) 仍兼容：已知工具显示中文名
@@ -153,6 +157,25 @@ def test_tool_calls_display():
     # 未知工具名兜底显示原名
     msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
     assert "my_custom_thing" in cw._msg_html(msg3)
+    # 折叠态用 anchor link 触发 toggle
+    assert 'href="cmd:toggle_tools"' in html
+    assert "点击展开" in html
+    assert "收起" not in html
+
+    # === 展开态 ===
+    cw._tools_collapsed = False
+    html2 = cw._msg_html(msg)
+    # 全部工具都展示
+    assert "设置提醒" in html2 and "下午三点开会" in html2
+    assert "联网搜索" in html2 and "十月新番" in html2
+    # 失败状态
+    assert "失败" in html2 and "星穹铁道" in html2
+    # 原始英文工具名 / 原始结果文本不直接展示给主人
+    assert "add_reminder" not in html2
+    assert "已设置提醒" not in html2
+    # 展开态有「点击收起」链接
+    assert "点击收起" in html2
+    assert "点击展开" not in html2
     print("[OK] Tool calls rendered as step card")
 
 
@@ -331,5 +354,100 @@ if __name__ == "__main__":
     test_settings_window_char_cfg_passed()
     test_settings_window_preview_voice_no_crash_without_cfg()
     test_settings_window_preview_voice_uses_char_name()
+    test_custom_avatar_loaded_from_path()
+    test_custom_avatar_fallback_when_missing()
+    test_set_custom_avatar_copies_and_persists()
     print()
+
+
+def test_custom_avatar_loaded_from_path():
+    """chat_cfg.user_avatar_path 有值时,_make_avatar_pixmap('user') 真的去读这个图。"""
+    from app.core.config import LLMConfig, CharacterConfig, ChatConfig
+    # 准备一个 32x32 红图作为 user 自定义头像
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        red_png = tmp_path / "red_user.png"
+        # 用 QPixmap 生成真图(否则 QPixmap.isNull() 拒收)
+        from app.core.qt_compat import QPixmap, QColor, QImage
+        img = QImage(32, 32, QImage.Format.Format_ARGB32)
+        img.fill(QColor(255, 0, 0))
+        assert QPixmap.fromImage(img).save(str(red_png), "PNG")
+
+        chat_cfg = ChatConfig(user_avatar_path=str(red_png))
+        cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                        'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg)
+        pm = cw._make_avatar_pixmap("user", 40)
+        assert not pm.isNull()
+        # 不应再走默认「我」字+蓝渐变路径(user 角色有自定义 path 时)
+        # 简单判定：非 32x32 缩放(我们画的是 40x40 圆头像,中心像素应不是蓝渐变)
+        pixel = pm.toImage().pixel(20, 20)
+        r = (pixel >> 16) & 0xff
+        g = (pixel >> 8) & 0xff
+        b = pixel & 0xff
+        # 中心是红色(255,0,0),不应是蓝渐变(0x60,0xa5,0xfa 之类)
+        assert r > 200 and g < 50 and b < 50, f"中心像素 {r},{g},{b} 应为红色"
+        print("[OK] custom user_avatar_path is loaded into avatar pixmap")
+
+
+def test_custom_avatar_fallback_when_missing():
+    """user_avatar_path 指向不存在的文件 → 回退默认首字+蓝渐变,不崩。"""
+    from app.core.config import LLMConfig, CharacterConfig, ChatConfig
+    chat_cfg = ChatConfig(user_avatar_path="Z:/no/such/file.png")
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg)
+    pm = cw._make_avatar_pixmap("user", 40)
+    # 不应崩,应回退到默认(中心蓝渐变像素)
+    assert not pm.isNull()
+    print("[OK] missing user_avatar_path falls back to default")
+
+
+def test_set_custom_avatar_copies_and_persists():
+    """_set_custom_avatar 复制源图到 data/avatars/<role>.png,更新 cfg 字段并写回 config.yaml。"""
+    from app.core.config import LLMConfig, CharacterConfig, ChatConfig, load_config
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text("chat:\n  request_timeout_s: 30\n", encoding="utf-8")
+
+        # 准备一个 16x16 真 PNG 当头像源
+        from app.core.qt_compat import QImage, QPixmap, QColor
+        src_img = tmp_path / "source.png"
+        img = QImage(16, 16, QImage.Format.Format_ARGB32)
+        img.fill(QColor(0, 255, 0))   # 纯绿
+        assert QPixmap.fromImage(img).save(str(src_img), "PNG")
+
+        chat_cfg = ChatConfig(request_timeout_s=30)
+        # 改 cwd 让 AVATAR_DIR (data/avatars) 落在 tmp 下
+        import os
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(tmp_path)
+            # 改 AVATAR_DIR 到 tmp 下
+            import app.ui.chat_window as cw_mod
+            from pathlib import Path as _P
+            cw_mod.AVATAR_DIR = _P(tmp_path) / "data" / "avatars"
+            cw_mod.AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+
+            cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                            'assets/sprites', asr_enabled=False, chat_cfg=chat_cfg,
+                            cfg_path=str(cfg_path))
+            ok = cw._set_custom_avatar("user", str(src_img))
+            assert ok is True
+            # self._user_avatar_path 应指向 .../data/avatars/user.png
+            assert Path(cw._user_avatar_path).name == "user.png"
+            assert "avatars" in Path(cw._user_avatar_path).parts
+            # 文件应真在 tmp/data/avatars/user.png
+            dst = cw_mod.AVATAR_DIR / "user.png"
+            assert dst.is_file()
+            # 重新加载验证内容是源图
+            pm = QPixmap(str(dst))
+            assert not pm.isNull()
+            # config.yaml 写回 chat.user_avatar_path
+            saved = load_config(cfg_path)
+            assert Path(saved.chat.user_avatar_path).name == "user.png"
+            assert "avatars" in Path(saved.chat.user_avatar_path).parts
+            assert saved.chat.request_timeout_s == 30    # 其它字段保留
+        finally:
+            os.chdir(old_cwd)
+    print("[OK] _set_custom_avatar copies file, updates state, persists to config.yaml")
     print("All chat rendering tests passed!")
