@@ -1366,34 +1366,27 @@ class ChatWindow(QWidget):
             log.exception("_invoke_confirm_dispatch_slot 异常")
 
     def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
-        """主线程槽：弹 QMessageBox → 调 on_done（Event.set() 唤醒子线程）。"""
+        """主线程槽：弹危险工具确认弹窗 → 调 on_done（Event.set() 唤醒子线程）。
+
+        2026-10-15 改用自定义 _DangerConfirmDialog(QDialog) 而不是 QMessageBox:
+        - QMessageBox 在 FramelessWindowHint + WA_TranslucentBackground 父窗口
+          下被 Qt 当 transient child 立刻 dismiss(用户实测「只闪一下」)
+        - 自定义 QDialog 显式控制所有 flags,不被父窗口属性干扰
+        - 显式 ApplicationModal + StaysOnTopHint + 完整 window 标志(不用父)
+        """
         try:
-            label = _DANGEROUS_LABELS.get(name, name)
-            text = (f"桌宠想要调用危险工具：\n\n"
-                    f"工具：{label}\n"
-                    f"参数：\n{args_pretty or '  (无)'}\n\n"
-                    f"是否允许？")
-            box = QMessageBox(self)
-            # 桌宠场景主人往往没在盯聊天窗，弹窗必须自己跳到前台，
-            # 否则它会藏在后面，60s 必然超时（同文件 _open_memory 里已有
-            # raise_/activateWindow 的正确范式）。
-            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            box.setWindowModality(Qt.WindowModality.ApplicationModal)
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("危险工具确认")
-            box.setText(text)
-            box.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            box.setDefaultButton(QMessageBox.StandardButton.No)
-            self._confirm_box = box      # 供超时路径 _close_confirm_box 用
+            from app.ui.chat_window.confirm_dialog import _DangerConfirmDialog
+            dlg = _DangerConfirmDialog(name=name, args_pretty=args_pretty, parent=None)
+            self._confirm_box = dlg      # 供超时路径 _close_confirm_box 用
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            # 调 exec() 阻塞主线程直到用户点按钮 / 关闭 / 超时
             try:
-                box.show()
-                box.raise_()
-                box.activateWindow()
-                result = box.exec()
+                result = dlg.exec()
             finally:
                 self._confirm_box = None
-            on_done(result == QMessageBox.StandardButton.Yes)
+            on_done(result == 1)   # Accepted = 1(Yes),Rejected = 0(No)
         except Exception:  # noqa: BLE001
             log.exception("confirm dialog failed")
             on_done(False)
