@@ -702,7 +702,7 @@ class ChatWindow(QWidget):
         # 全屏按钮 + F11 快捷键已移除。
         self.btn_close = QToolButton()
         self.btn_close.setObjectName("win_btn_close")
-        self.btn_close.setText("✕")
+        self.btn_close.setText("X")
         self.btn_close.setToolTip("关闭")
         self.btn_close.clicked.connect(self.close)
         hl.addWidget(self.btn_close)
@@ -983,7 +983,7 @@ class ChatWindow(QWidget):
             self.btn_max.setToolTip("最大化")
         else:
             self.showMaximized()
-            self.btn_max.setText("❐")
+            self.btn_max.setText("[ ]")
             self.btn_max.setToolTip("还原")
 
     def _open_demo(self) -> None:
@@ -1148,7 +1148,7 @@ class ChatWindow(QWidget):
                 if self._is_image_suffix(p.suffix):
                     lines.append(f"![{p.name}]({file_uri})")
                 else:
-                    lines.append(f"📎 **{p.name}**")
+                    lines.append(f"附件 **{p.name}**")
             attach_block = "\n".join(lines)
             text = (attach_block + ("\n\n" + text if text else "")).strip()
 
@@ -1289,7 +1289,7 @@ class ChatWindow(QWidget):
             return
 
         # /image <prompt> / /video <prompt> / /audio <prompt>:
-        # 直接从输入框打命令调多模态 tool 拿 URL 嵌图。跟点 🎨 insert 前缀是
+        # 直接从输入框打命令调多模态 tool 拿 URL 嵌图。跟点 生成图片 按钮 insert 前缀是
         # 同一姿势的键盘版 —— 主人不用鼠标也能用。v12 加 (v11 走 /api 切换)。
         if cmd in ("/image", "/video", "/audio") and args:
             kind = cmd[1:]   # "image" / "video" / "audio"
@@ -1336,7 +1336,7 @@ class ChatWindow(QWidget):
                         f"当前可用 skill（{len(names)} 个）:\n"
                         + "\n".join(lines)
                         + f"\n\n路径: `{skills_dir}`"
-                        + (f"\n\n✨ 当前激活: **{active}**（本次对话会按它的行为规范回答）"
+                        + (f"\n\n当前激活: **{active}**（本次对话会按它的行为规范回答）"
                            if active else
                            f"\n\n激活方式: 在聊天开头输入 `/skills/{names[0]} ...`，"
                            f"或单独输入 `/skills/{names[0]}`。"
@@ -1420,7 +1420,7 @@ class ChatWindow(QWidget):
         if not text:
             return
         # 渲染用户问题(用 system 灰框,不写进 history)
-        self._render_message(Message(role="user", content=f"📝 {text}"))
+        self._render_message(Message(role="user", content=f"[主人笔记] {text}"))
         self._kickoff_llm_plan(text)
 
     def _kickoff_llm_plan(self, user_text: str) -> None:
@@ -1458,7 +1458,7 @@ class ChatWindow(QWidget):
         self._plan_buffer.append(text)
 
     def _on_plan_done(self, full: str) -> None:
-        """plan 完成:渲染为一张「📋 计划」卡片,不入 history / chat_store。"""
+        """plan 完成:渲染为一张「[计划]」卡片,不入 history / chat_store。"""
         body = full or ("".join(getattr(self, "_plan_buffer", []) or []))
         self._plan_buffer = []
         self._generating = False
@@ -1496,7 +1496,7 @@ class ChatWindow(QWidget):
             '<div style="margin:8px 0 14px 0;padding:10px 12px;'
             'background:#fbf7ff;border:1px solid #d9c9f5;border-radius:8px;">'
             '<div style="color:#7c5cf0;font-weight:600;margin-bottom:6px;">'
-            '📋 计划(不会自动执行,主人说「按计划做」才会执行)</div>'
+            '[计划] (不会自动执行,主人说「按计划做」才会执行)</div>'
             f'<div style="white-space:pre-wrap;color:#2c2c38;line-height:1.55;">{safe}</div>'
             '</div>'
         )
@@ -1786,7 +1786,7 @@ class ChatWindow(QWidget):
                                Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation))
         else:
-            thumb.setText("📎")
+            thumb.setText("附件")
             thumb.setStyleSheet("font-size: 26pt; color: #7c6cf0;")
         thumb.setFixedSize(72, 56)
         bl.addWidget(thumb)
@@ -1878,8 +1878,8 @@ class ChatWindow(QWidget):
         走 self.registry.get(f"generate_{kind}") 调 tool, 拿 URL, 嵌图。
         registry 不可用 / tool 没注册时, 弹清晰提示。
         """
-        labels = {"image": "🎨 生成图片", "video": "🎬 生成视频",
-                  "audio": "🎵 生成音频"}
+        labels = {"image": "生成图片", "video": "生成视频",
+                  "audio": "生成音频"}
         label = labels.get(kind, kind)
         prompt = (prompt or "").strip()
         if not prompt:
@@ -2916,7 +2916,7 @@ class ChatWindow(QWidget):
             if event.type() == QEvent.Type.WindowStateChange:
                 if hasattr(self, "btn_max"):
                     if self.isMaximized():
-                        self.btn_max.setText("❐")
+                        self.btn_max.setText("[ ]")
                         self.btn_max.setToolTip("还原")
                     else:
                         self.btn_max.setText("▢")
@@ -2952,9 +2952,9 @@ class ChatWindow(QWidget):
             if status == "cancel":
                 mark = '<span style="color:#9ca3af;">⊘ 取消</span>'
             elif status == "fail":
-                mark = '<span style="color:#dc2626;">✕ 失败</span>'
+                mark = '<span style="color:#dc2626;">[失败]</span>'
             else:
-                mark = '<span style="color:#16a34a;">✓</span>'
+                mark = '<span style="color:#16a34a;">[完成]</span>'
             target_html = (
                 f'&nbsp;<span style="color:#a1a1aa;">·</span>&nbsp;<b>{_html_escape(target)}</b>'
                 if target else ""
@@ -3034,7 +3034,7 @@ class ChatWindow(QWidget):
             output = _html_escape(e.get("output", ""))
             ec = int(e.get("exit_code", 0))
             ec_color = "#16a34a" if ec == 0 else "#dc2626"
-            ec_icon = "✓" if ec == 0 else "✕"
+            ec_icon = "[完成]" if ec == 0 else "[失败]"
             rows.append(
                 '<div style="margin:3px 0;background:#0f172a;border-radius:6px;'
                 'padding:6px 10px;font-family:Consolas,Menlo,monospace;font-size:9pt;'

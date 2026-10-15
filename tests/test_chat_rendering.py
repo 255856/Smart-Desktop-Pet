@@ -2280,3 +2280,173 @@ def test_v12_image_command_missing_config_raises():
         _multimodal.setup_config({})  # 清掉, 不污染其他测试
 
     print("[OK] v12: 没 multimodal cfg 时 generate_image 抛清晰错")
+
+
+
+# ============================================================
+# v13 调整 (2026-10-15):
+#   1) multimodal 默认 endpoint 路径改 MiniMax 实际值
+#      (image=image_generation / video=video_generation / audio=t2a_v2),
+#      不是 OpenAI 兼容的 /images/generations (在 MiniMax 上 404)
+#   2) 适配 MiniMax 实际响应 schema
+#      (image: data.image_urls[] / data.image_base64[];
+#       video: {task_id} 异步 polling /v2/query/video_generation/{task_id})
+#   3) chat_window 不再有 emoji (主人实测反馈: 「以后项目中不要使用表情包」)
+# ============================================================
+
+
+def test_v13_endpoint_paths_default_to_minimax():
+    """v13: multimodal 默认 endpoint 路径按 MiniMax 官网实际值, 不是 OpenAI 兼容的
+    /images/generations (MiniMax 上 404)。"""
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({})  # 没 cfg, 走默认
+    assert _multimodal._endpoint_path("image") == "image_generation", (
+        f"image 默认 endpoint 应是 MiniMax image_generation, 实际: "
+        f"{_multimodal._endpoint_path('image')}"
+    )
+    assert _multimodal._endpoint_path("video") == "video_generation", (
+        f"video 默认 endpoint 应是 MiniMax video_generation, 实际: "
+        f"{_multimodal._endpoint_path('video')}"
+    )
+    assert _multimodal._endpoint_path("audio") == "t2a_v2", (
+        f"audio 默认 endpoint 应是 MiniMax t2a_v2, 实际: "
+        f"{_multimodal._endpoint_path('audio')}"
+    )
+
+    print("[OK] v13: multimodal 默认 endpoint 走 MiniMax 实际路径")
+
+
+def test_v13_endpoint_path_overridden_by_cfg():
+    """v13: config.yaml multimodal.image_endpoint_path 等可覆盖默认。"""
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({
+        "image_endpoint_path": "images/generations",
+        "video_endpoint_path": "videos/generate",
+        "audio_endpoint_path": "audio/speech",
+    })
+    assert _multimodal._endpoint_path("image") == "images/generations"
+    assert _multimodal._endpoint_path("video") == "videos/generate"
+    assert _multimodal._endpoint_path("audio") == "audio/speech"
+    _multimodal.setup_config({})  # 清掉避免污染
+
+    print("[OK] v13: cfg multimodal.*_endpoint_path 覆盖默认")
+
+
+def test_v13_extract_first_url_minimax_official_schema():
+    """v13: MiniMax 官方 image-01 响应 {data: {image_urls: [url, ...]}}
+    / {data: {image_base64: [b64, ...]}} 都正确解析。"""
+    from app.engine.tools import _multimodal
+
+    # 官方 schema 1: URL list
+    url = _multimodal._extract_first_url(
+        {"image_urls": ["https://minimax/x.png", "https://minimax/y.png"]},
+        kind="image",
+    )
+    assert url == "https://minimax/x.png", (
+        f"应取 image_urls[0], 实际: {url!r}"
+    )
+
+    # 官方 schema 2: base64 list
+    url = _multimodal._extract_first_url(
+        {"image_base64": ["AAAA", "BBBB"]}, kind="image",
+    )
+    assert url == "data:image/png;base64,AAAA", (
+        f"应取 image_base64[0] 包成 data URL, 实际: {url!r}"
+    )
+
+    # OpenAI / 代理 schema: list[dict]
+    url = _multimodal._extract_first_url(
+        [{"url": "https://proxy/x.png"}], kind="image",
+    )
+    assert url == "https://proxy/x.png"
+
+    # OpenAI b64_json
+    url = _multimodal._extract_first_url(
+        [{"b64_json": "BBBB"}], kind="image",
+    )
+    assert url == "data:image/png;base64,BBBB"
+
+    # 兜底 audio mime
+    url = _multimodal._extract_first_url(
+        [{"b64_json": "AAA"}], kind="audio",
+    )
+    assert url == "data:audio/mpeg;base64,AAA", (
+        f"audio 应走 audio/mpeg mime, 实际: {url!r}"
+    )
+
+    print("[OK] v13: _extract_first_url 兼容 MiniMax / OpenAI / 代理 schema")
+
+
+def test_v13_generate_image_uses_minimax_schema():
+    """v13: base_url 配 minimaxi.com 时, generate_image 走 MiniMax 官方 schema
+    (aspect_ratio + response_format=url), 不是 OpenAI 的 size。"""
+    import io
+    from app.engine.tools import _multimodal
+    captured = {}
+    def _fake_urlopen(req, timeout=60):
+        body_str = req.data.decode("utf-8")
+        captured["body"] = body_str
+        captured["url"] = req.full_url
+        # MiniMax 官方响应 schema
+        resp_body = (
+            b'{"data":{"image_urls":["https://minimax/x.png"]},'
+            b'"metadata":{"success_count":"1","failed_count":"0"},'
+            b'"base_resp":{"status_code":0,"status_msg":"success"}}'
+        )
+        return io.BytesIO(resp_body)
+    # monkeypatch
+    real = _multimodal.urllib.request.urlopen
+    _multimodal.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
+    try:
+        _multimodal.setup_config({
+            "base_url": "https://api.minimaxi.com/v1",
+            "api_key": "sk-v13-test",
+            "image_model": "image-01",
+            "aspect_ratio": "16:9",
+        })
+        url = _multimodal.generate_image("a cat in space")
+        assert url == "https://minimax/x.png", (
+            f"应从 MiniMax 响应取 image_urls[0], 实际: {url!r}"
+        )
+        # 验证 body 走 MiniMax schema (aspect_ratio, response_format)
+        assert "aspect_ratio" in captured["body"], (
+            f"MiniMax 应走 aspect_ratio 字段。 body: {captured['body']}"
+        )
+        assert "response_format" in captured["body"]
+        assert "16:9" in captured["body"]
+        # 不应含 OpenAI 的 size 字段 (除非 size 显式给了 kwargs)
+        # (默认 aspect_ratio=1:1, kwargs 没 size 不会有 size 字段)
+    finally:
+        _multimodal.urllib.request.urlopen = real  # type: ignore[attr-defined]
+        _multimodal.setup_config({})
+
+    print("[OK] v13: generate_image 走 MiniMax schema (aspect_ratio + response_format)")
+
+
+def test_v13_no_emoji_in_chat_window_ui_strings():
+    """v13 守卫: chat_window 里没有 emoji block / 装饰符号 (主人 2026-10-15
+    反馈: 「以后项目中不要使用表情包」)。
+
+    扫源码, 排除 docstring 跟注释 (注释里如果有 emoji 也算违规, 防止后续
+    grep 误判)。"""
+    import re
+    src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8-sig")
+
+    emoji_pat = re.compile(
+        r"[\U0001F300-\U0001FAFF\U0001F600-\U0001F64F"
+        r"\U0001F680-\U0001F6FF\u2600-\u27BF"
+        r"\u2713\u2714\u2715\u2716\u2717\u2718]"
+    )
+    hits = []
+    for ln_num, line in enumerate(src.splitlines(), 1):
+        # 跳过注释行 (含 docstring 的单行) — docstring 也算 UI 文本不该有 emoji
+        # 严格不放过任何 emoji (包括注释里)
+        m = emoji_pat.search(line)
+        if m:
+            hits.append((ln_num, m.group(), line.strip()[:80]))
+
+    assert not hits, (
+        f"chat_window 还有 emoji/装饰符号, 应清。 命中: {hits[:10]}"
+    )
+
+    print("[OK] v13: chat_window 全清 emoji/装饰符号 (主人偏好)")
