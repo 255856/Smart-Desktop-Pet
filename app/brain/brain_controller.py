@@ -127,6 +127,25 @@ class BrainController(QObject):
             mem_path = root / mem_path
         self.memory = MemoryStore(mem_path)
 
+        # 接线(a):会话(SessionStore)和 Skill 加载目录 —— 让 ChatWindow
+        # 能拿一份持久化的 SessionStore / skills_dir,挂到 LangChainAgent。
+        # SessionStore:对齐 IDE agent 的「会话列表 / 切换 / 续接」能力
+        # Skills:从项目根的 skills/ 目录按需加载行为说明 markdown
+        # 两份对象都做 try/except:失败不阻断桌宠启动(降级到无会话/无 skill)。
+        try:
+            from app.brain.sessions import SessionStore
+            sessions_path = root / "data" / "pet_sessions.db"
+            self.session_store = SessionStore(sessions_path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("SessionStore 初始化失败,会话列表 / 续接 不可用: %s", e)
+            self.session_store = None
+        # skills 目录约定:项目根/skills/*.md(用户可放,文件不存在就空目录)
+        self.skills_dir: Path = root / "skills"
+        try:
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
         foods_path = root / "data" / "foods.json"
         self.items = ItemStore.load(foods_path) if foods_path.is_file() else None
 

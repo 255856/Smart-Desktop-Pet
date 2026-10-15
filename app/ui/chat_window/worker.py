@@ -219,4 +219,56 @@ class _StreamWorker(QThread):
             self.failed.emit(_failure_message(e))
 
 
-__all__ = ["_AgentWorker", "_StreamWorker"]
+class _PlanWorker(QThread):
+    """Plan-mode worker:调用 LangChainAgent.plan_sync(),只产 markdown 计划。
+
+    复用 _AgentWorker 的 chunk / done / failed 信号协议,因此 chat_window
+    既存的 _on_chunk / _on_done 不用改。但不挂 tool_used / meta —— plan 不调工具,
+    也不需要工具步骤卡片,免得给主人错觉说「会执行这些」。
+    """
+
+    chunk = Signal(str)
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, agent, messages: list[dict]):
+        super().__init__()
+        self.agent = agent
+        self.messages = messages
+        self.cancel_event = threading.Event()
+
+    def request_stop(self) -> None:
+        self.cancel_event.set()
+
+    def run(self) -> None:
+        full: list[str] = []
+        done_fallback: str = ""
+        try:
+            # plan_sync 在持久 loop 里跑 plan();每个事件 (text|done|error, payload)
+            plan_events = self.agent.plan_sync(
+                self.messages, cancel_check=self.cancel_event.is_set,
+            ) if hasattr(self.agent, "plan_sync") else None
+            if plan_events is None:
+                self.failed.emit(
+                    "当前 Agent 后端不支持 plan 模式(仅 standard / LangChain 后端可用)"
+                )
+                return
+            for ev in plan_events:
+                kind = ev[0]
+                if kind == "text":
+                    full.append(ev[1])
+                    self.chunk.emit(ev[1])
+                elif kind == "done":
+                    # 防御:plan 没 yield text 但给了 done payload,用 payload 兜底
+                    if len(ev) > 1 and ev[1]:
+                        done_fallback = str(ev[1])
+                elif kind == "error":
+                    self.failed.emit(str(ev[1]) if len(ev) > 1 else "plan 失败")
+                    return
+            final_text = "".join(full) or done_fallback
+            self.done.emit(final_text)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(_failure_message(e))
+
+
+__all__ = ["_AgentWorker", "_StreamWorker", "_PlanWorker"]

@@ -286,7 +286,7 @@ class UIController(QObject):
     def _on_eat_requested(self) -> None:
         """吃饭：涨饱食度 + 体力 + 心情。"""
         self.state_mgr.on_eat_requested()
-        self.pet.show_bubble("🍚 吃饱啦~ 好满足！")
+        self.pet.show_bubble("吃饱啦~ 好满足！")
 
     def _on_food_selected(self, name: str) -> None:
         """右键投喂具体食物：按 foods.json 价格扣金币并应用数值变化。
@@ -687,7 +687,7 @@ class UIController(QObject):
     def _on_thinking_started(self) -> None:
         """模型开始思考：桌宠播放 think/think_2 动画。"""
         self.pet.animator.set_thinking()
-        self.pet.show_bubble("🤔 思考中…", duration_ms=2000)
+        self.pet.show_bubble("思考中…", duration_ms=2000)
 
     def _on_thinking_stopped(self) -> None:
         """模型思考结束：回到待机。"""
@@ -761,15 +761,27 @@ class UIController(QObject):
         self.pet._start_frame_timer()
 
     def _on_pet_scale_changed(self, new_scale: float) -> None:
-        """右键菜单改了缩放 → 实时 resize pet 窗 + 重新缩放显示。"""
-        if abs(new_scale - self.pet._scale) < 0.001:
-            return
-        self.pet.apply_display_size(new_scale)
+        """滚轮 / 右键菜单改了缩放 → 持久化 + 同步设置面板。
+
+        窗口尺寸与锚点移动已由 PetWindow._zoom_to 完成（它先 apply_display_size
+        再 emit，所以此处 pet._scale 通常已是新值，不能用「_scale 是否变化」早退）。
+        这里负责：sprite 帧重缩放、写 settings.json、同步滑块/标签/预设高亮。
+        """
+        new_scale = round(float(new_scale), 2)
+        # 兜底：信号来自未 resize 的路径时补一次（正常 _zoom_to 路径已 resize）
+        if abs(self.pet._scale - new_scale) > 0.001:
+            self.pet.apply_display_size(new_scale)
         self._rescale_sprite_pixmaps()
-        # 同步 settings_window 滑块
-        self.settings_window.scale_slider.blockSignals(True)
-        self.settings_window.scale_slider.setValue(int(new_scale * 100))
-        self.settings_window.scale_slider.blockSignals(False)
+        sw = self.settings_window
+        # 与设置面板滑块拖动用同一个键，重启后保持
+        sw.settings_store.set("scale", float(new_scale))
+        val = int(round(new_scale * 100))
+        if sw.scale_slider.value() != val:
+            sw.scale_slider.blockSignals(True)
+            sw.scale_slider.setValue(val)
+            sw.scale_label.setText(f"{new_scale:.2f}x")
+            sw.scale_slider.blockSignals(False)
+            sw._highlight_scale_preset(new_scale)
 
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
@@ -790,7 +802,7 @@ class UIController(QObject):
             pass
         fps = 1000.0 / ms if ms > 0 else 0
         self.settings_window._set_status(
-            f"🎯 帧时长已切换：{ms} ms / 帧（{fps:.1f} fps）")
+            f"帧时长已切换：{ms} ms / 帧（{fps:.1f} fps）")
 
     def _on_fps_monitor_toggled(self, on: bool) -> None:
         """FPS 气泡调试开关：两边保持一致。"""
@@ -798,9 +810,9 @@ class UIController(QObject):
         if on:
             self.pet._fps_count = 0
             self.pet._fps_window_start = 0.0
-            self.pet.show_bubble("📊 FPS 监测开启", duration_ms=2000)
+            self.pet.show_bubble("FPS 监测开启", duration_ms=2000)
         else:
-            self.pet.show_bubble("📊 FPS 监测关闭", duration_ms=1500)
+            self.pet.show_bubble("FPS 监测关闭", duration_ms=1500)
         # 同步 settings_window 复选框
         try:
             self.settings_window.set_fps_monitor(on)
@@ -876,6 +888,14 @@ class UIController(QObject):
                 tts=self.tts,
                 memory_store=self.brain.memory,
                 chat_cfg=self.cfg.chat,
+                # 接线(a):把 phase 2/3 引擎层做好的「上下文对象」喂给 ChatWindow
+                # cwd:Agent 当前工作目录(AGENTS.md 向上查找起点 + 项目级工具的根)。
+                # 默认 = 项目根,主程序可配置(将来让用户在 settings 里改)。
+                cwd=str(self.root),
+                # session_store:brain 上挂的持久化对象(降级时为 None)
+                session_store=getattr(self.brain, "session_store", None),
+                # skills_dir:brain.skills_dir(项目根/skills/),非空路径
+                skills_dir=str(getattr(self.brain, "skills_dir", "") or ""),
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)
@@ -1072,7 +1092,7 @@ class UIController(QObject):
         import threading
         threading.Thread(target=self._rebuild_tts_blocking, daemon=True,
                          name="tts-rebuild").start()
-        self.settings_window._set_status("🔊 语音引擎配置已保存，正在切换…")
+        self.settings_window._set_status("语音引擎配置已保存，正在切换…")
 
     def _rebuild_tts_blocking(self) -> None:
         """按 cfg 重建 TTS 引擎（后台线程；minimax 首次克隆可能耗时）。"""
@@ -1176,11 +1196,11 @@ class UIController(QObject):
                                   ("max_s", "sticker_max_s"),
                                   ("duration_s", "sticker_duration_s")):
                     store.set(skey, int(opts[key]))
-            sw._set_status("✅ 设置已保存，重启后自动生效")
+            sw._set_status("✓ 设置已保存，重启后自动生效")
             log.info("设置已手动保存")
         except Exception:  # noqa: BLE001
             log.exception("保存设置失败")
-            sw._set_status("❌ 保存失败，详见日志")
+            sw._set_status("✕ 保存失败，详见日志")
 
     def _apply_stored_window_settings(self) -> None:
         """启动时应用 settings.json 里保存的窗口类设置（保存按钮/自动保存写入）。"""

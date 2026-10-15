@@ -75,8 +75,8 @@ from .utils import (  # noqa: F401
 from .message import Message  # noqa: F401
 
 
-# _AgentWorker / _StreamWorker — 拆到 chat_window.worker
-from .worker import _AgentWorker, _StreamWorker  # noqa: F401
+# _AgentWorker / _StreamWorker / _PlanWorker — 拆到 chat_window.worker
+from .worker import _AgentWorker, _StreamWorker, _PlanWorker  # noqa: F401
 
 
 #  / 命令补全（QPlainTextEdit 没有 setCompleter，自己写一个轻量版）
@@ -109,7 +109,14 @@ class ChatWindow(QWidget):
                  tts: Optional[object] = None,
                  memory_store: Optional[object] = None,
                  chat_cfg=None,
-                 cfg_path: str = "config.yaml"):
+                 cfg_path: str = "config.yaml",
+                 # 接线(a):Phase 2.1-3.4 引擎层上下文 —— 全部透传给 LangChainAgent
+                 cwd: Optional[str] = None,
+                 session_id: Optional[str] = None,
+                 session_store: Optional[object] = None,
+                 skills_dir: Optional[str] = None,
+                 auto_load_skills: Optional[list] = None,
+                 extra_docs_paths: Optional[list] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
@@ -138,6 +145,17 @@ class ChatWindow(QWidget):
         # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
         self.memory_store = memory_store
         self._memory_dlg: Optional[MemoryDialog] = None
+        # 接线(a):Phase 2/3 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
+        # cwd:项目根(用作 AGENTS.md 向上查找的起点 + 项目级指令上下文)
+        # session_id/session_store:对齐 Claude Code/ZCode 的会话列表 / 续接
+        # skills_dir/auto_load_skills:加载 skills/*.md 行为说明
+        # extra_docs_paths:主程序注入的额外 AGENTS.md / CLAUDE.md 路径
+        self._cwd = cwd
+        self._session_id = session_id
+        self._session_store = session_store
+        self._skills_dir = skills_dir
+        self._auto_load_skills = list(auto_load_skills or [])
+        self._extra_docs_paths: list = list(extra_docs_paths or [])
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -969,6 +987,21 @@ class ChatWindow(QWidget):
                 role="assistant", content="工具不可用"))
             return
 
+        # /plan:把当前输入当 plan-mode 请求,只产 markdown 计划不调工具
+        # 接线(a):让 LangChainAgent.plan() 走标准的 chat_window 信号协议
+        # 与普通 chat 共享 _on_chunk / _on_done,所以计划正文会进历史。
+        if cmd == "/plan":
+            if not hasattr(self, "_lc_agent") or self._lc_agent is None:
+                self._render_message(Message(
+                    role="assistant", content="plan 模式只在 standard / LangChain 后端可用"))
+                return
+            # 跟普通 chat 一样,先走清洗逻辑 + 推 history
+            plan_ask = args or "（主人在 /plan 里没带具体问题,先给个通用 plan 模板。）"
+            self.input_edit.clear()
+            # 走 _on_send 一样的路径:把用户问题入历史,启动 _PlanWorker
+            self._quick_send_plan(plan_ask)
+            return
+
         # 其他命令 → 直接当文本发给 LLM（带命令提示）
         hint = f"（主人用了快捷命令 {text}）"
         self._quick_send(hint)
@@ -986,6 +1019,102 @@ class ChatWindow(QWidget):
         self.chat_store.add("user", text)  # 持久化用户消息
         self._render_message(msg)
         self._kickoff_llm()
+
+    def _quick_send_plan(self, text: str) -> None:
+        """Plan-mode 入口:跟 _quick_send 不一样 —— 用户问题不入 history 也不入
+        chat_store 的「主对话」流,因为 plan 产物不调工具,只是主人先看一眼草稿,
+        后续主人在普通 chat 里说「按计划做」才进主循环。
+
+        但用户问题本身要渲染出来,这样能看到「这是我对哪个问题拿到的计划」。
+        """
+        if self._generating:
+            return
+        text = text.strip()
+        if not text:
+            return
+        # 渲染用户问题(用 system 灰框,不写进 history)
+        self._render_message(Message(role="user", content=f"📝 {text}"))
+        self._kickoff_llm_plan(text)
+
+    def _kickoff_llm_plan(self, user_text: str) -> None:
+        """启动 _PlanWorker —— /plan 命令专用路径。
+
+        用独立的信号协议:plan_chunk / plan_done / plan_failed,不走普通 chat 的
+        _on_chunk / _on_done(那些会触发 TTS 朗读 + 加 emotion,plan 模式不需要)。
+        产物渲染为单独一张「计划」卡片,不写进 history / chat_store,保持主对话流干净。
+        """
+        if not hasattr(self, "_lc_agent") or self._lc_agent is None:
+            self._render_message(Message(
+                role="assistant", content="plan 模式不可用:仅 standard / LangChain 后端支持"))
+            return
+        self._generating = True
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setVisible(True)
+        self.thinking_started.emit()
+        # 只把 user_text 作为单一消息喂给 plan(避免污染主 chat 历史)
+        msgs = [{"role": "user", "content": user_text}]
+        # plan 模式下我们用一个独立 buffer,worker 的 chunk 不直接渲染,而是
+        # 累积,最后通过 done 一次渲染为一张「计划卡片」
+        self._plan_buffer: list[str] = []
+        self._plan_worker = _PlanWorker(
+            self._lc_agent, msgs,
+        )
+        self._plan_worker.chunk.connect(self._on_plan_chunk)
+        self._plan_worker.done.connect(self._on_plan_done)
+        self._plan_worker.failed.connect(self._on_plan_failed)
+        self._plan_worker.start()
+
+    def _on_plan_chunk(self, text: str) -> None:
+        """plan 流式 chunk 累积,不渲染中间过程(plan 文本一次发出来比较干净)。"""
+        if not hasattr(self, "_plan_buffer") or self._plan_buffer is None:
+            self._plan_buffer = []
+        self._plan_buffer.append(text)
+
+    def _on_plan_done(self, full: str) -> None:
+        """plan 完成:渲染为一张「📋 计划」卡片,不入 history / chat_store。"""
+        body = full or ("".join(getattr(self, "_plan_buffer", []) or []))
+        self._plan_buffer = []
+        self._generating = False
+        self.send_btn.setEnabled(True)
+        self.stop_btn.setVisible(False)
+        self.thinking_stopped.emit()
+        if not body.strip():
+            self._render_message(Message(
+                role="assistant", content="plan 模式没产出内容,可能是模型拒绝"))
+        else:
+            self._render_plan_card(user_text="", plan_text=body)
+        # _plan_worker 已经在 done 后会自动 quit,清引用避免内存泄漏
+        self._plan_worker = None
+
+    def _on_plan_failed(self, err: str) -> None:
+        """plan 失败:提示主人,不影响普通 chat 后续使用。"""
+        self._generating = False
+        self.send_btn.setEnabled(True)
+        self.stop_btn.setVisible(False)
+        self.thinking_stopped.emit()
+        self._render_message(Message(
+            role="assistant", content=f"plan 模式失败: {err}"))
+        self._plan_worker = None
+
+    def _render_plan_card(self, user_text: str, plan_text: str) -> None:
+        """把产出的 markdown 计划渲染成一张折叠卡片。
+
+        与普通对话气泡共用 chat_view,但有清晰的视觉边界(紫框 + 锁形 icon),
+        让主人一眼区分「这是计划,不是已经做的事」。
+        """
+        # 转义 + 保留 markdown 块结构(code fence 等)
+        from app.ui.chat_window.utils import _html_escape
+        safe = _html_escape(plan_text)
+        html = (
+            '<div style="margin:8px 0 14px 0;padding:10px 12px;'
+            'background:#fbf7ff;border:1px solid #d9c9f5;border-radius:8px;">'
+            '<div style="color:#7c5cf0;font-weight:600;margin-bottom:6px;">'
+            '📋 计划(不会自动执行,主人说「按计划做」才会执行)</div>'
+            f'<div style="white-space:pre-wrap;color:#2c2c38;line-height:1.55;">{safe}</div>'
+            '</div>'
+        )
+        # 直接插入到 chat_view(不动 history / chat_store)
+        self.chat_view.append(html)
 
     def _trim_history(self) -> None:
         """裁剪送给 LLM 的上下文：条数上限 + 字符预算，两条约束取更严的。
@@ -1282,6 +1411,15 @@ class ChatWindow(QWidget):
                     registry=self.registry,
                     persona=system_prompt,
                     cfg=self.langchain_cfg,
+                    # 接线(a):把 phase 2/3 的引擎层上下文(项目目录 / 会话 / 长期记忆 / skills / 文档)
+                    # 全部透传给 LangChainAgent。这些都是 best-effort —— 留 None 时走 agent 默认。
+                    cwd=self._cwd,
+                    session_id=self._session_id,
+                    session_store=self._session_store,
+                    memory_store=self.memory_store,
+                    skills_dir=self._skills_dir,
+                    auto_load_skills=self._auto_load_skills or None,
+                    extra_docs_paths=self._extra_docs_paths or None,
                 )
                 # 把现有的 Qt confirm 弹窗挂到 LangChain 的 RiskyToolConfirm 拦截器
                 # 上 —— 否则标准后端高风险工具只能靠 chat 里说"确认"二字,体验差。

@@ -804,6 +804,20 @@ class LangChainAgent:
             log.warning("清 checkpoint 失败:%s", e)
             return False
 
+    def plan_sync(self, messages: list[dict],
+                  cancel_check: Optional[Callable[[], bool]] = None,
+                  timeout: float = 300.0) -> list[tuple]:
+        """同步版 plan():给 _PlanWorker (QThread) 调用 —— 在持久 loop 里跑 async plan(),
+        返回所有 (text|done|error, ...) 事件。返回 list 而非 generator,
+        跟 run_sync 保持一致,worker 直接 for 迭代即可。
+        """
+        async def collect() -> list[tuple]:
+            out: list[tuple] = []
+            async for ev in self.plan(messages, cancel_check=cancel_check):
+                out.append(ev)
+            return out
+        return LangChainAgent._get_loop().run_coro(collect(), timeout=timeout)
+
     def run_sync(self, messages: list[dict],
                  cancel_check: Optional[Callable[[], bool]] = None,
                  timeout: float = 300.0) -> list[tuple]:
