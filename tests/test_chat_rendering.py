@@ -2771,3 +2771,101 @@ def test_v15_multimodal_segment_optional():
     _multimodal.setup_config({})
 
     print("[OK] v15: multimodal 段可选, 不写时跟 llm 共享 base_url/api_key")
+
+
+
+# ============================================================
+# v16 调整 (2026-10-15):
+#   MiniMax 1004 错 (login fail) 通常是 key 跟 base_url 不匹配 (plan key
+#   走 plan 域, pay-as-you-go 走另一个域)。_post_json 抛错时给清晰中文提示,
+#   主人不用读 stack trace 就能知道去 MiniMax 后台「套餐详情」找 plan base_url。
+# ============================================================
+
+
+def test_v16_post_json_1004_login_fail_clear_hint():
+    """v16: MiniMax 1004 错 (login fail) 时, _post_json 抛的错应该含清晰
+    提示告诉主人 key 跟 base_url 不匹配, 让主人去 MiniMax 后台「套餐详情」
+    找 plan 专属 base_url。"""
+    import io
+    from app.engine.tools import _multimodal
+    from urllib.error import HTTPError, URLError
+
+    # 模拟 MiniMax 1004 响应
+    def _fake_urlopen(req, timeout=60):
+        if req.data is None:
+            return io.BytesIO(b"")
+        err = HTTPError(
+            req.full_url, 401, "Unauthorized", {}, io.BytesIO(
+                b'{"base_resp":{"statuscode":1004,"status_msg":"login fail: '
+                b'Please carry the API secret key in the Authorization field"}}'
+            ),
+        )
+        raise err
+
+    real = _multimodal.urllib.request.urlopen
+    _multimodal.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
+    try:
+        _multimodal.setup_config({
+            "llm": {"base_url": "https://api.minimaxi.com/v1",
+                    "api_key": "sk-cp-plan-key"},
+        })
+        try:
+            _multimodal._post_json(
+                "https://api.minimaxi.com/v1/image_generation",
+                {"model": "image-01", "prompt": "cat"},
+                {"Authorization": "Bearer sk-cp-plan-key"},
+            )
+            raise AssertionError("应抛 RuntimeError")
+        except RuntimeError as e:
+            msg = str(e)
+            assert "1004" in msg or "login fail" in msg.lower(), (
+                f"应提 1004 / login fail, 实际: {msg[:200]}"
+            )
+            # 关键: 提示主人 key 跟 base_url 不匹配
+            assert "base_url" in msg and ("不匹配" in msg or "key" in msg), (
+                f"应提示 key 跟 base_url 不匹配, 实际: {msg[:300]}"
+            )
+            # 提示主人去套餐详情找 plan 域
+            assert "套餐详情" in msg or "plan" in msg.lower(), (
+                f"应引导主人去 MiniMax 套餐详情找 plan 域, 实际: {msg[:300]}"
+            )
+    finally:
+        _multimodal.urllib.request.urlopen = real  # type: ignore[attr-defined]
+        _multimodal.setup_config({})
+
+    print("[OK] v16: MiniMax 1004 错给清晰提示, 引导主人去套餐详情找 plan 域")
+
+
+def test_v16_post_json_other_http_error_unchanged():
+    """v16: 非 1004 错 (比如 500) 走原路径, 不被误判为 key/base_url 不匹配。"""
+    import io
+    from app.engine.tools import _multimodal
+    from urllib.error import HTTPError
+
+    def _fake_urlopen(req, timeout=60):
+        if req.data is None:
+            return io.BytesIO(b"")
+        err = HTTPError(
+            req.full_url, 500, "Internal Server Error", {},
+            io.BytesIO(b'{"error":"server side oops"}'),
+        )
+        raise err
+
+    real = _multimodal.urllib.request.urlopen
+    _multimodal.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
+    try:
+        _multimodal.setup_config({"llm": {"base_url": "https://x", "api_key": "k"}})
+        try:
+            _multimodal._post_json("https://x", {}, {})
+        except RuntimeError as e:
+            msg = str(e)
+            assert "500" in msg, f"应含 500, 实际: {msg[:200]}"
+            # 关键: 不应含 v16 专属 plan 提示 (因为不是 1004)
+            assert "套餐详情" not in msg, (
+                f"非 1004 错不应触发 plan 提示, 实际: {msg[:200]}"
+            )
+    finally:
+        _multimodal.urllib.request.urlopen = real  # type: ignore[attr-defined]
+        _multimodal.setup_config({})
+
+    print("[OK] v16: 非 1004 错不被误判为 plan key 错")

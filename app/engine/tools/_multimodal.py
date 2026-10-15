@@ -136,6 +136,21 @@ def _post_json(url: str, body: dict, headers: dict, timeout: int = 120) -> dict:
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        # v16: 1004 错 (login fail) 通常是 key 跟 base_url 不匹配 (plan key
+        # 走 plan 域, pay-as-you-go 走另一个域), 提示主人去 MiniMax 后台
+        # 看 plan 接入指南的 base_url, 别只看 stack trace。
+        if '"statuscode":1004' in body_text or 'login fail' in body_text.lower():
+            raise RuntimeError(
+                "MiniMax 401 鉴权失败 (statuscode=1004, login fail): "
+                "API key 跟 base_url 不匹配。\n\n"
+                "  - 主人用的是 MiniMax Plan 订阅 key (sk-cp- 开头), "
+                "应该走 plan 接入指南里给的 base_url, 不是任意 minimaxi 域都通。\n"
+                "  - 主人去 MiniMax 后台「套餐详情」或「接入指南」找 plan 专属的 base_url, "
+                "填到 config.yaml 的 llm.base_url 字段。\n"
+                "  - 主人截图红线写得很清楚: 「本 API Key 适用于按量付费... "
+                "使用 M Plan 或 Credits 资源时, 请改用套餐详情中的订阅 Key」"
+                f"\n\n  原始响应: {body_text[:200]}"
+            ) from e
         raise RuntimeError(
             f"HTTP {e.code} {e.reason}: {body_text[:500]}"
         ) from e
