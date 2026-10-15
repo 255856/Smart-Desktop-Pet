@@ -638,14 +638,8 @@ class ChatWindow(QWidget):
         self.btn_max.clicked.connect(self._toggle_maximized)
         hl.addWidget(self.btn_max)
 
-        # 2026-10-15 v2: 全屏切换按钮 (F11 / 第二次点 退出全屏)
-        self.btn_fullscreen = QToolButton()
-        self.btn_fullscreen.setObjectName("win_btn")
-        self.btn_fullscreen.setText("⛶")
-        self.btn_fullscreen.setToolTip("全屏 (F11)")
-        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
-        hl.addWidget(self.btn_fullscreen)
-
+        # 2026-10-15 v3: 用户实测 "只需要最小化最大化和关闭, 不需要多余的全屏"。
+        # 全屏按钮 + F11 快捷键已移除。
         self.btn_close = QToolButton()
         self.btn_close.setObjectName("win_btn_close")
         self.btn_close.setText("✕")
@@ -669,6 +663,12 @@ class ChatWindow(QWidget):
         # cmd 链接的应用」系统对话框(用户实测)。内部命令用 anchorClicked
         # signal 拦截,外部链接用 openExternalLinks event filter 自己处理。
         self.chat_view.setOpenExternalLinks(False)
+        # 2026-10-15 v3 修复白屏: setOpenLinks(False) 关掉 QTextBrowser 的
+        # 默认 doSetSource 导航 —— 否则点 cmd:toggle_tools 这种内部 anchor
+        # 时, QTextBrowser 会把 url 解析成相对路径, 找不到文件后用空文档
+        # 替换 view, 整个 chat 区域变白(用户实测 "点击展开还是会白屏")。
+        # 我们只走 anchorClicked signal 路由, 不让 QTextBrowser 自己做导航。
+        self.chat_view.setOpenLinks(False)
         self.chat_view.anchorClicked.connect(self._on_chat_anchor_clicked)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
@@ -845,38 +845,6 @@ class ChatWindow(QWidget):
             self.showMaximized()
             self.btn_max.setText("❐")
             self.btn_max.setToolTip("还原")
-
-    def _toggle_fullscreen(self) -> None:
-        """全屏 / 退出全屏 切换 (2026-10-15 加)。
-
-        全屏时把标题栏藏起来, 退出时恢复。"""
-        if self.isFullScreen():
-            self.showNormal()
-            self._titlebar.setVisible(True)
-            self.btn_fullscreen.setText("⛶")
-            self.btn_fullscreen.setToolTip("全屏 (F11)")
-        else:
-            # 最大化状态下进入全屏: 先还原再全屏, 避免两个状态叠加
-            if self.isMaximized():
-                self.showNormal()
-                self.btn_max.setText("▢")
-                self.btn_max.setToolTip("最大化")
-            self.showFullScreen()
-            self._titlebar.setVisible(False)
-            self.btn_fullscreen.setText("⛘")
-            self.btn_fullscreen.setToolTip("退出全屏 (F11)")
-
-    def keyPressEvent(self, event):
-        """F11 = 全屏切换 (跟常见窗口一致)。"""
-        try:
-            from app.core.qt_compat import Qt
-            if event.key() == Qt.Key.Key_F11:
-                self._toggle_fullscreen()
-                event.accept()
-                return
-        except Exception:
-            pass
-        super().keyPressEvent(event)
 
     def _open_demo(self) -> None:
         """打开纯静态 Live2D Demo（本地 8765）。"""
@@ -2225,34 +2193,21 @@ class ChatWindow(QWidget):
         super().moveEvent(ev)
 
     def changeEvent(self, event):
-        """窗口状态变化(最大化/全屏)时,同步更新右上角按钮图标。
+        """窗口状态变化(最大化)时,同步更新右上角 max 按钮图标。
 
-        2026-10-15 加 —— 拖动窗口到屏幕顶端触发系统最大化时, 按钮文字
-        也要跟着切到「还原」, 否则按钮状态和实际窗口状态对不上。"""
+        2026-10-15 v3: 全屏按钮已移除, changeEvent 只剩 max 同步。
+        拖动窗口到屏幕顶端触发系统最大化时, 按钮文字也要跟着切到「还原」,
+        否则按钮状态和实际窗口状态对不上。"""
         try:
             from app.core.qt_compat import QEvent
             if event.type() == QEvent.Type.WindowStateChange:
-                # 全屏态优先判断
-                if self.isFullScreen():
-                    if hasattr(self, "btn_fullscreen"):
-                        self.btn_fullscreen.setText("⛘")
-                        self.btn_fullscreen.setToolTip("退出全屏 (F11)")
-                    if hasattr(self, "_titlebar"):
-                        self._titlebar.setVisible(False)
-                else:
-                    if hasattr(self, "btn_fullscreen"):
-                        self.btn_fullscreen.setText("⛶")
-                        self.btn_fullscreen.setToolTip("全屏 (F11)")
-                    if hasattr(self, "_titlebar"):
-                        self._titlebar.setVisible(True)
-                    # 最大化/还原
-                    if hasattr(self, "btn_max"):
-                        if self.isMaximized():
-                            self.btn_max.setText("❐")
-                            self.btn_max.setToolTip("还原")
-                        else:
-                            self.btn_max.setText("▢")
-                            self.btn_max.setToolTip("最大化")
+                if hasattr(self, "btn_max"):
+                    if self.isMaximized():
+                        self.btn_max.setText("❐")
+                        self.btn_max.setToolTip("还原")
+                    else:
+                        self.btn_max.setText("▢")
+                        self.btn_max.setToolTip("最大化")
         except Exception:
             pass
         super().changeEvent(event)

@@ -834,24 +834,59 @@ def test_input_box_style_matches_display():
 
 
 def test_window_controls_present():
-    """调整 5 验证: 标题栏右上角 4 个窗口控制按钮齐全。
+    """调整 5 v3 验证: 标题栏右上角 3 个窗口控制按钮 (最小化/最大化/关闭)。
 
-    主人实测指定 "右上角要有全屏和窗口功能"。"""
+    2026-10-15 v3: 主人实测 "只需要最小化最大化和关闭, 不需要多余的全屏",
+    全屏按钮 + F11 快捷键已移除。"""
     from app.core.config import LLMConfig
     from app.core.qt_compat import QToolButton
     cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                     'assets/sprites', asr_enabled=False)
-    for name in ('btn_min', 'btn_max', 'btn_fullscreen', 'btn_close'):
+    # 3 个按钮必须都存在
+    for name in ('btn_min', 'btn_max', 'btn_close'):
         assert hasattr(cw, name), f"标题栏缺 {name} 按钮"
         btn = getattr(cw, name)
         assert isinstance(btn, QToolButton), f"{name} 必须是 QToolButton"
+    # 全屏按钮 / F11 处理器必须已删
+    assert not hasattr(cw, "btn_fullscreen"),         "btn_fullscreen 必须已移除 (用户实测 v3)"
+    assert not callable(getattr(cw, "_toggle_fullscreen", None)),         "_toggle_fullscreen 方法必须已移除"
+    # tooltip 仍在
     assert cw.btn_min.toolTip() == "最小化"
     assert "最大化" in cw.btn_max.toolTip() or "还原" in cw.btn_max.toolTip()
-    assert "全屏" in cw.btn_fullscreen.toolTip()
     assert cw.btn_close.toolTip() == "关闭"
+    # maximize handler 仍在
     assert callable(getattr(cw, "_toggle_maximized", None))
-    assert callable(getattr(cw, "_toggle_fullscreen", None))
-    print("[OK] 标题栏右上角 4 个窗口控制按钮齐全 (min/max/fullscreen/close)")
+    print("[OK] 标题栏右上角 3 个窗口控制按钮 (min/max/close), 全屏按钮已删")
+
+
+def test_chat_view_set_open_links_false():
+    """Bug 1 v3 根因修复: chat_view 必须 setOpenLinks(False) 关掉
+    QTextBrowser 的默认 doSetSource 导航, 否则点 cmd:toggle_tools
+    时 QTextBrowser 会去解析 url 找不到本地文件 → 空文档替换 view → 白屏。
+
+    用户实测 2026-10-15 "点击展开还是会白屏" —— 上一版虽然有
+    _current_bot_msg 守卫挡住 _refresh_streaming_message, 但 QTextBrowser
+    自己仍然在 click 时调用 doSetSource(cmd:toggle_tools) 试图本地解析,
+    失败后用空 QTextDocument 替换 chat_view 的内容, 整个 chat 区域变白。
+
+    修法: setOpenLinks(False) 阻止默认导航, 只走我们自己的 anchorClicked
+    handler。"""
+    from app.core.config import LLMConfig
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    # openLinks 必须是 False (默认是 True)
+    assert cw.chat_view.openLinks() is False, (
+        "chat_view.openLinks() 必须为 False —— 否则点内部 anchor "
+        "(cmd:toggle_tools) 时 QTextBrowser 会去解析 url 找本地文件, "
+        "找不到时用空文档替换 view, chat 整个变白。"
+    )
+    # setOpenExternalLinks 也要是 False (上一版已修)
+    assert cw.chat_view.openExternalLinks() is False
+    # anchorClicked 信号仍连着
+    assert cw.chat_view.receivers(cw.chat_view.anchorClicked) > 0, (
+        "anchorClicked 必须仍连接 _on_chat_anchor_clicked 处理 cmd:"
+    )
+    print("[OK] chat_view openLinks=False (白屏根因修掉了)")
 
 
 def test_anchor_click_handler_keeps_toggle_guard():
