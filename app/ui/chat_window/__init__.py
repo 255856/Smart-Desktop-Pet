@@ -87,6 +87,37 @@ from app.ui.memory_panel import MemoryDialog
 log = logging.getLogger(__name__)
 
 
+class _NoCmdNavQTextBrowser(QTextBrowser):
+    """chat_view 专用 QTextBrowser —— 覆盖 doSetSource 让内部 cmd: 链接不导航。
+
+    2026-10-15 v4: PyQt5 5.x 的 setOpenLinks(False) 在 openLinks=False 时
+    不只是禁止默认导航, 还会**禁用 click** (mousePressEvent 不再走链接路径,
+    anchorClicked 信号也不发, 用户实测「点击没反应」)。
+
+    正确做法是 subclass QTextBrowser 覆盖 doSetSource —— 默认实现尝试把
+    url 解析成本地文件路径, 找不到时用空 QTextDocument 替换 view 造成白屏。
+    我们的 override 让 cmd: scheme 走 no-op (不让 QTextBrowser 替换 view),
+    http/https/mailto 走父类默认 (setOpenExternalLinks(False) 之后不会
+    触发 OS 弹窗, anchorClicked 信号在 click 时仍正常 emit, 由
+    _on_chat_anchor_clicked 路由到对应 handler)。
+    """
+    def doSetSource(self, name):
+        try:
+            url = name.toUrl() if hasattr(name, "toUrl") else name
+            scheme = url.scheme() if hasattr(url, "scheme") else ""
+        except Exception:  # noqa: BLE001
+            scheme = ""
+        if scheme in ("http", "https", "mailto"):
+            # 外部链接: 让 setOpenExternalLinks(False) + anchorClicked
+            # 处理, 父类 doSetSource 实际不会调到这里 (被前面的 flag 拦住)
+            return
+        # cmd: / 其它 scheme: 不导航, 不替换 view, 让 chat 保持原样
+        return
+
+
+
+
+
 # 工具 UI 元数据 + 工具结果状态 + 工具元组解包 — 拆到 chat_window.utils
 from .utils import (  # noqa: F401
     _TOOL_UI_META, _CIRCLED_NUMS, _TOOL_FAIL_MARKERS,
@@ -656,19 +687,19 @@ class ChatWindow(QWidget):
         self.avatar_label.installEventFilter(self._drag_filter)
         title.installEventFilter(self._drag_filter)
 
-        self.chat_view = QTextBrowser()
+        self.chat_view = _NoCmdNavQTextBrowser()
         self.chat_view.setObjectName("chat_view")
         # 2026-10-15 修复: 不要 setOpenExternalLinks(True) —— 它让 Qt 试图用
         # OS shell 打开 scheme,Windows 找不到 cmd: handler 会弹「获取打开此
         # cmd 链接的应用」系统对话框(用户实测)。内部命令用 anchorClicked
         # signal 拦截,外部链接用 openExternalLinks event filter 自己处理。
         self.chat_view.setOpenExternalLinks(False)
-        # 2026-10-15 v3 修复白屏: setOpenLinks(False) 关掉 QTextBrowser 的
-        # 默认 doSetSource 导航 —— 否则点 cmd:toggle_tools 这种内部 anchor
-        # 时, QTextBrowser 会把 url 解析成相对路径, 找不到文件后用空文档
-        # 替换 view, 整个 chat 区域变白(用户实测 "点击展开还是会白屏")。
-        # 我们只走 anchorClicked signal 路由, 不让 QTextBrowser 自己做导航。
-        self.chat_view.setOpenLinks(False)
+        # 2026-10-15 v4: 不要 setOpenLinks(False) —— PyQt5 5.x 在 openLinks=False
+        # 时会**禁用 click** (用户实测「点击没反应」)。改用 _NoCmdNavQTextBrowser
+        # 覆盖 doSetSource: cmd: scheme 走 no-op, 不替换 view; http/https
+        # 走 setOpenExternalLinks(False) 那一路。
+        # click 时 anchorClicked 信号照常 emit, _on_chat_anchor_clicked 路由
+        # cmd:toggle_tools / http/https/mailto。
         self.chat_view.anchorClicked.connect(self._on_chat_anchor_clicked)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")

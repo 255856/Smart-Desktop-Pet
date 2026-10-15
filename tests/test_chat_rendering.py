@@ -859,34 +859,98 @@ def test_window_controls_present():
     print("[OK] 标题栏右上角 3 个窗口控制按钮 (min/max/close), 全屏按钮已删")
 
 
-def test_chat_view_set_open_links_false():
-    """Bug 1 v3 根因修复: chat_view 必须 setOpenLinks(False) 关掉
-    QTextBrowser 的默认 doSetSource 导航, 否则点 cmd:toggle_tools
-    时 QTextBrowser 会去解析 url 找不到本地文件 → 空文档替换 view → 白屏。
+def test_chat_view_no_cmd_nav_subclass():
+    """Bug 1 v4 根因修复: 用 _NoCmdNavQTextBrowser 子类覆盖 doSetSource,
+    让 cmd: scheme 走 no-op, 不替换 view。
 
-    用户实测 2026-10-15 "点击展开还是会白屏" —— 上一版虽然有
-    _current_bot_msg 守卫挡住 _refresh_streaming_message, 但 QTextBrowser
-    自己仍然在 click 时调用 doSetSource(cmd:toggle_tools) 试图本地解析,
-    失败后用空 QTextDocument 替换 chat_view 的内容, 整个 chat 区域变白。
+    v3 错方案: setOpenLinks(False) —— PyQt5 5.x 在 openLinks=False 时
+    会禁用 click 行为 (mousePressEvent 不再走链接路径, anchorClicked
+    不再 emit), 用户实测 v3「点击没反应」。
 
-    修法: setOpenLinks(False) 阻止默认导航, 只走我们自己的 anchorClicked
-    handler。"""
+    v4 正解: 默认 openLinks=True (click 仍工作, anchorClicked 照常发),
+    但用 _NoCmdNavQTextBrowser 覆盖 doSetSource: 对 cmd: scheme 走
+    no-op, 不让 QTextBrowser 用空文档替换 view。
+    """
     from app.core.config import LLMConfig
+    from app.ui.chat_window import _NoCmdNavQTextBrowser
     cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                     'assets/sprites', asr_enabled=False)
-    # openLinks 必须是 False (默认是 True)
-    assert cw.chat_view.openLinks() is False, (
-        "chat_view.openLinks() 必须为 False —— 否则点内部 anchor "
-        "(cmd:toggle_tools) 时 QTextBrowser 会去解析 url 找本地文件, "
-        "找不到时用空文档替换 view, chat 整个变白。"
+    # 1) chat_view 必须是 _NoCmdNavQTextBrowser 实例
+    assert isinstance(cw.chat_view, _NoCmdNavQTextBrowser), (
+        "chat_view 必须是 _NoCmdNavQTextBrowser 子类, "
+        "否则 cmd: 链接点下去会触发 QTextBrowser 默认 doSetSource, "
+        "把 view 替换成空文档 → 白屏"
     )
-    # setOpenExternalLinks 也要是 False (上一版已修)
+    # 2) chat_view 必须是 QTextBrowser (subclass 关系, 走 IS-A 路径)
+    from app.core.qt_compat import QTextBrowser
+    assert isinstance(cw.chat_view, QTextBrowser)
+    # 3) openLinks 必须保持 True (默认) —— 否则 v3 bug 重现
+    assert cw.chat_view.openLinks() is True, (
+        "openLinks 必须是 True (默认) —— 上一版改成 False 后, "
+        "PyQt5 5.x 直接禁用了 click 行为, 用户实测「点击没反应」"
+    )
+    # 4) openExternalLinks 仍 False (http 链接不让 OS 自动开)
     assert cw.chat_view.openExternalLinks() is False
-    # anchorClicked 信号仍连着
+    # 5) anchorClicked 信号仍连着
     assert cw.chat_view.receivers(cw.chat_view.anchorClicked) > 0, (
-        "anchorClicked 必须仍连接 _on_chat_anchor_clicked 处理 cmd:"
+        "anchorClicked 必须仍连接 _on_chat_anchor_clicked"
     )
-    print("[OK] chat_view openLinks=False (白屏根因修掉了)")
+    # 6) 调 doSetSource 时 cmd: 应 no-op (不抛异常, 不替换 view)
+    from app.core.qt_compat import QUrl
+    qurl = QUrl("cmd:toggle_tools")
+    cw.chat_view.doSetSource(qurl)  # 必须不抛, 必须 no-op
+    # 7) 调 doSetSource 时 http 也 no-op (走父类也走不到, 因 setOpenExternalLinks=False)
+    cw.chat_view.doSetSource(QUrl("https://example.com"))  # 不抛即可
+    print("[OK] chat_view 是 _NoCmdNavQTextBrowser (cmd: 不再让 QTextBrowser 替换 view)")
+
+
+def test_no_cmd_nav_subclass_ast_guard():
+    """AST 守卫: chat_window 里的 _NoCmdNavQTextBrowser 子类不能丢。
+    防止下次重构把它去掉, 又回到 v3 的 setOpenLinks(False) 反模式。
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "chat_window" / "__init__.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    # 必须有 _NoCmdNavQTextBrowser 类定义
+    has_class = False
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ClassDef) and node.name == "_NoCmdNavQTextBrowser":
+            has_class = True
+            # 类必须有 doSetSource 方法
+            has_method = any(
+                isinstance(item, _ast.FunctionDef) and item.name == "doSetSource"
+                for item in node.body
+            )
+            assert has_method, (
+                "_NoCmdNavQTextBrowser 必须有 doSetSource 方法"
+            )
+            break
+    assert has_class, (
+        "_NoCmdNavQTextBrowser 子类定义在 chat_window/__init__.py 中"
+        "必须存在 —— 否则 v3 白屏 bug 会重现"
+    )
+    # 不能有 self.chat_view.setOpenLinks(False) 实际调用 (v3 反模式,
+    # PyQt5 5.x 在 openLinks=False 时会禁用 click 行为, 用户实测
+    # 「点击没反应」)。注意: 注释里有这串文字是 OK 的, 只挡实际函数调用。
+    # 扫描 AST 找 setOpenLinks 的实参是 False 的 Call 节点
+    bad_call_found = False
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.Call)
+                and isinstance(node.func, _ast.Attribute)
+                and node.func.attr == "setOpenLinks"):
+            for arg in node.args:
+                if (isinstance(arg, _ast.Constant)
+                        and arg.value is False):
+                    bad_call_found = True
+                    break
+    assert not bad_call_found, (
+        "setOpenLinks(False) 是 v3 反模式 —— 实际函数调用必须删, "
+        "用 _NoCmdNavQTextBrowser 覆盖 doSetSource 替代。"
+        "注释里的说明文字 OK, 但不能让代码真的调 setOpenLinks(False)。"
+    )
+    print("[OK] AST 守卫: _NoCmdNavQTextBrowser 在, setOpenLinks(False) 调用已删")
 
 
 def test_anchor_click_handler_keeps_toggle_guard():
