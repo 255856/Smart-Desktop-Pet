@@ -742,11 +742,21 @@ def test_bug2_ast_guard_load_history_uses_helper():
     print("[OK] Bug 2 AST 守卫: _load_history 真在调 _convert_loaded_tools(sm.tools)")
 
 
-def test_bug1_ast_guard_anchor_click_doesnt_refresh_when_done():
-    """Bug 1 AST 守卫: 点 chat 上的 cmd:toggle_tools 链接 (post _on_done)
-    时, _on_chat_anchor_clicked 不能调 _refresh_streaming_message。
-    这是因为 _on_done 之后 _current_bot_msg = None, _streaming_anchor_pos = None,
-    此时调用 _refresh_streaming_message 会因为 anchor 不存在而把整段 HTML 抹掉 → 空白。"""
+def test_bug1_ast_guard_anchor_click_uses_rebuild_not_refresh():
+    """Bug 1 AST 守卫 v5: 点 chat 上的 cmd:toggle_tools 链接时,
+    _on_chat_anchor_clicked 必须走 _rebuild_chat_view_from_history, 不能调
+    _refresh_streaming_message。
+
+    历史:
+    - v1: 守卫 _current_bot_msg 挡 _refresh_streaming_message → 仍白屏 (QTextBrowser doSetSource)
+    - v3: setOpenLinks(False) → 禁用 click
+    - v4: subclass QTextBrowser doSetSource → click 通了, 但用户实测仍有「清空」
+    - v5: 完全不走 _refresh_streaming_message, 改 _rebuild_chat_view_from_history
+
+    这个测试是 v5 后的正确守卫: _on_chat_anchor_clicked 函数体的实际调用节点
+    (跳过 docstring, 避免 docstring 里提到函数名误判) 不能包含
+    _refresh_streaming_message, 必须包含 _rebuild_chat_view_from_history。
+    """
     import ast as _ast
     src = (Path(__file__).resolve().parent.parent
            / "app" / "ui" / "chat_window" / "__init__.py").read_text(
@@ -756,17 +766,29 @@ def test_bug1_ast_guard_anchor_click_doesnt_refresh_when_done():
     for node in _ast.walk(tree):
         if (isinstance(node, _ast.FunctionDef)
                 and node.name == "_on_chat_anchor_clicked"):
-            body_src = _ast.dump(node)
-            # 必须有守卫（_current_bot_msg 检查 + _streaming_anchor_pos 检查）
-            assert "_current_bot_msg" in body_src
-            assert "_streaming_anchor_pos" in body_src
-            # 守卫必须在 _refresh_streaming_message 之前出现
-            pos_guard = body_src.find("_current_bot_msg")
-            pos_refresh = body_src.find("_refresh_streaming_message")
-            assert pos_guard < pos_refresh, (
-                "_current_bot_msg 守卫必须在 _refresh_streaming_message 之前"
+            # 跳过 docstring (函数体第一个 Expr 节点), 只 dump 实际语句
+            body_nodes = node.body
+            if (body_nodes
+                    and isinstance(body_nodes[0], _ast.Expr)
+                    and isinstance(body_nodes[0].value, _ast.Constant)
+                    and isinstance(body_nodes[0].value.value, str)):
+                body_nodes = body_nodes[1:]
+            body_src = ' '.join(_ast.dump(s) for s in body_nodes)
+            # v5: 不能调 _refresh_streaming_message
+            assert "_refresh_streaming_message" not in body_src, (
+                "_on_chat_anchor_clicked 不能调 _refresh_streaming_message — "
+                "v4 实测这个调用在某些状态下会清空 chat 区域。"
+                "必须改用 _rebuild_chat_view_from_history。"
             )
-            print("[OK] Bug 1 AST 守卫: anchor click 不会在 _current_bot_msg=None 时 refresh")
+            # v5: 必须调 _rebuild_chat_view_from_history
+            assert "_rebuild_chat_view_from_history" in body_src, (
+                "_on_chat_anchor_clicked 必须调 _rebuild_chat_view_from_history"
+            )
+            # toggle 命令路径必须还在
+            assert "toggle_tools" in body_src, (
+                "cmd:toggle_tools 处理不能丢 —— 工具卡片 toggle 还要"
+            )
+            print("[OK] Bug 1 v5 AST 守卫: toggle 走 rebuild 路径, 不再 refresh")
             return
     raise AssertionError("_on_chat_anchor_clicked 函数未找到")
 
@@ -953,8 +975,123 @@ def test_no_cmd_nav_subclass_ast_guard():
     print("[OK] AST 守卫: _NoCmdNavQTextBrowser 在, setOpenLinks(False) 调用已删")
 
 
+def test_v5_rebuild_chat_view_from_history_preserves_content():
+    """v5: _on_chat_anchor_clicked(cmd:toggle_tools) 改用
+    _rebuild_chat_view_from_history, 不再 _refresh_streaming_message。
+    后者有「从 anchor 删到末尾再 insertHtml」的危险操作, 在某些
+    状态下会让 chat 区域被擦白 (用户实测 v4 反馈「点击后
+    聊天窗口信息清空」)。
+
+    验证 rebuild 后:
+    1. 用户消息 + 历史 bot 消息都还在
+    2. streaming 占位仍在 (如果有)
+    3. _tools_collapsed 状态切换
+    """
+    from PyQt5.QtCore import QUrl
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.voice.character import Emotion
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='测试'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 1. 加历史
+    cw.history = []
+    cw.history.append(Message(role='user', content='你好'))
+    cw.history.append(Message(role='assistant', content='已设置', emotion=Emotion.HAPPY,
+                              tools=[('add_reminder', '{}', '已设置')]))
+    cw.history.append(Message(role='user', content='再看看天气'))
+    cw.history.append(Message(role='assistant', content='晴 25 度', emotion=Emotion.HAPPY,
+                              tools=[('get_weather', '{}', '晴 25 度')]))
+
+    # 2. 渲染
+    cw.chat_view.clear()
+    for m in cw.history:
+        cw._render_message(m)
+
+    # 3. 流式中
+    cw._current_bot_msg = Message(role='assistant', content='正在处理...', emotion=Emotion.HAPPY,
+                                  tools=[('add_reminder', '{}', '已设置')])
+    cw._streaming_anchor_pos = cw._insert_placeholder(cw._current_bot_msg)
+
+    before = cw.chat_view.toPlainText()
+    # 关键内容必须在
+    assert "你好" in before
+    assert "已设置" in before
+    assert "晴 25 度" in before
+    assert "正在处理" in before
+
+    # 4. 反复点 3 次
+    for _ in range(3):
+        cw._on_chat_anchor_clicked(QUrl("cmd:toggle_tools"))
+        after = cw.chat_view.toPlainText()
+        # 关键内容始终在 (用户实测 v4 「清空」就是这些不在)
+        assert "你好" in after, f"用户消息 '你好' 在 toggle 后消失: {after!r}"
+        assert "已设置" in after, f"bot 历史 '已设置' 在 toggle 后消失: {after!r}"
+        assert "晴 25 度" in after, f"bot 历史 '晴 25 度' 在 toggle 后消失: {after!r}"
+        # streaming 占位也在
+        assert "正在处理" in after, f"streaming '正在处理' 在 toggle 后消失: {after!r}"
+
+    # 5. _on_done 后再点
+    cw._current_bot_msg = None
+    cw._streaming_anchor_pos = None
+    cw._on_chat_anchor_clicked(QUrl("cmd:toggle_tools"))
+    final = cw.chat_view.toPlainText()
+    assert "你好" in final, "_on_done 后点 toggle, 用户消息 '你好' 消失"
+    assert "已设置" in final
+    assert "晴 25 度" in final
+    # streaming 占位已经不存在, 但 _current_bot_msg = None 时
+    # _rebuild_chat_view_from_history 不会重建 (判断条件), 正常
+    print("[OK] v5: toggle 用 _rebuild_chat_view_from_history, chat 内容不再被清空")
+
+
+def test_v5_ast_guard_rebuild_method_exists():
+    """AST 守卫: _rebuild_chat_view_from_history 方法必须存在, 且
+    _on_chat_anchor_clicked 必须调用它 (而不是 _refresh_streaming_message)。"""
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "chat_window" / "__init__.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    # 必须有 _rebuild_chat_view_from_history 函数
+    has_rebuild = any(
+        isinstance(n, _ast.FunctionDef) and n.name == "_rebuild_chat_view_from_history"
+        for n in _ast.walk(tree)
+    )
+    assert has_rebuild, (
+        "_rebuild_chat_view_from_history 方法必须存在 (v5 修法核心)"
+    )
+    # _on_chat_anchor_clicked 内部不能有 _refresh_streaming_message 调用
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.FunctionDef)
+                and node.name == "_on_chat_anchor_clicked"):
+            # 跳过 docstring, 只看实际函数体
+            body_nodes = node.body
+            if (body_nodes
+                    and isinstance(body_nodes[0], _ast.Expr)
+                    and isinstance(body_nodes[0].value, _ast.Constant)
+                    and isinstance(body_nodes[0].value.value, str)):
+                body_nodes = body_nodes[1:]
+            body_src = ' '.join(_ast.dump(s) for s in body_nodes)
+            assert "_refresh_streaming_message" not in body_src, (
+                "_on_chat_anchor_clicked 不能调 _refresh_streaming_message — "
+                "v4 实测这个调用在某些状态下会清空 chat 区域"
+            )
+            # 必须调 _rebuild_chat_view_from_history
+            assert "_rebuild_chat_view_from_history" in body_src, (
+                "_on_chat_anchor_clicked 必须调 _rebuild_chat_view_from_history"
+            )
+            print("[OK] AST 守卫: _rebuild_chat_view_from_history 在, toggle 走 rebuild 路径")
+            return
+    raise AssertionError("_on_chat_anchor_clicked 函数未找到")
+
+
 def test_anchor_click_handler_keeps_toggle_guard():
-    """Bug 1 守卫依然有效 + toggle 还在。"""
+    """v5: _on_chat_anchor_clicked 调 _rebuild_chat_view_from_history,
+    不再调 _refresh_streaming_message — 所以 _current_bot_msg /
+    _streaming_anchor_pos 守卫也用不上了 (v1 那个守卫就是当时为了挡
+    _refresh_streaming_message 加的, 现在那条路直接没了)。"""
     import ast as _ast
     src = (Path(__file__).resolve().parent.parent
            / "app" / "ui" / "chat_window" / "__init__.py").read_text(
@@ -964,16 +1101,24 @@ def test_anchor_click_handler_keeps_toggle_guard():
     for node in _ast.walk(tree):
         if (isinstance(node, _ast.FunctionDef)
                 and node.name == "_on_chat_anchor_clicked"):
-            body = _ast.dump(node)
+            # 跳过 docstring, 只看实际函数体
+            body_nodes = node.body
+            if (body_nodes
+                    and isinstance(body_nodes[0], _ast.Expr)
+                    and isinstance(body_nodes[0].value, _ast.Constant)
+                    and isinstance(body_nodes[0].value.value, str)):
+                body_nodes = body_nodes[1:]
+            body = ' '.join(_ast.dump(s) for s in body_nodes)
             assert "toggle_tools" in body, (
                 "cmd:toggle_tools 处理不能丢 —— 工具卡片 toggle 还要"
             )
-            pos_guard = body.find("_current_bot_msg")
-            pos_refresh = body.find("_refresh_streaming_message")
-            assert pos_guard > 0 and pos_refresh > 0
-            assert pos_guard < pos_refresh, (
-                "Bug 1 守卫顺序错了"
+            assert "_rebuild_chat_view_from_history" in body, (
+                "v5: 必须用 _rebuild_chat_view_from_history, 不能退回到 _refresh_streaming_message"
             )
-            print("[OK] toggle_tools + Bug 1 守卫共存")
+            assert "_refresh_streaming_message" not in body, (
+                "v5: _on_chat_anchor_clicked 不能再调 _refresh_streaming_message — "
+                "那个调用路径会让 chat 区域被擦白"
+            )
+            print("[OK] toggle 走 rebuild 路径, Bug 1 守卫 v1 时代已不需要")
             return
     raise AssertionError("_on_chat_anchor_clicked 函数未找到")

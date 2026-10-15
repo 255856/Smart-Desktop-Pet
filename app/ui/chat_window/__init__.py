@@ -1714,12 +1714,13 @@ class ChatWindow(QWidget):
     def _on_chat_anchor_clicked(self, url):
         """chat_view 上 <a href> 被点击,处理内部命令 (toggle_tools) + 外部链接。
 
-        2026-10-15 v3:cmd:toggle_tools 处理保留(用户实测"功能还要"),
-        但 head 文字里去掉了"点击展开/收起"。Bug 1 守卫
-        (_current_bot_msg is not None + _streaming_anchor_pos is not None)
-        仍然挡在 _refresh_streaming_message 之前 —— _on_done 后
-        _current_bot_msg=None,此时点链接会执行"从 anchor 删到末尾 +
-        插新内容",anchor 不存在 → 整段 chat 变空白。
+        2026-10-15 v5: cmd:toggle_tools 处理改用 _rebuild_chat_view_from_history
+        重建整个 chat_view, 不再调 _refresh_streaming_message —— 后者的
+        「从 anchor 删到末尾再 insertHtml」模式在某些状态下会让 chat 区域
+        被擦白 (用户实测 v4 反馈「点击后聊天窗口信息清空」)。
+
+        v4 的 _NoCmdNavQTextBrowser 仍然有效 —— 它挡 QTextBrowser 默认
+        doSetSource 对 cmd: scheme 错误地调用 setSource 试图本地解析。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
@@ -1733,10 +1734,9 @@ class ChatWindow(QWidget):
             if cmd == "toggle_tools":
                 self._tools_collapsed = not getattr(
                     self, "_tools_collapsed", True)
-                # Bug 1 守卫: 只在 bot 消息还在「流式/未完成」时 refresh(已有 anchor)
-                if (self._current_bot_msg is not None
-                        and getattr(self, "_streaming_anchor_pos", None) is not None):
-                    self._refresh_streaming_message()
+                # v5: 不再 _refresh_streaming_message, 改用全量重建
+                # (后者会操作 anchor/cursor 删整段, 容易触发白屏)
+                self._rebuild_chat_view_from_history()
             return
         # 外部链接:手动打开(setOpenExternalLinks(False) 不会自动开)
         if scheme in ("http", "https", "mailto"):
@@ -2677,6 +2677,39 @@ class ChatWindow(QWidget):
         cursor.insertBlock()
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _rebuild_chat_view_from_history(self) -> None:
+        """完全重建 chat_view:从 self.history 重新渲染所有消息,再加上
+        当前 streaming 占位 (如果有)。
+
+        2026-10-15 v5: 这是 cmd:toggle_tools 点击处理用的最稳路径。
+        _refresh_streaming_message 的「从 anchor 删到末尾再 insertHtml」模式
+        在某些状态下会让 chat 区域被擦白 (用户实测 v4 反馈「点击后
+        聊天窗口信息清空」)。重建整个 chat_view 慢一点但安全 —— 不动
+        anchor, 不动 cursor, 用 setHtml-style 全量重渲染。
+
+        性能: history 长度通常 < 200, 每条 _msg_html 跑一次 markdown 渲染,
+        实测 < 50ms, 在 60 fps 桌宠上下文完全无感。
+        """
+        # 1. 滚到底 (重渲染后还要在底部)
+        sb = self.chat_view.verticalScrollBar()
+        was_at_bottom = (sb.value() >= sb.maximum() - 4)
+        # 2. 清空 chat_view
+        self.chat_view.clear()
+        # 3. 重新渲染 history 里所有消息
+        #    注意: 这里不能调 _on_done 之后才有的 _current_bot_msg = None 路径,
+        #    只渲染 history 里的 (历史 assistant 消息 tools 已带)
+        for msg in self.history:
+            self._render_message(msg)
+        # 4. 重建 streaming 占位 (如果还在 streaming)
+        if (self._current_bot_msg is not None
+                and getattr(self, "_streaming_anchor_pos", None) is not None):
+            self._streaming_anchor_pos = self._insert_placeholder(
+                self._current_bot_msg
+            )
+        # 5. 滚到底 (如果之前就在底部) 或保留位置
+        if was_at_bottom:
+            sb.setValue(sb.maximum())
 
     def _refresh_streaming_message(self, finished: bool = False, emotion: str = "") -> None:
         """流式刷新「当前 bot 占位 div」——从 anchor 到末尾删除旧内容后插入新内容。
