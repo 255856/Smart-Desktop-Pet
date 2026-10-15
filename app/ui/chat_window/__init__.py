@@ -3214,26 +3214,55 @@ class ChatWindow(QWidget):
           - file 存在 + size < 8 MiB 才 inline (太大直接显示 file:// 文字)
           - 非 file:// 引用 (http/https/data:) 原样保留
           - 失败 fallback: 保持原 file:// 文字, 不抛异常
+
+        v14: 还支持项目内相对路径 (assets/uploads/xxx.png), 按 self._uploads_dir()
+        解析; 文件找不到时替换成「[图片已丢失: <basename>]」让主人知道是哪张图
+        没了, 不再是空白方块。
         """
         import re as _re
         import base64 as _b64
-        # markdown image 形 ![alt](file:///...) 或 ![alt](file:///...xxx)
-        pattern = _re.compile(r'!\[([^\]]*)\]\((file:///[^)\s]+)\)')
+        # markdown image 形 ![alt](URL) — 抓 alt + url
+        # URL 可以是 file:///, http(s)://, data:, 或项目内相对路径 (含 assets/ 开头)
+        pattern = _re.compile(r'!\[([^\]]*)\]\(([^)\s]+)\)')
+
+        uploads_root = self._uploads_dir() if hasattr(self, "_uploads_dir") else None
+        # _uploads_dir = project_root / "assets" / "uploads", 解相对路径用
+        # project_root (uploads_root.parent.parent), 不是 uploads_root.parent
+        project_root = uploads_root.parent.parent if uploads_root is not None else None
+
+        def _resolve_local_path(url: str) -> Optional[Path]:
+            """把 url 解析成可读 file path; 非本地或解析失败返 None。"""
+            if url.startswith("file:///"):
+                local = url[len("file:///"):]
+                if not local:
+                    return None
+                try:
+                    return Path(local)
+                except Exception:
+                    return None
+            # v14: 项目内相对路径 (assets/uploads/xxx.png)
+            if project_root is not None and (
+                url.startswith("assets/")
+                or url.startswith("./assets/")
+            ):
+                rel = url.lstrip("./")
+                return project_root / rel
+            return None
 
         def _replace(m: "re.Match[str]") -> str:
-            alt = m.group(1)
+            alt = m.group(1) or "图片"
             url = m.group(2)
-            # url 形如 file:///C:/Users/.../xxx.png
-            local = url[len("file:///"):]
-            if not local:
+
+            # http(s):// data: → 原样保留 (跟 v9 一致)
+            if url.startswith(("http://", "https://", "data:")):
                 return m.group(0)
-            # file:// 在 Windows 上以 `/C:/...` 形式, file:/// 后接盘符; pathlib 会正确解
-            try:
-                p = Path(local)
-            except Exception:
+
+            p = _resolve_local_path(url)
+            if p is None:
                 return m.group(0)
             if not p.is_file():
-                return m.group(0)
+                # v14: 文件丢失 → 给清晰提示, 不再空白
+                return f"*[图片已丢失: {p.name}]*"
             try:
                 if p.stat().st_size > 8 * 1024 * 1024:
                     return m.group(0)
@@ -3242,7 +3271,7 @@ class ChatWindow(QWidget):
             try:
                 data = p.read_bytes()
             except OSError:
-                return m.group(0)
+                return f"*[图片读取失败: {p.name}]*"
             ext = p.suffix.lower().lstrip(".")
             mime = {
                 "png": "image/png",

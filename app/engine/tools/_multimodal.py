@@ -151,6 +151,59 @@ def _uploads_dir() -> Path:
     return d
 
 
+def _download_to_uploads(url_or_data: str, kind: str) -> str:
+    """v14: 把 generate_* 返回的 URL / data:base64 落盘到项目 assets/uploads/,
+    返回 file:/// 绝对路径。这样 chat_store 持久化的是项目内绝对路径,
+    重启后 file 还在, 渲染时 _inline_local_images_to_data_url 能找到。
+
+    主人实测 2026-10-15: 「桌宠返回的文件, 图片之类的也应该存在文件夹中」—
+    落盘后不受 MiniMax 24h URL 过期影响, 跨重启稳定。
+
+    kind 决定后缀 (image / video / audio)。支持三种输入:
+      - http(s)://   → urlopen 下载
+      - data:<mime>;base64,XXX  → 解码 XXX
+      - file:/// 已经本地, 直接转 file:/// 绝对路径返回 (不重复复制)
+    """
+    if url_or_data.startswith("file:///"):
+        return url_or_data  # 已经在本地, 不动
+
+    ext_map = {
+        "image": "png",      # 通用后缀, 真实后缀从 URL/MIME 推断会更准但 chat 渲染不挑
+        "video": "mp4",
+        "audio": "mp3",
+    }
+    ext = ext_map.get(kind, "bin")
+    fn = f"multimodal_{kind}_{int(time.time() * 1000)}.{ext}"
+    target = _uploads_dir() / fn
+
+    if url_or_data.startswith("data:"):
+        # data:image/png;base64,XXX
+        try:
+            b64 = url_or_data.split(",", 1)[1]
+            target.write_bytes(base64.b64decode(b64))
+        except (IndexError, ValueError, OSError) as e:
+            raise RuntimeError(f"data: URL 落盘失败: {e}") from e
+    elif url_or_data.startswith(("http://", "https://")):
+        try:
+            req = urllib.request.Request(url_or_data, headers={
+                "User-Agent": "desktop-pet/1.0"
+            })
+            with urllib.request.urlopen(req, timeout=120) as r:
+                target.write_bytes(r.read())
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            raise RuntimeError(
+                f"下载 multimodal {kind} 失败 ({url_or_data[:80]}): {e}"
+            ) from e
+    else:
+        raise RuntimeError(
+            f"multimodal {kind} 收到不认识的结果 (不是 http(s):// / data: / file://): "
+            f"{url_or_data[:80]}"
+        )
+
+    abs_path = str(target).replace("\\", "/").lstrip("/")
+    return f"file:///{abs_path}"
+
+
 def _build_endpoint_url(action: str) -> str:
     base = _cfg("base_url").rstrip("/")
     return f"{base}/{_endpoint_path(action)}"
@@ -220,7 +273,8 @@ def generate_image(prompt: str, **kwargs) -> str:
         raise RuntimeError(
             f"image 响应里没拿到 URL/base64: {json.dumps(resp)[:300]}"
         )
-    return url
+    # v14: 落盘到项目 assets/uploads/, 返回 file:// 路径
+    return _download_to_uploads(url, "image")
 
 
 def generate_video(prompt: str, **kwargs) -> str:
@@ -371,7 +425,9 @@ def generate_audio(prompt: str, **kwargs) -> str:
         task_id = resp.get("task_id") or ""
         if task_id:
             timeout_s = int(_CONFIG.get("audio_timeout_s", 90))
-            return _poll_video_task(task_id, timeout_s)
+            # v14: polling 拿到 URL 后落盘
+            url = _poll_video_task(task_id, timeout_s)
+            return _download_to_uploads(url, "audio")
         # 兜底继续尝试同步提取
     url = _extract_first_url(resp.get("data"), "audio")
     if not url:
@@ -380,7 +436,8 @@ def generate_audio(prompt: str, **kwargs) -> str:
         raise RuntimeError(
             f"audio 响应里没 url 字段: {json.dumps(resp)[:300]}"
         )
-    return url
+    # v14: 落盘
+    return _download_to_uploads(url, "audio")
 
 
 def register(reg, **_kwargs) -> None:

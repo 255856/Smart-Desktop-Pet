@@ -1541,13 +1541,25 @@ def test_v9_inline_local_images_to_data_url():
             f"inline 后不应再含 file:// 字样。 实际: {out[:200]!r}"
         )
 
-    # 文件不存在时, 保持 file:// 文字 (不抛)
+    # 文件不存在时, v14 改成清晰提示 (主人实测 2026-10-15: 「重启后图片
+    # 丢失变空白方块」, 给「图片已丢失」文字说明, 不再空白)。
     out2 = cw._inline_local_images_to_data_url("![alt](file:///C:/no/such/file.png)")
-    assert "file:///C:/no/such/file.png" in out2, (
-        f"文件不存在时 inline 退化为 file:// 文字。 实际: {out2!r}"
+    assert "图片已丢失" in out2, (
+        f"文件不存在时 v14 应给「图片已丢失」提示。 实际: {out2!r}"
+    )
+    assert "file.png" in out2, f"提示里应含文件名, 实际: {out2!r}"
+
+    # v14: 项目内相对路径也能 inline
+    md_rel = f"![主人上传](assets/uploads/{png.name})"
+    out3 = cw._inline_local_images_to_data_url(md_rel)
+    # 由于 _uploads_dir() 是项目根下 assets/uploads/, 真实路径可能不匹配
+    # png.name 在临时目录, 不在项目 uploads 里 — 应得「图片已丢失」
+    # (这条只验证相对路径不会崩, 不强制 inline)
+    assert "图片已丢失" in out3 or "data:image/png" in out3, (
+        f"项目相对路径要么 inline 要么给清晰丢失提示, 实际: {out3!r}"
     )
 
-    print("[OK] v9: file:// URL inline 成 data: URL, 真桌面上显示真图")
+    print("[OK] v9: file:// URL inline 成 data: URL, v14 失败时给图片已丢失提示")
 
 
 def test_v9_activate_skill_session_state():
@@ -2379,22 +2391,34 @@ def test_v13_extract_first_url_minimax_official_schema():
 
 def test_v13_generate_image_uses_minimax_schema():
     """v13: base_url 配 minimaxi.com 时, generate_image 走 MiniMax 官方 schema
-    (aspect_ratio + response_format=url), 不是 OpenAI 的 size。"""
+    (aspect_ratio + response_format=url), 不是 OpenAI 的 size。
+
+    v14 升级: generate_image 落盘到 assets/uploads/, 返回 file:// 路径。
+    测试需要 mock urlopen 两次: POST (拿 MiniMax 响应) + GET (落盘时下载)。
+    """
     import io
     from app.engine.tools import _multimodal
     captured = {}
     def _fake_urlopen(req, timeout=60):
-        body_str = req.data.decode("utf-8")
-        captured["body"] = body_str
-        captured["url"] = req.full_url
-        # MiniMax 官方响应 schema
-        resp_body = (
-            b'{"data":{"image_urls":["https://minimax/x.png"]},'
-            b'"metadata":{"success_count":"1","failed_count":"0"},'
-            b'"base_resp":{"status_code":0,"status_msg":"success"}}'
+        # POST: 拿 MiniMax 响应, 含 image_urls
+        if req.data is not None:
+            captured["body"] = req.data.decode("utf-8")
+            captured["url"] = req.full_url
+            resp_body = (
+                b'{"data":{"image_urls":["https://minimax/x.png"]},'
+                b'"metadata":{"success_count":"1","failed_count":"0"},'
+                b'"base_resp":{"status_code":0,"status_msg":"success"}}'
+            )
+            return io.BytesIO(resp_body)
+        # GET: v14 落盘时下载 URL → 返 1x1 png 字节
+        return io.BytesIO(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde\x00"
+            b"\x00\x00\x0cIDAT\x08\x99c\xf8\xcf\xc0"
+            b"\x00\x00\x00\x03\x00\x01\x5b\xb6\xee"
+            b"\x56\x00\x00\x00\x00IEND\xaeB`\x82"
         )
-        return io.BytesIO(resp_body)
-    # monkeypatch
     real = _multimodal.urllib.request.urlopen
     _multimodal.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
     try:
@@ -2405,22 +2429,31 @@ def test_v13_generate_image_uses_minimax_schema():
             "aspect_ratio": "16:9",
         })
         url = _multimodal.generate_image("a cat in space")
-        assert url == "https://minimax/x.png", (
-            f"应从 MiniMax 响应取 image_urls[0], 实际: {url!r}"
+        # v14: 返回 file:// 路径 (落盘到项目 uploads)
+        assert url.startswith("file:///"), (
+            f"v14 应落盘返回 file://, 实际: {url!r}"
         )
-        # 验证 body 走 MiniMax schema (aspect_ratio, response_format)
+        assert url.endswith(".png"), f"image 后缀应是 .png, 实际: {url}"
+        assert "assets/uploads/" in url, (
+            f"v14 落盘到 assets/uploads/, 实际: {url!r}"
+        )
+        # 验证 body 走 MiniMax schema
         assert "aspect_ratio" in captured["body"], (
             f"MiniMax 应走 aspect_ratio 字段。 body: {captured['body']}"
         )
         assert "response_format" in captured["body"]
         assert "16:9" in captured["body"]
-        # 不应含 OpenAI 的 size 字段 (除非 size 显式给了 kwargs)
-        # (默认 aspect_ratio=1:1, kwargs 没 size 不会有 size 字段)
     finally:
         _multimodal.urllib.request.urlopen = real  # type: ignore[attr-defined]
         _multimodal.setup_config({})
+        # 清理落盘的 fake png
+        if url.startswith("file:///"):
+            try:
+                Path(url[len("file:///"):]).unlink(missing_ok=True)
+            except OSError:
+                pass
 
-    print("[OK] v13: generate_image 走 MiniMax schema (aspect_ratio + response_format)")
+    print("[OK] v13: generate_image 走 MiniMax schema + v14 落盘 file://")
 
 
 def test_v13_no_emoji_in_chat_window_ui_strings():
@@ -2450,3 +2483,147 @@ def test_v13_no_emoji_in_chat_window_ui_strings():
     )
 
     print("[OK] v13: chat_window 全清 emoji/装饰符号 (主人偏好)")
+
+
+
+# ============================================================
+# v14 调整 (2026-10-15):
+#   1) 多模态文件落盘 assets/uploads/: generate_image / video / audio 拿到 URL
+#      / base64 后下载到项目 uploads, 返回 file:// 绝对路径
+#   2) chat_store 持久化 file:// 路径, 重启后文件还在, 渲染不丢失
+#   3) _inline_local_images 失败时给「图片已丢失: <name>」清晰提示, 不再空白
+#   4) 同时支持项目内相对路径 (assets/uploads/xxx.png) — 按 chat_window
+#      _uploads_dir() 解析
+# ============================================================
+
+
+def test_v14_download_to_uploads_local_file_passthrough():
+    """v14: file:// 输入 (已经在本地) 直接返回, 不重复复制。"""
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({})
+    src = "file:///C:/tmp/v14_src.png"
+    out = _multimodal._download_to_uploads(src, "image")
+    assert out == src, (
+        f"file:// 输入应原样返回, 实际: {out!r}"
+    )
+
+    print("[OK] v14: _download_to_uploads file:// 输入 passthrough")
+
+
+def test_v14_download_to_uploads_data_url_writes_to_uploads():
+    """v14: data:image/png;base64,XXX 输入解码落盘到 assets/uploads/。"""
+    import base64 as _b64
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({})
+    # 1x1 png 字节
+    raw_png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde"
+    )
+    b64 = _b64.b64encode(raw_png).decode("ascii")
+    data_url = f"data:image/png;base64,{b64}"
+    out = _multimodal._download_to_uploads(data_url, "image")
+    try:
+        assert out.startswith("file:///"), f"应返 file://, 实际: {out!r}"
+        assert "assets/uploads/" in out
+        assert out.endswith(".png")
+        # 文件确实落盘
+        abs_path = Path(out[len("file:///"):])
+        assert abs_path.is_file()
+        # 内容应是 raw_png
+        assert abs_path.read_bytes()[:4] == b"\x89PNG"
+    finally:
+        # 清理
+        try:
+            Path(out[len("file:///"):]).unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
+
+    print("[OK] v14: _download_to_uploads data: URL 落盘")
+
+
+def test_v14_download_to_uploads_http_downloads_via_urlopen():
+    """v14: http(s):// 输入走 urlopen 下载到 uploads。"""
+    import io
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({})
+    captured = {}
+    def _fake_urlopen(req, timeout=120):
+        captured["url"] = req.full_url
+        return io.BytesIO(b"FAKE_HTTP_BODY_v14")
+    real = _multimodal.urllib.request.urlopen
+    _multimodal.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
+    try:
+        out = _multimodal._download_to_uploads(
+            "https://example.com/v14.png", "image",
+        )
+        assert captured["url"] == "https://example.com/v14.png"
+        assert "assets/uploads/" in out
+        abs_path = Path(out[len("file:///"):])
+        assert abs_path.is_file()
+        assert abs_path.read_bytes() == b"FAKE_HTTP_BODY_v14"
+    finally:
+        _multimodal.urllib.request.urlopen = real  # type: ignore[attr-defined]
+        try:
+            Path(out[len("file:///"):]).unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
+
+    print("[OK] v14: _download_to_uploads http(s):// URL 走 urlopen 下载")
+
+
+def test_v14_inline_local_images_missing_file_shows_placeholder():
+    """v14: 渲染时 file:// 找不到文件 → 给「图片已丢失: <name>」提示, 不空白。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    out = cw._inline_local_images_to_data_url(
+        "![主人上传](file:///C:/no/such/path/v14_missing.png)"
+    )
+    assert "图片已丢失" in out, (
+        f"v14 找不到文件时给「图片已丢失」提示, 实际: {out!r}"
+    )
+    assert "v14_missing.png" in out, (
+        f"提示里含文件名, 实际: {out!r}"
+    )
+    # 不能再是裸 file:// 文字
+    assert "file:///C:/no/such" not in out, (
+        f"v14 不应保留裸 file:// 文字, 实际: {out!r}"
+    )
+
+    print("[OK] v14: 找不到文件时给「图片已丢失: <name>」提示")
+
+
+def test_v14_inline_local_images_resolves_assets_relative_path():
+    """v14: chat_window 渲染项目内相对路径 (assets/uploads/xxx.png) —
+    按 chat_window._uploads_dir() 解析为绝对路径, 存在则 inline。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.core.qt_compat import QPixmap, QColor
+    import tempfile
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    with tempfile.TemporaryDirectory() as td:
+        # 直接在 chat_window 的 _uploads_dir() 下放一张图
+        uploads = cw._uploads_dir()
+        target = uploads / "v14_rel.png"
+        pix = QPixmap(1, 1)
+        pix.fill(QColor("#abcabc"))
+        pix.save(str(target), "PNG")
+
+        try:
+            # 用项目内相对路径 (windows 风格反斜杠先 normalize)
+            rel = "assets/uploads/v14_rel.png"
+            md = f"![主人拖图]({rel})"
+            out = cw._inline_local_images_to_data_url(md)
+            assert "data:image/png;base64," in out, (
+                f"项目内相对路径应被 inline 成 data: URL。 实际: {out[:200]!r}"
+            )
+        finally:
+            target.unlink(missing_ok=True)
+
+    print("[OK] v14: 项目内相对路径 assets/uploads/xxx.png 解析 + inline")
