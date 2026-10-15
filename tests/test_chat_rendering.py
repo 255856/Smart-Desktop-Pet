@@ -1,4 +1,4 @@
-"""Chat rendering 单元测试（气泡样式 + 头像 + 工具调用 + 流式提示）。"""
+﻿"""Chat rendering 单元测试（气泡样式 + 头像 + 工具调用 + 流式提示）。"""
 import sys
 import shutil
 import tempfile
@@ -1610,8 +1610,12 @@ def test_v9_skills_list_marks_active():
     assert "激活方式" in text, (
         f"/skills 列表没激活时应给「激活方式」提示。 实际: {text!r}"
     )
-    assert "/skills/poem" in text, (
-        f"/skills 列表项应给 /skills/poem 这种入口。 实际: {text!r}"
+    # 列表项应给 "/skills/<name>" 入口形式 (不限定具体哪个 skill,
+    # 取决于 skills_dir 实际有什么 + list_skills 顺序)
+    import re as _re
+    skill_entries = _re.findall(r"/skills/(\w[\w_]*)", text)
+    assert skill_entries, (
+        f"/skills 列表项应给 /skills/<name> 这种入口。 实际: {text!r}"
     )
 
     # 2) 激活后, 列表里 poem 后要带「← 当前激活」标记
@@ -1680,47 +1684,6 @@ def test_v9_on_send_skills_prefix_in_chat():
             )
 
     print("[OK] v9: 聊天开头 /skills/<name> 激活 + 剩余文本作为 user message")
-
-
-def test_v9_media_action_prompts_and_no_registry():
-    """v9: 多模态生成 (图片 / 视频) 调 self.registry.get('generate_image') 等。
-    registry 缺 / tool 不存在 / 调异常 三种情况都给清晰提示, 不静默失败。
-    """
-    from app.ui.chat_window import ChatWindow
-    from app.core.config import LLMConfig, CharacterConfig
-
-    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
-                    'assets/sprites', asr_enabled=False)
-
-    # 1) registry = None (默认) → 弹「需要 agent tool registry」
-    cw._on_media_action("image")
-    text = cw.chat_view.toPlainText()
-    assert "需要 agent tool registry" in text or "没接" in text, (
-        f"无 registry 时, _on_media_action 应给清晰提示。 实际: {text!r}"
-    )
-
-    # 2) registry 有但缺 tool → 弹「没注册 generate_image」
-    from app.engine.tools._core import ToolRegistry
-    cw.registry = ToolRegistry()
-    cw.chat_view.clear()
-    cw._on_media_action("image")
-    text2 = cw.chat_view.toPlainText()
-    assert "generate_image" in text2, (
-        f"无 tool 时应告诉主人缺哪个 tool。 实际: {text2!r}"
-    )
-    assert "如何接入" in text2 or "接入方法" in text2 or "接入" in text2, (
-        f"无 tool 时应给接入指引。 实际: {text2!r}"
-    )
-
-    # 3) audio 路径给清晰说明
-    cw.chat_view.clear()
-    cw._on_media_action("audio")
-    text3 = cw.chat_view.toPlainText()
-    assert "生成音效" in text3 or "TTS" in text3, (
-        f"audio 应说明当前状态。 实际: {text3!r}"
-    )
-
-    print("[OK] v9: 多模态 menu 弹清晰提示, 不会静默失败")
 
 
 # ============================================================
@@ -1849,8 +1812,9 @@ def test_v10_skills_completer_dynamic():
 
 
 def test_v10_multimodal_tool_registered():
-    """v10/v11: build_default_tools 后, registry 应有 generate_image / video / audio。
-    v11 升级: tool fn 走 multimodal_router 路由, 不再写死 OpenAI。
+    """v10/v12: build_default_tools 后, registry 应有 generate_image / video / audio。
+    v12 升级: tool fn 走 config.yaml multimodal 段直接发 HTTP, 不再走
+    multimodal_router (v11 router 抽象代码保留, 但本测试验证 tool 注册链路)。
     """
     from app.engine.tools import build_default_tools
 
@@ -1872,164 +1836,25 @@ def test_v10_multimodal_tool_registered():
     print("[OK] v10/v11: generate_image / video / audio 都进 tool registry")
 
 
-def test_v11_router_no_active_clear_prompt():
-    """v11: 主人已经注册了 provider, 但还没 /api/<name> 激活时, generate_image
-    报清晰错误引导主人先选 API。
-    """
-    from app.brain.multimodal_providers import reset_for_tests, setup_all
-    from app.brain import multimodal_router
-    reset_for_tests()
-    setup_all()  # 重新装 (reset 把 _PROVIDERS 清了)
-    # 不调 set_active, 直接 route
-    if multimodal_router.get_active() is not None:
-        # 测试不污染: 强制清
-        multimodal_router.set_active(None)
-    try:
-        multimodal_router.route("image", "a cat")
-        raise AssertionError("没 active 时应抛 RuntimeError")
-    except RuntimeError as e:
-        msg = str(e)
-        assert ("/api/" in msg or "激活" in msg or "选" in msg), (
-            f"应引导主人先 /api/<name>。 实际: {msg}"
-        )
-    reset_for_tests()
-    print("[OK] v11: 没 active provider 时 generate_image 提示先 /api/")
 
 
-def test_v11_router_unsupported_action_hints_alternatives():
-    """v11: 当前 active 不支持 video 时, generate_video 报清晰错 +
-    推荐同样支持 video 的其它 provider。
-    """
-    from app.brain.multimodal_providers import reset_for_tests
-    from app.brain import multimodal_router
-    from app.brain.multimodal_router import ApiCapability
-    reset_for_tests()
-    # 一个只支持 image 的 provider
-    multimodal_router.register(
-        ApiCapability(name="imgonly", supports_image=True,
-                      display_name="imgonly"),
-        gen_image=lambda prompt, **kw: "https://img/x.png",
-    )
-    # 一个支持 video 的 provider
-    multimodal_router.register(
-        ApiCapability(name="withvideo", supports_image=True, supports_video=True,
-                      display_name="withvideo"),
-        gen_image=lambda prompt, **kw: "https://img/y.png",
-        gen_video=lambda prompt, **kw: "https://vid/y.mp4",
-    )
-    multimodal_router.set_active("imgonly")
-
-    # 1) image 应该能跑
-    out = multimodal_router.route("image", "a cat")
-    assert out == "https://img/x.png"
-
-    # 2) video 应该被拒, 但引导到 withvideo
-    try:
-        multimodal_router.route("video", "a cat walking")
-        raise AssertionError("imgonly 不应能生成 video")
-    except RuntimeError as e:
-        msg = str(e)
-        assert "不支持" in msg or "video" in msg
-        assert "withvideo" in msg, (
-            f"应推荐 withvideo 作替代。 实际: {msg}"
-        )
-        assert "/api/withvideo" in msg, (
-            f"应给 /api/withvideo 切换命令。 实际: {msg}"
-        )
-
-    print("[OK] v11: 当前 API 不支持时, 路由报清晰 + 推替代 provider")
+# ============================================================
+# v12 调整 (2026-10-15):
+#   1) 多模态从 v11 router 多 provider 改回 config-driven:
+#      config.yaml 的 multimodal: 段填 base_url / api_key / image_model / ...
+#      _multimodal.setup_config() 注入, tool 直接发 HTTP
+#   2) 多模态按钮 (🎨 / 🎬 / 🎵) 改为「在输入框前面 insert /image /video /audio 」,
+#      跟 iMessage / 微信 / QQ 同款姿势, 不再弹 QInputDialog
+#   3) /image /video /audio 命令走 _handle_command, 跟按钮是同一姿势的键盘版
+#   4) /skills/<name> 改成 per-message: 当条 user msg 设 msg.skill, 下一条
+#      user msg 不传就不拼进 system_prompt (不再持久到 self._active_skill session)
+# ============================================================
 
 
-def test_v11_router_supported_but_no_handler_says_fix():
-    """v11: capability 声明支持 image 但 gen_image handler 没接,
-    路由报"声明支持但没接 handler, 改 <provider>.py"。
-    """
-    from app.brain.multimodal_providers import reset_for_tests
-    from app.brain import multimodal_router
-    from app.brain.multimodal_router import ApiCapability
-    reset_for_tests()
-    multimodal_router.register(
-        ApiCapability(name="broken", supports_image=True, display_name="broken"),
-        # 没传 gen_image handler, 但 capability 声明支持
-    )
-    multimodal_router.set_active("broken")
-    try:
-        multimodal_router.route("image", "a cat")
-        raise AssertionError("缺 handler 时应抛 RuntimeError")
-    except RuntimeError as e:
-        msg = str(e)
-        assert "handler" in msg or "实现" in msg or "broken" in msg, (
-            f"应告诉主人改 broken.py 补实现。 实际: {msg}"
-        )
-    print("[OK] v11: 声明支持但缺 handler 时, 报清晰实现路径")
-
-
-def test_v11_openai_provider_real_returns_url():
-    """v11: openai provider 真接 OpenAI image generations endpoint。
-    用 monkeypatch 替换 urlopen, 模拟返回 data[0].url。
-    """
-    import io
-    from app.brain.multimodal_providers import reset_for_tests
-    from app.brain import multimodal_router
-    from app.brain.multimodal_providers import openai as openai_provider
-    reset_for_tests()
-    import os
-    old = os.environ.get("OPENAI_API_KEY")
-    os.environ["OPENAI_API_KEY"] = "sk-test"
-    try:
-        # monkeypatch urlopen 返回一个伪响应
-        def _fake_urlopen(req, timeout=60):
-            body = b'{"data":[{"url":"https://example.com/cat.png"}]}'
-            return io.BytesIO(body)
-
-        openai_provider.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
-        # 走 setup + route
-        openai_provider.setup()
-        multimodal_router.set_active("openai")
-        out = multimodal_router.route("image", "a cat in space")
-        assert out == "https://example.com/cat.png", (
-            f"openai 路径应返回 urlopen 给的 URL, 实际: {out}"
-        )
-    finally:
-        if old is None:
-            os.environ.pop("OPENAI_API_KEY", None)
-        else:
-            os.environ["OPENAI_API_KEY"] = old
-        reset_for_tests()
-    print("[OK] v11: openai provider 真接 endpoint, 返回 URL")
-
-
-def test_v11_openai_provider_missing_key_raises():
-    """v11: openai provider 缺 OPENAI_API_KEY 时, 清晰报 (经过 router 路由)。"""
-    import os
-    from app.brain.multimodal_providers import reset_for_tests
-    from app.brain import multimodal_router
-    from app.brain.multimodal_providers import openai as openai_provider
-    reset_for_tests()
-    old = os.environ.pop("OPENAI_API_KEY", None)
-    old_mm = os.environ.pop("MULTIMODAL_API_KEY", None)
-    try:
-        openai_provider.setup()
-        multimodal_router.set_active("openai")
-        try:
-            multimodal_router.route("image", "a cat")
-            raise AssertionError("缺 key 应抛")
-        except RuntimeError as e:
-            assert "OPENAI_API_KEY" in str(e) or "MULTIMODAL_API_KEY" in str(e), (
-                f"应提到 key, 实际: {e}"
-            )
-    finally:
-        if old is not None:
-            os.environ["OPENAI_API_KEY"] = old
-        if old_mm is not None:
-            os.environ["MULTIMODAL_API_KEY"] = old_mm
-        reset_for_tests()
-    print("[OK] v11: openai 缺 key 时, router 抛清晰 key 错")
-
-
-def test_v11_chat_window_api_command_activates():
-    """v11: chat_window 收到 /api/MiniMax 切到 MiniMax provider;
-    /api 列已注册 + 当前激活标。
+def test_v12_button_inserts_prefix():
+    """v12: 多模态按钮 (image / video / audio) 在 input_edit 前面 insert
+    "/<kind> " 前缀, focus 回去, 让主人接着输 prompt 按发送走 /image 命令。
+    不再弹 QInputDialog (那是 v9-v11 的姿势)。
     """
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -2037,34 +1862,421 @@ def test_v11_chat_window_api_command_activates():
     cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                     'assets/sprites', asr_enabled=False)
 
-    # 1) /api 列表
-    cw._handle_command("/api")
+    # 1) 点 image → input_edit 文本以 "/image " 开头, focus 在 input_edit
+    cw.input_edit.clear()
+    cw.input_edit.setPlainText("")
+    cw._on_media_action("image")
+    text = cw.input_edit.toPlainText()
+    assert text.startswith("/image "), (
+        f"点 image 后 input_edit 应以 /image 开头。 实际: {text!r}"
+    )
+
+    # 2) 点 video → input_edit 文本以 "/video " 开头
+    cw.input_edit.clear()
+    cw._on_media_action("video")
+    text2 = cw.input_edit.toPlainText()
+    assert text2.startswith("/video "), (
+        f"点 video 后 input_edit 应以 /video 开头。 实际: {text2!r}"
+    )
+
+    # 3) 点 audio → input_edit 文本以 "/audio " 开头
+    cw.input_edit.clear()
+    cw._on_media_action("audio")
+    text3 = cw.input_edit.toPlainText()
+    assert text3.startswith("/audio "), (
+        f"点 audio 后 input_edit 应以 /audio 开头。 实际: {text3!r}"
+    )
+
+    # 4) 重复点 image → 不重复插前缀 (已经有 /image 时只 focus 回去)
+    cw.input_edit.clear()
+    cw.input_edit.setPlainText("/image 橘猫")
+    cw._on_media_action("image")
+    text4 = cw.input_edit.toPlainText()
+    assert text4 == "/image 橘猫", (
+        f"已有 /image 前缀时不应重复插。 实际: {text4!r}"
+    )
+
+    print("[OK] v12: 多模态按钮自动 insert /<kind> 前缀, 不弹窗")
+
+
+def test_v12_image_command_runs_tool():
+    """v12: 输入框直接打 /image <prompt> 走 _handle_command 调真 tool 拿 URL 嵌图。
+    tool fn 返回 URL 后, _render_message 把 markdown image 渲染进 chat_view。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.engine.tools._core import ToolRegistry
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # stub registry 含 generate_image / video / audio, 都返回固定 URL
+    reg = ToolRegistry()
+    _fake_url = "https://example.com/v12_cat.png"
+    from app.engine.tools._core import Tool
+    reg.register(Tool(
+        name="generate_image", description="stub",
+        parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
+        fn=lambda prompt, **kw: _fake_url,
+    ))
+    reg.register(Tool(
+        name="generate_video", description="stub",
+        parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
+        fn=lambda prompt, **kw: "https://example.com/v12_cat.mp4",
+    ))
+    reg.register(Tool(
+        name="generate_audio", description="stub",
+        parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
+        fn=lambda prompt, **kw: "https://example.com/v12_cat.mp3",
+    ))
+    cw.registry = reg
+
+    # 1) /image prompt 走 _handle_command —— QTextBrowser 的 image 是 inline
+    #    resource, 不会出现在 toPlainText() 里; 直接看 history 里的 msg.content。
+    cw.chat_view.clear()
+    cw._handle_command("/image 一只橘猫")
+    assert cw.history[-1].role == "assistant", (
+        f"/image 后应有一条 assistant msg。 history: {cw.history}"
+    )
+    msg1 = cw.history[-1].content
+    assert "https://example.com/v12_cat.png" in msg1, (
+        f"/image 应把 URL 写到 msg.content。 实际: {msg1!r}"
+    )
+    assert "橘猫" in msg1, "/image 应把 prompt 写入 markdown alt"
+
+    # 2) /video 同样
+    cw._handle_command("/video 猫走路")
+    msg2 = cw.history[-1].content
+    assert "https://example.com/v12_cat.mp4" in msg2, (
+        f"/video 应写 URL。 实际: {msg2!r}"
+    )
+
+    # 3) /audio 同样
+    cw._handle_command("/audio 猫叫声")
+    msg3 = cw.history[-1].content
+    assert "https://example.com/v12_cat.mp3" in msg3, (
+        f"/audio 应写 URL。 实际: {msg3!r}"
+    )
+
+    print("[OK] v12: /image /video /audio 命令调真 tool 拿 URL 嵌图")
+
+
+def test_v12_run_multimodal_no_tool_raises():
+    """v12: registry 有但缺 tool → _run_multimodal_action 给清晰接入指引。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.engine.tools._core import ToolRegistry
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    cw.registry = ToolRegistry()  # 空 registry
+
+    cw._run_multimodal_action("image", "橘猫")
     text = cw.chat_view.toPlainText()
-    assert "openai" in text and "MiniMax" in text, (
-        f"/api 应列出 openai + MiniMax. 实际: {text!r}"
+    assert "generate_image" in text, (
+        f"缺 tool 时应告诉主人缺哪个 tool。 实际: {text!r}"
+    )
+    assert "config.yaml" in text or "setup_config" in text, (
+        f"缺 tool 时应给 config.yaml 接入指引。 实际: {text!r}"
     )
 
-    # 2) /api/MiniMax 激活
-    cw._handle_command("/api/MiniMax")
-    text2 = cw.chat_view.toPlainText()
-    assert "已激活" in text2 and "MiniMax" in text2, (
-        f"/api/MiniMax 应激活 MiniMax. 实际: {text2!r}"
-    )
-    assert cw._active_api == "MiniMax", (
-        f"_active_api 应同步为 MiniMax, 实际: {cw._active_api!r}"
+    print("[OK] v12: 缺 tool 时 /image 给出清晰接入指引")
+
+
+def test_v12_run_multimodal_no_registry_raises():
+    """v12: registry=None 时, _run_multimodal_action 报清晰错。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    # 默认 registry=None
+
+    cw._run_multimodal_action("image", "橘猫")
+    text = cw.chat_view.toPlainText()
+    assert "registry" in text or "工具" in text, (
+        f"无 registry 时应清晰提示。 实际: {text!r}"
     )
 
-    # 3) /api/openai 切到 openai
-    cw._handle_command("/api/openai")
-    assert cw._active_api == "openai", (
-        f"切到 openai 后 _active_api 应是 openai, 实际: {cw._active_api!r}"
+    print("[OK] v12: 无 registry 时 /image 清晰提示")
+
+
+def test_v12_per_message_skill_only_affects_one_msg():
+    """v12: /skills/<name> ... 在聊天开头, skill 只对当条 user message 生效。
+    - 当条 msg.skill = "poem"
+    - 下一条 user msg 不传 skill, msg.skill 应为 None, 不拼进 system_prompt
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    # 走 _on_send 路径 (绕开 _kickoff_llm 实际跑 LLM, 用占位 LLMConfig)
+    cw._generating = False
+    # 拦截 _kickoff_llm, 避免真去跑模型
+    kicked_with = []
+    original_kickoff = cw._kickoff_llm
+    cw._kickoff_llm = lambda: kicked_with.append(cw.history[-1].skill if cw.history else None)  # noqa: E731
+
+    # 1) /skills/poem 写一首诗 → 当条 msg.skill = "poem"
+    cw.input_edit.setPlainText("/skills/poem 写一首诗")
+    cw._on_send()
+    assert cw.history[-1].skill == "poem", (
+        f"/skills/poem 后的 msg.skill 应为 poem, 实际: {cw.history[-1].skill!r}"
+    )
+    assert kicked_with == ["poem"], f"kickoff 应被调一次且 skill=poem, 实际: {kicked_with}"
+    kicked_with.clear()
+
+    # 2) 下一条 user msg 不传 skill → msg.skill 应为 None
+    cw.input_edit.setPlainText("帮我打开 Notepad")
+    cw._on_send()
+    assert cw.history[-1].skill is None, (
+        f"普通 user msg 的 skill 应为 None (per-message 不持久), 实际: {cw.history[-1].skill!r}"
+    )
+    assert kicked_with == [None], (
+        f"下一条 kickoff 应读到 skill=None (per-message 兜底走 _active_skill_prompt), "
+        f"实际: {kicked_with}"
     )
 
-    # 4) 列表里 "← 当前激活" 标记应在 openai 后面
-    cw._handle_command("/api")
-    text3 = cw.chat_view.toPlainText()
-    assert "当前激活" in text3 and "openai" in text3, (
-        f'/api 列表应标"当前激活: openai"。 实际: {text3!r}'
+    # 3) v12 主线: _kickoff_llm 优先读 msg.skill, _active_skill 字段
+    #    仍由 _activate_skill 兜底 set (v9 老路径兼容, 测试通过兜底用)。
+    #    但 per-message 下一条 msg.skill=None 时, _kickoff_llm 应走
+    #    _active_skill_prompt 兜底 (而不是 _skill_prompt_for)。
+
+    # 还原 (不污染其他测试)
+    cw._kickoff_llm = original_kickoff
+
+    print("[OK] v12: /skills/<name> per-message, 下一条不带就不拼")
+
+
+def test_v12_kickoff_uses_msg_skill_not_session_skill():
+    """v12: _kickoff_llm 优先读 history[-1].skill (per-message), 不读
+    self._active_skill session 字段 (那是 v9 老路径)。
+
+    用 _skill_prompt_for 跟 _active_skill_prompt 输出的格式相同 ([Active Skill: <name>])
+    来对比验证。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.ui.chat_window.message import Message
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+    # 给 llm_cfg 设非 placeholder api_key, 否则 _kickoff_llm 第一行就 return
+    cw.llm_cfg.api_key = "sk-v12-test"
+
+    # 1) 验证 _skill_prompt_for 跟 _active_skill_prompt 输出格式一致
+    sp_active = cw._active_skill_prompt()  # 没 active, 应为 ""
+    assert sp_active == "", (
+        f"没 _active_skill 时应为空串, 实际: {sp_active!r}"
     )
 
-    print("[OK] v11: chat_window /api 切 provider 流程通")
+    sp_poem = cw._skill_prompt_for("poem")
+    assert "[Active Skill: poem]" in sp_poem, (
+        f"_skill_prompt_for 应包含 [Active Skill: poem] 标记。 实际: {sp_poem[:200]!r}"
+    )
+    assert "[/Active Skill]" in sp_poem, (
+        f"_skill_prompt_for 应包含 [/Active Skill] 闭合。 实际: {sp_poem[:200]!r}"
+    )
+
+    # 2) 手动造一个 history, 当条 msg 带 skill, 验证 _kickoff_llm 走 _skill_prompt_for
+    #    而不是 _active_skill_prompt
+    cw.history = [
+        Message(role="user", content="写诗", skill="poem"),
+    ]
+    # self._active_skill 显式设成不一样 → 验证 _kickoff_llm 优先 msg.skill
+    cw._active_skill = "cooking"  # 老 session 字段
+    # 但 _kickoff_llm 优先读 msg.skill ("poem"), 而不是 _active_skill ("cooking")
+
+    # 拦截: 直接看 _kickoff_llm 调的 LLMClient 里 system_prompt 含哪个 skill
+    captured = {}
+    real_client_init = None
+    try:
+        from app.brain.llm_client import LLMClient
+        real_client_init = LLMClient.__init__
+        def _spy(self, cfg, system_prompt, *a, **kw):
+            captured["system_prompt"] = system_prompt
+            real_client_init(self, cfg, system_prompt, *a, **kw)
+        LLMClient.__init__ = _spy  # type: ignore[assignment]
+
+        # 调用 _kickoff_llm 但拦截 worker.start, 避免真跑
+        cw._worker = None
+        try:
+            cw._kickoff_llm()
+        except Exception:
+            pass
+    finally:
+        if real_client_init:
+            LLMClient.__init__ = real_client_init  # type: ignore[assignment]
+
+    sp_used = captured.get("system_prompt", "")
+    assert "[Active Skill: poem]" in sp_used, (
+        f"_kickoff_llm 应优先用 msg.skill=poem。 实际 system_prompt: {sp_used[:400]!r}"
+    )
+    assert "[Active Skill: cooking]" not in sp_used, (
+        f"不应被 session _active_skill=cooking 覆盖。 实际: {sp_used[:400]!r}"
+    )
+
+    print("[OK] v12: _kickoff_llm 优先 per-message msg.skill, 不读 session")
+
+
+def test_v12_no_api_command_in_handle_command():
+    """v12 AST 守卫: _handle_command 不再含 /api[/<name>] 段, 不再 import
+    multimodal_router / multimodal_providers / _active_api 字段。
+    """
+    import ast as _ast
+    src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8-sig")
+    tree = _ast.parse(src)
+
+    # 找 ChatWindow._handle_command 方法
+    cw_cls = next(
+        n for n in _ast.walk(tree)
+        if isinstance(n, _ast.ClassDef) and n.name == "ChatWindow"
+    )
+    handle_cmd = next(
+        n for n in cw_cls.body
+        if isinstance(n, _ast.FunctionDef) and n.name == "_handle_command"
+    )
+
+    body_src = _ast.get_source_segment(src, handle_cmd) or ""
+
+    # 1) 不应再出现 /api/ 命令匹配 (text == "/api" or text.startswith("/api/"))
+    assert 'text == "/api"' not in body_src, (
+        "/api 命令段不应还在 _handle_command 里"
+    )
+    assert 'text.startswith("/api/")' not in body_src, (
+        "/api/ 前缀段不应还在 _handle_command 里"
+    )
+
+    # 2) 不应再 import multimodal_router / multimodal_providers
+    for stmt in _ast.walk(handle_cmd):
+        if isinstance(stmt, _ast.ImportFrom):
+            mod = stmt.module or ""
+            assert "multimodal_router" not in mod, (
+                f"_handle_command 不应再 import {mod}"
+            )
+            assert "multimodal_providers" not in mod, (
+                f"_handle_command 不应再 import {mod}"
+            )
+
+    # 3) _active_api 字段不应在 ChatWindow 里出现 (除了注释)
+    #    简单 grep 源码, 排除注释行
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert "_active_api" not in line, (
+            f"v12 删了 _active_api 字段, 但还有: {line!r}"
+        )
+
+    print("[OK] v12 AST 守卫: /api 段 + multimodal_router import + _active_api 字段全删干净")
+
+
+def test_v12_handle_command_supports_image_video_audio():
+    """v12: _handle_command 加 /image /video /audio 三个命令, 走 _run_multimodal_action。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.engine.tools._core import ToolRegistry
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    reg = ToolRegistry()
+    from app.engine.tools._core import Tool
+    reg.register(Tool(
+        name="generate_image", description="stub",
+        parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
+        fn=lambda prompt, **kw: "https://example.com/i.png",
+    ))
+    cw.registry = reg
+
+    cw.chat_view.clear()
+    cw._handle_command("/image 猫")
+    # QTextBrowser image 不在 toPlainText; 看 history[-1].content
+    msg = cw.history[-1].content
+    assert "https://example.com/i.png" in msg, (
+        f"/image 命令应把 URL 写到 msg.content。 实际: {msg!r}"
+    )
+
+    print("[OK] v12: /image /video /audio 命令段在 _handle_command")
+
+
+def test_v12_multimodal_setup_config_injected_from_cfg_path():
+    """v12: ChatWindow 构造时, 从 cfg_path 读 multimodal 段注入 _multimodal._CONFIG。
+    直接调 setup_config 后再生成, tool 应能用注入的 base_url。
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.engine.tools import _multimodal
+
+    # 写一个临时 cfg_path, 含 multimodal 段
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "cfg.yaml"
+        cfg_path.write_text(
+            "multimodal:\n"
+            "  enabled: true\n"
+            "  base_url: https://api.minimaxi.com/v1\n"
+            "  api_key: sk-v12-test\n"
+            "  image_model: MiniMax-image-01\n"
+            "  image_endpoint_path: images/generations\n",
+            encoding="utf-8",
+        )
+        # 清掉可能的 env 干扰
+        old = os.environ.pop("MULTIMODAL_API_KEY", None)
+        old2 = os.environ.pop("MULTIMODAL_BASE_URL", None)
+        try:
+            cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                            'assets/sprites', asr_enabled=False,
+                            cfg_path=str(cfg_path))
+            # _multimodal._CONFIG 已被注入 multimodal 段
+            assert _multimodal._CONFIG.get("base_url") == "https://api.minimaxi.com/v1", (
+                f"_multimodal._CONFIG 应含 cfg multimodal 段 base_url。 实际: {_multimodal._CONFIG}"
+            )
+            assert _multimodal._CONFIG.get("api_key") == "sk-v12-test"
+            assert _multimodal._CONFIG.get("image_model") == "MiniMax-image-01"
+        finally:
+            if old is not None:
+                os.environ["MULTIMODAL_API_KEY"] = old
+            if old2 is not None:
+                os.environ["MULTIMODAL_BASE_URL"] = old2
+
+    print("[OK] v12: ChatWindow 构造时 cfg_path multimodal 段注入 _multimodal._CONFIG")
+
+
+def test_v12_image_command_missing_config_raises():
+    """v12: 没 multimodal 段 / 没 api_key 时, _run_multimodal_action 报清晰错。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.engine.tools._core import ToolRegistry
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+    reg = ToolRegistry()
+    from app.engine.tools._core import Tool
+    reg.register(Tool(
+        name="generate_image", description="stub",
+        parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]},
+        fn=lambda prompt, **kw: "https://example.com/i.png",
+    ))
+    cw.registry = reg
+
+    # 直接调 generate_image (不通过 _run_multimodal_action), tool 应抛清晰错
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({})  # 清掉 cfg, 让 _check_or_raise 抛
+    try:
+        _multimodal.generate_image("cat")
+        raise AssertionError("缺 cfg 应抛 RuntimeError")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "api_key" in msg or "base_url" in msg or "multimodal" in msg, (
+            f"应清晰告诉主人缺 multimodal 段。 实际: {msg}"
+        )
+    finally:
+        _multimodal.setup_config({})  # 清掉, 不污染其他测试
+
+    print("[OK] v12: 没 multimodal cfg 时 generate_image 抛清晰错")

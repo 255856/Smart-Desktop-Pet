@@ -227,14 +227,27 @@ class ChatWindow(QWidget):
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
         self._extra_docs_paths: list = list(extra_docs_paths or [])
-        # v9: 当前会话激活的 skill 名 (从 chat 开头 /skills/<name> 切换)。
-        # 整个对话期间该 skill 内容会拼到 system_prompt 末尾。
-        # session 内有效, 不持久化 (重启桌宠重置, 等于主人重新选)。
+        # v9: 当前会话激活的 skill 名 (单独 /skills/<name> 切换, 整段对话期间
+        # 拼到 system_prompt 末尾)。v12 起主线改 per-message (msg.skill),
+        # 这字段保留作为兜底 + 老测试兼容。
         self._active_skill: Optional[str] = None
-        # v11: 当前激活的 API provider (走 /api/<name> 切), multimodal tool
-        # (generate_image / video / audio) 走 multimodal_router 路由到对应
-        # provider 的 handler。None 表示还没选。
-        self._active_api: Optional[str] = None
+        # v12: 从 cfg_path 读 multimodal 段, 注入到 _multimodal.setup_config,
+        # 之后 generate_image / video / audio tool 直接读 cfg。v11 的
+        # multimodal_router / _active_api 段已删 (单一组 config 不再需要路由)。
+        # cfg 读失败 (yaml 没装 / 路径不对 / 没 multimodal 段) 都视作空 dict,
+        # 后续 _check_or_raise 会告诉主人怎么填。
+        try:
+            import yaml as _yaml
+            with open(cfg_path, encoding="utf-8") as _f:
+                _full_cfg = _yaml.safe_load(_f) or {}
+            _mm_cfg = (_full_cfg.get("multimodal") or {}) if isinstance(_full_cfg, dict) else {}
+        except Exception:  # noqa: BLE001
+            _mm_cfg = {}
+        try:
+            from app.engine.tools import _multimodal as _mm
+            _mm.setup_config(_mm_cfg)
+        except Exception:  # noqa: BLE001
+            log.debug("multimodal.setup_config 注入失败 (非致命)", exc_info=True)
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -1140,31 +1153,14 @@ class ChatWindow(QWidget):
             text = (attach_block + ("\n\n" + text if text else "")).strip()
 
         # v11 主人实测设计: 聊天开头写 `/api/<name> ...` 视为「切换 API
-        # provider + 剩余文本作为 user message」。跟 /skills/<name> 同款姿势。
-        if text.startswith("/api/"):
-            head, _, rest = text.partition(" ")
-            name = head[len("/api/"):].strip().strip("/")
-            if name:
-                from app.brain.multimodal_providers import setup_all
-                from app.brain import multimodal_router
-                setup_all()
-                ok, msg = multimodal_router.set_active(name)
-                if ok:
-                    self._active_api = name if name in multimodal_router.list_providers() else None
-                    self._append_system_msg(msg)
-                else:
-                    self._render_message(Message(role="assistant", content=msg))
-                if rest.strip():
-                    self.input_edit.clear()
-                    self._quick_send(rest.strip())
-                else:
-                    self.input_edit.clear()
-                return
-            self._handle_command(text)
-            return
+        # provider + 剩余文本作为 user message」。v12 删了 —— config-driven 后
+        # 单一组 config 参数, 不再需要路由切换, multimodal tool 走 config.yaml
+        # multimodal 段。
 
-        # v9 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「激活这个 skill
-        # 进本对话 + 剩余文本作为 user message」。匹配优先级高于普通 / 命令。
+        # v12 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「这一次对话
+        # 用这个 skill + 剩余文本作为 user message」—— skill 只对当条 msg 生效,
+        # 下一条 user message 没 skill 就不拼进 system_prompt。不再持久到
+        # self._active_skill (那是 v9 老的 session 持久姿势)。
         if text.startswith("/skills/"):
             head, _, rest = text.partition(" ")
             # head 形如 /skills/<name>
@@ -1172,12 +1168,12 @@ class ChatWindow(QWidget):
             if name:
                 ok, msg = self._activate_skill(name)
                 self._append_system_msg(msg)
-                # 激活后: 若有剩余文本, 作为普通 user message 发送
-                if rest.strip():
+                # v12: skill 仅对当条消息生效; 设到 msg.skill 而非 self._active_skill
+                if ok and rest.strip():
                     self.input_edit.clear()
-                    self._quick_send(rest.strip())
+                    self._quick_send(rest.strip(), skill=name)
                 else:
-                    # 单纯激活, 不发新消息, 清空输入框
+                    # 单纯激活 (无剩余文本), 不发新消息, 清空输入框
                     self.input_edit.clear()
                 return
             # /skills/ 但 name 为空, 走 /handle_command 给提示
@@ -1195,6 +1191,9 @@ class ChatWindow(QWidget):
     def _handle_command(self, text: str) -> None:
         """处理 / 快捷命令（chat 顶上的输入框以 / 开头时走这里）。
 
+        2026-10-15 v12: 删了 v11 的 /api[/<name>] —— config-driven 后不需要
+        路由切换; 加 /image /video /audio 三个命令 —— 跟 input_edit 前 insert
+        前缀 + 多模态按钮是同一姿势, 但支持从输入框直接打命令。
         2026-10-15 v6: 命令字面量统一改成英文，避开中文输入法切换的问题。
         后续若新增命令, 仍按英文命名; 内部说明文案 / 给主人看的内容用中文。
         """
@@ -1289,56 +1288,12 @@ class ChatWindow(QWidget):
             self._quick_send_plan(plan_ask)
             return
 
-        # /api[/<name>]: 列出 / 切换当前 API provider (multimodal tool 路由目标)。
-        # v11 主人实测设计: "重点是解决不同模型 API 与对应多模态工具之间的适配问题" —
-        # 主人 /api/openai 切到 OpenAI, 之后 generate_image 走 gpt-image-1;
-        # 切到 /api/MiniMax, generate_video 走 MiniMax H3 (若该 provider 不支持图片,
-        # 报"切到 Y 后重试")。
-        # 注意: 用 text 而非 cmd (cmd 是 .lower() 后的, 会把 "MiniMax" 改成
-        # "minimax", 这里需要保留原大小写)
-        if text == "/api" or text.startswith("/api/"):
-            from app.brain.multimodal_providers import setup_all
-            from app.brain import multimodal_router
-            setup_all()  # 没初始化就现在装
-            name = text[len("/api/"):].strip().strip("/") if text.startswith("/api/") else ""
-            # /api 列表
-            if not name:
-                caps = multimodal_router.list_capabilities()
-                if not caps:
-                    self._append_system_msg(
-                        "还没注册任何 API provider, 在 app/brain/multimodal_providers/ "
-                        "加一个 .py 然后 setup_all() 里 import。"
-                    )
-                else:
-                    lines = []
-                    for n, c in sorted(caps.items()):
-                        marks = (
-                            f"image:{'✓' if c.supports_image else '✗'} "
-                            f"video:{'✓' if c.supports_video else '✗'} "
-                            f"audio:{'✓' if c.supports_audio else '✗'}"
-                        )
-                        active_mark = "   ← 当前激活" if n == self._active_api else ""
-                        lines.append(f"• /api/{n}  — {c.display_name or n}  ({marks}){active_mark}")
-                    self._render_message(Message(
-                        role="assistant",
-                        content=(
-                            "已注册的 API provider:\n" + "\n".join(lines)
-                            + "\n\n切换方式: /api/<name> (例 /api/openai)"
-                            + (f"\n\n✨ 当前激活: **{self._active_api}** — "
-                               "之后 chat 里点 🎨 / 🎬 走该 provider。"
-                               if self._active_api else
-                               "\n\n还没激活。点 🎨 / 🎬 之前先用 /api/<name> 选一个。")
-                        )
-                    ))
-                return
-            # /api/<name> 切换
-            ok, msg = multimodal_router.set_active(name)
-            if ok:
-                # ChatWindow 同步 active 状态 (跟 router 共享 _active_api)
-                self._active_api = name if name in multimodal_router.list_providers() else None
-                self._append_system_msg(msg)
-            else:
-                self._render_message(Message(role="assistant", content=msg))
+        # /image <prompt> / /video <prompt> / /audio <prompt>:
+        # 直接从输入框打命令调多模态 tool 拿 URL 嵌图。跟点 🎨 insert 前缀是
+        # 同一姿势的键盘版 —— 主人不用鼠标也能用。v12 加 (v11 走 /api 切换)。
+        if cmd in ("/image", "/video", "/audio") and args:
+            kind = cmd[1:]   # "image" / "video" / "audio"
+            self._run_multimodal_action(kind, args)
             return
 
         # /skills[/<name>]: 列出所有 / 单独激活某个 skill。
@@ -1433,14 +1388,19 @@ class ChatWindow(QWidget):
         hint = f"（主人输入了 / 快捷命令 {text}，但当前版本未支持）"
         self._quick_send(hint)
 
-    def _quick_send(self, text: str) -> None:
-        """从快捷输入框发送消息（直接传入文本，不走 input_edit）。"""
+    def _quick_send(self, text: str, skill: Optional[str] = None) -> None:
+        """从快捷输入框发送消息（直接传入文本，不走 input_edit）。
+
+        v12: 加 skill kwarg —— 当条 user message 拼 msg.skill, _kickoff_llm
+        读 history[-1].skill 拼到 system_prompt; 不传就不拼。per-message 语义,
+        下一条 user msg 不传 skill 就不带。
+        """
         if self._generating:
             return
         text = text.strip()
         if not text:
             return
-        msg = Message(role="user", content=text)
+        msg = Message(role="user", content=text, skill=skill)
         self.history.append(msg)
         self._trim_history()
         self.chat_store.add("user", text)  # 持久化用户消息
@@ -1642,7 +1602,12 @@ class ChatWindow(QWidget):
         )
 
     def _active_skill_prompt(self) -> str:
-        """返回要拼到 system_prompt 末尾的当前激活 skill 文本。无激活时返回空串。"""
+        """返回要拼到 system_prompt 末尾的当前激活 skill 文本。无激活时返回空串。
+
+        v12 兜底用 —— 主线读 per-message msg.skill; 这条 session-level 路径
+        留给老测试 + 兜底 (主人在 /skills/<name> 单独激活但没跟 user 文本
+        一起发的情况下仍生效)。
+        """
         if not self._active_skill:
             return ""
         from app.brain.skills import load_skill
@@ -1652,6 +1617,23 @@ class ChatWindow(QWidget):
             return ""
         return (
             f"\n\n[Active Skill: {self._active_skill}]\n{body}\n[/Active Skill]"
+        )
+
+    def _skill_prompt_for(self, name: str) -> str:
+        """v12 per-message 主线: 给定 skill 名字, 返回对应的 skill prompt 段。
+
+        跟 _active_skill_prompt 同样的格式 (前端模板是 [Active Skill: <name>]),
+        但读 msg.skill 而不是 self._active_skill session 字段。
+        """
+        if not name:
+            return ""
+        from app.brain.skills import load_skill
+        skills_dir = getattr(self, "_skills_dir", None) or "skills"
+        body = load_skill(skills_dir, name)
+        if not body:
+            return ""
+        return (
+            f"\n\n[Active Skill: {name}]\n{body}\n[/Active Skill]"
         )
 
     def _uploads_dir(self) -> Path:
@@ -1854,50 +1836,58 @@ class ChatWindow(QWidget):
         return out
 
     def _on_media_action(self, kind: str) -> None:
-        """多模态下拉 (图片 / 视频 / 音频 / 配置) 入口。
+        """多模态下拉 (图片 / 视频 / 音频) 入口。
 
-        2026-10-15 v9: 真接 agent tool —— 弹 QInputDialog 让主人输 prompt,
-        调 self.registry.get(f"generate_{kind}") 拿 URL, 用 markdown image
-        渲染进 chat_view。registry 没接该 tool 时, 弹清晰提示告诉主人怎么接。
+        2026-10-15 v12 owner 实测设计: 主人说「点击生成图片按钮就在输入框前面
+        加 /image 之类的命令, 然后再输入内容」 —— 跟 iMessage / 微信 / QQ
+        同款姿势, 不弹 QInputDialog 也不直接调 tool。让主人在输入框里接着
+        输, 按发送才走 /image 命令 → _handle_command → _run_multimodal_action。
+        /image /video /audio 命令在 _handle_command 里处理。
         """
-        prompts = {
-            "image": "🎨 生成图片",
-            "video": "🎬 生成视频",
-            "audio": "🎵 生成音效",
-            "config": "⚙ 配置多模态 provider",
-        }
-        label = prompts.get(kind, kind)
-
-        if kind == "config":
-            # 配置入口: 当前不弹窗, 改成系统消息给主人清晰指引
+        if kind not in ("image", "video", "audio"):
+            # 配置入口 (v12 集中到 config.yaml multimodal 段, 不再弹窗)
             self._render_message(Message(
                 role="assistant",
                 content=(
-                    "**多模态 provider 配置**\n\n"
-                    "1. 在 `app/tools/` 下加一个 `multimodal.py`, 实现两个函数:\n"
-                    "   - `generate_image(prompt: str) -> str`（返回 http(s) URL）\n"
-                    "   - `generate_video(prompt: str) -> str`（返回 http(s) URL）\n"
-                    "2. 在 `app/tools/registry.py` 里 register 这两个 tool 名字。\n"
-                    "3. provider 接哪种: OpenAI gpt-image-1 / 智谱 CogVideoX / 阿里\n"
-                    "   Qwen-Image / 字节豆包 / Replicate 等等, 自己挑一个写 client。\n"
-                    "4. 这边 chat_window 已经走 tool registry, 接好就能用, 不用改 UI。"
+                    "**多模态配置**\n\n"
+                    "在 `config.yaml` 的 `multimodal:` 段填 base_url / api_key / "
+                    "image_model / video_model / audio_model 以及对应的 endpoint "
+                    "路径。跟 llm 段同源就能用, 不需要再选 provider。"
                 )
             ))
             return
 
-        if kind == "audio":
+        # image / video / audio: 在 input_edit 前 insert "/{kind} ", focus 回去,
+        # 让主人接着输 prompt, 按发送就走 _handle_command 里的 /image /video /audio
+        # 命令段调 _run_multimodal_action。
+        prefix = f"/{kind} "
+        current = self.input_edit.toPlainText()
+        if not current.startswith(prefix):
+            self.input_edit.setPlainText(prefix + current.lstrip())
+        self.input_edit.setFocus()
+        # 移动 cursor 到文本末尾
+        from app.core.qt_compat import QTextCursor
+        cursor = self.input_edit.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input_edit.setTextCursor(cursor)
+
+    def _run_multimodal_action(self, kind: str, prompt: str) -> None:
+        """/image /video /audio 命令的真正干活入口 (v12) —— 跟 _on_media_action
+        按钮插前缀是同一姿势的键盘版。
+
+        走 self.registry.get(f"generate_{kind}") 调 tool, 拿 URL, 嵌图。
+        registry 不可用 / tool 没注册时, 弹清晰提示。
+        """
+        labels = {"image": "🎨 生成图片", "video": "🎬 生成视频",
+                  "audio": "🎵 生成音频"}
+        label = labels.get(kind, kind)
+        prompt = (prompt or "").strip()
+        if not prompt:
             self._render_message(Message(
                 role="assistant",
-                content=(
-                    "🎵 **生成音效** 当前没接通 agent tool (`generate_audio`)。\n\n"
-                    "桌宠现有的 TTS（语音合成）走 `voice/character.py` 那条路径，"
-                    "负责「把文字朗读出来」。本项是「按 prompt 生成一段音效 / 音乐」，"
-                    "需要单独接 model（如 MiniMax music / suno），留作 Phase 4.*。"
-                )
+                content=f"用法: /{kind} <prompt>   (例: /{kind} 一只橘猫趴在窗台)"
             ))
             return
-
-        # image / video: 弹 prompt input, 调 tool, 拿 URL 嵌图
         if not hasattr(self, "registry") or self.registry is None:
             self._render_message(Message(
                 role="assistant",
@@ -1914,28 +1904,13 @@ class ChatWindow(QWidget):
                 role="assistant",
                 content=(
                     f"{label}：当前 tool registry 没注册 `{tool_name}`。\n\n"
-                    f"接入方法见 `🎨 多模态 / ⚙ 配置` 菜单里的指引，"
-                    f"或者 `app/tools/multimodal.py` 自己加一个 `{tool_name}(prompt)` "
-                    f"返回 http(s) URL 的函数。"
+                    f"接入方法: 确认 `app/engine/tools/_multimodal.py` 已被 load "
+                    f"且在 `setup_config` 里注入了 config.yaml multimodal 段。"
                 ),
             ))
             return
-
-        # 弹 prompt 输入框
-        from app.core.qt_compat import QInputDialog
-        prompt, ok = QInputDialog.getText(
-            self, label, f"输入要生成的{('图片' if kind == 'image' else '视频')}描述:",
-        )
-        if not ok or not prompt.strip():
-            return
-        prompt = prompt.strip()
-
-        # 走 tool —— tool 可能是同步返回 URL, 也可能返回 dict 包含 url 字段。
         try:
-            self._append_system_msg(f"已发出{label}请求, 等模型回...") \
-                if hasattr(self, "_append_system_msg") else None
-            self.input_edit.clear()
-            # 同步调一次 (大部分 generate_* tool 是 HTTP 长轮询, 客户端封装好同步)
+            self._append_system_msg(f"已发出{label}请求, 等模型回...")
             result = tool.fn(prompt=prompt)
         except Exception as e:  # noqa: BLE001
             log.exception("multimodal %s tool failed", kind)
@@ -1956,7 +1931,7 @@ class ChatWindow(QWidget):
             return
 
         # 渲染成 markdown image 进 chat (跟上传图片同款姿势, 走 _msg_html)
-        kind_cn = "图片" if kind == "image" else "视频"
+        kind_cn = {"image": "图片", "video": "视频", "audio": "音频"}.get(kind, kind)
         content = f"![{kind_cn}: {prompt}]({url})"
         msg = Message(role="assistant", content=content)
         self.history.append(msg)
@@ -2239,8 +2214,21 @@ class ChatWindow(QWidget):
                     system_prompt = system_prompt + "\n\n" + extra
             except Exception as e:  # noqa: BLE001
                 log.warning("context_provider 失败：%s", e)
-        # v9: 主人激活的 skill 内容拼到 system_prompt 末尾 (整段对话期间生效)
-        skill_prompt = self._active_skill_prompt()
+        # v12: 主人激活的 skill 内容拼到 system_prompt 末尾 —— 但**只在当条
+        # user message 生效** (per-message 语义, 下一条不带就不拼)。
+        # 主线: 读 self.history[-1].skill (v12 设的); 兜底: 老的 self._active_skill
+        # 字段 (v9 之前留下的, 测试 + 老调用还能用)。
+        skill_prompt = ""
+        if self.history:
+            last_user = next(
+                (m for m in reversed(self.history) if m.role == "user"), None
+            )
+            per_msg_skill = getattr(last_user, "skill", None) if last_user else None
+            if per_msg_skill:
+                skill_prompt = self._skill_prompt_for(per_msg_skill)
+        if not skill_prompt:
+            # 兜底: v9 老路径, session 内激活的 skill 整段对话期间生效
+            skill_prompt = self._active_skill_prompt()
         if skill_prompt:
             system_prompt = system_prompt + skill_prompt
         client = LLMClient(
