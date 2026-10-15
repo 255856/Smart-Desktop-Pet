@@ -203,7 +203,11 @@ class ChatWindow(QWidget):
         )
         # 工具步骤默认折叠 —— Qt QTextBrowser 不支持 <details>,用 anchorClicked
         # 切回 setHtml 模拟。新一轮 chat 起始 reset 成 True。
-        self._tools_collapsed: bool = True
+        # 2026-10-15 v6: 改成 per-message 状态 (dict keyed by id(msg)) —
+        # 之前 self._tools_collapsed 是全局 bool, 点 A 消息的 toggle 会影响所有消息
+        # 的工具卡片 (用户实测「点击一个后所有的都会展开」)。
+        self._tools_collapsed_by_msg: dict = {}
+        self._tools_collapsed_default: bool = True  # 新消息默认折叠
         # 2026-10-14 美化：用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
@@ -723,10 +727,11 @@ class ChatWindow(QWidget):
         self.input_edit.setMaximumHeight(110)
         # 自定义按键事件：Enter 发送，Shift+Enter 换行
         self.input_edit.keyPressEvent = self._input_key_press
-        # / 命令补全
+        # / 命令补全 (2026-10-15 v6: 改为英文 + 加 /plan / /skills)
         self._cmd_completer = _CommandCompleter(self.input_edit, [
-            "/状态", "/喂 ", "/记 ", "/时间", "/说 ", "/帮助", "/记忆",
-            "/提醒", "/清除", "/demo", "/调试", "/打开 ",
+            "/help", "/status", "/feed ", "/time", "/say ", "/remember ",
+            "/memory", "/reminders", "/clear", "/demo", "/debug", "/open ",
+            "/plan ", "/skills",
         ])
         il.addWidget(self.input_edit)
 
@@ -1036,71 +1041,76 @@ class ChatWindow(QWidget):
         self._quick_send(text)
 
     def _handle_command(self, text: str) -> None:
-        """处理 /命令（快捷命令系统）。"""
+        """Handle /commands (shortcut system) — 2026-10-15 v6: switched to English."""
         self.input_edit.clear()
         cmd = text.split()[0].lower()
         args = text[len(cmd):].strip()
 
-        # 帮助
-        if cmd in ("/帮助", "/help", "/?"):
+        # /help
+        if cmd in ("/help", "/?"):
             self._append_system_msg(
-                "命令：/喂 /状态 /时间 /记 /说 /记忆 /提醒 /清除 /demo /调试 /打开")
+                "Commands: /help /status /time /remember /say /memory "
+                "/reminders /clear /demo /debug /open /plan /skills"
+            )
             self._render_message(Message(
                 role="assistant",
                 content=(
-                    "常用命令：\n"
-                    "• /喂 食物名  — 喂食（如 /喂 拿铁）\n"
-                    "• /状态      — 查看桌宠数值\n"
-                    "• /时间      — 看当前时间\n"
-                    "• /记 内容   — 记住（/记 主人不吃香菜）\n"
-                    "• /说 文字   — 桌宠冒气泡\n"
-                    "• /记忆      — 看长期记忆\n"
-                    "• /提醒      — 看/管提醒\n"
-                    "• /清除      — 清空聊天上下文（不影响长期记忆）\n"
-                    "• /demo      — 打开 Live2D Demo 演示页\n"
-                    "• /调试      — 打开 Agent Trace 调试面板（开发）\n"
-                    "• /打开 名称 — 打开应用（如 /打开 记事本）"
+                    "Common commands:\n"
+                    "• /help                 — show this help\n"
+                    "• /status               — show pet stats\n"
+                    "• /time                 — current time\n"
+                    "• /remember <text>      — remember (e.g. /remember user dislikes cilantro)\n"
+                    "• /say <text>           — pet says a bubble\n"
+                    "• /memory               — show long-term memory\n"
+                    "• /reminders            — list/manage reminders\n"
+                    "• /clear                — clear chat context (not long-term memory)\n"
+                    "• /demo                 — open Live2D Demo page\n"
+                    "• /debug                — open Agent Trace dashboard (dev)\n"
+                    "• /open <name>          — open app (e.g. /open Notepad)\n"
+                    "• /plan [text]          — generate a plan (no tool calls)\n"
+                    "• /skills               — list loaded skill docs"
                 ),
             ))
             return
 
-        # /记忆
-        if cmd == "/记忆":
+        # /memory
+        if cmd == "/memory":
             items = self.context_provider().split("\n") if self.context_provider else []
             mem = [l for l in items if l.strip().startswith("- [")]
             self._render_message(Message(
                 role="assistant",
-                content="长期记忆（最新）：\n" + ("\n".join(mem[:10]) if mem
-                                   else "还没有记住任何事 ~"),
+                content="Long-term memory (latest):\n" + ("\n".join(mem[:10]) if mem
+                                   else "(no memories yet)"),
             ))
             return
 
-        # /提醒：调 list_reminders（如果有 registry）
-        if cmd == "/提醒":
+        # /reminders
+        if cmd == "/reminders":
             if self.registry is None:
                 self._render_message(Message(
-                    role="assistant", content="当前没有工具注册表"))
+                    role="assistant", content="no tool registry"))
             else:
                 tool = self.registry.get("list_reminders")
                 if tool is None:
                     self._render_message(Message(
-                        role="assistant", content="list_reminders 不可用"))
+                        role="assistant", content="list_reminders not available"))
                 else:
                     result = tool.fn()
                     self._render_message(Message(
-                        role="assistant", content=f"提醒事项：\n{result}"))
+                        role="assistant", content=f"Reminders:\n{result}"))
             return
 
-        # /demo：打开 Live2D Demo；/调试：打开 Agent Trace（开发者）
+        # /demo: open Live2D Demo
         if cmd == "/demo":
             self._open_demo()
             return
-        if cmd == "/调试":
+        # /debug: open Agent Trace
+        if cmd == "/debug":
             self._open_dashboard()
             return
 
-        # /打开
-        if cmd == "/打开" and args:
+        # /open
+        if cmd == "/open" and args:
             if self.registry:
                 tool = self.registry.get("open_app")
                 if tool:
@@ -1108,26 +1118,88 @@ class ChatWindow(QWidget):
                     self._render_message(Message(role="assistant", content=r))
                     return
             self._render_message(Message(
-                role="assistant", content="工具不可用"))
+                role="assistant", content="tool not available"))
             return
 
-        # /plan:把当前输入当 plan-mode 请求,只产 markdown 计划不调工具
-        # 接线(a):让 LangChainAgent.plan() 走标准的 chat_window 信号协议
-        # 与普通 chat 共享 _on_chunk / _on_done,所以计划正文会进历史。
+        # /plan: treat input as plan-mode request, output markdown plan, no tool calls
         if cmd == "/plan":
             if not hasattr(self, "_lc_agent") or self._lc_agent is None:
                 self._render_message(Message(
-                    role="assistant", content="plan 模式只在 standard / LangChain 后端可用"))
+                    role="assistant", content="LangChain agent not ready, /plan unavailable"))
                 return
-            # 跟普通 chat 一样,先走清洗逻辑 + 推 history
-            plan_ask = args or "（主人在 /plan 里没带具体问题,先给个通用 plan 模板。）"
+            plan_ask = args or "(no specific question provided in /plan, give a generic plan template.)"
             self.input_edit.clear()
-            # 走 _on_send 一样的路径:把用户问题入历史,启动 _PlanWorker
             self._quick_send_plan(plan_ask)
             return
 
-        # 其他命令 → 直接当文本发给 LLM（带命令提示）
-        hint = f"（主人用了快捷命令 {text}）"
+        # /skills: list loaded skill docs
+        if cmd == "/skills":
+            from app.brain.skills import list_skills
+            skills_dir = getattr(self, "_skills_dir", None) or "skills"
+            try:
+                names = list_skills(skills_dir)
+            except Exception as e:  # noqa: BLE001
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"/skills: failed to read {skills_dir!r}: {e}"))
+                return
+            if not names:
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"No skills found in `{skills_dir}` "
+                            f"(skipped: not running in a project with skills/, "
+                            f"or no .md files yet)."))
+            else:
+                self._render_message(Message(
+                    role="assistant",
+                    content="Loaded skills (" + str(len(names)) + "):\n"
+                            + "\n".join(f"• {n}" for n in names)
+                            + f"\n\nSource: `{skills_dir}`"
+                ))
+            return
+
+        # /say: pet says a bubble
+        if cmd == "/say" and args:
+            self._render_message(Message(
+                role="assistant",
+                content=args,
+            ))
+            return
+
+        # /clear: clear chat context (not long-term memory)
+        if cmd == "/clear":
+            self._on_clear()
+            return
+
+        # /remember: 存到长期记忆
+        if cmd == "/remember":
+            if not args:
+                self._append_system_msg("usage: /remember <text>")
+                return
+            if self.memory_store is not None:
+                try:
+                    self.memory_store.add(args, source="user")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("memory_store.add failed: %s", e)
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"OK, I'll remember: {args}"))
+            else:
+                self._render_message(Message(
+                    role="assistant",
+                    content="(memory store not configured)"))
+            return
+
+        # /status / /time / /feed — v6 stub. Show a hint so user knows
+        # the command is recognized but not yet wired up.
+        if cmd in ("/status", "/time", "/feed"):
+            self._append_system_msg(
+                f"{cmd}: stub in v6, see /help for the current command list."
+            )
+            return
+
+        # Unknown command — send to LLM as a normal message with a hint
+        hint = f"(user used shortcut command {text})"
         self._quick_send(hint)
 
     def _quick_send(self, text: str) -> None:
@@ -1582,7 +1654,8 @@ class ChatWindow(QWidget):
                       "base_url": self.llm_cfg.base_url[:60]},
             )
         # 2026-10-15:新一轮 chat 起始,工具步骤 reset 成折叠
-        self._tools_collapsed = True
+        # v6: 不再 reset 全局, 旧消息保留各自状态 (dict 留着)
+        # v6 之前有 self._tools_collapsed = True 这种 reset; 现在已经不需要
 
         self._generating = True
         self.send_btn.setEnabled(False)
@@ -1719,6 +1792,9 @@ class ChatWindow(QWidget):
         「从 anchor 删到末尾再 insertHtml」模式在某些状态下会让 chat 区域
         被擦白 (用户实测 v4 反馈「点击后聊天窗口信息清空」)。
 
+        2026-10-15 v6: per-message toggle。URL 用 fragment (#N) 编码 msg id,
+        这里从 fragment 读回, 只切换那条消息的 _tools_collapsed_by_msg[id]。
+
         v4 的 _NoCmdNavQTextBrowser 仍然有效 —— 它挡 QTextBrowser 默认
         doSetSource 对 cmd: scheme 错误地调用 setSource 试图本地解析。
         """
@@ -1732,10 +1808,15 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 cmd = ""
             if cmd == "toggle_tools":
-                self._tools_collapsed = not getattr(
-                    self, "_tools_collapsed", True)
-                # v5: 不再 _refresh_streaming_message, 改用全量重建
-                # (后者会操作 anchor/cursor 删整段, 容易触发白屏)
+                # v6: fragment 是 msg_id 整数, 默认 0
+                try:
+                    msg_id = int(url.fragment() or 0) if hasattr(url, "fragment") else 0
+                except (TypeError, ValueError):
+                    msg_id = 0
+                cur = self._tools_collapsed_by_msg.get(
+                    msg_id, self._tools_collapsed_default)
+                self._tools_collapsed_by_msg[msg_id] = not cur
+                # v5: 全量重建, 不动 anchor/cursor
                 self._rebuild_chat_view_from_history()
             return
         # 外部链接:手动打开(setOpenExternalLinks(False) 不会自动开)
@@ -2243,7 +2324,7 @@ class ChatWindow(QWidget):
             pass
         super().changeEvent(event)
 
-    def _tool_steps_html(self, tools: list) -> str:
+    def _tool_steps_html(self, tools: list, msg_id: int = 0) -> str:
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
 
         工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
@@ -2253,6 +2334,11 @@ class ChatWindow(QWidget):
         "点击收起"字样 —— 用户实测 2026-10-15「去掉点击展开这4个文字,
         功能还要」。Bug 1 (_current_bot_msg=None 时点链接 chat 变空白)
         由 _on_chat_anchor_clicked 里的守卫挡住, 不影响功能。
+
+        2026-10-15 v6:per-message toggle 状态。msg_id 是 id(msg) 整数,
+        URL 用 `cmd:toggle_tools#{msg_id}` 编码, _on_chat_anchor_clicked
+        从 fragment 读回, 找到对应消息的折叠状态。dict 里没记录的消息
+        走默认 (self._tools_collapsed_default, 折叠)。
         """
         if not tools:
             return ""
@@ -2281,7 +2367,11 @@ class ChatWindow(QWidget):
                 '</div>'
             )
         n = len(tools)
-        if getattr(self, "_tools_collapsed", True):
+        collapsed = self._tools_collapsed_by_msg.get(
+            msg_id, self._tools_collapsed_default)
+        # URL 编码 msg_id 用 fragment (#N), 走 cmd:toggle_tools#123
+        url = f"cmd:toggle_tools#{msg_id}"
+        if collapsed:
             # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
             # 不出现"点击展开"字样,只靠箭头指示
             first_name, first_args, first_result = _unpack_tool(tools[0])
@@ -2295,7 +2385,7 @@ class ChatWindow(QWidget):
             )
             return (
                 '<div class="tools">'
-                f'<a href="cmd:toggle_tools" class="tools-head-link">'
+                f'<a href="{url}" class="tools-head-link">'
                 f'已执行操作 · {n}&nbsp;&nbsp;▾'
                 '</a>'
                 + preview +
@@ -2304,7 +2394,7 @@ class ChatWindow(QWidget):
         # 展开态:head + 完整列表 + 收起箭头
         return (
             '<div class="tools">'
-            f'<a href="cmd:toggle_tools" class="tools-head-link">'
+            f'<a href="{url}" class="tools-head-link">'
             f'已执行操作 · {n}&nbsp;&nbsp;▴'
             '</a>'
             '<div class="tools-body">' + "".join(rows) + '</div>'
@@ -2464,8 +2554,9 @@ class ChatWindow(QWidget):
             thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
             execs_html = self._execs_html(getattr(msg, "execs", []) or [])
             file_edits_html = self._file_edits_html(msg.tools)
+            # v6: 传 id(msg) 让 _tool_steps_html 把折叠状态按消息分别存
             tools_html = (
-                self._tool_steps_html(msg.tools)
+                self._tool_steps_html(msg.tools, msg_id=id(msg))
                 if (msg.tools and self._show_tool_steps) else ""
             )
             prepend = thoughts_html + execs_html + file_edits_html + tools_html

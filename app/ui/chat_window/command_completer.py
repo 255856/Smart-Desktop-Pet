@@ -43,6 +43,11 @@ class _CommandCompleter(QObject):
         self.popup.itemClicked.connect(self._accept)
         # 拦截事件
         edit.installEventFilter(self)
+        # 2026-10-15 v6: 文本变化时刷新 popup, 解决「输入 / 后没反应, 再输入一个字符
+        # 才会显示」的问题。keypress 事件在 Qt 处理之前, 此时 doc 还没插入新字符,
+        # _current_word() 读空行, popup 不显示。textChanged 在 doc 变化后才发,
+        # 这时能读到 / + 后续字符。
+        edit.textChanged.connect(self._refresh)
 
     def eventFilter(self, obj, event):
         if obj is not self.edit:

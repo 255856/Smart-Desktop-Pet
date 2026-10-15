@@ -340,7 +340,8 @@ def test_tool_calls_display():
     # 折叠态用 anchor link 触发 toggle —— 2026-10-15 v3: head 文字
     # 只显示「已执行操作 · N ▾」,不再出现"点击展开/点击收起"字样
     # (用户实测指定), 但 cmd:toggle_tools 仍保留 (toggle 功能还要)
-    assert 'href="cmd:toggle_tools"' in html
+    # v6: URL 升级为 `cmd:toggle_tools#N` (N=msg_id), 但 prefix 仍是 cmd:toggle_tools
+    assert 'href="cmd:toggle_tools' in html
     assert "▾" in html  # 折叠态箭头
     assert "点击展开" not in html, (
         f"「点击展开」字样不应出现 (用户实测要求去掉), 实际: {html}"
@@ -348,7 +349,8 @@ def test_tool_calls_display():
     assert "点击收起" not in html
 
     # === 展开态 ===
-    cw._tools_collapsed = False
+    # v6: per-message 状态 —— 通过 dict 切, 不再设 self._tools_collapsed
+    cw._tools_collapsed_by_msg[id(msg)] = False
     html2 = cw._msg_html(msg)
     # 全部工具都展示
     assert "设置提醒" in html2 and "下午三点开会" in html2
@@ -793,6 +795,155 @@ def test_bug1_ast_guard_anchor_click_uses_rebuild_not_refresh():
     raise AssertionError("_on_chat_anchor_clicked 函数未找到")
 
 
+def test_v6_per_message_toggle_state():
+    """v6 调整 1: 工具折叠改成 per-message 状态 (dict keyed by id(msg))。
+
+    之前 self._tools_collapsed 是全局 bool, 点 A 消息的 toggle 会影响
+    所有消息的「已执行操作」卡片 (用户实测「点击一个后所有的都会展开」)。
+    现在 dict 存 per-msg 状态, 互不影响。
+    """
+    from PyQt5.QtCore import QUrl
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.voice.character import Emotion
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='测试'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 两条 bot 消息, 各有 tools
+    msg_a = Message(role='assistant', content='A 答案', emotion=Emotion.HAPPY,
+                    tools=[('add_reminder', '{}', '已设置')])
+    msg_b = Message(role='assistant', content='B 答案', emotion=Emotion.HAPPY,
+                    tools=[('web_search', '{}', '找到 5 条'),
+                           ('get_weather', '{}', '晴 25 度')])
+    cw.history = [msg_a, msg_b]
+    cw._rebuild_chat_view_from_history()
+
+    # 初始: 两条都默认折叠
+    html_a = cw._msg_html(msg_a)
+    html_b = cw._msg_html(msg_b)
+    assert "已执行操作 · 1&nbsp;&nbsp;▾" in html_a, "msg_a 默认应折叠"
+    assert "已执行操作 · 2&nbsp;&nbsp;▾" in html_b, "msg_b 默认应折叠"
+
+    # 点 msg_a 的 toggle: 展开 a, b 不动
+    url_a = QUrl(f"cmd:toggle_tools#{id(msg_a)}")
+    cw._on_chat_anchor_clicked(url_a)
+    assert cw._tools_collapsed_by_msg.get(id(msg_a)) is False,         "msg_a 应被 toggle 为展开"
+    assert cw._tools_collapsed_by_msg.get(id(msg_b)) is None,         "msg_b 不应被影响 (dict 里没 entry)"
+
+    # 重新生成的 HTML 也要反映新状态
+    html_a2 = cw._msg_html(msg_a)
+    html_b2 = cw._msg_html(msg_b)
+    assert "已执行操作 · 1&nbsp;&nbsp;▴" in html_a2, "msg_a 应展开"
+    assert "已执行操作 · 2&nbsp;&nbsp;▾" in html_b2, "msg_b 仍应折叠"
+
+    # 再点 a 折回去
+    cw._on_chat_anchor_clicked(url_a)
+    assert cw._tools_collapsed_by_msg.get(id(msg_a)) is True
+    html_a3 = cw._msg_html(msg_a)
+    assert "已执行操作 · 1&nbsp;&nbsp;▾" in html_a3
+
+    # 现在点 b, a 不动
+    url_b = QUrl(f"cmd:toggle_tools#{id(msg_b)}")
+    cw._on_chat_anchor_clicked(url_b)
+    assert cw._tools_collapsed_by_msg.get(id(msg_b)) is False
+    assert cw._tools_collapsed_by_msg.get(id(msg_a)) is True,         "msg_a 不应被影响"
+    print("[OK] v6: per-message toggle 状态 — 点 A 不影响 B")
+
+
+def test_v6_command_completer_textChanged():
+    """v6 调整 2: 修「输入 / 后没反应, 再输入一个字符才显示」。
+
+    keypress 事件在 Qt 处理之前触发, 此时 doc 还没插入新字符,
+    _current_word() 读空行, popup 不显示。改用 textChanged 信号 —
+    doc 变化后才发, 这时能读到 / + 后续字符。
+    """
+    import inspect
+    from app.ui.chat_window.command_completer import _CommandCompleter
+    src = inspect.getsource(_CommandCompleter.__init__)
+    assert "textChanged" in src, (
+        "_CommandCompleter.__init__ 必须连 input_edit.textChanged "
+        "(用户实测「输入 / 后没反应, 再输入一个字符才显示」根因修复)"
+    )
+    assert "self._refresh" in src, (
+        "textChanged 必须连到 self._refresh 才会触发 popup 更新"
+    )
+    print("[OK] v6: /键响应 — _CommandCompleter 连了 textChanged")
+
+
+def test_v6_english_commands_with_plan_skills():
+    """v6 调整 3: 命令改为英文, 加 /plan / /skills。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # candidates 必须是英文 + 含 /plan + /skills
+    candidates = cw._cmd_completer.candidates
+    expected = {"/help", "/status", "/time", "/say ", "/remember ", "/memory",
+                "/reminders", "/clear", "/demo", "/debug", "/open ",
+                "/plan ", "/skills", "/feed "}
+    missing = expected - set(candidates)
+    assert not missing, (
+        f"candidates 缺少英文命令: {missing}. 实际: {candidates}"
+    )
+    # 中文命令不能还在
+    chinese = [c for c in candidates if any('一' <= ch <= '鿿' for ch in c)]
+    assert not chinese, (
+        f"candidates 不应再有中文命令: {chinese} (用户实测: 命令需要用英文)"
+    )
+
+    # _handle_command 接受英文命令 (直接调, 不通过按钮)
+    # /help 路径: 走 if cmd in ("/help", "/?") 分支, 调用 _render_message 输出到 chat_view
+    cw._handle_command("/help")
+    # 验证 chat_view 内容含 "Common commands"
+    text = cw.chat_view.toPlainText()
+    assert "Common commands" in text, (
+        f"/help 必须在 chat_view 里渲染 Common commands 列表. 实际: {text!r}"
+    )
+
+    print("[OK] v6: 命令改英文 + 加 /plan / /skills")
+
+
+def test_v6_ast_guard_no_chinese_commands():
+    """AST 守卫: chat_window/_handle_command 里不能有中文命令字符串。
+    防止下次重构又把 /帮助 /记忆 /时间 等加回去。
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "chat_window" / "__init__.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.FunctionDef)
+                and node.name == "_handle_command"):
+            body_nodes = node.body
+            if (body_nodes
+                    and isinstance(body_nodes[0], _ast.Expr)
+                    and isinstance(body_nodes[0].value, _ast.Constant)
+                    and isinstance(body_nodes[0].value.value, str)):
+                body_nodes = body_nodes[1:]
+            body_src = ' '.join(_ast.dump(s) for s in body_nodes)
+            # 不能有中文命令字符串 (chinese chars in command checks)
+            for ch in body_src:
+                if '一' <= ch <= '鿿':
+                    raise AssertionError(
+                        f"_handle_command 体内不能有中文字符 (用户实测命令需要用英文), "
+                        f"实际: {body_src[:200]}"
+                    )
+            # 必须有 /plan / /skills / /help / /memory (字符串字面量, 不带引号
+            # 因为 _ast.dump 不保留字符串引号)
+            for cmd_name in ("/plan", "/skills", "/help", "/memory"):
+                assert cmd_name in body_src, (
+                    f"_handle_command 缺 {cmd_name} 路径"
+                )
+            print("[OK] AST 守卫: _handle_command 无中文命令 + 含 /plan / /skills")
+            return
+    raise AssertionError("_handle_command 函数未找到")
+
+
     print("All chat rendering tests passed!")
 
 
@@ -822,16 +973,17 @@ def test_tool_steps_no_click_text():
         ("add_reminder", '{"x":1}', "OK"),
         ("web_search", '{}', "找到"),
     ])
-    cw._tools_collapsed = True
-    html = cw._tool_steps_html(msg.tools)
+    # v6: per-message 状态通过 dict 设
+    cw._tools_collapsed_by_msg[id(msg)] = True
+    html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert "点击展开" not in html, f"「点击展开」字样不应出现: {html}"
     assert "点击收起" not in html, f"「点击收起」字样不应出现: {html}"
-    assert 'href="cmd:toggle_tools"' in html, \
+    assert 'href="cmd:toggle_tools' in html, \
         "toggle 功能保留, href 必须在"
     assert "▾" in html, "折叠态应显示下箭头"
 
-    cw._tools_collapsed = False
-    html2 = cw._tool_steps_html(msg.tools)
+    cw._tools_collapsed_by_msg[id(msg)] = False
+    html2 = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert "点击展开" not in html2
     assert "点击收起" not in html2
     assert "▴" in html2, "展开态应显示上箭头"
