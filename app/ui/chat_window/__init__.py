@@ -231,6 +231,10 @@ class ChatWindow(QWidget):
         # 整个对话期间该 skill 内容会拼到 system_prompt 末尾。
         # session 内有效, 不持久化 (重启桌宠重置, 等于主人重新选)。
         self._active_skill: Optional[str] = None
+        # v11: 当前激活的 API provider (走 /api/<name> 切), multimodal tool
+        # (generate_image / video / audio) 走 multimodal_router 路由到对应
+        # provider 的 handler。None 表示还没选。
+        self._active_api: Optional[str] = None
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -617,13 +621,13 @@ class ChatWindow(QWidget):
         header.setObjectName("titlebar")
         header.setStyleSheet(ui_style.TITLEBAR_QSS)
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(14, 8, 10, 8)
-        hl.setSpacing(10)
+        hl.setContentsMargins(12, 8, 8, 8)
+        hl.setSpacing(4)
 
         # 头像（圆形裁剪 + 白色描边，复用富文本头像的统一绘制）
         self.avatar_label = QLabel()
-        self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 44))
-        self.avatar_label.setFixedSize(44, 44)
+        self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 40))
+        self.avatar_label.setFixedSize(40, 40)
         hl.addWidget(self.avatar_label)
 
         # 标题区（标题 + 副标题；按住可拖动窗口）
@@ -824,12 +828,14 @@ class ChatWindow(QWidget):
         self.media_btn.setMenu(media_menu)
         bottom_row.addWidget(self.media_btn)
 
-        # 麦克风（文字 + 图标）
-        self.mic_btn = QPushButton("语音")
+        # 麦克风（文字 + 图标）—— 用 QToolButton 与 +/多模态 按钮完全统一
+        self.mic_btn = QToolButton()
+        self.mic_btn.setText("语音")
         self.mic_btn.setObjectName("ghost_btn")
         self.mic_btn.setToolTip("按住说话，松开自动识别并发送" if self.asr
                                 else "未安装 faster-whisper / sounddevice")
         self.mic_btn.setMinimumHeight(28)
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mic_btn.setEnabled(self.asr is not None)
         if self.asr is not None:
             self.mic_btn.pressed.connect(self._on_mic_pressed)
@@ -1133,6 +1139,30 @@ class ChatWindow(QWidget):
             attach_block = "\n".join(lines)
             text = (attach_block + ("\n\n" + text if text else "")).strip()
 
+        # v11 主人实测设计: 聊天开头写 `/api/<name> ...` 视为「切换 API
+        # provider + 剩余文本作为 user message」。跟 /skills/<name> 同款姿势。
+        if text.startswith("/api/"):
+            head, _, rest = text.partition(" ")
+            name = head[len("/api/"):].strip().strip("/")
+            if name:
+                from app.brain.multimodal_providers import setup_all
+                from app.brain import multimodal_router
+                setup_all()
+                ok, msg = multimodal_router.set_active(name)
+                if ok:
+                    self._active_api = name if name in multimodal_router.list_providers() else None
+                    self._append_system_msg(msg)
+                else:
+                    self._render_message(Message(role="assistant", content=msg))
+                if rest.strip():
+                    self.input_edit.clear()
+                    self._quick_send(rest.strip())
+                else:
+                    self.input_edit.clear()
+                return
+            self._handle_command(text)
+            return
+
         # v9 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「激活这个 skill
         # 进本对话 + 剩余文本作为 user message」。匹配优先级高于普通 / 命令。
         if text.startswith("/skills/"):
@@ -1257,6 +1287,58 @@ class ChatWindow(QWidget):
             plan_ask = args or "（主人没给具体问题，给一份通用计划模板）"
             self.input_edit.clear()
             self._quick_send_plan(plan_ask)
+            return
+
+        # /api[/<name>]: 列出 / 切换当前 API provider (multimodal tool 路由目标)。
+        # v11 主人实测设计: "重点是解决不同模型 API 与对应多模态工具之间的适配问题" —
+        # 主人 /api/openai 切到 OpenAI, 之后 generate_image 走 gpt-image-1;
+        # 切到 /api/MiniMax, generate_video 走 MiniMax H3 (若该 provider 不支持图片,
+        # 报"切到 Y 后重试")。
+        # 注意: 用 text 而非 cmd (cmd 是 .lower() 后的, 会把 "MiniMax" 改成
+        # "minimax", 这里需要保留原大小写)
+        if text == "/api" or text.startswith("/api/"):
+            from app.brain.multimodal_providers import setup_all
+            from app.brain import multimodal_router
+            setup_all()  # 没初始化就现在装
+            name = text[len("/api/"):].strip().strip("/") if text.startswith("/api/") else ""
+            # /api 列表
+            if not name:
+                caps = multimodal_router.list_capabilities()
+                if not caps:
+                    self._append_system_msg(
+                        "还没注册任何 API provider, 在 app/brain/multimodal_providers/ "
+                        "加一个 .py 然后 setup_all() 里 import。"
+                    )
+                else:
+                    lines = []
+                    for n, c in sorted(caps.items()):
+                        marks = (
+                            f"image:{'✓' if c.supports_image else '✗'} "
+                            f"video:{'✓' if c.supports_video else '✗'} "
+                            f"audio:{'✓' if c.supports_audio else '✗'}"
+                        )
+                        active_mark = "   ← 当前激活" if n == self._active_api else ""
+                        lines.append(f"• /api/{n}  — {c.display_name or n}  ({marks}){active_mark}")
+                    self._render_message(Message(
+                        role="assistant",
+                        content=(
+                            "已注册的 API provider:\n" + "\n".join(lines)
+                            + "\n\n切换方式: /api/<name> (例 /api/openai)"
+                            + (f"\n\n✨ 当前激活: **{self._active_api}** — "
+                               "之后 chat 里点 🎨 / 🎬 走该 provider。"
+                               if self._active_api else
+                               "\n\n还没激活。点 🎨 / 🎬 之前先用 /api/<name> 选一个。")
+                        )
+                    ))
+                return
+            # /api/<name> 切换
+            ok, msg = multimodal_router.set_active(name)
+            if ok:
+                # ChatWindow 同步 active 状态 (跟 router 共享 _active_api)
+                self._active_api = name if name in multimodal_router.list_providers() else None
+                self._append_system_msg(msg)
+            else:
+                self._render_message(Message(role="assistant", content=msg))
             return
 
         # /skills[/<name>]: 列出所有 / 单独激活某个 skill。

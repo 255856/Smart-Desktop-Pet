@@ -1849,8 +1849,9 @@ def test_v10_skills_completer_dynamic():
 
 
 def test_v10_multimodal_tool_registered():
-    """v10: build_default_tools 后, registry 应有 generate_image / generate_video。
-    v8/v9 留的 stub 现在被真 tool 取代。"""
+    """v10/v11: build_default_tools 后, registry 应有 generate_image / video / audio。
+    v11 升级: tool fn 走 multimodal_router 路由, 不再写死 OpenAI。
+    """
     from app.engine.tools import build_default_tools
 
     class _StubState:
@@ -1861,63 +1862,209 @@ def test_v10_multimodal_tool_registered():
             self.last_status[k] = v
     reg = build_default_tools(state=_StubState(), reminders=None, memory=None)
 
-    img = reg.get("generate_image")
-    assert img is not None, "generate_image 应注册到 tool registry"
-    assert img.name == "generate_image"
-    # 描述应给主人有用的提示
-    assert "prompt" in img.description.lower() or "图片" in img.description
+    for name in ("generate_image", "generate_video", "generate_audio"):
+        t = reg.get(name)
+        assert t is not None, f"{name} 应注册到 tool registry"
+        assert t.name == name
+        assert "prompt" in t.description.lower() or "图片" in t.description \
+            or "视频" in t.description or "音频" in t.description
 
-    vid = reg.get("generate_video")
-    assert vid is not None, "generate_video 应注册到 tool registry"
-    assert vid.name == "generate_video"
-
-    print("[OK] v10: generate_image / generate_video 都进 tool registry")
+    print("[OK] v10/v11: generate_image / video / audio 都进 tool registry")
 
 
-def test_v10_generate_image_no_key_raises():
-    """v10: 缺 MULTIMODAL_API_KEY / OPENAI_API_KEY 时 generate_image 抛
-    RuntimeError 清晰提示 (而不是抛 urllib 栈底错误, 主人看不明白)。"""
-    from app.engine.tools import _multimodal
-
-    # 强制无 key 环境
-    import os as _os
-    old_key = _os.environ.pop("OPENAI_API_KEY", None)
-    old_mm = _os.environ.pop("MULTIMODAL_API_KEY", None)
+def test_v11_router_no_active_clear_prompt():
+    """v11: 主人已经注册了 provider, 但还没 /api/<name> 激活时, generate_image
+    报清晰错误引导主人先选 API。
+    """
+    from app.brain.multimodal_providers import reset_for_tests, setup_all
+    from app.brain import multimodal_router
+    reset_for_tests()
+    setup_all()  # 重新装 (reset 把 _PROVIDERS 清了)
+    # 不调 set_active, 直接 route
+    if multimodal_router.get_active() is not None:
+        # 测试不污染: 强制清
+        multimodal_router.set_active(None)
     try:
-        try:
-            _multimodal.generate_image("a cat in space")
-            raise AssertionError("缺 key 时应抛 RuntimeError, 不应成功")
-        except RuntimeError as e:
-            assert "MULTIMODAL_API_KEY" in str(e) or "OPENAI_API_KEY" in str(e), (
-                f"错误信息应提到 api key, 实际: {e}"
-            )
-    finally:
-        if old_key is not None:
-            _os.environ["OPENAI_API_KEY"] = old_key
-        if old_mm is not None:
-            _os.environ["MULTIMODAL_API_KEY"] = old_mm
-
-    print("[OK] v10: 缺 key 时 generate_image 抛清晰 RuntimeError")
-
-
-def test_v10_generate_video_stub_clearly_documented():
-    """v10: generate_video 默认 stub 抛 RuntimeError 包含怎么接的指引。
-    主人 / 开发者看一眼就知道下一步该改哪。"""
-    from app.engine.tools import _multimodal
-
-    try:
-        _multimodal.generate_video("a cat walking in garden")
-        raise AssertionError("没接 video provider 时应抛 RuntimeError")
+        multimodal_router.route("image", "a cat")
+        raise AssertionError("没 active 时应抛 RuntimeError")
     except RuntimeError as e:
         msg = str(e)
-        # 三个候选 provider 至少提一个
-        assert ("Replicate" in msg or "CogVideoX" in msg
-                or "MiniMax" in msg or "豆包" in msg), (
-            f"应提具体 video provider 选型。 实际: {msg}"
+        assert ("/api/" in msg or "激活" in msg or "选" in msg), (
+            f"应引导主人先 /api/<name>。 实际: {msg}"
         )
-        # 指引路径
-        assert "_multimodal.py" in msg or "generate_video" in msg, (
-            f"应告诉主人去哪改代码。 实际: {msg}"
+    reset_for_tests()
+    print("[OK] v11: 没 active provider 时 generate_image 提示先 /api/")
+
+
+def test_v11_router_unsupported_action_hints_alternatives():
+    """v11: 当前 active 不支持 video 时, generate_video 报清晰错 +
+    推荐同样支持 video 的其它 provider。
+    """
+    from app.brain.multimodal_providers import reset_for_tests
+    from app.brain import multimodal_router
+    from app.brain.multimodal_router import ApiCapability
+    reset_for_tests()
+    # 一个只支持 image 的 provider
+    multimodal_router.register(
+        ApiCapability(name="imgonly", supports_image=True,
+                      display_name="imgonly"),
+        gen_image=lambda prompt, **kw: "https://img/x.png",
+    )
+    # 一个支持 video 的 provider
+    multimodal_router.register(
+        ApiCapability(name="withvideo", supports_image=True, supports_video=True,
+                      display_name="withvideo"),
+        gen_image=lambda prompt, **kw: "https://img/y.png",
+        gen_video=lambda prompt, **kw: "https://vid/y.mp4",
+    )
+    multimodal_router.set_active("imgonly")
+
+    # 1) image 应该能跑
+    out = multimodal_router.route("image", "a cat")
+    assert out == "https://img/x.png"
+
+    # 2) video 应该被拒, 但引导到 withvideo
+    try:
+        multimodal_router.route("video", "a cat walking")
+        raise AssertionError("imgonly 不应能生成 video")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "不支持" in msg or "video" in msg
+        assert "withvideo" in msg, (
+            f"应推荐 withvideo 作替代。 实际: {msg}"
+        )
+        assert "/api/withvideo" in msg, (
+            f"应给 /api/withvideo 切换命令。 实际: {msg}"
         )
 
-    print("[OK] v10: generate_video stub 给清晰接入指引")
+    print("[OK] v11: 当前 API 不支持时, 路由报清晰 + 推替代 provider")
+
+
+def test_v11_router_supported_but_no_handler_says_fix():
+    """v11: capability 声明支持 image 但 gen_image handler 没接,
+    路由报"声明支持但没接 handler, 改 <provider>.py"。
+    """
+    from app.brain.multimodal_providers import reset_for_tests
+    from app.brain import multimodal_router
+    from app.brain.multimodal_router import ApiCapability
+    reset_for_tests()
+    multimodal_router.register(
+        ApiCapability(name="broken", supports_image=True, display_name="broken"),
+        # 没传 gen_image handler, 但 capability 声明支持
+    )
+    multimodal_router.set_active("broken")
+    try:
+        multimodal_router.route("image", "a cat")
+        raise AssertionError("缺 handler 时应抛 RuntimeError")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "handler" in msg or "实现" in msg or "broken" in msg, (
+            f"应告诉主人改 broken.py 补实现。 实际: {msg}"
+        )
+    print("[OK] v11: 声明支持但缺 handler 时, 报清晰实现路径")
+
+
+def test_v11_openai_provider_real_returns_url():
+    """v11: openai provider 真接 OpenAI image generations endpoint。
+    用 monkeypatch 替换 urlopen, 模拟返回 data[0].url。
+    """
+    import io
+    from app.brain.multimodal_providers import reset_for_tests
+    from app.brain import multimodal_router
+    from app.brain.multimodal_providers import openai as openai_provider
+    reset_for_tests()
+    import os
+    old = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "sk-test"
+    try:
+        # monkeypatch urlopen 返回一个伪响应
+        def _fake_urlopen(req, timeout=60):
+            body = b'{"data":[{"url":"https://example.com/cat.png"}]}'
+            return io.BytesIO(body)
+
+        openai_provider.urllib.request.urlopen = _fake_urlopen  # type: ignore[attr-defined]
+        # 走 setup + route
+        openai_provider.setup()
+        multimodal_router.set_active("openai")
+        out = multimodal_router.route("image", "a cat in space")
+        assert out == "https://example.com/cat.png", (
+            f"openai 路径应返回 urlopen 给的 URL, 实际: {out}"
+        )
+    finally:
+        if old is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old
+        reset_for_tests()
+    print("[OK] v11: openai provider 真接 endpoint, 返回 URL")
+
+
+def test_v11_openai_provider_missing_key_raises():
+    """v11: openai provider 缺 OPENAI_API_KEY 时, 清晰报 (经过 router 路由)。"""
+    import os
+    from app.brain.multimodal_providers import reset_for_tests
+    from app.brain import multimodal_router
+    from app.brain.multimodal_providers import openai as openai_provider
+    reset_for_tests()
+    old = os.environ.pop("OPENAI_API_KEY", None)
+    old_mm = os.environ.pop("MULTIMODAL_API_KEY", None)
+    try:
+        openai_provider.setup()
+        multimodal_router.set_active("openai")
+        try:
+            multimodal_router.route("image", "a cat")
+            raise AssertionError("缺 key 应抛")
+        except RuntimeError as e:
+            assert "OPENAI_API_KEY" in str(e) or "MULTIMODAL_API_KEY" in str(e), (
+                f"应提到 key, 实际: {e}"
+            )
+    finally:
+        if old is not None:
+            os.environ["OPENAI_API_KEY"] = old
+        if old_mm is not None:
+            os.environ["MULTIMODAL_API_KEY"] = old_mm
+        reset_for_tests()
+    print("[OK] v11: openai 缺 key 时, router 抛清晰 key 错")
+
+
+def test_v11_chat_window_api_command_activates():
+    """v11: chat_window 收到 /api/MiniMax 切到 MiniMax provider;
+    /api 列已注册 + 当前激活标。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 1) /api 列表
+    cw._handle_command("/api")
+    text = cw.chat_view.toPlainText()
+    assert "openai" in text and "MiniMax" in text, (
+        f"/api 应列出 openai + MiniMax. 实际: {text!r}"
+    )
+
+    # 2) /api/MiniMax 激活
+    cw._handle_command("/api/MiniMax")
+    text2 = cw.chat_view.toPlainText()
+    assert "已激活" in text2 and "MiniMax" in text2, (
+        f"/api/MiniMax 应激活 MiniMax. 实际: {text2!r}"
+    )
+    assert cw._active_api == "MiniMax", (
+        f"_active_api 应同步为 MiniMax, 实际: {cw._active_api!r}"
+    )
+
+    # 3) /api/openai 切到 openai
+    cw._handle_command("/api/openai")
+    assert cw._active_api == "openai", (
+        f"切到 openai 后 _active_api 应是 openai, 实际: {cw._active_api!r}"
+    )
+
+    # 4) 列表里 "← 当前激活" 标记应在 openai 后面
+    cw._handle_command("/api")
+    text3 = cw.chat_view.toPlainText()
+    assert "当前激活" in text3 and "openai" in text3, (
+        f'/api 列表应标"当前激活: openai"。 实际: {text3!r}'
+    )
+
+    print("[OK] v11: chat_window /api 切 provider 流程通")
