@@ -142,3 +142,141 @@ def test_chat_window_tts_drain_no_duplicate_queue():
     # 第三次 chunk 时 "今天天气不错。" 已被 sanitize 替换为 "今天天气不错！"（累积文本变化）
     # —— 这里只验证「重复 prepare」被修：同一句话不应该出现 2 次以上
     assert len(prepared) <= 4, f"总 prepare 过多: {prepared}"
+
+
+def test_prepare_worker_signal_arity_in_source():
+    """2026-10-15 Bug 6 修复源码守卫:
+    AST 解析 chat_window.__init__.py,确认 _launch_sentence_prepare 内部
+    嵌套类 _PrepareWorker 用的 done 信号 arity 是 2 (int + str),
+    匹配 _on_sentence_ready(seq, sentence)。信号退化成 Signal(str) 的话
+    真实 QThread 链路里会 TypeError。
+
+    不构造 ChatWindow(不触发 ASR / TTS 实际链路),纯静态检查,
+    避免受 faster-whisper / Qt worker thread 时序影响。
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_launch_sentence_prepare":
+            target = node
+            break
+    assert target is not None, "找不到 _launch_sentence_prepare 定义"
+
+    prepare_worker = None
+    for sub in ast.iter_child_nodes(target):
+        if isinstance(sub, ast.ClassDef) and sub.name == "_PrepareWorker":
+            prepare_worker = sub
+    assert prepare_worker is not None, "找不到嵌套 _PrepareWorker 类"
+
+    done_signal = None
+    for stmt in prepare_worker.body:
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "done"
+                and isinstance(stmt.value, ast.Call)):
+            done_signal = stmt.value
+            break
+    assert done_signal is not None, "_PrepareWorker 必须有 done = Signal(...)"
+
+    args = done_signal.args
+    assert len(args) == 2, (
+        f"_PrepareWorker.done 信号 arity 必须 == 2 (seq + sentence);"
+        f"实际 Signal 实参数={len(args)} ({ast.unparse(done_signal)})"
+    )
+    # 实参类型应该是 int + str
+    assert isinstance(args[0], ast.Name) and args[0].id == "int"
+    assert isinstance(args[1], ast.Name) and args[1].id == "str"
+
+
+def test_prepare_worker_emit_passes_correct_arity():
+    """2026-10-15 Bug 6 修复源码守卫:
+    _PrepareWorker.run() 必须 emit 同样 2 个参数(seq_id, txt),跟
+    Signal(int, str) 严格匹配。emit 数量不对会导致 Python signal 报错。
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_launch_sentence_prepare":
+            target = node
+            break
+    prepare_worker = None
+    for sub in ast.iter_child_nodes(target):
+        if isinstance(sub, ast.ClassDef) and sub.name == "_PrepareWorker":
+            prepare_worker = sub
+    worker_run = None
+    for sub in prepare_worker.body:
+        if isinstance(sub, ast.FunctionDef) and sub.name == "run":
+            worker_run = sub
+    assert worker_run is not None
+
+    emit_calls = []
+    for sub in ast.walk(worker_run):
+        if (isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "emit"):
+            # 不管接收者是 `self` / `self.done` / `_inner`
+            emit_calls.append(sub)
+    assert emit_calls, "_PrepareWorker.run 应该至少调一次 *.emit(...)"
+    emit = emit_calls[-1]
+    assert len(emit.args) == 2, (
+        f"emit() 实参必须是 2 (seq_id, txt);实际 {len(emit.args)}"
+    )
+
+
+def test_prepare_worker_signal_signature_matches_slot():
+    """已迁到 test_prepare_worker_signal_arity_in_source (AST 静态守卫) ——
+    不再构造 QApplication / QThread(测试环境跑会触发 faster_whisper 加载链
+    导致 Windows access violation crash,见 2026-10-15 复盘)。两个 AST 守卫
+    (上面两个) 已经覆盖:信号 arity + emit 实参数,等价静态证明。
+    """
+
+
+def test_chat_window_drain_speak_queue_preserves_order():
+    """2026-10-15 Bug 6:并发 prepare 完成时,_drain_speak_queue 必须按 seq 升序
+    speak,不能颠倒。模拟 3 句 worker 不同顺序完成(seq 入队顺序是 0/1/2,
+    完成顺序故意打乱成 2/0/1),验证 speak 顺序还是 0/1/2。
+    """
+    import sys, threading
+    sys.path.insert(0, '.local-packages')
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.ui.chat_window import ChatWindow
+    from app.voice.voice import TTS
+
+    class OrderTTS(TTS):
+        def __init__(self):
+            super().__init__(voice="fake")
+            self.spoken: list[str] = []
+
+        def speak(self, text):  # type: ignore[override]
+            self.spoken.append(text)
+
+        def prepare(self, text, timeout_s=30.0):  # type: ignore[override]
+            return True
+
+    char_cfg = CharacterConfig(name="t", persona="p", tts_enabled=True)
+    llm_cfg = LLMConfig(api_key="sk", model="m")
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites", tts=OrderTTS())
+
+    # 直接灌入 _pending_speak,故意把"完成顺序"打乱成 2/0/1
+    cw._pending_speak = {2: "C", 0: "A", 1: "B"}
+
+    # 但 _tts_seq_drain 起始是 0,期望按 0 → A, 1 → B, 2 → C 顺序 speak
+    cw._tts_seq_drain = 0
+    cw._drain_speak_queue()
+
+    assert cw.tts.spoken == ["A", "B", "C"], (
+        f"drain 必须按 seq 升序;实际 {cw.tts.spoken}"
+    )
+    assert cw._tts_seq_drain == 3

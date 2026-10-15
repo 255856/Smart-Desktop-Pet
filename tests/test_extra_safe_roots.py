@@ -145,3 +145,39 @@ class TestChatWindowIntegration:
         _filesearch.set_extra_safe_roots([])
         out = reg.get("search_files").fn(keyword="x", directory=str(proj))
         assert "不在沙箱内" in out
+
+
+# -------------------- ChatWindow 启动期自动注入 cwd --------------------
+
+def test_chat_window_includes_cwd_in_extra_safe_roots():
+    """2026-10-15:Bug 5/沙箱接线 — 即使用户没在 config.yaml 写 project_dirs,
+    ChatWindow.__init__ 收到 cwd 时也应把 cwd 加进 _filesearch 沙箱。
+    之前只看 llm_cfg.project_dirs(默认 []),导致项目目录下的搜索被沙箱拒。
+
+    回归:Bug 5 之前 _filesearch 只看 llm_cfg.project_dirs,如果用户没在 config.yaml
+    手动配,沙箱就只有家目录,`E:\\study\\desktop-pet` 这种项目根路径被沙箱拒。
+    """
+    import sys
+    sys.path.insert(0, '.local-packages')
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    from pathlib import Path
+    from app.core.config import CharacterConfig, LLMConfig
+    from app.ui.chat_window import ChatWindow
+    from app.engine.tools import _filesearch
+
+    # 先把沙箱清掉,确保我们测的是 cwd 注入而非历史残留
+    _filesearch.set_extra_safe_roots([])
+
+    char_cfg = CharacterConfig(name="t", persona="p", tts_enabled=False)
+    llm_cfg = LLMConfig(api_key="sk", model="m")  # 没有 project_dirs
+    cwd = "E:/proj_test/sandbox_cwd_inclusion"
+    ChatWindow(llm_cfg, char_cfg, "assets/sprites", cwd=cwd)
+
+    roots = [str(r) for r in _filesearch.get_extra_safe_roots()]
+    assert any(Path(r).as_posix().endswith("sandbox_cwd_inclusion") for r in roots), (
+        f"ChatWindow 应该把 cwd 加进 _extra_safe_roots;实际 {roots}"
+    )
+    # 清理
+    _filesearch.set_extra_safe_roots([])

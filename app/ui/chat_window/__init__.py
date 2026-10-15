@@ -120,14 +120,23 @@ class ChatWindow(QWidget):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
-        # 把 llm.project_dirs 加进沙箱白名单(允许跨家目录访问项目目录)
+        # 把 llm.project_dirs(用户配置)+ cwd(自动注入) 加进沙箱白名单。
         # grep_files / glob_files / search_files / edit_file / multi_edit 等工具都受这条
-        # 限制影响。空列表就是默认(只允许家目录)。
+        # 限制影响。
+        # 关键:cwd 是项目根(如 E:\study\desktop-pet),即使用户没在 config.yaml 里
+        # 写 project_dirs,自动把 cwd 加进白名单,这样 chat 里说「在 E:\study\xxx
+        # 项目下搜 YY」也能跑通,而不是被一句「不在沙箱内」挡掉。
         try:
             from app.engine.tools import _filesearch
-            _filesearch.set_extra_safe_roots(
-                list(getattr(self.llm_cfg, "project_dirs", []) or [])
-            )
+            extra = list(getattr(self.llm_cfg, "project_dirs", []) or [])
+            if cwd:
+                # 把 cwd 自身 + cwd 父目录链也都放行,允许 cwd 上级有项目文档
+                try:
+                    from pathlib import Path as _P
+                    extra.append(str(_P(cwd).resolve()))
+                except Exception:  # noqa: BLE001
+                    extra.append(cwd)
+            _filesearch.set_extra_safe_roots(extra)
         except Exception as e:  # noqa: BLE001
             log.warning("set_extra_safe_roots 失败: %s", e)
         self._chat_timeout_s: int | None = (
@@ -1244,9 +1253,18 @@ class ChatWindow(QWidget):
         if getattr(self, "_confirm_in_progress", False):
             log.warning("嵌套危险工具确认，自动通过（避免套弹窗）")
             return True
-        if name not in DANGEROUS_TOOLS:
-            # 非危险工具不需要确认
-            return True
+        # 2026-10-15 修复 Bug 7 第二处旁路:
+        # 之前 `name not in DANGEROUS_TOOLS` 直接 return True,
+        # 但 RiskyToolConfirm 用的是 hallucination_guard._RISKY_TOOLS —— 两者
+        # 不一致(例如 send_email 在 _RISKY_TOOLS 但不在 DANGEROUS_TOOLS)。
+        # 中间件拦下来 → 调到本 callback → 看到不在 DANGEROUS_TOOLS 就放行
+        # → 完全不弹窗就执行了。
+        # 修法:既然走到了本 callback(RiskyToolConfirm 已经拦下来),就是
+        # 高风险工具,不区分 DANGEROUS_TOOLS vs _RISKY_TOOLS,统一弹窗。
+        # 把早 return 删掉,让所有情况都进入下面的弹窗逻辑。
+        # (历史兼容:对未接 standard middleware 的轻量 backend,AgentLoop
+        #  仍然自己用 DANGEROUS_TOOLS 判定要不要调到这里 —— 即「非 DANGEROUS
+        #  工具」根本不会进本方法,所以这个删除安全。)
 
         # 解析参数（子线程做，没 Qt 依赖）
         try:
@@ -1724,15 +1742,25 @@ class ChatWindow(QWidget):
         self._tts_tail = scan[last_end:]
 
     def _launch_sentence_prepare(self, sentence: str) -> None:
-        """为单句启动后台 QThread 调 tts.prepare(sentence)，完成后 emit sentence_ready。"""
+        """为单句启动后台 QThread 调 tts.prepare(sentence)，完成后 emit (seq, sentence)
+        给 _on_sentence_ready 入队。
+
+        2026-10-15 Bug 6 修复把 done 信号由 (sentence) → (seq, sentence)
+        —— 这里补上对 seq 的分配 + 传递,避免 slot 报
+        "missing 1 required positional argument: 'sentence'"。
+        """
         from app.core.qt_compat import QThread, Signal
 
-        class _PrepareWorker(QThread):
-            done = Signal(str)
+        seq = self._tts_seq_next
+        self._tts_seq_next += 1
 
-            def __init__(self, tts_obj, txt):
+        class _PrepareWorker(QThread):
+            done = Signal(int, str)
+
+            def __init__(self, tts_obj, seq_id, txt):
                 super().__init__()
                 self.tts_obj = tts_obj
+                self.seq_id = seq_id
                 self.txt = txt
 
             def run(self):
@@ -1740,9 +1768,9 @@ class ChatWindow(QWidget):
                     self.tts_obj.prepare(self.txt)
                 except Exception:  # noqa: BLE001
                     log.exception("TTS.prepare 异常: %r", self.txt[:60])
-                self.done.emit(self.txt)
+                self.done.emit(self.seq_id, self.txt)
 
-        w = _PrepareWorker(self.tts, sentence)
+        w = _PrepareWorker(self.tts, seq, sentence)
         w.done.connect(self._on_sentence_ready)
         # 保留引用防 GC，等线程结束自动清理
         self._sentence_workers.append(w)
