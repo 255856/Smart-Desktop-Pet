@@ -226,6 +226,10 @@ class ChatWindow(QWidget):
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
         self._extra_docs_paths: list = list(extra_docs_paths or [])
+        # v9: 当前会话激活的 skill 名 (从 chat 开头 /skills/<name> 切换)。
+        # 整个对话期间该 skill 内容会拼到 system_prompt 末尾。
+        # session 内有效, 不持久化 (重启桌宠重置, 等于主人重新选)。
+        self._active_skill: Optional[str] = None
         self.sprite_dir = Path(sprite_dir)
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
@@ -1071,6 +1075,27 @@ class ChatWindow(QWidget):
                 f"消息太长（{len(text)} 字符），已截断到 2000")
             text = text[:2000]
 
+        # v9 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「激活这个 skill
+        # 进本对话 + 剩余文本作为 user message」。匹配优先级高于普通 / 命令。
+        if text.startswith("/skills/"):
+            head, _, rest = text.partition(" ")
+            # head 形如 /skills/<name>
+            name = head[len("/skills/"):].strip().strip("/")
+            if name:
+                ok, msg = self._activate_skill(name)
+                self._append_system_msg(msg)
+                # 激活后: 若有剩余文本, 作为普通 user message 发送
+                if rest.strip():
+                    self.input_edit.clear()
+                    self._quick_send(rest.strip())
+                else:
+                    # 单纯激活, 不发新消息, 清空输入框
+                    self.input_edit.clear()
+                return
+            # /skills/ 但 name 为空, 走 /handle_command 给提示
+            self._handle_command(text)
+            return
+
         # 快捷命令
         if text.startswith("/"):
             self._handle_command(text)
@@ -1176,41 +1201,21 @@ class ChatWindow(QWidget):
             self._quick_send_plan(plan_ask)
             return
 
-        # /skills[/<name>]: 列出所有 / 单独看某个 skill 的文档内容预览。
-# 主人 2026-10-15 实测：「加载 skills 我觉得可以这样子 /skills/skills详细名（再次选择）」，
-# 设计: /skills 列表, /skills/<name> 内容 + 二级操作提示, 真激活留作 Phase 4.*。
+        # /skills[/<name>]: 列出所有 / 单独激活某个 skill。
+# 主人 2026-10-15 实测设计: 「如果有 /skills/<name> 在聊天开头, 那么这次对话将使用这个 skill」——
+# _handle_command 也走同一条激活路径, 让主人在输入框里单独打 `/skills/poem` 也能激活。
         if cmd == "/skills" or cmd.startswith("/skills/"):
-            from app.brain.skills import list_skills, load_skill
+            from app.brain.skills import list_skills
             skills_dir = getattr(self, "_skills_dir", None) or "skills"
-            # /skills/<name> 这条: 直接展示该 skill 的 markdown 文档内容
+            # /skills/<name>: 激活 (跟「聊天开头写 /skills/<name>」是同一动作)
             if cmd.startswith("/skills/"):
                 skill_name = cmd[len("/skills/"):].strip().strip("/")
-                if not skill_name:
+                ok, msg = self._activate_skill(skill_name)
+                if ok:
+                    self._append_system_msg(msg)
+                else:
                     self._render_message(Message(
-                        role="assistant",
-                        content="用法: /skills/<name>（name 是列表里看到的 skill 名）"))
-                    return
-                content = load_skill(skills_dir, skill_name)
-                if content is None:
-                    self._render_message(Message(
-                        role="assistant",
-                        content=f"找不到 skill `{skill_name}`。"
-                                f"\n\n先用 /skills 看现有列表，确认名字拼写。"))
-                    return
-                # 去掉 [Skill: name] 包装头（render 时已经能看到名字）
-                body = content
-                if body.startswith(f"[Skill: {skill_name}]"):
-                    body = body[len(f"[Skill: {skill_name}]"):]
-                body = body.rstrip()
-                if body.endswith("[/Skill]"):
-                    body = body[:-len("[/Skill]")].rstrip()
-                self._render_message(Message(
-                    role="assistant",
-                    content=f"📕 skill: **{skill_name}**\n```\n{body}\n```\n\n"
-                            f"_二级操作_（当前 v8 只做内容预览，真激活留到 Phase 4.*）:\n"
-                            f"• `/skills/{skill_name}` — 再看一次\n"
-                            f"• 接下来真正「激活 → 进 system prompt」"
-                            f"留作后续接入；先确认列表 + 文档能看见即可。"))
+                        role="assistant", content=msg))
                 return
             # /skills 列表
             try:
@@ -1220,6 +1225,7 @@ class ChatWindow(QWidget):
                     role="assistant",
                     content=f"读取 skill 目录失败 {skills_dir!r}: {e}"))
                 return
+            active = self._active_skill
             if not names:
                 self._render_message(Message(
                     role="assistant",
@@ -1228,13 +1234,19 @@ class ChatWindow(QWidget):
                             f"\n\n想新建一个? 在该目录下加一个 .md 文件, "
                             f"下次跑 /skills 就能看到。"))
             else:
+                lines = [f"• {n}{'   ← 当前激活' if n == active else ''}" for n in names]
                 self._render_message(Message(
                     role="assistant",
-                    content=f"当前可用 skill（{len(names)} 个）:\n"
-                            + "\n".join(f"• /skills/{n}  — {n}" for n in names)
-                            + f"\n\n路径: `{skills_dir}`"
-                            f"\n（重启桌宠后会自动加载这些 skill 进 system prompt）"
-                            f"\n\n二级命令: /skills/<name> 单独看某个 skill 的内容"
+                    content=(
+                        f"当前可用 skill（{len(names)} 个）:\n"
+                        + "\n".join(lines)
+                        + f"\n\n路径: `{skills_dir}`"
+                        + (f"\n\n✨ 当前激活: **{active}**（本次对话会按它的行为规范回答）"
+                           if active else
+                           f"\n\n激活方式: 在聊天开头输入 `/skills/{names[0]} ...`，"
+                           f"或单独输入 `/skills/{names[0]}`。"
+                           f"整个对话期间该 skill 都会生效。")
+                    )
                 ))
             return
 
@@ -1452,6 +1464,56 @@ class ChatWindow(QWidget):
     _UPLOAD_DIR_NAME = "uploads"
     _MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 MiB cap, 太大会让 chat_view 渲染卡
 
+    # ------------------------------------------------------------------
+    # v9 skill 激活路径
+    # 主人实测设计: 在聊天开头写 /skills/<name>, 整段对话期间
+    # 该 skill 内容会拼到 system_prompt 末尾; 切换别的不丢之前的聊天。
+    # ------------------------------------------------------------------
+
+    def _activate_skill(self, name: str) -> tuple[bool, str]:
+        """激活一个 skill 进当前 session。返回 (success, message)。
+
+        - 校验名字合法 + 存在于 skills_dir
+        - 设置 self._active_skill, 旧值若不同会覆盖
+        - 系统消息反映激活结果
+        """
+        from app.brain.skills import load_skill
+        skills_dir = getattr(self, "_skills_dir", None) or "skills"
+        name = (name or "").strip().strip("/")
+        if not name:
+            return False, "用法: /skills/<name>  （name 从 /skills 列表里挑）"
+        content = load_skill(skills_dir, name)
+        if content is None:
+            return False, (
+                f"找不到 skill `{name}`。先用 /skills 看现有列表, 确认名字拼写。"
+            )
+        prev = self._active_skill
+        self._active_skill = name
+        if prev == name:
+            return True, f"skill `{name}` 已经是当前激活状态（重复激活）。"
+        if prev:
+            return True, (
+                f"已把当前 skill 从 `{prev}` 切到 `{name}`。"
+                f"本次对话起按 {name} 的行为来回答。"
+            )
+        return True, (
+            f"已激活 skill: **{name}**。"
+            f"本次对话起按这个 skill 的行为规范回答（直到主人切换 / 重启桌宠）。"
+        )
+
+    def _active_skill_prompt(self) -> str:
+        """返回要拼到 system_prompt 末尾的当前激活 skill 文本。无激活时返回空串。"""
+        if not self._active_skill:
+            return ""
+        from app.brain.skills import load_skill
+        skills_dir = getattr(self, "_skills_dir", None) or "skills"
+        body = load_skill(skills_dir, self._active_skill)
+        if not body:
+            return ""
+        return (
+            f"\n\n[Active Skill: {self._active_skill}]\n{body}\n[/Active Skill]"
+        )
+
     def _uploads_dir(self) -> Path:
         """计算项目根下的 assets/uploads, 自动 mkdir."""
         root = Path(__file__).resolve().parent.parent.parent.parent
@@ -1592,12 +1654,11 @@ class ChatWindow(QWidget):
             # 由主人按「发送」一起发。QQ/微信/iMessage 也是这种"先列表等发"姿势。
 
     def _on_media_action(self, kind: str) -> None:
-        """多模态下拉 (图片 / 视频 / 音频 / 配置) 当前是 stub.
+        """多模态下拉 (图片 / 视频 / 音频 / 配置) 入口。
 
-        主人 2026-10-15 实测要求: 在底部加一个按钮, 让多模态模型能生成
-        图 / 视频。但当前项目里 agent tool registry 还没接图像 / 视频
-        生成工具, 所以 v8 这版先给一个提示, 后续接入真实 tool 后把这里
-        改成调 self.registry.get('generate_image') / 'generate_video'。
+        2026-10-15 v9: 真接 agent tool —— 弹 QInputDialog 让主人输 prompt,
+        调 self.registry.get(f"generate_{kind}") 拿 URL, 用 markdown image
+        渲染进 chat_view。registry 没接该 tool 时, 弹清晰提示告诉主人怎么接。
         """
         prompts = {
             "image": "🎨 生成图片",
@@ -1606,20 +1667,105 @@ class ChatWindow(QWidget):
             "config": "⚙ 配置多模态 provider",
         }
         label = prompts.get(kind, kind)
-        self._render_message(Message(
-            role="assistant",
-            content=(
-                f"主人点了 **{label}**。\n\n"
-                f"当前 v8 这版还没接 agent tool（generate_image / generate_video / "
-                f"generate_audio），先弹个提示告诉主人在 Phase 4.* 接入。\n\n"
-                f"接入方法: \n"
-                f"1. 在 tools 模块里注册 `generate_image` / `generate_video`，\n"
-                f"   例如调 OpenAI gpt-image-1 / 智谱 CogVideoX 等 model；\n"
-                f"2. tool 返回值是一个 URL（图片 http(s) URL 或 OSS URL）；\n"
-                f"3. 把 URL 拼回 markdown `![](url)` 渲染进 chat_view（参考 v8 的\n"
-                f"   `_handle_uploaded_files` 用 file:// 拼图片的同款姿势）。"
-            ),
-        ))
+
+        if kind == "config":
+            # 配置入口: 当前不弹窗, 改成系统消息给主人清晰指引
+            self._render_message(Message(
+                role="assistant",
+                content=(
+                    "**多模态 provider 配置**\n\n"
+                    "1. 在 `app/tools/` 下加一个 `multimodal.py`, 实现两个函数:\n"
+                    "   - `generate_image(prompt: str) -> str`（返回 http(s) URL）\n"
+                    "   - `generate_video(prompt: str) -> str`（返回 http(s) URL）\n"
+                    "2. 在 `app/tools/registry.py` 里 register 这两个 tool 名字。\n"
+                    "3. provider 接哪种: OpenAI gpt-image-1 / 智谱 CogVideoX / 阿里\n"
+                    "   Qwen-Image / 字节豆包 / Replicate 等等, 自己挑一个写 client。\n"
+                    "4. 这边 chat_window 已经走 tool registry, 接好就能用, 不用改 UI。"
+                )
+            ))
+            return
+
+        if kind == "audio":
+            self._render_message(Message(
+                role="assistant",
+                content=(
+                    "🎵 **生成音效** 当前没接通 agent tool (`generate_audio`)。\n\n"
+                    "桌宠现有的 TTS（语音合成）走 `voice/character.py` 那条路径，"
+                    "负责「把文字朗读出来」。本项是「按 prompt 生成一段音效 / 音乐」，"
+                    "需要单独接 model（如 MiniMax music / suno），留作 Phase 4.*。"
+                )
+            ))
+            return
+
+        # image / video: 弹 prompt input, 调 tool, 拿 URL 嵌图
+        if not hasattr(self, "registry") or self.registry is None:
+            self._render_message(Message(
+                role="assistant",
+                content=(
+                    f"{label} 需要 agent tool registry。当前 chat 没接 tool registry，"
+                    f"无法调 `generate_{kind}`。"
+                ),
+            ))
+            return
+        tool_name = f"generate_{kind}"
+        tool = self.registry.get(tool_name)
+        if tool is None:
+            self._render_message(Message(
+                role="assistant",
+                content=(
+                    f"{label}：当前 tool registry 没注册 `{tool_name}`。\n\n"
+                    f"接入方法见 `🎨 多模态 / ⚙ 配置` 菜单里的指引，"
+                    f"或者 `app/tools/multimodal.py` 自己加一个 `{tool_name}(prompt)` "
+                    f"返回 http(s) URL 的函数。"
+                ),
+            ))
+            return
+
+        # 弹 prompt 输入框
+        from app.core.qt_compat import QInputDialog
+        prompt, ok = QInputDialog.getText(
+            self, label, f"输入要生成的{('图片' if kind == 'image' else '视频')}描述:",
+        )
+        if not ok or not prompt.strip():
+            return
+        prompt = prompt.strip()
+
+        # 走 tool —— tool 可能是同步返回 URL, 也可能返回 dict 包含 url 字段。
+        try:
+            self._append_system_msg(f"已发出{label}请求, 等模型回...") \
+                if hasattr(self, "_append_system_msg") else None
+            self.input_edit.clear()
+            # 同步调一次 (大部分 generate_* tool 是 HTTP 长轮询, 客户端封装好同步)
+            result = tool.fn(prompt=prompt)
+        except Exception as e:  # noqa: BLE001
+            log.exception("multimodal %s tool failed", kind)
+            self._render_message(Message(
+                role="assistant",
+                content=f"{label} 调用失败: {e}"))
+            return
+
+        url: Optional[str] = None
+        if isinstance(result, str):
+            url = result
+        elif isinstance(result, dict):
+            url = result.get("url") or result.get("image_url") or result.get("video_url")
+        if not url:
+            self._render_message(Message(
+                role="assistant",
+                content=f"{label} 工具没返回 URL，原始结果: `{result!r}`"))
+            return
+
+        # 渲染成 markdown image 进 chat (跟上传图片同款姿势, 走 _msg_html)
+        kind_cn = "图片" if kind == "image" else "视频"
+        content = f"![{kind_cn}: {prompt}]({url})"
+        msg = Message(role="assistant", content=content)
+        self.history.append(msg)
+        self._trim_history()
+        try:
+            self.chat_store.add("assistant", content)
+        except Exception:
+            log.exception("chat_store.add failed (multimodal %s)", kind)
+        self._render_message(msg)
 
     def _on_mic_pressed(self) -> None:
         """按住麦克风按钮：开始录音。"""
@@ -1893,6 +2039,10 @@ class ChatWindow(QWidget):
                     system_prompt = system_prompt + "\n\n" + extra
             except Exception as e:  # noqa: BLE001
                 log.warning("context_provider 失败：%s", e)
+        # v9: 主人激活的 skill 内容拼到 system_prompt 末尾 (整段对话期间生效)
+        skill_prompt = self._active_skill_prompt()
+        if skill_prompt:
+            system_prompt = system_prompt + skill_prompt
         client = LLMClient(
             self.llm_cfg, system_prompt,
             request_timeout_s=self._chat_timeout_s,
@@ -2803,6 +2953,11 @@ class ChatWindow(QWidget):
         # 清理内容
         raw = msg.content or ""
         raw = self._clean_content(raw)
+        # 2026-10-15 v9: 上传 / 拖图产生的 file:// URL 在 markdown 里只是
+        # 一段文字, QTextBrowser 不一定 load (PyQt5 5.x 对 file:// 嵌图不稳)。
+        # 渲染前把 markdown 里的 ![alt](file://...) 替换成 data: URL,
+        # 这样 QTextBrowser 自包含 base64 嵌图, 不会显示裸路径。
+        raw = self._inline_local_images_to_data_url(raw)
 
         # HTML 转义 + markdown 渲染 (MiniMax Code 风格两边都做 markdown;
         # user 消息内容一般很短, 走 markdown 没副作用)
@@ -2856,6 +3011,63 @@ class ChatWindow(QWidget):
         # 去掉首尾空白
         text = text.strip()
         return text
+
+    def _inline_local_images_to_data_url(self, text: str) -> str:
+        """v9: 渲染前预处理 — 把 markdown 里的本地图片引用 (file:///) 替换
+        成 data: URL, 让 QTextBrowser 真的嵌图, 而不是只显示一段路径文字。
+
+        为什么不直接 setHtml + file:// :
+          PyQt5 5.x 的 QTextBrowser 对 file:// 嵌图支持不稳, 经常只显示 alt
+          文字 (用户实测「图片拖进去是这样子」截图)。data: URL 是 QTextBrowser
+          内置 base64 解码, 稳定可靠。
+
+        范围:
+          - 只处理 markdown 形式 `![alt](file:///...)`, 扫的是 image 链接
+          - file 存在 + size < 8 MiB 才 inline (太大直接显示 file:// 文字)
+          - 非 file:// 引用 (http/https/data:) 原样保留
+          - 失败 fallback: 保持原 file:// 文字, 不抛异常
+        """
+        import re as _re
+        import base64 as _b64
+        # markdown image 形 ![alt](file:///...) 或 ![alt](file:///...xxx)
+        pattern = _re.compile(r'!\[([^\]]*)\]\((file:///[^)\s]+)\)')
+
+        def _replace(m: "re.Match[str]") -> str:
+            alt = m.group(1)
+            url = m.group(2)
+            # url 形如 file:///C:/Users/.../xxx.png
+            local = url[len("file:///"):]
+            if not local:
+                return m.group(0)
+            # file:// 在 Windows 上以 `/C:/...` 形式, file:/// 后接盘符; pathlib 会正确解
+            try:
+                p = Path(local)
+            except Exception:
+                return m.group(0)
+            if not p.is_file():
+                return m.group(0)
+            try:
+                if p.stat().st_size > 8 * 1024 * 1024:
+                    return m.group(0)
+            except OSError:
+                return m.group(0)
+            try:
+                data = p.read_bytes()
+            except OSError:
+                return m.group(0)
+            ext = p.suffix.lower().lstrip(".")
+            mime = {
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "gif": "image/gif",
+                "bmp": "image/bmp",
+                "webp": "image/webp",
+            }.get(ext, "application/octet-stream")
+            b64 = _b64.b64encode(data).decode("ascii")
+            return f"![{alt}](data:{mime};base64,{b64})"
+
+        return pattern.sub(_replace, text)
 
     def _render_markdown(self, text: str) -> str:
         """把 Markdown 文本渲染为 HTML（MiniMax Code 风格的 CommonMark 子集）。
@@ -2967,14 +3179,13 @@ class ChatWindow(QWidget):
         text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
 
         # 3b. 2026-10-15 v8: markdown 图片 ![alt](url) → <img src=url>
-        # 仅放行 http(s):// 与 file:// scheme (跟 link 同样防 XSS-like)。
-        # 这是主人上传图片的关键路径: _handle_uploaded_files 把图片复制到
-        # assets/uploads/ 后, 拼一条 Markdown 内容 ![主人上传](file:///...xxx.png)
-        # 走这条 pipeline 渲染。QTextBrowser 自己会读 file:// 嵌图。
+        # v9 升级: 放行 http(s):// / file:// / data: 三种 scheme。
+        # data: 是 _inline_local_images_to_data_url 的产物, 渲染稳定;
+        # file:// 是降级路径 (file 太大 / 失败), QTextBrowser 不一定 load。
         def _img(m: "re.Match[str]") -> str:
             alt = m.group(1)
             url = m.group(2)
-            if re.match(r'^(https?|file):', url, re.IGNORECASE):
+            if re.match(r'^(https?|file|data):', url, re.IGNORECASE):
                 return (
                     f'<img src="{url}" alt="{alt}" '
                     f'style="max-width:320px;border-radius:8px;'

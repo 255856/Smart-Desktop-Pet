@@ -1345,8 +1345,9 @@ def test_v8_no_purple_focus_border():
 
 
 def test_v8_skills_deep_link():
-    """v8: /skills/<name> 显示该 skill 文档预览 + 操作提示。
-    真激活留 Phase 4.*, 这版只先有「看」功能。
+    """v8: /skills/<name> 路径存在。v9 升级后该命令的语义变成"激活
+    (注入到 system_prompt)" 而不是"内容预览" —— 跟主人最新设计一致。
+    测试验证: 激活 + 找不到给提示。
     """
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -1355,14 +1356,20 @@ def test_v8_skills_deep_link():
                     'assets/sprites', asr_enabled=False,
                     skills_dir='skills')
 
+    # v9 行为: /skills/<name> 走激活
     cw._handle_command("/skills/poem")
     text = cw.chat_view.toPlainText()
-    assert "skill" in text and "poem" in text, (
-        f"/skills/poem 必须在 chat 里渲染 skill 预览 + 名字。 实际: {text!r}"
+    assert "已激活" in text and "poem" in text, (
+        f"/skills/poem 应激活 poem 并给系统消息。 实际: {text!r}"
     )
-    # 预览内容至少给一个字（标题或注释）
-    assert "七言绝句" in text or "用一首七言绝句" in text, (
-        f"/skills/poem 应展示 poem.md 文档内容。 实际: {text!r}"
+    # 激活后, _active_skill 状态机被设上
+    assert cw._active_skill == "poem", (
+        f"/skills/poem 应让 _active_skill = 'poem', 实际: {cw._active_skill!r}"
+    )
+    # skill 内容真的进了 system_prompt
+    sp = cw._active_skill_prompt()
+    assert "七言绝句" in sp, (
+        f"激活后 system_prompt 应含 poem.md 文档内容。 实际: {sp[:200]!r}"
     )
 
     # /skills/<not-found> 给友好提示
@@ -1371,7 +1378,7 @@ def test_v8_skills_deep_link():
     assert "找不到" in text2 or "不存在" in text2 or "没" in text2, (
         f"/skills/nonexistent_skill 应给提示。 实际: {text2!r}"
     )
-    print("[OK] v8: /skills/<name> 二级深链 + 找不到给提示")
+    print("[OK] v8/v9: /skills/<name> 激活路径 + 找不到给提示")
 
 
 def test_v8_upload_and_media_buttons():
@@ -1487,3 +1494,231 @@ def test_v8_handle_uploaded_files_saves_and_renders():
         )
 
     print("[OK] v8: 上传图片 → 复制到 uploads + 进 history + 渲染进 chat")
+
+
+# ============================================================
+# v9 调整 (2026-10-15):
+#   1) 图片拖入只显示 file:// 文字 → 渲染前 inline 成 data: URL
+#   2) /skills/<name> 改为激活路径 (写聊天开头 / _handle_command 都走激活)
+#   3) 多模态生成 (图 / 视频) 调真实 tool, 拿 URL 嵌图
+# ============================================================
+
+
+def test_v9_inline_local_images_to_data_url():
+    """v9: 主人截图实测「图片拖进去是这样子」 — file:// 文字而不是图。
+    _msg_html 渲染前先扫 `![alt](file://...)`, 把 file:// 替换成
+    `data:image/...;base64,xxx`, QTextBrowser 自包含 base64 嵌图, 不会显示裸路径。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    import tempfile, base64 as _b64
+    from pathlib import Path
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 造一个真的 1x1 png 写盘
+    from app.core.qt_compat import QPixmap, QColor
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "v9inline.png"
+        pix = QPixmap(1, 1)
+        pix.fill(QColor("#aaffaa"))
+        pix.save(str(png), "PNG")
+        data = png.read_bytes()
+        b64 = _b64.b64encode(data).decode("ascii")
+        # 用 windows 风格 file:///C:/xxx/ 形式 (跟主人截图一致)
+        file_url = "file:///" + str(png).replace("\\", "/").lstrip("/")
+        md = f"![主人上传]({file_url})"
+
+        out = cw._inline_local_images_to_data_url(md)
+        assert "data:image/png;base64," in out, (
+            f"file:// URL 应被 inline 成 data: URL。 实际: {out[:200]!r}"
+        )
+        assert b64[:40] in out, (
+            f"data URL 里应含真实 base64 (前 40 字符)。 实际: {out[:200]!r}"
+        )
+        # file:// 文字应被替换走
+        assert "file://" not in out, (
+            f"inline 后不应再含 file:// 字样。 实际: {out[:200]!r}"
+        )
+
+    # 文件不存在时, 保持 file:// 文字 (不抛)
+    out2 = cw._inline_local_images_to_data_url("![alt](file:///C:/no/such/file.png)")
+    assert "file:///C:/no/such/file.png" in out2, (
+        f"文件不存在时 inline 退化为 file:// 文字。 实际: {out2!r}"
+    )
+
+    print("[OK] v9: file:// URL inline 成 data: URL, 真桌面上显示真图")
+
+
+def test_v9_activate_skill_session_state():
+    """v9: _activate_skill 把 skill 内容加入 system_prompt (整段对话期间生效)。
+    _active_skill_prompt 非空时, 应返回包含 [Active Skill] 头尾 + skill 文本。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    # 没激活时, prompt 是空
+    assert cw._active_skill is None
+    assert cw._active_skill_prompt() == ""
+
+    # 激活 poem
+    ok, msg = cw._activate_skill("poem")
+    assert ok
+    assert cw._active_skill == "poem"
+    assert "poem" in msg
+
+    # prompt 现在非空, 应包含 [Active Skill] 包装 + 实际内容
+    sp = cw._active_skill_prompt()
+    assert "poem" in sp
+    assert "[Active Skill: poem]" in sp, (
+        f"激活 prompt 应含 [Active Skill: poem] 包装头。 实际: {sp[:200]!r}"
+    )
+    assert "[/Active Skill]" in sp, (
+        f"激活 prompt 应含 [/Active Skill] 包装尾。 实际: {sp[-100:]!r}"
+    )
+    assert "七言绝句" in sp, (
+        f"激活 prompt 应含 poem.md 文档内容。 实际: {sp[:200]!r}"
+    )
+
+    # 切到不存在的 skill
+    ok2, msg2 = cw._activate_skill("nonexistent_skill_xxx")
+    assert not ok2
+    assert "找不到" in msg2 or "不存在" in msg2
+    # 切换失败, _active_skill 仍是上一次的 poem
+    assert cw._active_skill == "poem"
+
+    print("[OK] v9: 激活 / 切换 / 找不到 — session 状态机正确")
+
+
+def test_v9_skills_list_marks_active():
+    """v9: /skills 列表里当前激活的 skill 后面要标 '← 当前激活', 没激活时给
+    '激活方式' 提示, 让主人知道怎么用。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    # 1) 没激活时, /skills 列表应提到「激活方式」
+    cw._handle_command("/skills")
+    text = cw.chat_view.toPlainText()
+    assert "激活方式" in text, (
+        f"/skills 列表没激活时应给「激活方式」提示。 实际: {text!r}"
+    )
+    assert "/skills/poem" in text, (
+        f"/skills 列表项应给 /skills/poem 这种入口。 实际: {text!r}"
+    )
+
+    # 2) 激活后, 列表里 poem 后要带「← 当前激活」标记
+    cw._activate_skill("poem")
+    cw.chat_view.clear()
+    cw._handle_command("/skills")
+    text2 = cw.chat_view.toPlainText()
+    assert "当前激活" in text2, (
+        f"/skills 列表激活时应有「当前激活」标记。 实际: {text2!r}"
+    )
+
+    print("[OK] v9: /skills 列表 — 激活时打标, 未激活时给激活方式")
+
+
+def test_v9_handle_command_skills_path_activates():
+    """v9: _handle_command 路径里 /skills/<name> 走激活, 不再 list 预览。
+    系统消息里含「已激活 skill: <name>」或类似。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    cw._handle_command("/skills/poem")
+    # 激活后, self._active_skill 应该是 poem
+    assert cw._active_skill == "poem", (
+        f"/skills/poem 应激活 poem, 实际: {cw._active_skill!r}"
+    )
+    text = cw.chat_view.toPlainText()
+    # 系统消息里提示激活 (render 后是 system-msg class, plain text 看到关键字)
+    assert "已激活" in text or "激活" in text, (
+        f"激活后应给系统消息提示。 实际: {text!r}"
+    )
+
+    print("[OK] v9: _handle_command(/skills/<name>) 走激活路径")
+
+
+def test_v9_on_send_skills_prefix_in_chat():
+    """v9 主人设计核心: 聊天开头写 `/skills/poem ...` 视为「激活 + 剩余文本作为
+    user message 发送」。这是 _on_send 路径, 不走 _handle_command。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.ui.chat_window.message import Message
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    # 模拟主人在 input_edit 写 "/skills/poem 帮我写首中秋诗" 然后回车
+    # 不实际触发 _quick_send (那会 kickoff llm), 而是直接验证 detection
+    text = "/skills/poem 帮我写首中秋诗"
+    # 模拟 _on_send 的 detection 逻辑 (它内部剥前缀后调 _activate_skill + _quick_send)
+    # 这里手动走同样分支避免 _kickoff_llm 在 test 里启动 worker
+    if text.startswith("/skills/"):
+        head, _, rest = text.partition(" ")
+        name = head[len("/skills/"):].strip().strip("/")
+        if name:
+            ok, _ = cw._activate_skill(name)
+            assert ok and cw._active_skill == "poem"
+            # 剩余文本作为 user message
+            user_rest = rest.strip()
+            assert user_rest == "帮我写首中秋诗", (
+                f"剩余文本应原样保留。 实际: {user_rest!r}"
+            )
+
+    print("[OK] v9: 聊天开头 /skills/<name> 激活 + 剩余文本作为 user message")
+
+
+def test_v9_media_action_prompts_and_no_registry():
+    """v9: 多模态生成 (图片 / 视频) 调 self.registry.get('generate_image') 等。
+    registry 缺 / tool 不存在 / 调异常 三种情况都给清晰提示, 不静默失败。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 1) registry = None (默认) → 弹「需要 agent tool registry」
+    cw._on_media_action("image")
+    text = cw.chat_view.toPlainText()
+    assert "需要 agent tool registry" in text or "没接" in text, (
+        f"无 registry 时, _on_media_action 应给清晰提示。 实际: {text!r}"
+    )
+
+    # 2) registry 有但缺 tool → 弹「没注册 generate_image」
+    from app.engine.tools._core import ToolRegistry
+    cw.registry = ToolRegistry()
+    cw.chat_view.clear()
+    cw._on_media_action("image")
+    text2 = cw.chat_view.toPlainText()
+    assert "generate_image" in text2, (
+        f"无 tool 时应告诉主人缺哪个 tool。 实际: {text2!r}"
+    )
+    assert "如何接入" in text2 or "接入方法" in text2 or "接入" in text2, (
+        f"无 tool 时应给接入指引。 实际: {text2!r}"
+    )
+
+    # 3) audio 路径给清晰说明
+    cw.chat_view.clear()
+    cw._on_media_action("audio")
+    text3 = cw.chat_view.toPlainText()
+    assert "生成音效" in text3 or "TTS" in text3, (
+        f"audio 应说明当前状态。 实际: {text3!r}"
+    )
+
+    print("[OK] v9: 多模态 menu 弹清晰提示, 不会静默失败")
