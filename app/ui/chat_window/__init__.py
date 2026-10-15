@@ -18,6 +18,10 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
+# 2026-10-14 美化：用户/桌宠头像持久化目录(.gitignore 的 data/ 兜底,不会入库)
+AVATAR_DIR = Path("data") / "avatars"
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _safe_qapp():
     """返回当前 QApplication 实例（无 GUI 环境返回 None）。
@@ -32,8 +36,8 @@ def _safe_qapp():
         return None
 
 from app.core.qt_compat import (
-    QApplication, QFont, QFrame, QHBoxLayout, QKeyEvent,
-    QLabel, QMessageBox, QPixmap, QPlainTextEdit, QPushButton,
+    QApplication, QFileDialog, QFont, QFrame, QHBoxLayout, QKeyEvent,
+    QLabel, QMenu, QMessageBox, QPixmap, QPlainTextEdit, QPushButton,
     Qt, QTextBrowser, QTextCursor, QToolButton,
     QVBoxLayout, QWidget, Signal, QTimer, QColor, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
@@ -54,6 +58,7 @@ from app.engine.chat_store import ChatStore
 from .utils import _DANGEROUS_LABELS, _CONFIRM_TIMEOUT_S  # noqa: F401
 from app.brain.trace import TraceRecorder
 from app.ui import ui_style
+from app.ui.elided_label import ElidedLabel
 from app.ui.memory_panel import MemoryDialog
 
 log = logging.getLogger(__name__)
@@ -103,10 +108,21 @@ class ChatWindow(QWidget):
                  langchain_cfg: Optional[LangChainAgentConfig] = None,
                  tts: Optional[object] = None,
                  memory_store: Optional[object] = None,
-                 chat_cfg=None):
+                 chat_cfg=None,
+                 cfg_path: str = "config.yaml"):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
+        # 把 llm.project_dirs 加进沙箱白名单(允许跨家目录访问项目目录)
+        # grep_files / glob_files / search_files / edit_file / multi_edit 等工具都受这条
+        # 限制影响。空列表就是默认(只允许家目录)。
+        try:
+            from app.engine.tools import _filesearch
+            _filesearch.set_extra_safe_roots(
+                list(getattr(self.llm_cfg, "project_dirs", []) or [])
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("set_extra_safe_roots 失败: %s", e)
         self._chat_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
@@ -115,6 +131,8 @@ class ChatWindow(QWidget):
         self._show_tool_steps: bool = (
             chat_cfg.show_tool_steps if chat_cfg is not None else True
         )
+        # 2026-10-14 美化：用户改头像后,要把 chat 段写回 config.yaml
+        self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
         self.tts = tts
         # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
@@ -136,7 +154,11 @@ class ChatWindow(QWidget):
         self.langchain_cfg = langchain_cfg or LangChainAgentConfig()
         self._trace_run_id: Optional[str] = None
         self.history: list[Message] = []
-        self._MAX_HISTORY = 50  # 最多保留 50 轮对话（超出则丢弃最早的）
+        self._MAX_HISTORY = 50  # 最多保留 50 条对话（超出则丢弃最早的）
+        # 送给 LLM 的上下文字符预算。只按条数裁剪会让长对话越滚越贵：
+        # 单条输入上限 2000 字符，50 条最坏 10 万字符，每轮全量重发。
+        # 12000 字符 ≈ 4~6K token，够覆盖最近十来个来回，又不至于拖垮延迟。
+        self._CTX_CHAR_BUDGET = 12000
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
         self._mic_busy = False
@@ -175,6 +197,14 @@ class ChatWindow(QWidget):
         # 改用自包含的 data URI：<img src="data:image/png;base64,...">）
         self._avatar_data_bot: str = ""
         self._avatar_data_user: str = ""
+        # 2026-10-14 美化：用户和桌宠头像可自定义(从 chat_cfg.user_avatar_path / bot_avatar_path 读)
+        # 空字符串 = 走原默认(桌宠用 assets/icon.ico 回退 / 用户用首字+渐变)
+        self._user_avatar_path: str = (
+            chat_cfg.user_avatar_path if chat_cfg is not None else ""
+        ) or ""
+        self._bot_avatar_path: str = (
+            chat_cfg.bot_avatar_path if chat_cfg is not None else ""
+        ) or ""
         self._build_ui()
         self._register_avatar_resources()
         self._append_system_welcome()
@@ -191,6 +221,12 @@ class ChatWindow(QWidget):
         self._committed_text = ""
         # 句子 prepare worker（每句一个，完成后 emit sentence_ready）
         self._sentence_workers = []   # QThread 列表，保留引用防 GC
+        # 2026-10-15:句子朗读串行化 — 每句分配 _seq 序号,准备完成不直接 speak,
+        # 而是入队到 _pending_speak;_drain_speak_queue 按编号连续性 speak,
+        # 保证朗读顺序跟句子到达顺序一致(避免并发 prepare 颠倒)。
+        self._tts_seq_next = 0
+        self._tts_seq_drain = 0
+        self._pending_speak: dict[int, str] = {}
         self._typing_frame = 0
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(380)
@@ -216,6 +252,10 @@ class ChatWindow(QWidget):
     def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
         """生成圆形头像 QPixmap（外圈 2px 白边）。
 
+        2026-10-14 美化：用户和桌宠头像可自定义。优先级：
+            1) self._<role>_avatar_path（用户在设置面板选的图，已持久化到 data/avatars/）
+            2) bot 默认 assets/icon.ico → 角色首帧；user 默认首字「我」+ 蓝色渐变
+
         bot 角色：统一使用项目图标 assets/icon.ico（居中裁剪成圆）；
                   图标缺失时回退角色首帧，再无图则用首字 + 粉紫渐变。
         user 角色：首字「我」+ 蓝色渐变。
@@ -226,6 +266,13 @@ class ChatWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
 
+        # 1) 优先用用户自定义头像
+        custom = self._load_custom_avatar_pixmap(role)
+        if custom is not None and not custom.isNull():
+            self._draw_avatar_from_pixmap(p, custom, size)
+            p.end()
+            return pm
+
         if role == "bot":
             # 聊天窗桌宠头像统一使用 assets/icon.ico；缺失时回退角色首帧
             icon = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
@@ -233,20 +280,7 @@ class ChatWindow(QWidget):
             if src.isNull() and self._avatar_path:
                 src = QPixmap(str(self._avatar_path))
             if not src.isNull():
-                # 先画白色底圆（即 2px 白边）
-                p.setBrush(QColor(255, 255, 255))
-                p.drawEllipse(0, 0, size, size)
-                # 内圆裁剪后画头像图（居中裁剪填满圆）
-                inner = QPainterPath()
-                m = 2
-                inner.addEllipse(m, m, size - 2 * m, size - 2 * m)
-                p.setClipPath(inner)
-                scaled = src.scaled(size - 2 * m, size - 2 * m,
-                                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                    Qt.TransformationMode.SmoothTransformation)
-                x = (size - scaled.width()) // 2
-                y = (size - scaled.height()) // 2
-                p.drawPixmap(x, y, scaled)
+                self._draw_avatar_from_pixmap(p, src, size)
             else:
                 grad = QLinearGradient(0, 0, size, size)
                 grad.setColorAt(0.0, QColor("#f9a8d4"))
@@ -263,6 +297,38 @@ class ChatWindow(QWidget):
             self._draw_avatar_char(p, "我", size)
         p.end()
         return pm
+
+    def _load_custom_avatar_pixmap(self, role: str) -> Optional[QPixmap]:
+        """读用户自定义头像(返回 None = 没设/读不到,继续走默认)。"""
+        path = (
+            self._user_avatar_path if role == "user" else self._bot_avatar_path
+        )
+        if not path:
+            return None
+        p = Path(path)
+        if not p.is_file():
+            return None
+        try:
+            return QPixmap(str(p))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _draw_avatar_from_pixmap(self, p: QPainter, src: QPixmap, size: int) -> None:
+        """把任意 QPixmap 居中裁剪成圆形头像（外圈 2px 白边）。"""
+        # 先画白色底圆（即 2px 白边）
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(0, 0, size, size)
+        # 内圆裁剪后画头像图（居中裁剪填满圆）
+        inner = QPainterPath()
+        m = 2
+        inner.addEllipse(m, m, size - 2 * m, size - 2 * m)
+        p.setClipPath(inner)
+        scaled = src.scaled(size - 2 * m, size - 2 * m,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+        x = (size - scaled.width()) // 2
+        y = (size - scaled.height()) // 2
+        p.drawPixmap(x, y, scaled)
 
     @staticmethod
     def _draw_avatar_char(p: QPainter, ch: str, size: int) -> None:
@@ -300,6 +366,85 @@ class ChatWindow(QWidget):
         # 富文本头像缓存（只影响之后的新消息）
         self._register_avatar_resources()
 
+    # 2026-10-14 美化：用户和桌宠头像自定义入口
+    def pick_user_avatar(self, parent=None) -> bool:
+        """弹文件选择对话框让用户选头像;选完复制到 data/avatars/user.png 并刷新 UI。
+        返回 True = 选了文件并已生效;False = 用户取消或选了无效文件。"""
+        from PyQt5.QtWidgets import QFileDialog
+        src, _ = QFileDialog.getOpenFileName(
+            parent or self,
+            "选择你的头像",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif)",
+        )
+        if not src:
+            return False
+        return self._set_custom_avatar("user", src)
+
+    def pick_bot_avatar(self, parent=None) -> bool:
+        """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。"""
+        from PyQt5.QtWidgets import QFileDialog
+        src, _ = QFileDialog.getOpenFileName(
+            parent or self,
+            "选择桌宠的头像",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif)",
+        )
+        if not src:
+            return False
+        return self._set_custom_avatar("bot", src)
+
+    def _set_custom_avatar(self, role: str, src_path: str) -> bool:
+        """复制 src_path 到 data/avatars/<role>.png,更新 self._<role>_avatar_path,刷新 UI。
+
+        选空文件 / 复制失败 / 加载 QPixmap 失败 → 返回 False,不污染当前状态。
+        """
+        import shutil
+        src = Path(src_path)
+        if not src.is_file():
+            return False
+        # 试加载,坏的图直接拒
+        test_pm = QPixmap(str(src))
+        if test_pm.isNull():
+            return False
+        # 复制到 data/avatars/{user|bot}.png(覆盖)
+        dst = AVATAR_DIR / f"{role}.png"
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            return False
+        if role == "user":
+            self._user_avatar_path = str(dst)
+        else:
+            self._bot_avatar_path = str(dst)
+        # 标题栏头像(桌宠那个)
+        if role == "bot" and self.avatar_label is not None:
+            self.avatar_label.setPixmap(self._make_avatar_pixmap("bot", 44))
+            self.avatar_label.setFixedSize(44, 44)
+        # 富文本头像缓存(影响之后的新消息)
+        self._register_avatar_resources()
+        # 2026-10-14 持久化：把 chat 段写回 config.yaml,下次启动自动恢复
+        self._persist_chat_overrides()
+        return True
+
+    def _persist_chat_overrides(self) -> None:
+        """把当前 chat 段(头像路径等)merge 写回 config.yaml。"""
+        try:
+            from app.core.config import Config, save_chat_overrides
+            from app.core.config import ChatConfig as _CC
+            chat_cfg = _CC(
+                request_timeout_s=self._chat_timeout_s or 20,
+                show_tool_steps=self._show_tool_steps,
+                user_avatar_path=self._user_avatar_path,
+                bot_avatar_path=self._bot_avatar_path,
+            )
+            # 构造一个最小 Config 实例(只 chat 段会被 save_chat_overrides 用到)
+            cfg = Config(chat=chat_cfg)
+            save_chat_overrides(self._cfg_path, cfg)
+        except Exception:  # noqa: BLE001
+            # 写盘失败不污染 UI,主流程已经改好了
+            pass
+
     def _build_ui(self) -> None:
         """新版 UI：能力展示 + 聊天 + 多行输入 + 命令。
 
@@ -323,7 +468,7 @@ class ChatWindow(QWidget):
             │ [多行输入框                                  ]│
             │                                               │
             ├──────────────────────────────────────────────┤
-            │ [🎤]  0 / 2000                  [停止][发送]   │
+            │ [语音]  0 / 2000                  [停止][发送]   │
             └──────────────────────────────────────────────┘
         """
         root = QVBoxLayout(self)
@@ -361,10 +506,10 @@ class ChatWindow(QWidget):
         dz = QVBoxLayout(drag_zone)
         dz.setContentsMargins(0, 0, 0, 0)
         dz.setSpacing(1)
-        title = QLabel(f"和 {self.char_cfg.name} 的对话")
+        title = ElidedLabel(f"和 {self.char_cfg.name} 的对话")
         title.setObjectName("titlebar_title")
         dz.addWidget(title)
-        self.subtitle_label = QLabel(self._status_text())
+        self.subtitle_label = ElidedLabel(self._status_text())
         self.subtitle_label.setObjectName("titlebar_subtitle")
         dz.addWidget(self.subtitle_label)
         hl.addWidget(drag_zone, 1)
@@ -387,6 +532,13 @@ class ChatWindow(QWidget):
         self.btn_memory.setToolTip("管理长期记忆（查看 / 新增 / 删除）")
         self.btn_memory.clicked.connect(self._open_memory)
         hl.addWidget(self.btn_memory)
+
+        # 2026-10-14 美化：自定义头像入口(菜单：换我 / 换桌宠)
+        self.btn_avatar = QPushButton("头像")
+        self.btn_avatar.setObjectName("ghost_btn")
+        self.btn_avatar.setToolTip("自定义聊天头像（换我 / 换桌宠）")
+        self.btn_avatar.clicked.connect(self._on_avatar_menu)
+        hl.addWidget(self.btn_avatar)
 
         self.btn_min = QToolButton()
         self.btn_min.setObjectName("win_btn")
@@ -466,13 +618,13 @@ class ChatWindow(QWidget):
         bottom_row.addWidget(self.input_status)
         bottom_row.addStretch()
 
-        # 停止按钮
+        # 停止按钮：仅在生成中显示，平时隐藏（避免灰色按钮常驻占位）
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("stop_btn")
         self.stop_btn.setMinimumHeight(32)
         self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn.clicked.connect(self._on_stop)
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setVisible(False)
         bottom_row.addWidget(self.stop_btn)
 
         # 发送按钮（不再绑 Enter 快捷键，否则会和 input_edit.keyPressEvent 双发）
@@ -489,6 +641,11 @@ class ChatWindow(QWidget):
         # 输入框焦点高亮输入容器边框
         self._focus_watcher = _InputFocusWatcher(input_container)
         self.input_edit.installEventFilter(self._focus_watcher)
+
+        # 无边框窗口没有系统边框，补上「拖拽四边/四角调整大小」
+        # （后装于标题拖拽，边缘命中优先，不与顶部拖动冲突）
+        from app.ui.frameless import FramelessResizer
+        self._resizer = FramelessResizer(self).attach()
 
         # 旧属性兼容
         self.history_list = None
@@ -547,7 +704,7 @@ class ChatWindow(QWidget):
     def _open_memory(self) -> None:
         """标题栏「记忆」：打开长期记忆管理面板（非模态，可边聊边开）。"""
         if self.memory_store is None:
-            self._append_system_msg("⚠️ 当前未接入记忆存储，无法管理长期记忆")
+            self._append_system_msg("当前未接入记忆存储，无法管理长期记忆")
             return
         if self._memory_dlg is None:
             self._memory_dlg = MemoryDialog(self.memory_store, self)
@@ -558,6 +715,21 @@ class ChatWindow(QWidget):
         self._memory_dlg.show()
         self._memory_dlg.raise_()
         self._memory_dlg.activateWindow()
+
+    def _on_avatar_menu(self) -> None:
+        """标题栏「头像」按钮：弹菜单选「换我 / 换桌宠」,触发对应文件选择。"""
+        menu = QMenu(self)
+        act_user = menu.addAction("换我的头像")
+        act_bot = menu.addAction("换桌宠头像")
+        chosen = menu.exec_(self.btn_avatar.mapToGlobal(self.btn_avatar.rect().bottomLeft()))
+        if chosen is act_user:
+            ok = self.pick_user_avatar(self)
+        elif chosen is act_bot:
+            ok = self.pick_bot_avatar(self)
+        else:
+            return
+        if ok:
+            self._append_system_msg("头像已更新（保存在 data/avatars/）")
 
     def _open_demo(self) -> None:
         """打开纯静态 Live2D Demo（本地 8765）。"""
@@ -640,7 +812,7 @@ class ChatWindow(QWidget):
                 if not target or len(target) > 40:
                     continue
                 self._append_system_msg(
-                    f"⚠️ 刚才「{target}」没真的{'打开' if action == 'open' else '启动' if action == 'start' else '操作'}："
+                    f"刚才「{target}」没真的{'打开' if action == 'open' else '启动' if action == 'start' else '操作'}："
                     f"模型回了文字但没调用工具（可能 LLM 幻觉）。"
                     f"请换种说法重试（如「帮我打开 {target}」）。"
                 )
@@ -679,6 +851,9 @@ class ChatWindow(QWidget):
             msg = Message(role=sm.role, content=sm.content, emotion=emotion)
             self._render_message(msg)
             self.history.append(msg)
+        # 历史是从磁盘读的，可能远超过条数/字符上限（ChatStore 存 200 条）。
+        # 不在这里裁一次的话，启动后第一轮会把整份历史发给模型。
+        self._trim_history()
 
     def _on_clear(self) -> None:
         if self._generating:
@@ -698,7 +873,7 @@ class ChatWindow(QWidget):
         # 限长：>2000 字符警告并截断
         if len(text) > 2000:
             self._append_system_msg(
-                f"⚠️ 消息太长（{len(text)} 字符），已截断到 2000")
+                f"消息太长（{len(text)} 字符），已截断到 2000")
             text = text[:2000]
 
         # 快捷命令
@@ -744,7 +919,7 @@ class ChatWindow(QWidget):
             mem = [l for l in items if l.strip().startswith("- [")]
             self._render_message(Message(
                 role="assistant",
-                content="🧠 长期记忆（最新）：\n" + ("\n".join(mem[:10]) if mem
+                content="长期记忆（最新）：\n" + ("\n".join(mem[:10]) if mem
                                    else "还没有记住任何事 ~"),
             ))
             return
@@ -753,16 +928,16 @@ class ChatWindow(QWidget):
         if cmd == "/提醒":
             if self.registry is None:
                 self._render_message(Message(
-                    role="assistant", content="⚠️ 当前没有工具注册表"))
+                    role="assistant", content="当前没有工具注册表"))
             else:
                 tool = self.registry.get("list_reminders")
                 if tool is None:
                     self._render_message(Message(
-                        role="assistant", content="⚠️ list_reminders 不可用"))
+                        role="assistant", content="list_reminders 不可用"))
                 else:
                     result = tool.fn()
                     self._render_message(Message(
-                        role="assistant", content=f"⏰ {result}"))
+                        role="assistant", content=f"提醒事项：\n{result}"))
             return
 
         # /demo：打开 Live2D Demo；/调试：打开 Agent Trace（开发者）
@@ -782,7 +957,7 @@ class ChatWindow(QWidget):
                     self._render_message(Message(role="assistant", content=r))
                     return
             self._render_message(Message(
-                role="assistant", content="⚠️ 工具不可用"))
+                role="assistant", content="工具不可用"))
             return
 
         # 其他命令 → 直接当文本发给 LLM（带命令提示）
@@ -804,11 +979,39 @@ class ChatWindow(QWidget):
         self._kickoff_llm()
 
     def _trim_history(self) -> None:
-        """聊天历史超过 MAX_HISTORY 时丢弃最早的记录（保留最近 MAX_HISTORY 条）。"""
-        if len(self.history) > self._MAX_HISTORY:
-            overflow = len(self.history) - self._MAX_HISTORY
+        """裁剪送给 LLM 的上下文：条数上限 + 字符预算，两条约束取更严的。
+
+        只按条数裁是不够的：单条用户输入上限 2000 字符，50 条最坏能堆到
+        10 万字符 —— 每一轮都要把这坨重新发一遍，成本和首字延迟随对话
+        线性增长，而多轮场景里模型实际只需要最近几轮。字符预算按「从最早的
+        开始丢，累加到超预算就停」计算，保证留下的是最新上下文。
+        """
+        before = len(self.history)
+        if before > self._MAX_HISTORY:
             self.history = self.history[-self._MAX_HISTORY:]
-            log.debug("聊天历史裁剪：丢弃最早 %d 条", overflow)
+
+        # 字符预算：从新到旧累加，超出就截断
+        budget = self._CTX_CHAR_BUDGET
+        if budget and budget > 0:
+            kept: list[Message] = []
+            used = 0
+            for m in reversed(self.history):
+                cost = len(getattr(m, "content", "") or "")
+                if kept and used + cost > budget:
+                    break
+                kept.append(m)
+                used += cost
+            kept.reverse()
+            # 裁剪后可能以 assistant 开头（它的 user 问题被丢了），
+            # 开头的孤立助手回复对模型是噪声，去掉
+            while kept and kept[0].role == "assistant":
+                kept.pop(0)
+            self.history = kept
+
+        after = len(self.history)
+        if after != before:
+            log.debug("上下文裁剪：%d → %d 条（上限 %d / 预算 %d 字符）",
+                      before, after, self._MAX_HISTORY, self._CTX_CHAR_BUDGET)
 
     def _on_stop(self) -> None:
         """停止当前正在进行的流式生成。
@@ -819,14 +1022,14 @@ class ChatWindow(QWidget):
         """
         if self._worker is not None:
             self._worker.request_stop()
-            self.stop_btn.setEnabled(False)
+            self.stop_btn.setVisible(False)
 
     def _on_mic_pressed(self) -> None:
         """按住麦克风按钮：开始录音。"""
         if self._mic_busy or self.asr is None:
             return
         self._mic_busy = True
-        self.mic_btn.setText("🎤 录音中…")
+        self.mic_btn.setText("录音中…")
         self.mic_btn.setStyleSheet("background-color: #ffcccc;")
         self.asr.start_recording()
 
@@ -834,7 +1037,7 @@ class ChatWindow(QWidget):
         """松开麦克风按钮：停止录音并开始识别。"""
         if self.asr is None:
             return
-        self.mic_btn.setText("🔍 识别中…")
+        self.mic_btn.setText("识别中…")
         self.mic_btn.setEnabled(False)
         self.asr.stop_and_recognize()
 
@@ -992,12 +1195,12 @@ class ChatWindow(QWidget):
     def _on_speech_text(self, text: str) -> None:
         """语音识别完成：填入输入框并自动发送。"""
         self._mic_busy = False
-        self.mic_btn.setText("📢")
+        self.mic_btn.setText("语音")
         self.mic_btn.setStyleSheet("")
         self.mic_btn.setEnabled(True)
 
         if not text.strip():
-            self.chat_view.append("⚠️ 未识别到语音")
+            self.chat_view.append("未识别到语音")
             return
 
         # 填入输入框并自动发送
@@ -1007,10 +1210,10 @@ class ChatWindow(QWidget):
     def _on_asr_error(self, err: str) -> None:
         """语音识别出错：恢复按钮状态。"""
         self._mic_busy = False
-        self.mic_btn.setText("📢")
+        self.mic_btn.setText("语音")
         self.mic_btn.setStyleSheet("")
         self.mic_btn.setEnabled(True)
-        self.chat_view.append(f"⚠️ {err}")
+        self.chat_view.append(f"语音识别出错：{err}")
 
     def _kickoff_llm(self) -> None:
         if is_placeholder_key(self.llm_cfg.api_key):
@@ -1059,7 +1262,7 @@ class ChatWindow(QWidget):
 
         self._generating = True
         self.send_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.stop_btn.setVisible(True)
         self.thinking_started.emit()
 
         if self.registry is not None and self.registry.names():
@@ -1071,6 +1274,17 @@ class ChatWindow(QWidget):
                     persona=system_prompt,
                     cfg=self.langchain_cfg,
                 )
+                # 把现有的 Qt confirm 弹窗挂到 LangChain 的 RiskyToolConfirm 拦截器
+                # 上 —— 否则标准后端高风险工具只能靠 chat 里说"确认"二字,体验差。
+                # 桥接:_confirm_dangerous_tool 返回 Optional[bool](True=执行,False=拒绝,
+                # None=超时也算拒绝);RiskyToolConfirm 的回调返回 True=放行,False/None=拦。
+                def _confirm_bridge(tool_call_id: str, tool_name: str, args) -> bool:
+                    import json as _json
+                    args_json = _json.dumps(args, ensure_ascii=False) \
+                        if isinstance(args, dict) else str(args)
+                    r = self._confirm_dangerous_tool(tool_name, args_json)
+                    return bool(r)
+                lc_agent.on_confirm_needed(_confirm_bridge)
                 self._worker = _AgentWorker(
                     lc_agent,
                     [{"role": m.role, "content": m.content} for m in msgs])
@@ -1290,7 +1504,7 @@ class ChatWindow(QWidget):
                 if not getattr(self, "_retry_notice_shown", False):
                     self._retry_notice_shown = True
                     self._append_system_msg(
-                        "⚙️ 正在调用工具，主人稍等一下~"
+                        "正在调用工具，主人稍等一下~"
                     )
                     log.info("ChatWindow: force_retry 已提示用户（后续重试不再重复提示）")
                 else:
@@ -1301,7 +1515,7 @@ class ChatWindow(QWidget):
                 if not getattr(self, "_retry_notice_shown", False):
                     self._retry_notice_shown = True
                     self._append_system_msg(
-                        "🔎 核对了一下执行结果，好像不太对，让我重新确认一下~"
+                        "核对了一下执行结果，好像不太对，让我重新确认一下~"
                     )
                     log.info("ChatWindow: verify_retry 事件已提示用户")
 
@@ -1388,17 +1602,30 @@ class ChatWindow(QWidget):
         w.finished.connect(lambda ww=w: self._sentence_workers.remove(ww))
         w.start()
 
-    def _on_sentence_ready(self, sentence: str) -> None:
-        """单句 TTS prepare 完成：把该句加入 chat_view + 立即 speak 触发播放。"""
-        # 拼接到已 commit 的显示文本（_current_bot_msg.content 已流式累积）
-        # 当前 _current_bot_msg.content = sanitized（每 chunk 整体覆盖）。
-        # 这里只调 speak 让 worker 立即播放（缓存命中），chat_view 显示由 _on_done 一次性完成。
-        # 流式期间保持占位动画（_refresh_streaming_message 不调），等 _on_done 才正式显示。
+    def _on_sentence_ready(self, seq: int, sentence: str) -> None:
+        """单句 TTS prepare 完成:把该句入队等按序播放。
+
+        2026-10-15:不再直接 speak —— 入队到 _pending_speak[seq],让
+        _drain_speak_queue 按编号连续性消费,避免并发 prepare 导致朗读
+        顺序颠倒（短句先完成先播，长句后播;模型长输出时尤其明显）。
+        """
         self._committed_text = (self._committed_text or "") + sentence
-        try:
-            self.tts.speak(sentence)
-        except Exception:  # noqa: BLE001
-            log.exception("TTS.speak 入队失败: %r", sentence[:60])
+        self._pending_speak[seq] = sentence
+        self._drain_speak_queue()
+
+    def _drain_speak_queue(self) -> None:
+        """按 _seq 顺序把 _pending_speak 里「连续编号」的句子依次 speak。
+
+        任意句子准备完成就调用一次;只在编号严格连续时才继续消费,
+        缺号时不消费(等缺失的更早句子 prepare 完)。
+        """
+        while self._tts_seq_drain in self._pending_speak:
+            sentence = self._pending_speak.pop(self._tts_seq_drain)
+            self._tts_seq_drain += 1
+            try:
+                self.tts.speak(sentence)
+            except Exception:  # noqa: BLE001
+                log.exception("TTS.speak 入队失败: %r", sentence[:60])
 
     def _flush_tts_tail_to_prepare(self) -> None:
         """_on_done 时把最后一段无句末标点的尾部启动 prepare（之前只是送 speak）。
@@ -1500,7 +1727,7 @@ class ChatWindow(QWidget):
             self._trace_run_id = None
         self._generating = False
         self.send_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setVisible(False)
         # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
         self.thinking_stopped.emit()
         self.streaming_done.emit()
@@ -1534,7 +1761,7 @@ class ChatWindow(QWidget):
             self._trace_run_id = None
         self._generating = False
         self.send_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setVisible(False)
         self.thinking_stopped.emit()
         self.reply_ready.emit(self._current_bot_msg.content, Emotion.SAD, False)
         self.streaming_done.emit()
@@ -1542,8 +1769,8 @@ class ChatWindow(QWidget):
     # 气泡内联样式（Qt 富文本对多 class 选择器 / td border-radius 支持不稳定，
     # 直接内联最可靠）
     _BUBBLE_STYLE_USER = (
-        "background:#95ec69;border:1px solid #7ed463;padding:9px 13px;"
-        "color:#1f2937;font-size:10pt;line-height:1.55;")
+        "background:#8b7cf6;border:1px solid #7c6cf0;padding:9px 13px;"
+        "color:#ffffff;font-size:10pt;line-height:1.55;")
     _BUBBLE_STYLE_BOT = (
         "background:#ffffff;border:1px solid #e9e6f7;padding:9px 13px;"
         "color:#2c2c38;font-size:10pt;line-height:1.55;")
@@ -1581,11 +1808,23 @@ class ChatWindow(QWidget):
                 '</tr></table>'
             )
         head = (
-            '<div style="color:#8b5cf6;font-size:8pt;font-weight:bold;'
-            'margin-bottom:2px;letter-spacing:0.5px;">已执行操作 · '
-            + str(len(tools)) + '</div>'
+            '已执行操作 · ' + str(len(tools))
         )
-        return '<div class="tools">' + head + "".join(rows) + '</div>'
+        # 2026-10-14 美化：默认折叠成 <details>，主人点开才看每条详情。
+        # 标题用已执行操作 · N 即可，背景色/边框与 _thoughts_html 保持一致风格。
+        return (
+            '<details class="tools" style="margin:2px 0;background:#fafafa;'
+            'border:1px solid #e5e7eb;border-radius:4px;padding:2px 8px;'
+            'font-size:9pt;color:#6b7280;">'
+            '<summary style="cursor:pointer;color:#8b5cf6;'
+            'font-weight:bold;list-style:none;">'
+            + _html_escape(head) +
+            '</summary>'
+            '<div style="margin-top:4px;">'
+            + "".join(rows) +
+            '</div>'
+            '</details>'
+        )
 
     def _thoughts_html(self, thoughts: list) -> str:
         """思考块：折叠展示（默认收起，主人点开看推理过程）。"""
@@ -1672,7 +1911,6 @@ class ChatWindow(QWidget):
             rows.append(
                 '<div style="margin:2px 0;background:#fef3c7;border:1px solid #fbbf24;'
                 'border-radius:4px;padding:4px 8px;font-size:9pt;color:#78350f;">'
-                '<span style="color:#d97706;">📝</span> '
                 f'<b>{_html_escape(e["path"])}</b>'
                 f'&nbsp;<span style="color:#92400e;">· {e["size"]} 字节</span>'
                 '</div>'
@@ -1717,18 +1955,13 @@ class ChatWindow(QWidget):
 
         # 流式输出中：bot 气泡末尾追加「三点跳动」等待动画
         # - streaming_meta 为 truthy 字符串 + msg.emotion 未设 → 走三点跳动
-        # - streaming_meta 是「准备语音…」/「typing…」等显式文本 + msg.emotion 已设
-        #   → 显示该文本（提示用户当前状态）
+        # - 2026-10-15 修复：原来当 msg.emotion 已设时，会把 emotion 字面量（如 "happy"）
+        #   当 meta 渲染成 `· happy` 小尾巴，跟主人偏好冲突 —— 主程序不要在 chat
+        #   里出现情绪字样。emotion 仍保留在 Message 对象上驱动桌宠动画，但不再
+        #   显示在气泡里。
         if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
             safe = safe + " " + self._typing_dots_html()
-        elif not is_user and streaming_meta and (msg.emotion and msg.role == "assistant"):
-            # 已设 emotion 但还在流式（如「准备语音…」状态）→ 显示提示文本
-            meta_safe = (streaming_meta
-                         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-            safe = safe + (
-                f' <span style="color:#8b5cf6;font-size:10px;'
-                f'margin-left:6px;">· {meta_safe}</span>'
-            )
+        # （旧逻辑：已设 emotion 时把 emotion 当 meta 显示成小尾巴 —— 已移除）
 
         # AI Coding 风格多块渲染：思考（折叠）→ 命令（终端）→ 文件编辑（黄色）→ 工具步骤 → 正文
         thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])

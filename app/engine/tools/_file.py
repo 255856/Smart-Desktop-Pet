@@ -336,11 +336,215 @@ def read_file(path: str = "", question: str = "") -> str:
         return f"错误：读取失败：{e}"
 
 
+# ---------------------------------------------------------------------------
+# 文件编辑:edit_file / multi_edit(Phase 1.1 / 1.2)
+# 跟 read_* 共享沙箱(_is_safe_path)
+# ---------------------------------------------------------------------------
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """原子写文件:先写临时文件 + rename,避免写到一半被打断导致文件截断。
+
+    rename 在同一文件系统下是原子操作(POSIX 保证)。
+    Windows 上 Python 的 os.replace 跨目录也安全(只要 dst 不存在)。
+    """
+    import tempfile
+    import os
+    tmp = path.with_suffix(path.suffix + ".tmp_edit")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        # 失败时清掉临时文件,避免污染目录
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _make_diff(path: str, before: str, after: str) -> str:
+    """生成 unified diff 供 dry_run / 错误回退展示。"""
+    import difflib
+    diff = difflib.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+        n=2,
+    )
+    return "".join(diff)
+
+
+@tool(
+    description=(
+        "精确替换文件中的字符串(原子写)。old_string 默认必须唯一匹配(防误伤);\n"
+        "要全部替换传 replace_all=True。dry_run=True 时只返回 diff,不写盘。\n"
+        "沙箱限定用户主目录;失败时返回清晰错误文案。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "文件绝对路径"},
+            "old_string": {"type": "string", "description": "要替换的原内容(精确匹配)"},
+            "new_string": {"type": "string", "description": "替换后的内容"},
+            "replace_all": {
+                "type": "boolean",
+                "description": "True = 替换所有匹配(默认 False,要求唯一)",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "True = 只看 diff,不写盘(默认 False)",
+            },
+        },
+        "required": ["path", "old_string", "new_string"],
+    },
+)
+def edit_file(path: str, old_string: str, new_string: str,
+              replace_all: bool = False, dry_run: bool = False) -> str:
+    """精确替换文件中的字符串。
+
+    行为:
+      - 默认要求 old_string 唯一匹配(避免误伤) → 不唯一时返回错误并指出次数
+      - replace_all=True 时全部替换,返回实际替换次数
+      - dry_run=True 时只生成 diff,不写盘
+      - 写盘走临时文件 + rename 原子操作
+      - 沙箱:_is_safe_path,家目录之外直接拒
+    """
+    if not path or not path.strip():
+        return "错误：path 不能为空"
+    if not old_string:
+        return "错误：old_string 不能为空(空字符串会匹配所有位置,易误伤)"
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"错误：文件不存在：{p}"
+    if not p.is_file():
+        return f"错误：不是文件：{p}"
+    if not _is_safe_path(p):
+        return f"错误：安全策略拒绝，路径必须在用户主目录下({p})"
+    try:
+        before = p.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"错误：读取失败：{e}"
+    count = before.count(old_string)
+    if count == 0:
+        return f"错误：old_string 在文件中未找到({p});请确认内容精确(包含空白/换行)"
+    if not replace_all and count > 1:
+        return (f"错误：old_string 在文件中匹配 {count} 次,为防误伤默认拒绝替换。"
+                f"加 replace_all=True 可强制全部替换,或用 multi_edit 一次性精确处理多个匹配。")
+    after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
+    if before == after:
+        return f"错误：替换前后内容相同,没真改什么({p})"
+    if dry_run:
+        return f"[dry_run] 不会写盘,只是预览 diff:\n{_make_diff(str(p), before, after)}"
+    try:
+        _atomic_write_text(p, after)
+    except Exception as e:  # noqa: BLE001
+        log.exception("edit_file write failed: %s", p)
+        return f"错误：写盘失败：{e}"
+    actual = count if replace_all else 1
+    return f"已修改 {p}(替换 {actual} 处)\n{_make_diff(str(p), before, after)}"
+
+
+@tool(
+    description=(
+        "对同一文件做多次精确替换,事务式(全成功或全失败,任一错就回滚)。\n"
+        "edits 是 list[dict],每个 dict 包含 path(可选,默认沿用顶层 path)、old_string、new_string、replace_all(可选)。\n"
+        "dry_run=True 时只生成最终 diff,不写盘。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "文件绝对路径(所有 edits 默认作用此文件)"},
+            "edits": {
+                "type": "array",
+                "description": "edit 列表,每个 dict 含 old_string + new_string + 可选 replace_all",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                        "replace_all": {"type": "boolean"},
+                    },
+                    "required": ["old_string", "new_string"],
+                },
+            },
+            "dry_run": {"type": "boolean", "description": "True = 只看 diff,不写盘"},
+        },
+        "required": ["path", "edits"],
+    },
+)
+def multi_edit(path: str, edits: list, dry_run: bool = False) -> str:
+    """对同一文件做多次精确替换(事务式)。
+
+    每个 edit 的 old_string 默认必须唯一;replace_all=True 时全部替换。
+    任一 edit 校验失败 → 全部回滚(实际是 dry_run 预校验全部通过后才真改)。
+    """
+    if not path or not path.strip():
+        return "错误：path 不能为空"
+    if not edits:
+        return "错误：edits 不能为空"
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"错误：文件不存在：{p}"
+    if not p.is_file():
+        return f"错误：不是文件：{p}"
+    if not _is_safe_path(p):
+        return f"错误：安全策略拒绝，路径必须在用户主目录下({p})"
+    try:
+        before = p.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"错误：读取失败：{e}"
+    # 第一遍:在副本上顺序校验 + 应用,任一失败立即报错
+    working = before
+    applied: list[tuple[int, str, str, str]] = []  # (count, old, new, kind)
+    for i, e in enumerate(edits):
+        if not isinstance(e, dict):
+            return f"错误：edits[{i}] 不是 dict"
+        old_s = e.get("old_string", "")
+        new_s = e.get("new_string", "")
+        repl_all = bool(e.get("replace_all", False))
+        if not old_s:
+            return f"错误：edits[{i}].old_string 不能为空"
+        c = working.count(old_s)
+        if c == 0:
+            return f"错误：edits[{i}] old_string 在文件中未找到(可能前面的 edit 已改变行号/上下文)"
+        if not repl_all and c > 1:
+            return f"错误：edits[{i}] old_string 匹配 {c} 次,需要唯一(传 replace_all=True 或加更多上下文)"
+        working = working.replace(old_s, new_s) if repl_all else working.replace(old_s, new_s, 1)
+        applied.append((c if repl_all else 1, old_s, new_s, "all" if repl_all else "once"))
+    if working == before:
+        return "错误：所有 edits 应用后内容未变(等于 noop)"
+    if dry_run:
+        return f"[dry_run] 不会写盘,只是预览 diff:\n{_make_diff(str(p), before, working)}"
+    try:
+        _atomic_write_text(p, working)
+    except Exception as e:  # noqa: BLE001
+        log.exception("multi_edit write failed: %s", p)
+        return f"错误：写盘失败：{e}"
+    # 2026-10-15 修复：把 per-edit 摘要 + 协议分隔符放到 diff 之前,
+    # 让模型「一眼就能看到」改了几处、每处改了什么。模型容易在「总结」时
+    # 漏掉 diff 内容,把 per-edit 列表前置能强制它逐条复述。
+    per_edit_lines = [
+        f"  [编辑 #{i}] {'replace_all' if kind == 'all' else 'once'}(替换 {cnt} 处): {old!r} → {new!r}"
+        for i, (cnt, old, new, kind) in enumerate(applied)
+    ]
+    summary_header = (
+        f"已批量修改 {p},共 {len(applied)} 处替换:\n"
+        + "\n".join(per_edit_lines)
+        + "\n[--- diff ---]"
+    )
+    return f"{summary_header}\n{_make_diff(str(p), before, working)}"
+
+
 def register(reg: ToolRegistry) -> None:
     """注册文件类工具。"""
     reg.register(list_desktop_files)
     reg.register(read_text_file)
     reg.register(read_file)
+    reg.register(edit_file)
+    reg.register(multi_edit)
 
 
 __all__ = ["register"]

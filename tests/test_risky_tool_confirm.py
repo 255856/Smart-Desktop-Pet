@@ -262,6 +262,74 @@ class TestMiddlewareOnBlockedCallback:
         assert isinstance(result, ToolMessage)
         assert handler.calls == []
 
+    def test_callback_returning_true_passes_through(self):
+        """2026-10-15:UI callback 返回 True → 立即放行(不再等模型重试 __confirmed)。"""
+        ctrl = RiskyToolConfirm()
+
+        def approve(*a, **kw):
+            return True
+
+        ctrl.on_blocked(approve)
+        mw = ctrl.as_middleware()
+        req = _mk_req("lock_screen", {})
+        handler = _FakeHandler()
+
+        result = _run(mw.awrap_tool_call(req, handler))
+
+        # callback 同意 → handler 被调用,不是拦截
+        assert result == "CALLED:lock_screen"
+        assert len(handler.calls) == 1
+
+    def test_callback_returning_false_keeps_blocked(self):
+        """callback 返回 False → 仍然拦截,返回 sentinel。"""
+        ctrl = RiskyToolConfirm()
+
+        def reject(*a, **kw):
+            return False
+
+        ctrl.on_blocked(reject)
+        mw = ctrl.as_middleware()
+        req = _mk_req("lock_screen", {})
+        handler = _FakeHandler()
+
+        result = _run(mw.awrap_tool_call(req, handler))
+
+        assert isinstance(result, ToolMessage)
+        assert handler.calls == []
+
+    def test_no_callback_blocks(self):
+        """没注册 callback → 默认拦截(行为和 _RISKY_TOOLS 重定向到模型重试协议一致)。"""
+        ctrl = RiskyToolConfirm()
+        mw = ctrl.as_middleware()
+        req = _mk_req("lock_screen", {})
+        handler = _FakeHandler()
+
+        result = _run(mw.awrap_tool_call(req, handler))
+
+        assert isinstance(result, ToolMessage)
+        assert handler.calls == []
+
+    def test_multiple_callbacks_any_true_passes(self):
+        """多个 callback,任一返回 True → 放行。"""
+        ctrl = RiskyToolConfirm()
+
+        def reject_first(*a, **kw):
+            return False
+
+        def approve_second(*a, **kw):
+            return True
+
+        ctrl.on_blocked(reject_first)
+        ctrl.on_blocked(approve_second)
+        mw = ctrl.as_middleware()
+        req = _mk_req("kill_process", {"pid": 1})
+        handler = _FakeHandler()
+
+        result = _run(mw.awrap_tool_call(req, handler))
+
+        assert result == "CALLED:kill_process"
+        assert len(handler.calls) == 1
+
 
 # -------------------- build_hallucination_middlewares 集成 --------------------
 

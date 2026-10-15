@@ -255,12 +255,28 @@ class RiskyToolConfirm:
         """注册拦截回调(callback(tool_call_id, tool_name, args))。"""
         self._on_blocked.append(callback)
 
-    def _fire_blocked(self, tool_call_id: str, tool_name: str, args: Any) -> None:
+    def _fire_blocked(self, tool_call_id: str, tool_name: str, args: Any) -> bool:
+        """触发所有拦截回调,任意一个返回 True 即视为确认(放行)。
+
+        返回:
+          True  = 任意 callback 同意 → 调用方应该放行
+          False = 全部 callback 拒绝(或没 callback)→ 调用方应继续拦截
+
+        设计:
+          - 主程序注册的 callback 返回 True → 用户在 Qt 弹窗点了「确认」
+          - 返回 False → 用户点了「拒绝」或弹窗超时(都视为不放行)
+          - 没注册任何 callback → 默认 False(继续拦截),这样 model-mediated
+            协议(让模型重加 __confirmed=True 重试)还是能工作
+        """
+        any_approved = False
         for cb in list(self._on_blocked):
             try:
-                cb(tool_call_id, tool_name, args)
+                r = cb(tool_call_id, tool_name, args)
+                if r is True:
+                    any_approved = True
             except Exception as e:  # noqa: BLE001
                 log.warning("RiskyToolConfirm: on_blocked 回调失败: %s", e)
+        return any_approved
 
     def as_middleware(self):
         """返回 LangChain wrap_tool_call 兼容的中间件实例。"""
@@ -315,7 +331,17 @@ class RiskyToolConfirm:
                 "HallucinationGuard: 危险工具 %r 被拦截,等待 confirm (tool_call_id=%s, args=%r)",
                 tool_name, tool_call_id, args,
             )
-            outer._fire_blocked(tool_call_id, tool_name, args)
+            # 2026-10-15:让注册的 UI callback 决定是否放行。
+            # chat_window 的 _confirm_dangerous_tool 弹 Qt 弹窗:
+            # 用户点「确认」→ callback 返回 True → 这里直通 handler 执行
+            # 否则 callback 返回 False/None → 继续拦截,返回 awaiting_confirmation
+            if outer._fire_blocked(tool_call_id, tool_name, args):
+                # 用户已确认:直接执行工具(走 handler)
+                log.info(
+                    "HallucinationGuard: 危险工具 %r 已被用户确认(回调返回 True),执行",
+                    tool_name,
+                )
+                return await handler(request)
             args_view = args if isinstance(args, dict) else {"_raw": args}
             content = json.dumps({
                 "status": "awaiting_confirmation",

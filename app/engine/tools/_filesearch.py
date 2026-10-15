@@ -11,8 +11,34 @@ from ._decorator import tool
 
 log = logging.getLogger(__name__)
 
-# 沙箱根：用户家目录
+# 沙箱根：用户家目录 + 主程序可追加的「项目目录」
+# 设计：默认只允许家目录内访问(防越权读系统目录);主程序(chat_window 启动时)
+# 可以调 set_extra_safe_roots() 把项目目录加进去(例如 E:\study\desktop-pet)。
+# 这些额外根和家目录一起走 is_under_any() 校验,不在白名单里的路径一律拒绝。
 _HOME = Path.home()
+_extra_safe_roots: list[Path] = []
+
+
+def set_extra_safe_roots(paths: list) -> None:
+    """主程序在 chat_window 启动时调用,把项目目录加进沙箱白名单。
+
+    Args:
+        paths: 额外的允许根目录路径列表。每个会被 resolve() 后判定,
+               路径不存在/无法 resolve 时记 WARNING 但不抛(避免启动失败)。
+    """
+    global _extra_safe_roots
+    out: list[Path] = []
+    for p in paths or []:
+        try:
+            out.append(Path(p).resolve())
+        except (OSError, RuntimeError, ValueError) as e:
+            log.warning("set_extra_safe_roots: 跳过 %s (%s)", p, e)
+    _extra_safe_roots = out
+
+
+def get_extra_safe_roots() -> list[Path]:
+    return list(_extra_safe_roots)
+
 
 # 递归扫描的硬上限：rglob 会一路走进整个目录树，若不设限，
 # 在 Desktop 下挂了大项目 / node_modules 的机器上可能跑好几分钟。
@@ -27,12 +53,12 @@ _MAX_FILE_BYTES = 2 * 1024 * 1024   # 2 MiB
 
 
 def _is_safe_path(p: Path) -> bool:
-    """路径必须在用户家目录下（防止越权）。
+    """路径必须在用户家目录或「主程序加的项目目录」下（防止越权）。
 
     用 relative_to 做路径语义比较；str.startswith 的前缀比较会让
     C:\\Users\\alice-backup 通过 C:\\Users\\alice 的检查。
     """
-    return is_under_any(p, [_HOME])
+    return is_under_any(p, [_HOME] + list(_extra_safe_roots))
 
 
 def _fmt_size(n: int) -> str:
@@ -105,7 +131,11 @@ def register(reg: ToolRegistry) -> None:
         else:
             base = _HOME / "Desktop"
         if not _is_safe_path(base):
-            return f"错误：路径必须在用户主目录下（拒绝 {base}）"
+            return (
+                f"错误：路径不在沙箱内（拒绝 {base}）。"
+                f"默认只允许用户主目录（{_HOME}），"
+                f"可在 config.yaml 加 llm.project_dirs 把项目目录放行。"
+            )
         if not base.exists():
             return f"目录不存在：{base}"
         limit = max(1, min(int(limit if limit else 50), 500))
@@ -185,7 +215,11 @@ def register(reg: ToolRegistry) -> None:
         else:
             base = _HOME / "Desktop"
         if not _is_safe_path(base):
-            return f"错误：路径必须在用户主目录下（拒绝 {base}）"
+            return (
+                f"错误：路径不在沙箱内（拒绝 {base}）。"
+                f"默认只允许用户主目录（{_HOME}），"
+                f"可在 config.yaml 加 llm.project_dirs 把项目目录放行。"
+            )
         if not base.exists():
             return f"目录不存在：{base}"
         max_results = max(1, min(int(max_results if max_results else 100), 1000))
@@ -274,7 +308,11 @@ def register(reg: ToolRegistry) -> None:
         else:
             base = _HOME / "Desktop"
         if not _is_safe_path(base):
-            return f"错误：路径必须在用户主目录下（拒绝 {base}）"
+            return (
+                f"错误：路径不在沙箱内（拒绝 {base}）。"
+                f"默认只允许用户主目录（{_HOME}），"
+                f"可在 config.yaml 加 llm.project_dirs 把项目目录放行。"
+            )
         if not base.exists():
             return f"目录不存在：{base}"
         max_results = max(1, min(int(max_results if max_results else 200), 2000))

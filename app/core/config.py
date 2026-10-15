@@ -22,6 +22,11 @@ class LLMConfig(BaseModel):
     # "low" / "medium" / "high",None 表示不传(让后端用默认)。
     # 主程序可让主人按场景调:闲聊低、复杂任务高。
     reasoning_effort: Optional[str] = None
+    # 项目目录白名单:沙箱工具(grep / glob / search / edit_file / multi_edit 等)
+    # 默认只能访问用户家目录;主程序可把项目目录加进去,允许跨目录搜索 / 修改。
+    # 列表里的每个路径会被 resolve 后跟 Path.home() 一起构成白名单。
+    # 任何不在白名单里的访问一律报「不在沙箱内」错误。
+    project_dirs: List[str] = []
 
 
 class VoiceProfile(BaseModel):
