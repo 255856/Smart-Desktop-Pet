@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -65,6 +66,7 @@ from app.core.qt_compat import (
     QVBoxLayout, QWidget, Signal, QTimer, QColor, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
     QBuffer, QByteArray, pyqtSlot,
+    QDragEnterEvent, QDragMoveEvent, QDropEvent, QMimeData, QUrl,
 )
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
@@ -146,8 +148,6 @@ from .command_completer import _CommandCompleter  # noqa: F401
 from .chrome import _TitleBarDrag  # noqa: F401
 
 
-# _InputFocusWatcher — 拆到 chat_window.chrome
-from .chrome import _InputFocusWatcher  # noqa: F401
 class ChatWindow(QWidget):
     """独立聊天窗。"""
 
@@ -278,6 +278,9 @@ class ChatWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setObjectName("chat_root")
         self.setStyleSheet(ui_style.CHAT_QSS)
+        # 2026-10-15 v8: 主人实测要求「拖动图片直接渲染」—— 整个窗口接收 drag&drop
+        # 进入时拦截, 把图片保存到 assets/uploads 后渲染进 chat_view。
+        self.setAcceptDrops(True)
 
         # 2026-10-15:修复「Bug 3 窗口重叠 / 错位显示」——
         # 默认让 chat 出现在「桌宠精灵的右侧」(主人大概率会在那里点),如果没有
@@ -739,6 +742,42 @@ class ChatWindow(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
 
+        # 2026-10-15 v8: 主人实测要求 — 「拖入图片直接显示，底部 + 上传，
+        #   多模态生成（图 / 视频）也加在底部」。
+        # 这一排三个辅助按钮：上传 +  / 多模态 ▼  / 语音。
+        # 上传 +：打开 QFileDialog 选图片/文件，走和拖拽相同的渲染路径。
+        self.upload_btn = QToolButton()
+        self.upload_btn.setText("+")
+        self.upload_btn.setObjectName("ghost_btn")
+        self.upload_btn.setToolTip("上传图片或文件（也支持把图片拖到聊天窗）")
+        self.upload_btn.setMinimumHeight(28)
+        self.upload_btn.setMinimumWidth(36)
+        self.upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upload_btn.clicked.connect(self._on_upload_clicked)
+        bottom_row.addWidget(self.upload_btn)
+
+        # 多模态下拉：图 / 视频 / 语音（音频用现有 TTS，跳过）
+        self.media_btn = QToolButton()
+        self.media_btn.setText("多模态")
+        self.media_btn.setObjectName("ghost_btn")
+        self.media_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.media_btn.setMinimumHeight(28)
+        self.media_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.media_btn.setToolTip("让 agent 生成图 / 视频（需 model provider 支持）")
+        media_menu = QMenu(self.media_btn)
+        self._media_menu = media_menu
+        act_img = media_menu.addAction("🎨  生成图片")
+        act_img.triggered.connect(lambda: self._on_media_action("image"))
+        act_vid = media_menu.addAction("🎬  生成视频")
+        act_vid.triggered.connect(lambda: self._on_media_action("video"))
+        act_aud = media_menu.addAction("🎵  生成音效（stub）")
+        act_aud.triggered.connect(lambda: self._on_media_action("audio"))
+        media_menu.addSeparator()
+        act_help = media_menu.addAction("⚙  配置多模态 provider（占位）")
+        act_help.triggered.connect(lambda: self._on_media_action("config"))
+        self.media_btn.setMenu(media_menu)
+        bottom_row.addWidget(self.media_btn)
+
         # 麦克风（文字 + 图标）
         self.mic_btn = QPushButton("语音")
         self.mic_btn.setObjectName("ghost_btn")
@@ -780,9 +819,9 @@ class ChatWindow(QWidget):
         il.addLayout(bottom_row)
         cl.addWidget(input_container)
 
-        # 输入框焦点高亮输入容器边框
-        self._focus_watcher = _InputFocusWatcher(input_container)
-        self.input_edit.installEventFilter(self._focus_watcher)
+        # 2026-10-15 v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」，
+        # 不再用 _InputFocusWatcher 高亮边框，输入容器永远保持中性灰。
+        # 上一版的 _InputFocusWatcher 已在 chat_window/chrome.py 删除。
 
         # 无边框窗口没有系统边框，补上「拖拽四边/四角调整大小」
         # （后装于标题拖拽，边缘命中优先，不与顶部拖动冲突）
@@ -1063,13 +1102,13 @@ class ChatWindow(QWidget):
                     "• /help                 — 显示本帮助\n"
                     "• /status               — 显示桌宠状态\n"
                     "• /time                 — 显示当前时间\n"
-                    "• /remember <text>      — 记到长期记忆（例如 /remember 主人不爱香菜）\n"
+                    "• /remember <text>      — 记到长期记忆\n"
                     "• /say <text>           — 让桌宠念一句话（冒泡显示）\n"
                     "• /memory               — 列出长期记忆\n"
                     "• /reminders            — 查看/管理提醒\n"
                     "• /clear                — 清空当前聊天上下文（不影响长期记忆）\n"
                     "• /demo                 — 打开 Live2D 演示页\n"
-                    "• /debug                — 打开 Agent Trace 调试面板（开发用）\n"
+                    "• /debug                — 打开 Agent Trace 调试面板（开发）\n"
                     "• /open <name>          — 打开应用（例如 /open Notepad）\n"
                     "• /plan [text]          — 给出计划草稿（不调工具）\n"
                     "• /skills               — 列出已加载的 skill 文档"
@@ -1137,10 +1176,43 @@ class ChatWindow(QWidget):
             self._quick_send_plan(plan_ask)
             return
 
-        # /skills: 列出 skills_dir 下所有 .md skill 文档名字 (通过 list_skills)
-        if cmd == "/skills":
-            from app.brain.skills import list_skills
+        # /skills[/<name>]: 列出所有 / 单独看某个 skill 的文档内容预览。
+# 主人 2026-10-15 实测：「加载 skills 我觉得可以这样子 /skills/skills详细名（再次选择）」，
+# 设计: /skills 列表, /skills/<name> 内容 + 二级操作提示, 真激活留作 Phase 4.*。
+        if cmd == "/skills" or cmd.startswith("/skills/"):
+            from app.brain.skills import list_skills, load_skill
             skills_dir = getattr(self, "_skills_dir", None) or "skills"
+            # /skills/<name> 这条: 直接展示该 skill 的 markdown 文档内容
+            if cmd.startswith("/skills/"):
+                skill_name = cmd[len("/skills/"):].strip().strip("/")
+                if not skill_name:
+                    self._render_message(Message(
+                        role="assistant",
+                        content="用法: /skills/<name>（name 是列表里看到的 skill 名）"))
+                    return
+                content = load_skill(skills_dir, skill_name)
+                if content is None:
+                    self._render_message(Message(
+                        role="assistant",
+                        content=f"找不到 skill `{skill_name}`。"
+                                f"\n\n先用 /skills 看现有列表，确认名字拼写。"))
+                    return
+                # 去掉 [Skill: name] 包装头（render 时已经能看到名字）
+                body = content
+                if body.startswith(f"[Skill: {skill_name}]"):
+                    body = body[len(f"[Skill: {skill_name}]"):]
+                body = body.rstrip()
+                if body.endswith("[/Skill]"):
+                    body = body[:-len("[/Skill]")].rstrip()
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"📕 skill: **{skill_name}**\n```\n{body}\n```\n\n"
+                            f"_二级操作_（当前 v8 只做内容预览，真激活留到 Phase 4.*）:\n"
+                            f"• `/skills/{skill_name}` — 再看一次\n"
+                            f"• 接下来真正「激活 → 进 system prompt」"
+                            f"留作后续接入；先确认列表 + 文档能看见即可。"))
+                return
+            # /skills 列表
             try:
                 names = list_skills(skills_dir)
             except Exception as e:  # noqa: BLE001
@@ -1159,9 +1231,10 @@ class ChatWindow(QWidget):
                 self._render_message(Message(
                     role="assistant",
                     content=f"当前可用 skill（{len(names)} 个）:\n"
-                            + "\n".join(f"• {n}" for n in names)
+                            + "\n".join(f"• /skills/{n}  — {n}" for n in names)
                             + f"\n\n路径: `{skills_dir}`"
                             f"\n（重启桌宠后会自动加载这些 skill 进 system prompt）"
+                            f"\n\n二级命令: /skills/<name> 单独看某个 skill 的内容"
                 ))
             return
 
@@ -1363,6 +1436,190 @@ class ChatWindow(QWidget):
         if self._worker is not None:
             self._worker.request_stop()
             self.stop_btn.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # v8 上传 / 拖放 / 多模态生成按钮 (2026-10-15 主人实测要求)
+    #
+    # 设计:
+    #   - 拖入图片 / 点 + 上传 → 都走 _handle_uploaded_files,
+    #     图片存到 assets/uploads/ (项目根目录下), 用 file:// 路径
+    #     渲染进 chat_view。这样下次重启桌宠也能看见。
+    #   - 多模态生成 (图 / 视频 / 音效) → 当前 v8 留 stub,
+    #     弹一行提示告诉主人"等模型接上后端", 但 UI 按钮先有位置。
+    # ------------------------------------------------------------------
+
+    _UPLOAD_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+    _UPLOAD_DIR_NAME = "uploads"
+    _MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 MiB cap, 太大会让 chat_view 渲染卡
+
+    def _uploads_dir(self) -> Path:
+        """计算项目根下的 assets/uploads, 自动 mkdir."""
+        root = Path(__file__).resolve().parent.parent.parent.parent
+        d = root / "assets" / self._UPLOAD_DIR_NAME
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return d
+
+    @staticmethod
+    def _is_image_suffix(suffix: str) -> bool:
+        return suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+    def dragEnterEvent(self, event: "QDragEnterEvent") -> None:
+        """鼠标拖着文件 / 图片进入窗口: 看 mimeData 里有没有 file url, 有就 accept."""
+        md = event.mimeData()
+        if md is None:
+            event.ignore()
+            return
+        if md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+            event.acceptProposedAction()
+            return
+        # 也接受直接拖 image data (e.g. 从浏览器拖一张图)
+        if md.hasImage():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: "QDragMoveEvent") -> None:
+        md = event.mimeData()
+        if md is not None and (md.hasUrls() or md.hasImage()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: "QDropEvent") -> None:
+        """主人放下文件 / 图片: 解析 file urls → 走 _handle_uploaded_files."""
+        md = event.mimeData()
+        if md is None:
+            event.ignore()
+            return
+        paths: list[Path] = []
+        if md.hasUrls():
+            for url in md.urls():
+                if not url.isLocalFile():
+                    continue
+                local = url.toLocalFile()
+                if local:
+                    p = Path(local)
+                    if p.is_file():
+                        paths.append(p)
+        # 如果 mimeData 直接含 image (例如浏览器拖图), 不落本地, 转临时文件再走。
+        if not paths and md.hasImage():
+            img = md.imageData()
+            if isinstance(img, QPixmap) and not img.isNull():
+                tmp = self._uploads_dir() / f"pasted_{int(time.time())}.png"
+                try:
+                    img.save(str(tmp), "PNG")
+                    paths.append(tmp)
+                except Exception:
+                    pass
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._handle_uploaded_files(paths)
+
+    def _on_upload_clicked(self) -> None:
+        """主人点 + 按钮: 弹 QFileDialog 选图 / 文件, 走和拖放一样的渲染路径."""
+        try:
+            selected, _ = QFileDialog.getOpenFileNames(
+                self, "选择要发送的文件",
+                "", "图片 (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;所有文件 (*)",
+            )
+        except Exception:
+            selected = []
+        if not selected:
+            return
+        self._handle_uploaded_files([Path(p) for p in selected])
+
+    def _handle_uploaded_files(self, paths: list) -> None:
+        """主人上传 (拖放 / 点 + 选) 的多个文件, 一张一张渲染进 chat_view.
+
+        图片: 复制到 assets/uploads/, 在 chat 里渲染 markdown
+              ![主人上传](file://...), 同时把这条消息作为 user role 入 history。
+        非图片: 只展示文件路径 + 名字, 不下载 (Phase 4.* 可加内容摄取)。
+        """
+        if not paths:
+            return
+        for p in paths:
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > self._MAX_UPLOAD_BYTES:
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"文件 `{p.name}` 太大 ({size} 字节)，已超过 {self._MAX_UPLOAD_BYTES} 字节，跳过。"
+                ))
+                continue
+            try:
+                import shutil as _sh
+                target = self._uploads_dir() / f"{int(time.time())}_{p.name}"
+                # 防重名
+                stem = target.stem
+                suf = target.suffix
+                n = 1
+                while target.exists():
+                    target = target.with_name(f"{stem}_{n}{suf}")
+                    n += 1
+                _sh.copy2(str(p), str(target))
+            except Exception as e:  # noqa: BLE001
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"保存 `{p.name}` 失败: {e}"))
+                continue
+            # 渲染
+            abs_uri = target.resolve().as_posix()
+            file_uri = "file:///" + abs_uri.lstrip("/").replace("\\", "/")
+            if self._is_image_suffix(target.suffix):
+                content = f"![主人上传]({file_uri})\n\n*（{target.name} · {size//1024} KiB）*"
+            else:
+                content = (
+                    f"📎 **{target.name}**（{size//1024} KiB）\n\n"
+                    f"路径: `{target}`"
+                )
+            msg = Message(role="user", content=content)
+            self.history.append(msg)
+            self._trim_history()
+            # 持久化: Markdown 引用 + 文件名已经在 content 里, 不用 attachments 字段
+            try:
+                self.chat_store.add("user", content)
+            except Exception:
+                log.exception("chat_store.add 失败（上传文件 %s）", target)
+            self._render_message(msg)
+            # 不立刻调 _kickoff_llm: 主人可能还想编辑一句文字说明 / 多张图,
+            # 由主人按「发送」一起发。QQ/微信/iMessage 也是这种"先列表等发"姿势。
+
+    def _on_media_action(self, kind: str) -> None:
+        """多模态下拉 (图片 / 视频 / 音频 / 配置) 当前是 stub.
+
+        主人 2026-10-15 实测要求: 在底部加一个按钮, 让多模态模型能生成
+        图 / 视频。但当前项目里 agent tool registry 还没接图像 / 视频
+        生成工具, 所以 v8 这版先给一个提示, 后续接入真实 tool 后把这里
+        改成调 self.registry.get('generate_image') / 'generate_video'。
+        """
+        prompts = {
+            "image": "🎨 生成图片",
+            "video": "🎬 生成视频",
+            "audio": "🎵 生成音效",
+            "config": "⚙ 配置多模态 provider",
+        }
+        label = prompts.get(kind, kind)
+        self._render_message(Message(
+            role="assistant",
+            content=(
+                f"主人点了 **{label}**。\n\n"
+                f"当前 v8 这版还没接 agent tool（generate_image / generate_video / "
+                f"generate_audio），先弹个提示告诉主人在 Phase 4.* 接入。\n\n"
+                f"接入方法: \n"
+                f"1. 在 tools 模块里注册 `generate_image` / `generate_video`，\n"
+                f"   例如调 OpenAI gpt-image-1 / 智谱 CogVideoX 等 model；\n"
+                f"2. tool 返回值是一个 URL（图片 http(s) URL 或 OSS URL）；\n"
+                f"3. 把 URL 拼回 markdown `![](url)` 渲染进 chat_view（参考 v8 的\n"
+                f"   `_handle_uploaded_files` 用 file:// 拼图片的同款姿势）。"
+            ),
+        ))
 
     def _on_mic_pressed(self) -> None:
         """按住麦克风按钮：开始录音。"""
@@ -2708,6 +2965,23 @@ class ChatWindow(QWidget):
 
         # 3. 行内元素 —— 先做 code (避免被误判)
         text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
+
+        # 3b. 2026-10-15 v8: markdown 图片 ![alt](url) → <img src=url>
+        # 仅放行 http(s):// 与 file:// scheme (跟 link 同样防 XSS-like)。
+        # 这是主人上传图片的关键路径: _handle_uploaded_files 把图片复制到
+        # assets/uploads/ 后, 拼一条 Markdown 内容 ![主人上传](file:///...xxx.png)
+        # 走这条 pipeline 渲染。QTextBrowser 自己会读 file:// 嵌图。
+        def _img(m: "re.Match[str]") -> str:
+            alt = m.group(1)
+            url = m.group(2)
+            if re.match(r'^(https?|file):', url, re.IGNORECASE):
+                return (
+                    f'<img src="{url}" alt="{alt}" '
+                    f'style="max-width:320px;border-radius:8px;'
+                    f'margin:4px 0;"/>'
+                )
+            return m.group(0)
+        text = re.sub(r'!\[([^\]]*)\]\(([^)\s]+)\)', _img, text)
 
         # 4. 链接 [text](url)  (只允许 http/https/mailto 防止 javascript: 注入)
         def _link(m: "re.Match[str]") -> str:

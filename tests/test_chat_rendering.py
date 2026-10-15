@@ -1300,3 +1300,190 @@ def test_anchor_click_handler_keeps_toggle_guard():
             print("[OK] toggle 走 rebuild 路径, Bug 1 守卫 v1 时代已不需要")
             return
     raise AssertionError("_on_chat_anchor_clicked 函数未找到")
+
+
+# ============================================================
+# v8 调整 (2026-10-15):
+#   1) 输入框去紫色线圈（_InputFocusWatcher 删除）
+#   2) /skills/<name> 二级深链
+#   3) 拖图 + 底部 + 上传按钮 + 多模态生成按钮
+#   4) _render_markdown 支持 ![alt](file://...) 转 <img>
+# ============================================================
+
+
+def test_v8_no_purple_focus_border():
+    """v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」。
+    ui_style 删掉 input_container / chat_view 的 :focus-within / :focus
+    border-color 规则, 输入容器边框永远保持中性灰 (#e7e3f5)。
+    chrome.py 应该不再含 _InputFocusWatcher。
+    """
+    from app.ui import ui_style as _us
+    import re as _re
+    qss = _us.CHAT_QSS
+
+    # 从 QSS 里抠出所有 CSS 选择器 (粗筛 selector 文本, 排除 /* ... */ 注释)
+    no_comments = _re.sub(r"/\*.*?\*/", "", qss, flags=_re.DOTALL)
+    # 真凶: 任何「:focus-within {...}」规则 —— 因为注释里也有这字样, 所以
+    # 只检查 { 后真规则壳子。
+    bad_patterns = [
+        _re.compile(r":focus-within\s*\{"),
+        _re.compile(r"input_container:focus[a-zA-Z\-()]*\s*\{"),
+    ]
+    for pat in bad_patterns:
+        m = pat.search(no_comments)
+        assert not m, (
+            f"ui_style 仍含紫色线圈真凶规则 {pat.pattern}: {m.group(0)!r}"
+        )
+
+    # chrome.py 删除 _InputFocusWatcher (这条独立验证)
+    from app.ui.chat_window import chrome as _chrome
+    assert not hasattr(_chrome, "_InputFocusWatcher"), (
+        "chrome.py 还含 _InputFocusWatcher, 应该删除"
+    )
+
+    print("[OK] v8: 紫色线圈已删除 (QSS 规则去掉 + chrome watcher 删除)")
+
+
+def test_v8_skills_deep_link():
+    """v8: /skills/<name> 显示该 skill 文档预览 + 操作提示。
+    真激活留 Phase 4.*, 这版只先有「看」功能。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    cw._handle_command("/skills/poem")
+    text = cw.chat_view.toPlainText()
+    assert "skill" in text and "poem" in text, (
+        f"/skills/poem 必须在 chat 里渲染 skill 预览 + 名字。 实际: {text!r}"
+    )
+    # 预览内容至少给一个字（标题或注释）
+    assert "七言绝句" in text or "用一首七言绝句" in text, (
+        f"/skills/poem 应展示 poem.md 文档内容。 实际: {text!r}"
+    )
+
+    # /skills/<not-found> 给友好提示
+    cw._handle_command("/skills/nonexistent_skill")
+    text2 = cw.chat_view.toPlainText()
+    assert "找不到" in text2 or "不存在" in text2 or "没" in text2, (
+        f"/skills/nonexistent_skill 应给提示。 实际: {text2!r}"
+    )
+    print("[OK] v8: /skills/<name> 二级深链 + 找不到给提示")
+
+
+def test_v8_upload_and_media_buttons():
+    """v8: 底部新增 + 上传按钮和多模态下拉, 整窗接 drag&drop。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    assert hasattr(cw, "upload_btn"), "chat_window 应有 self.upload_btn"
+    assert cw.upload_btn.text() == "+", (
+        f"upload_btn 文字应是 '+', 实际: {cw.upload_btn.text()!r}"
+    )
+    assert hasattr(cw, "media_btn"), "chat_window 应有 self.media_btn"
+    # 多模态按钮的菜单应该有「生成图片」+「生成视频」
+    menu = cw.media_btn.menu()
+    assert menu is not None, "media_btn 必须挂 QMenu"
+    actions = [a.text() for a in menu.actions()]
+    assert any("图片" in a for a in actions), (
+        f"media 菜单缺「生成图片」项: {actions}"
+    )
+    assert any("视频" in a for a in actions), (
+        f"media 菜单缺「生成视频」项: {actions}"
+    )
+
+    # 整个窗接 drag&drop
+    assert cw.acceptDrops() is True, (
+        "chat_window 必须 setAcceptDrops(True), 否则拖图不接受"
+    )
+    print("[OK] v8: + 上传 + 多模态下拉 + drag&drop 已挂上")
+
+
+def test_v8_markdown_image_inline():
+    """v8: _render_markdown 处理 ![alt](url) → <img src=url>,
+    只放行 http/https/file scheme。这是上传图片走 markdown 渲染的关键。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # file:// URL 应转成 <img src=...>
+    out = cw._render_markdown("![主人上传](file:///C:/tmp/test.png)")
+    assert "<img src=\"file:///C:/tmp/test.png\"" in out, (
+        f"file:// 图片 markdown 没转 img 标签。 输出: {out!r}"
+    )
+    # http:// URL 也应转
+    out2 = cw._render_markdown("![alt](https://example.com/x.jpg)")
+    assert "<img src=\"https://example.com/x.jpg\"" in out2, (
+        f"http(s):// 图片 markdown 没转 img 标签。 输出: {out2!r}"
+    )
+    # javascript: 等危险 scheme 不转, 留原文字
+    out3 = cw._render_markdown("![alt](javascript:alert(1))")
+    assert "<img" not in out3, (
+        f"javascript: scheme 应当被拒。 输出: {out3!r}"
+    )
+
+    print("[OK] v8: markdown image 转 <img>, 仅放行 http(s)/file scheme")
+
+
+def test_v8_handle_uploaded_files_saves_and_renders():
+    """v8: _handle_uploaded_files 把文件复制到 assets/uploads/ + 渲染进 chat。
+    不调 _kickoff_llm (主人编辑完再发, QQ/iMessage 同款)。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.ui.chat_window.message import Message
+    import tempfile
+    from pathlib import Path
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    # 直接让 QPixmap 给我们造一个 1x1 PNG, 不要手撸字节
+    from app.core.qt_compat import QPixmap
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td) / "v8_sample.png"
+        pix = QPixmap(1, 1)
+        from app.core.qt_compat import QColor
+        pix.fill(QColor("#ff00ff"))  # 品红
+        pix.save(str(tmp_path), "PNG")
+
+        before = len(cw.history)
+        cw._handle_uploaded_files([tmp_path])
+        after = len(cw.history)
+        assert after == before + 1, (
+            f"_handle_uploaded_files 应让 history + 1, before={before}, after={after}"
+        )
+        msg = cw.history[-1]
+        assert msg.role == "user"
+        # content 里要含 file:// 引用 + 文件名
+        assert "file://" in msg.content, (
+            f"user content 应含 file:// 引用。 实际: {msg.content!r}"
+        )
+        assert tmp_path.name in msg.content, (
+            f"user content 应包含原文件名: {msg.content!r}"
+        )
+
+        # chat_view 里也真的渲染了一段包含 file://
+        chat_text = cw.chat_view.toPlainText()
+        assert "file://" in chat_text, (
+            f"chat_view 应渲染 file:// 路径文本。 实际: {chat_text!r}"
+        )
+
+        # 真的复制到 assets/uploads 下
+        uploads = cw._uploads_dir()
+        files = list(uploads.glob(f"*{tmp_path.name}"))
+        assert files, (
+            f"图片应被复制到 {uploads}, 没找到 *{tmp_path.name}: "
+            f"{list(p for p in uploads.iterdir())[:5]}..."
+        )
+
+    print("[OK] v8: 上传图片 → 复制到 uploads + 进 history + 渲染进 chat")

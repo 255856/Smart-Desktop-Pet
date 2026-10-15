@@ -6,6 +6,7 @@ try:
     from PyQt5.QtCore import (
         pyqtSignal as Signal, pyqtSlot as Slot, pyqtSlot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
         QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray, QSettings,
+        QMimeData,
     )
     from PyQt5.QtCore import Qt as _Qt
     if not hasattr(Qt, "AlignmentFlag"):
@@ -61,7 +62,7 @@ try:
 except ImportError:
     # PySide6 fallback（开发环境备用）
     from PySide6 import QtCore
-    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray, QSettings
+    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray, QSettings, QMimeData
     from PySide6.QtCore import Slot as pyqtSlot
     from PySide6.QtGui import (
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
@@ -139,6 +140,7 @@ def is_qobject_alive(obj) -> bool:
 __all__ = [
     "BACKEND", "Signal", "Slot", "pyqtSlot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
     "QEventLoop", "QEvent", "QUrl", "QBuffer", "QByteArray", "QSettings",
+    "QMimeData",
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
     "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",

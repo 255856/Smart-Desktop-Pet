@@ -182,10 +182,10 @@ QTextBrowser#chat_view, QFrame#input_container {{
 QTextBrowser#chat_view {{
     padding: 10px 8px;
 }}
-QTextBrowser#chat_view:focus,
-QFrame#input_container:focus-within {{
-    border-color: {ACCENT_LT};
-}}
+/* 2026-10-15 v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」，
+   不再让 focus 改 input_container / chat_view 边框颜色, 永远中性灰。
+   之前的 :focus / :focus-within 规则删除。 */
+QTextBrowser#chat_view:focus {{ border-color: #e7e3f5; }}
 
 /* 输入框 */
 QLineEdit {{

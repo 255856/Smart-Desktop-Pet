@@ -1,14 +1,17 @@
 """chat_window 子模块：窗口装饰相关辅助类。
 
 - _TitleBarDrag：无边框窗口的鼠标拖动支持
-- _InputFocusWatcher：输入框获焦时高亮边框（Qt QSS 不支持 :focus-within）
+
+历史：`_InputFocusWatcher` 在 FocusIn 时把输入容器边框改成紫色 (#a99bfa)，
+主人 2026-10-15 实测：「每次点击输入框会有一个紫色线圈不需要」，
+所以把整个 watcher 删了，输入容器边框永远保持中性灰。
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from app.core.qt_compat import (
-    QEvent, QFrame, QObject, QPoint, Qt,
+    QEvent, QObject, QPoint, Qt,
     event_global_pos,
 )
 
@@ -43,21 +46,4 @@ class _TitleBarDrag(QObject):
         return False
 
 
-class _InputFocusWatcher(QObject):
-    """输入框获得 / 失去焦点时高亮输入容器边框（Qt QSS 不支持 :focus-within）。"""
-
-    def __init__(self, container: QFrame):
-        super().__init__(container)
-        self._container = container
-
-    def eventFilter(self, obj, ev) -> bool:
-        if ev.type() == QEvent.Type.FocusIn:
-            self._container.setStyleSheet(
-                "QFrame { background: #ffffff; border: 2px solid #a99bfa; "
-                "border-radius: 16px; }")
-        elif ev.type() == QEvent.Type.FocusOut:
-            self._container.setStyleSheet("")
-        return False
-
-
-__all__ = ["_TitleBarDrag", "_InputFocusWatcher"]
+__all__ = ["_TitleBarDrag"]
