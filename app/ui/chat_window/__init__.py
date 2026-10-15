@@ -604,12 +604,11 @@ class ChatWindow(QWidget):
 
         self.chat_view = QTextBrowser()
         self.chat_view.setObjectName("chat_view")
-        self.chat_view.setOpenExternalLinks(True)
-        # 2026-10-15:挂 anchorClicked 拦截 cmd:toggle_tools 等内部命令
-        # (Qt QTextBrowser 不支持 <details> 折叠交互,改用 <a href> + handler
-        # 重新 setHtml 模拟)。注意 setOpenExternalLinks(True) + 自定义 scheme
-        # 同时启用:Qt 文档说自定义 scheme 不会被打开外部链接拦截。
-        from app.core.qt_compat import QUrl
+        # 2026-10-15 修复: 不要 setOpenExternalLinks(True) —— 它让 Qt 试图用
+        # OS shell 打开 scheme,Windows 找不到 cmd: handler 会弹「获取打开此
+        # cmd 链接的应用」系统对话框(用户实测)。内部命令用 anchorClicked
+        # signal 拦截,外部链接用 openExternalLinks event filter 自己处理。
+        self.chat_view.setOpenExternalLinks(False)
         self.chat_view.anchorClicked.connect(self._on_chat_anchor_clicked)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
@@ -1606,10 +1605,13 @@ class ChatWindow(QWidget):
         return cleaned
 
     def _on_chat_anchor_clicked(self, url):
-        """chat_view 上 <a href> 被点击,处理内部命令。
+        """chat_view 上 <a href> 被点击,处理内部命令 + 外部链接。
 
         Qt QTextBrowser 不支持 <details> 折叠交互 —— 我们用 <a href="cmd:...">
         模拟:点击后切换 _tools_collapsed 状态,重渲染当前 bot message。
+
+        2026-10-15:也处理外部链接(http/https),因为 setOpenExternalLinks(False)
+        关掉了自动打开,需要我们手动用 QDesktopServices.openUrl。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
@@ -1627,7 +1629,13 @@ class ChatWindow(QWidget):
                 if self._current_bot_msg is not None:
                     self._refresh_streaming_message()
             return
-        # 其他 scheme(external links)Qt 自己处理,这里不拦
+        # 外部链接:手动打开(setOpenExternalLinks=False 不会自动开)
+        if scheme in ("http", "https", "mailto"):
+            try:
+                from PyQt5.QtGui import QDesktopServices
+                QDesktopServices.openUrl(url)
+            except Exception:  # noqa: BLE001
+                log.warning("打开外部链接失败: %s", url)
 
     def _on_tool(self, name: str, args: str, result: str) -> None:
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""
