@@ -2885,9 +2885,13 @@ def test_v16_post_json_other_http_error_unchanged():
 # ============================================================
 
 
-def test_v17_render_markdown_image_thumb_size_240():
-    """v17: chat 渲染 markdown image 限制 width=240 / max-width:240 /
-    max-height:240, 主人实测 1024x1024 太大改缩略图。"""
+def test_v18_render_markdown_image_responsive_size():
+    """v18: chat 渲染 markdown image 响应式 (主人 2026-10-15 实测:
+    图片尺寸要适应窗口大小, 不要固定像素)。
+
+    走 max-width: 100% (跟父容器 msg-body 同步) + max-height: 480px (上限)
+    + display:block (独占一行) + object-fit:contain (按比例缩)。
+    """
     from app.ui.chat_window import ChatWindow
     from app.ui.chat_window.message import Message
     from app.core.config import LLMConfig, CharacterConfig
@@ -2897,7 +2901,7 @@ def test_v17_render_markdown_image_thumb_size_240():
     cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                     'assets/sprites', asr_enabled=False)
     with tempfile.TemporaryDirectory() as td:
-        png = Path(td) / "v17_thumb.png"
+        png = Path(td) / "v18_resp.png"
         pix = QPixmap(1024, 1024)
         pix.fill(QColor("#abcabc"))
         pix.save(str(png), "PNG")
@@ -2905,22 +2909,38 @@ def test_v17_render_markdown_image_thumb_size_240():
         md = f"![主人上传]({file_url})"
         msg = Message(role="assistant", content=md)
         html = cw._msg_html(msg)
-        # 验证 _render_markdown 输出含 width=240 + max-width:240 + max-height:240
-        assert 'width="240"' in html, (
-            f"v17 应在 img 上加 width=240。 实际: {html[:500]}"
+        # v18 验证: 响应式 CSS (跟窗口大小联动)
+        assert 'max-width:100%' in html, (
+            f"v18 应加 max-width:100% 跟窗口联动。 实际: {html[:500]}"
         )
-        assert 'max-width:240px' in html, (
-            f"v17 应加 max-width:240px。 实际: {html[:500]}"
+        assert 'max-height:480px' in html, (
+            f"v18 应加 max-height:480px (上限高度)。 实际: {html[:500]}"
         )
-        assert 'max-height:240px' in html, (
-            f"v17 应加 max-height:240px。 实际: {html[:500]}"
+        assert 'display:block' in html, (
+            f"v18 应 display:block 独占一行。 实际: {html[:500]}"
         )
-        # 旧的 max-width:320 不应再出现
+        assert 'object-fit:contain' in html, (
+            f"v18 应 object-fit:contain 按比例缩。 实际: {html[:500]}"
+        )
+        assert 'width:auto' in html, (
+            f"v18 应 width:auto 不固定像素。 实际: {html[:500]}"
+        )
+        # v17 固定 width=240 / max-width:240px / max-height:240px 应移除
+        assert 'width="240"' not in html, (
+            f"v18 应移除 v17 固定 width=240。 实际: {html[:500]}"
+        )
+        assert 'max-width:240px' not in html, (
+            f"v18 应移除 v17 固定 max-width:240px。 实际: {html[:500]}"
+        )
+        assert 'max-height:240px' not in html, (
+            f"v18 应移除 v17 固定 max-height:240px。 实际: {html[:500]}"
+        )
+        # v8 旧固定 max-width:320px 也不能在
         assert 'max-width:320px' not in html, (
-            f"v17 应移除旧 max-width:320px。 实际: {html[:500]}"
+            f"v18 不应含 v8 旧 max-width:320px。 实际: {html[:500]}"
         )
 
-    print("[OK] v17: chat 渲染 img 限制 width=240 max-width:240 max-height:240")
+    print("[OK] v18: chat 渲染 img 响应式 max-width:100% 跟窗口联动")
 
 
 def test_v17_understand_image_tool_registered():

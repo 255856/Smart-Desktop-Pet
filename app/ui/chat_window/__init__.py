@@ -3400,16 +3400,18 @@ class ChatWindow(QWidget):
         # v9 升级: 放行 http(s):// / file:// / data: 三种 scheme。
         # data: 是 _inline_local_images_to_data_url 的产物, 渲染稳定;
         # file:// 是降级路径 (file 太大 / 失败), QTextBrowser 不一定 load。
-        # v17: 缩略图限制 width=240 height=auto (主人 2026-10-15 实测:
-        # 1024x1024 图片在 chat 框占满整宽, 太占空间)。
+        # v18 主人 2026-10-15 反馈「图片尺寸要适应窗口大小, 不要固定像素」:
+        #   - max-width: 100% 跟父容器 (msg-body) 同步, 父容器跟 chat_view resize
+        #   - max-height: 480px 上限, 超高图不撑开
+        #   - 不再用固定 width="240"
         def _img(m: "re.Match[str]") -> str:
             alt = m.group(1)
             url = m.group(2)
             if re.match(r'^(https?|file|data):', url, re.IGNORECASE):
                 return (
                     f'<img src="{url}" alt="{alt}" '
-                    f'width="240" height="auto" '
-                    f'style="max-width:240px;max-height:240px;'
+                    f'style="display:block;max-width:100%;'
+                    f'max-height:480px;width:auto;height:auto;'
                     f'border-radius:8px;margin:4px 0;'
                     f'object-fit:contain;"/>'
                 )
