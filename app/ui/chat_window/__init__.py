@@ -67,6 +67,7 @@ from app.core.qt_compat import (
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
     QBuffer, QByteArray, pyqtSlot,
     QDragEnterEvent, QDragMoveEvent, QDropEvent, QMimeData, QUrl,
+    QScrollArea,
 )
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
@@ -689,6 +690,12 @@ class ChatWindow(QWidget):
         self.btn_close.clicked.connect(self.close)
         hl.addWidget(self.btn_close)
 
+        # 2026-10-15 美化：标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区
+        # (ElidedLabel) 省略，而不是把按钮文字裁掉（曾出现 Demo 被压成 em）。
+        for _tb in (self.btn_clear, self.btn_demo, self.btn_memory,
+                    self.btn_avatar):
+            _tb.setMinimumWidth(_tb.sizeHint().width())
+
         cl.addWidget(header)
 
         # 标题栏拖动（头像 / 标题 / 副标题区域）
@@ -727,6 +734,32 @@ class ChatWindow(QWidget):
         il.setContentsMargins(12, 8, 12, 8)
         il.setSpacing(4)
 
+        # 2026-10-15 v10: 主人在聊天开头 / 按发送之前, 拖入 / 上传的图片先
+        # 堆到 "输入框上方" 的缩略图条 (iMessage / 微信 / QQ 同款姿势) ——
+        # 不再 v8/v9 那样"拖入立刻渲染进 chat", 因为主人实测:
+        # "拖进去应该显示在输入框上方, 缩小版, 而不是直接进入对话框"。
+        # pending_strip 是一个 QScrollArea (横向), 内部用 QHBoxLayout 装
+        # 缩略图 + 文件名 + 关闭按钮。主人按发送时, 这些 attachment 跟
+        # 当前 input_edit 文本一起作为 user message 渲染进 chat + 持久化。
+        self._pending_attachments: list[Path] = []   # 待发送文件 (复制到 uploads 后)
+        self._pending_thumb_widgets: list[QFrame] = []  # 缩略图条上每个 QLabel 容器
+        self.pending_strip = QScrollArea()
+        self.pending_strip.setObjectName("pending_strip")
+        self.pending_strip.setWidgetResizable(True)
+        self.pending_strip.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.pending_strip.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.pending_strip.setFixedHeight(82)
+        self.pending_strip.setVisible(False)  # 没附件时隐藏
+        self._pending_strip_inner = QWidget()
+        self._pending_strip_layout = QHBoxLayout(self._pending_strip_inner)
+        self._pending_strip_layout.setContentsMargins(4, 4, 4, 4)
+        self._pending_strip_layout.setSpacing(6)
+        self._pending_strip_layout.addStretch()
+        self.pending_strip.setWidget(self._pending_strip_inner)
+        il.addWidget(self.pending_strip)
+
         self.input_edit = QPlainTextEdit()
         self.input_edit.setObjectName("chat_input")
         self.input_edit.setPlaceholderText(
@@ -735,11 +768,20 @@ class ChatWindow(QWidget):
         # 自定义按键事件：Enter 发送，Shift+Enter 换行
         self.input_edit.keyPressEvent = self._input_key_press
         # / 命令补全 (2026-10-15 v6: 改为英文 + 加 /plan / /skills)
-        self._cmd_completer = _CommandCompleter(self.input_edit, [
+        # v10: 动态拼 /skills/<name> 候选项 —— 让主人输入 "/skills/" 时 popup
+        # 列出当前 skills_dir 下所有 skill 名字。
+        skill_names: list[str] = []
+        try:
+            from app.brain.skills import list_skills
+            skill_names = list_skills(getattr(self, "_skills_dir", None) or "skills")
+        except Exception:
+            pass
+        candidates = [
             "/help", "/status", "/feed ", "/time", "/say ", "/remember ",
             "/memory", "/reminders", "/clear", "/demo", "/debug", "/open ",
             "/plan ", "/skills",
-        ])
+        ] + [f"/skills/{n} " for n in skill_names]
+        self._cmd_completer = _CommandCompleter(self.input_edit, candidates)
         il.addWidget(self.input_edit)
 
         # 输入区底部：状态 + 按钮
@@ -770,14 +812,14 @@ class ChatWindow(QWidget):
         self.media_btn.setToolTip("让 agent 生成图 / 视频（需 model provider 支持）")
         media_menu = QMenu(self.media_btn)
         self._media_menu = media_menu
-        act_img = media_menu.addAction("🎨  生成图片")
+        act_img = media_menu.addAction("生成图片")
         act_img.triggered.connect(lambda: self._on_media_action("image"))
-        act_vid = media_menu.addAction("🎬  生成视频")
+        act_vid = media_menu.addAction("生成视频")
         act_vid.triggered.connect(lambda: self._on_media_action("video"))
-        act_aud = media_menu.addAction("🎵  生成音效（stub）")
+        act_aud = media_menu.addAction("生成音效（stub）")
         act_aud.triggered.connect(lambda: self._on_media_action("audio"))
         media_menu.addSeparator()
-        act_help = media_menu.addAction("⚙  配置多模态 provider（占位）")
+        act_help = media_menu.addAction("配置多模态 provider（占位）")
         act_help.triggered.connect(lambda: self._on_media_action("config"))
         self.media_btn.setMenu(media_menu)
         bottom_row.addWidget(self.media_btn)
@@ -1067,13 +1109,29 @@ class ChatWindow(QWidget):
         if self._generating:
             return
         text = self.input_edit.toPlainText().strip()
-        if not text:
+        pending = self._consume_pending_attachments()  # v10: 取出待发送附件
+        if not text and not pending:
             return
         # 限长：>2000 字符警告并截断
         if len(text) > 2000:
             self._append_system_msg(
                 f"消息太长（{len(text)} 字符），已截断到 2000")
             text = text[:2000]
+
+        # v10: 主人按发送时, 如果有待发送附件, 把它们的 markdown image
+        # 引用拼到 user message 内容里 (render 时走 _inline_local_images_to_data_url
+        # 转 base64 嵌图, 跟单图路径一致)。
+        if pending:
+            lines: list[str] = []
+            for p in pending:
+                abs_uri = p.resolve().as_posix()
+                file_uri = "file:///" + abs_uri.lstrip("/").replace("\\", "/")
+                if self._is_image_suffix(p.suffix):
+                    lines.append(f"![{p.name}]({file_uri})")
+                else:
+                    lines.append(f"📎 **{p.name}**")
+            attach_block = "\n".join(lines)
+            text = (attach_block + ("\n\n" + text if text else "")).strip()
 
         # v9 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「激活这个 skill
         # 进本对话 + 剩余文本作为 user message」。匹配优先级高于普通 / 命令。
@@ -1596,11 +1654,20 @@ class ChatWindow(QWidget):
         self._handle_uploaded_files([Path(p) for p in selected])
 
     def _handle_uploaded_files(self, paths: list) -> None:
-        """主人上传 (拖放 / 点 + 选) 的多个文件, 一张一张渲染进 chat_view.
+        """主人上传 (拖放 / 点 + 选) 的多个文件, 进入"待发送"区。
 
-        图片: 复制到 assets/uploads/, 在 chat 里渲染 markdown
-              ![主人上传](file://...), 同时把这条消息作为 user role 入 history。
-        非图片: 只展示文件路径 + 名字, 不下载 (Phase 4.* 可加内容摄取)。
+        v10 行为 (主人 2026-10-15 实测设计):
+          - 拖入 / 选完文件后**不再立刻进 chat**, 而是堆在 input_edit 上方
+            的 horizontal 缩略图条 (pending_strip), 主人能继续编辑文字
+            / 拖更多 / 按发送。Q iMessage / 微信 / QQ 同款姿势。
+          - 主人按「发送」时 (_on_send), 这些 attachment 跟当前 input_edit
+            文本一起作为一条 user message 渲染进 chat + 持久化 + kickoff LLM。
+          - 单个文件缩略图右上角有 × 按钮, 主人能单独剔除某个 attachment。
+
+        文件落地:
+          - 复制到 assets/uploads/<ts>_<name> (v8 那条), 避免原始路径泄露 +
+            跨 session 引用稳定。
+          - > 12 MiB 跳过 + 渲染一条 assistant 提示。
         """
         if not paths:
             return
@@ -1631,27 +1698,78 @@ class ChatWindow(QWidget):
                     role="assistant",
                     content=f"保存 `{p.name}` 失败: {e}"))
                 continue
-            # 渲染
-            abs_uri = target.resolve().as_posix()
-            file_uri = "file:///" + abs_uri.lstrip("/").replace("\\", "/")
-            if self._is_image_suffix(target.suffix):
-                content = f"![主人上传]({file_uri})\n\n*（{target.name} · {size//1024} KiB）*"
-            else:
-                content = (
-                    f"📎 **{target.name}**（{size//1024} KiB）\n\n"
-                    f"路径: `{target}`"
-                )
-            msg = Message(role="user", content=content)
-            self.history.append(msg)
-            self._trim_history()
-            # 持久化: Markdown 引用 + 文件名已经在 content 里, 不用 attachments 字段
-            try:
-                self.chat_store.add("user", content)
-            except Exception:
-                log.exception("chat_store.add 失败（上传文件 %s）", target)
-            self._render_message(msg)
-            # 不立刻调 _kickoff_llm: 主人可能还想编辑一句文字说明 / 多张图,
-            # 由主人按「发送」一起发。QQ/微信/iMessage 也是这种"先列表等发"姿势。
+            self._pending_attachments.append(target)
+            self._add_pending_thumbnail(target, size)
+
+    def _add_pending_thumbnail(self, target: Path, size: int) -> None:
+        """在 pending_strip 上加一个缩略图卡片 (缩略图 + 文件名 + × 按钮)。"""
+        from app.core.qt_compat import QLabel
+        # 容器: 80x80 圆角白底, 上方放缩略图, 下方文件名
+        box = QFrame()
+        box.setObjectName("pending_thumb_box")
+        box.setFixedSize(80, 76)
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(2, 2, 2, 2)
+        bl.setSpacing(0)
+        # 缩略图 (图片) 或 文档 icon (非图片)
+        thumb = QLabel()
+        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if self._is_image_suffix(target.suffix):
+            pix = QPixmap(str(target))
+            if not pix.isNull():
+                thumb.setPixmap(
+                    pix.scaled(72, 56,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation))
+        else:
+            thumb.setText("📎")
+            thumb.setStyleSheet("font-size: 26pt; color: #7c6cf0;")
+        thumb.setFixedSize(72, 56)
+        bl.addWidget(thumb)
+        # 文件名 (最多 10 字符, 超过截断)
+        name_lbl = QLabel(target.name[:10] + ("…" if len(target.name) > 10 else ""))
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("font-size: 7.5pt; color: #475569;")
+        bl.addWidget(name_lbl)
+        # 点击 → 移除
+        def _on_click(ev, t=target, w=box):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._remove_pending_attachment(t, w)
+        box.mousePressEvent = _on_click
+        box.setToolTip(f"{target.name}  ·  {size//1024} KiB  (点一下可剔除)")
+        box.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 插到 layout 的 stretch 之前
+        idx = self._pending_strip_layout.count() - 1
+        self._pending_strip_layout.insertWidget(idx, box)
+        self._pending_thumb_widgets.append(box)
+        self.pending_strip.setVisible(True)
+
+    def _remove_pending_attachment(self, target: Path, widget: QFrame) -> None:
+        """主人点缩略图 → 从待发送列表剔除这个文件。"""
+        try:
+            self._pending_attachments.remove(target)
+        except ValueError:
+            pass
+        try:
+            self._pending_thumb_widgets.remove(widget)
+        except ValueError:
+            pass
+        widget.setParent(None)
+        widget.deleteLater()
+        if not self._pending_attachments:
+            self.pending_strip.setVisible(False)
+
+    def _consume_pending_attachments(self) -> list[Path]:
+        """取出当前待发送列表并清空 (主人按发送时用)。"""
+        out = list(self._pending_attachments)
+        self._pending_attachments.clear()
+        # 清掉所有缩略图
+        for w in self._pending_thumb_widgets:
+            w.setParent(None)
+            w.deleteLater()
+        self._pending_thumb_widgets.clear()
+        self.pending_strip.setVisible(False)
+        return out
 
     def _on_media_action(self, kind: str) -> None:
         """多模态下拉 (图片 / 视频 / 音频 / 配置) 入口。

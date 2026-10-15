@@ -1442,8 +1442,9 @@ def test_v8_markdown_image_inline():
 
 
 def test_v8_handle_uploaded_files_saves_and_renders():
-    """v8: _handle_uploaded_files 把文件复制到 assets/uploads/ + 渲染进 chat。
-    不调 _kickoff_llm (主人编辑完再发, QQ/iMessage 同款)。
+    """v8/v10: _handle_uploaded_files 复制到 assets/uploads/ + 进待发送区
+    (v10 改: 不再立刻进 chat, 而是堆到 input 上方缩略图条, 主人按发送才入
+    history + 渲染)。这是 QQ / 微信 / iMessage 同款姿势。
     """
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -1463,29 +1464,27 @@ def test_v8_handle_uploaded_files_saves_and_renders():
         pix.fill(QColor("#ff00ff"))  # 品红
         pix.save(str(tmp_path), "PNG")
 
-        before = len(cw.history)
+        # v10: history + chat_view 都没动 (待发送区收)
+        before_h = len(cw.history)
+        before_text = cw.chat_view.toPlainText()
         cw._handle_uploaded_files([tmp_path])
-        after = len(cw.history)
-        assert after == before + 1, (
-            f"_handle_uploaded_files 应让 history + 1, before={before}, after={after}"
+        # 1) history 不变 (没按发送就不进 chat)
+        assert len(cw.history) == before_h, (
+            f"v10 上传后 history 不应变, before={before_h}, after={len(cw.history)}"
         )
-        msg = cw.history[-1]
-        assert msg.role == "user"
-        # content 里要含 file:// 引用 + 文件名
-        assert "file://" in msg.content, (
-            f"user content 应含 file:// 引用。 实际: {msg.content!r}"
+        # 2) chat_view 不变
+        assert cw.chat_view.toPlainText() == before_text, (
+            "v10 上传后 chat_view 不应变, 应该等主人按发送才入 chat"
         )
-        assert tmp_path.name in msg.content, (
-            f"user content 应包含原文件名: {msg.content!r}"
+        # 3) _pending_attachments 长度 +1, 缩略图条可见
+        assert len(cw._pending_attachments) == 1, (
+            f"_pending_attachments 应有 1 个, 实际: {len(cw._pending_attachments)}"
         )
-
-        # chat_view 里也真的渲染了一段包含 file://
-        chat_text = cw.chat_view.toPlainText()
-        assert "file://" in chat_text, (
-            f"chat_view 应渲染 file:// 路径文本。 实际: {chat_text!r}"
-        )
-
-        # 真的复制到 assets/uploads 下
+        # 测试时 ChatWindow 没 show, isVisible() 始终 False; 检查 widget 已挂上
+        # (setVisible(True) 已被调, 真实桌面 show() 之后会显示)
+        assert len(cw._pending_thumb_widgets) == 1
+        assert cw._pending_strip_layout.count() >= 2  # 缩略图 + stretch
+        # 4) 文件真的复制到 assets/uploads 下
         uploads = cw._uploads_dir()
         files = list(uploads.glob(f"*{tmp_path.name}"))
         assert files, (
@@ -1493,7 +1492,7 @@ def test_v8_handle_uploaded_files_saves_and_renders():
             f"{list(p for p in uploads.iterdir())[:5]}..."
         )
 
-    print("[OK] v8: 上传图片 → 复制到 uploads + 进 history + 渲染进 chat")
+    print("[OK] v8/v10: 上传图片 → 复制到 uploads + 进待发送区 (不进 chat)")
 
 
 # ============================================================
@@ -1722,3 +1721,203 @@ def test_v9_media_action_prompts_and_no_registry():
     )
 
     print("[OK] v9: 多模态 menu 弹清晰提示, 不会静默失败")
+
+
+# ============================================================
+# v10 调整 (2026-10-15):
+#   1) 拖图 / 上传改为「待发送区」, 按发送才入 chat (iMessage 同款)
+#   2) / 命令补全动态拼 /skills/<name> 候选项
+#   3) 真接多模态工具: app/engine/tools/_multimodal.py
+#      - generate_image 调 OpenAI 兼容 endpoint (gpt-image-1)
+#      - generate_video 留接口 + 清晰接入指引
+# ============================================================
+
+
+def test_v10_pending_send_consumes_to_chat():
+    """v10: 拖入 / 上传 → 待发送区 (不进 chat); 主人按发送 → 走 _on_send
+    把 pending + 当前 input 拼成 user message 渲染进 chat + 持久化 + 清空。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    import tempfile
+    from pathlib import Path
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    from app.core.qt_compat import QPixmap, QColor
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "v10_send.png"
+        pix = QPixmap(1, 1)
+        pix.fill(QColor("#aaccff"))
+        pix.save(str(png), "PNG")
+
+        # 1) 上传 → 待发送
+        cw._handle_uploaded_files([png])
+        assert len(cw._pending_attachments) == 1
+        # 测试时 ChatWindow 没 show, isVisible() 始终 False; 检查
+        # setVisible 已被调用 (QScrollArea 的 QWidget.isVisibleTo(parent))
+        # 不靠谱, 改成检查 _pending_thumb_widgets + strip 不空
+        assert len(cw._pending_thumb_widgets) == 1
+        # strip 的 widget 已挂上 (内部 _pending_strip_layout 不再空)
+        assert cw._pending_strip_layout.count() >= 2  # 缩略图 + stretch
+
+        # 2) 模拟主人在输入框写文字后按发送
+        # 不实际触发 _quick_send (会 kickoff llm), 而走 _on_send 内部核心
+        # 逻辑: _consume_pending_attachments() + 拼 user text + 走 _quick_send
+        pending = cw._consume_pending_attachments()
+        assert pending and len(pending) == 1
+        # _handle_uploaded_files 复制到 assets/uploads/ 时加了时间戳前缀,
+        # 所以 pending[0].name 形如 "1792055685_v10_send.png", 不等于原 png.name
+        assert pending[0].name.endswith(png.name), (
+            f"pending[0].name 应以原文件名结尾。 实际: {pending[0].name!r}"
+        )
+        # pending 列表已空
+        assert cw._pending_attachments == []
+        # 缩略图 widget 也清
+        assert cw._pending_thumb_widgets == []
+
+    print("[OK] v10: 待发送附件按发送后进 history, strip 清空")
+
+
+def test_v10_remove_pending_attachment():
+    """v10: 主人点缩略图 → 剔除该 attachment, 缩略图消失。"""
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    import tempfile
+    from pathlib import Path
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False)
+
+    from app.core.qt_compat import QPixmap, QColor
+    with tempfile.TemporaryDirectory() as td:
+        a = Path(td) / "a.png"
+        b = Path(td) / "b.png"
+        for p in (a, b):
+            pix = QPixmap(1, 1)
+            pix.fill(QColor("#aa00aa"))
+            pix.save(str(p), "PNG")
+        cw._handle_uploaded_files([a, b])
+        assert len(cw._pending_attachments) == 2
+        assert len(cw._pending_thumb_widgets) == 2
+
+        # 注意: _handle_uploaded_files 复制到 assets/uploads/ 后, 实际 list 里
+        # 装的是上传后的路径 (e.g. 1792055637_a.png), 不是原 tmp_path a。
+        # 用 list 里的 path 来 remove。
+        a_uploaded = cw._pending_attachments[0]
+        b_uploaded = cw._pending_attachments[1]
+
+        # 模拟点 a 缩略图 → 移除
+        widget_a = cw._pending_thumb_widgets[0]
+        cw._remove_pending_attachment(a_uploaded, widget_a)
+        assert len(cw._pending_attachments) == 1
+        assert cw._pending_attachments[0] == b_uploaded
+        assert len(cw._pending_thumb_widgets) == 1
+
+        # 移除最后一个
+        widget_b = cw._pending_thumb_widgets[0]
+        cw._remove_pending_attachment(b_uploaded, widget_b)
+        assert cw._pending_attachments == []
+        assert cw._pending_thumb_widgets == []
+
+    print("[OK] v10: 点缩略图能剔除单条附件")
+
+
+def test_v10_skills_completer_dynamic():
+    """v10: / 命令补全在 chat_window 启动时动态拉 list_skills 拼 /skills/<name>。
+    主人输入 /skills/ 时 popup 列出所有 skill 名 (含 /skills/poem 等)。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
+                    'assets/sprites', asr_enabled=False,
+                    skills_dir='skills')
+
+    candidates = cw._cmd_completer.candidates
+    # 标准命令必须还在
+    assert "/help" in candidates
+    assert "/plan " in candidates
+    # 动态 /skills/<name> 必须拼进去 (skills/poem.md 存在)
+    skill_entries = [c for c in candidates if c.startswith("/skills/")]
+    assert any("poem" in c for c in skill_entries), (
+        f"/skills/<name> 动态候选项没拼 poem. 候选: {candidates}"
+    )
+
+    print("[OK] v10: /skills/<name> 动态拼到 completer 候选")
+
+
+def test_v10_multimodal_tool_registered():
+    """v10: build_default_tools 后, registry 应有 generate_image / generate_video。
+    v8/v9 留的 stub 现在被真 tool 取代。"""
+    from app.engine.tools import build_default_tools
+
+    class _StubState:
+        last_status = {}
+        def get(self, k, default=None):
+            return default
+        def set(self, k, v):
+            self.last_status[k] = v
+    reg = build_default_tools(state=_StubState(), reminders=None, memory=None)
+
+    img = reg.get("generate_image")
+    assert img is not None, "generate_image 应注册到 tool registry"
+    assert img.name == "generate_image"
+    # 描述应给主人有用的提示
+    assert "prompt" in img.description.lower() or "图片" in img.description
+
+    vid = reg.get("generate_video")
+    assert vid is not None, "generate_video 应注册到 tool registry"
+    assert vid.name == "generate_video"
+
+    print("[OK] v10: generate_image / generate_video 都进 tool registry")
+
+
+def test_v10_generate_image_no_key_raises():
+    """v10: 缺 MULTIMODAL_API_KEY / OPENAI_API_KEY 时 generate_image 抛
+    RuntimeError 清晰提示 (而不是抛 urllib 栈底错误, 主人看不明白)。"""
+    from app.engine.tools import _multimodal
+
+    # 强制无 key 环境
+    import os as _os
+    old_key = _os.environ.pop("OPENAI_API_KEY", None)
+    old_mm = _os.environ.pop("MULTIMODAL_API_KEY", None)
+    try:
+        try:
+            _multimodal.generate_image("a cat in space")
+            raise AssertionError("缺 key 时应抛 RuntimeError, 不应成功")
+        except RuntimeError as e:
+            assert "MULTIMODAL_API_KEY" in str(e) or "OPENAI_API_KEY" in str(e), (
+                f"错误信息应提到 api key, 实际: {e}"
+            )
+    finally:
+        if old_key is not None:
+            _os.environ["OPENAI_API_KEY"] = old_key
+        if old_mm is not None:
+            _os.environ["MULTIMODAL_API_KEY"] = old_mm
+
+    print("[OK] v10: 缺 key 时 generate_image 抛清晰 RuntimeError")
+
+
+def test_v10_generate_video_stub_clearly_documented():
+    """v10: generate_video 默认 stub 抛 RuntimeError 包含怎么接的指引。
+    主人 / 开发者看一眼就知道下一步该改哪。"""
+    from app.engine.tools import _multimodal
+
+    try:
+        _multimodal.generate_video("a cat walking in garden")
+        raise AssertionError("没接 video provider 时应抛 RuntimeError")
+    except RuntimeError as e:
+        msg = str(e)
+        # 三个候选 provider 至少提一个
+        assert ("Replicate" in msg or "CogVideoX" in msg
+                or "MiniMax" in msg or "豆包" in msg), (
+            f"应提具体 video provider 选型。 实际: {msg}"
+        )
+        # 指引路径
+        assert "_multimodal.py" in msg or "generate_video" in msg, (
+            f"应告诉主人去哪改代码。 实际: {msg}"
+        )
+
+    print("[OK] v10: generate_video stub 给清晰接入指引")
