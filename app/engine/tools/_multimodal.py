@@ -116,7 +116,8 @@ def _endpoint_path(action: str) -> str:
     if domain == "minimax":
         return {
             "image": "image_generation",
-            "video": "video_generation",
+            # MiniMax H3 视频必须用 v2 端点（v1 报"该模型请使用 /v2"）
+            "video": "v2/video_generation",
             "audio": "t2a_v2",
         }.get(action, "image_generation")
     # OpenAI 兼容 (含主人想用其他 provider)
@@ -255,7 +256,16 @@ def _download_to_uploads(url_or_data: str, kind: str) -> str:
 
 
 def _build_endpoint_url(action: str) -> str:
-    base = _cfg("base_url").rstrip("/")
+    # video 端点用 video_base_url（MiniMax v2 不带 /v1），其他走 base_url
+    if action == "video":
+        video_base = _cfg("video_base_url")
+        if video_base:
+            base = video_base.rstrip("/")
+        else:
+            # fallback：base_url 自动剥 /v1（image/chat 走 OpenAI /v1 兼容）
+            base = _cfg("base_url").rstrip("/").removesuffix("/v1")
+    else:
+        base = _cfg("base_url").rstrip("/")
     return f"{base}/{_endpoint_path(action)}"
 
 
@@ -341,6 +351,8 @@ def generate_video(prompt: str, **kwargs) -> str:
     _check_or_raise("video")
     model = _cfg("video_model") or "MiniMax-H3"
     is_minimax = "minimax" in _cfg("base_url").lower()
+    # MiniMax v2 视频端点 base URL 不带 /v1（image / chat 走 /v1）
+    video_base = _cfg("video_base_url") or _cfg("base_url").rstrip("/").removesuffix("/v1")
 
     if is_minimax:
         # MiniMax v2 schema: content[] 结构 (text prompt 必须放进去)
@@ -352,10 +364,12 @@ def generate_video(prompt: str, **kwargs) -> str:
             "content": [{"type": "text", "text": prompt.strip()}],
             "ratio": ratio,
             "duration": duration,
+            # MiniMax H3 视频必填 resolution —— 试 480p / 768p, 不支持 720p/1080p
+            "resolution": kwargs.get("resolution") or _cfg("video_resolution", "480p"),
         }
         timeout_s = int(kwargs.get("timeout_s") or _cfg("video_timeout_s", 90))
-        log.info("multimodal.generate_video model=%s duration=%s prompt=%s",
-                 model, duration, prompt[:60])
+        log.info("multimodal.generate_video model=%s duration=%s resolution=%s prompt=%s",
+                 model, duration, body["resolution"], prompt[:60])
         resp = _post_json(_build_endpoint_url("video"), body, _build_headers())
         task_id = resp.get("task_id") or ""
         if not task_id:
@@ -393,7 +407,12 @@ def _poll_video_task(task_id: str, timeout_s: int = 90) -> str:
     v13 设计: 默认 90s 超时, 每 3s 轮询一次。MiniMax H3 6s 视频平均 30~60s 完成。
     """
     import urllib.parse
-    base = _cfg("base_url").rstrip("/")
+    # 同 _build_endpoint_url("video") 逻辑：MiniMax v2 不带 /v1
+    video_base = _cfg("video_base_url")
+    if video_base:
+        base = video_base.rstrip("/")
+    else:
+        base = _cfg("base_url").rstrip("/").removesuffix("/v1")
     # MiniMax v2 query path
     query_path = _CONFIG.get("video_query_path", "v2/query/video_generation")
     url = f"{base}/{query_path}/{urllib.parse.quote(task_id, safe='')}"
@@ -450,10 +469,14 @@ def generate_audio(prompt: str, **kwargs) -> str:
     is_minimax = "minimax" in _cfg("base_url").lower()
 
     if is_minimax and "t2a_v2" in _endpoint_path("audio"):
-        # TTS 同步: model + text + voice_id 等
+        # TTS 同步: model + text + voice_setting.voice_id (MiniMax t2a_v2 嵌套 schema)
         body = {
             "model": model,
             "text": prompt.strip(),
+            "voice_setting": {
+                "voice_id": kwargs.get("voice_id")
+                or _cfg("audio_voice_id", "female-yujie"),
+            },
         }
     elif is_minimax and "music" in _endpoint_path("audio"):
         # music 异步 (跟 video 类似, 复用 _poll_video_task)
@@ -479,7 +502,20 @@ def generate_audio(prompt: str, **kwargs) -> str:
             url = _poll_video_task(task_id, timeout_s)
             return _download_to_uploads(url, "audio")
         # 兜底继续尝试同步提取
-    url = _extract_first_url(resp.get("data"), "audio")
+    # MiniMax t2a_v2 同步返回: data.audio 是 hex 字符串（不是 URL）
+    data = resp.get("data") or {}
+    if isinstance(data, dict):
+        # audio 是 hex 字符串（之前 _extract_first_url 不认）—— 落盘为 mp3
+        hex_audio = data.get("audio")
+        if isinstance(hex_audio, str) and hex_audio:
+            import binascii as _binascii
+            try:
+                fn = f"multimodal_audio_{int(time.time())}.mp3"
+                (_uploads_dir() / fn).write_bytes(_binascii.unhexlify(hex_audio))
+                return "file:///" + str(_uploads_dir() / fn).replace("\\", "/").lstrip("/")
+            except Exception as e:
+                log.warning("解析 t2a_v2 hex 音频失败：%s", e)
+    url = _extract_first_url(data, "audio")
     if not url:
         url = resp.get("url") or resp.get("audio_url") or ""
     if not url:
