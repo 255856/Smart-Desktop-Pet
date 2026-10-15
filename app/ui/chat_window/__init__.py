@@ -191,6 +191,15 @@ class ChatWindow(QWidget):
         self.setObjectName("chat_root")
         self.setStyleSheet(ui_style.CHAT_QSS)
 
+        # 2026-10-15:修复「Bug 3 窗口重叠 / 错位显示」——
+        # 默认让 chat 出现在「桌宠精灵的右侧」(主人大概率会在那里点),如果没有
+        # 桌宠位置就居中。同时用 QSettings 记忆上次关闭时的位置,下次打开就
+        # 恢复到那里(不会每次跳到屏幕正中)。超出当前屏幕也裁回。
+        self._restore_or_position_window(parent)
+
+        # 移动事件 → 实时记到 QSettings,下次打开恢复
+        self._save_pos_on_close = True
+
         self._avatar_path = self._pick_avatar()
         self.avatar_label: Optional[QLabel] = None
         # 富文本圆形头像（QTextBrowser 对 document 资源在 clear() 后会失效，
@@ -1774,6 +1783,66 @@ class ChatWindow(QWidget):
     _BUBBLE_STYLE_BOT = (
         "background:#ffffff;border:1px solid #e9e6f7;padding:9px 13px;"
         "color:#2c2c38;font-size:10pt;line-height:1.55;")
+
+    # -------------------- 窗口位置持久化(2026-10-15 修复 Bug 3) --------------------
+
+    def _restore_or_position_window(self, parent):
+        """默认位置策略:
+        1. 先看 QSettings(跨 session 记忆)有没有保存位置,有就恢复
+        2. 没保存过:如果桌宠位置可知,摆在桌宠右侧
+        3. 都没有:居中在主屏
+        4. 任何方案都得裁回当前屏幕内(双屏拔了一根 / 改了分辨率也不会跑丢)
+        """
+        from app.core.qt_compat import QSettings, QGuiApplication
+        settings = QSettings("MiniMax", "DesktopPet")
+        saved = settings.value("chat_window/pos", None)
+        if saved and isinstance(saved, str):
+            try:
+                x_str, y_str = saved.split(",")
+                x, y = int(x_str), int(y_str)
+                if self._on_any_screen(x, y):
+                    self.move(x, y)
+                    return
+            except Exception:
+                pass
+        anchor_x = None
+        if parent is not None:
+            try:
+                geo = parent.frameGeometry()
+                anchor_x = geo.x() + geo.width() + 12
+                anchor_y = geo.y()
+            except Exception:
+                anchor_x = None
+        screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        if anchor_x is not None and avail is not None:
+            x = anchor_x
+            y = max(avail.y(), anchor_y)
+            if x + self.width() > avail.right():
+                x = max(avail.x(), anchor_x - self.width() - 240)
+            self.move(x, y)
+            return
+        if avail is not None:
+            x = avail.x() + (avail.width() - self.width()) // 2
+            y = avail.y() + (avail.height() - self.height()) // 3
+            self.move(x, y)
+
+    def _on_any_screen(self, x, y):
+        from app.core.qt_compat import QGuiApplication
+        for screen in QGuiApplication.screens():
+            geo = screen.availableGeometry()
+            if geo.contains(x, y):
+                return True
+        return False
+
+    def moveEvent(self, ev):
+        try:
+            from app.core.qt_compat import QSettings
+            QSettings("MiniMax", "DesktopPet").setValue(
+                "chat_window/pos", f"{self.x()},{self.y()}")
+        except Exception:
+            pass
+        super().moveEvent(ev)
 
     def _tool_steps_html(self, tools: list) -> str:
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。

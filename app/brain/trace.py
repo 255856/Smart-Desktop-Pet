@@ -161,7 +161,25 @@ class TraceRecorder:
             rows = c.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?",
                 (limit,)).fetchall()
-            return [_row_to_run(r) for r in rows]
+            out: list[dict] = []
+            for r in rows:
+                run = _row_to_run(r)
+                # 2026-10-15:list_runs 也带 events —— 否则 dashboard 选 run 时
+                # 要多一次 /api/runs/{rid} 请求,且如果 detail 加载失败就会
+                # 误显示「这是一条普通对话,没有调用工具」。直接带 events 让
+                # UI 端一次渲染完整。
+                ev_rows = c.execute(
+                    "SELECT * FROM events WHERE run_id=? ORDER BY seq",
+                    (run["id"],),
+                ).fetchall()
+                run["events"] = [
+                    {"seq": e["seq"], "kind": e["kind"],
+                     "payload": json.loads(e["payload_json"] or "{}"),
+                     "ts": e["ts"]}
+                    for e in ev_rows
+                ]
+                out.append(run)
+            return out
 
     def get_run(self, rid: str) -> Optional[dict]:
         with self._conn() as c:

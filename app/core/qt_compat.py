@@ -5,7 +5,7 @@ try:
     from PyQt5 import QtCore
     from PyQt5.QtCore import (
         pyqtSignal as Signal, pyqtSlot as Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt,
-        QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray,
+        QEventLoop, QStringListModel, QEvent, QUrl, QBuffer, QByteArray, QSettings,
     )
     from PyQt5.QtCore import Qt as _Qt
     if not hasattr(Qt, "AlignmentFlag"):
@@ -42,7 +42,7 @@ try:
         QDropEvent, QFont, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence,
         QMouseEvent, QPainter, QPainterPath, QLinearGradient, QPaintEvent, QPixmap,
         QRegion, QTextCursor, QTextDocument, QTransform,
-        QPen, QBrush, QRadialGradient,
+        QPen, QBrush, QRadialGradient, QWheelEvent,
     )
     from PyQt5.QtWidgets import QAction
     from PyQt5.QtWidgets import (
@@ -61,13 +61,13 @@ try:
 except ImportError:
     # PySide6 fallback（开发环境备用）
     from PySide6 import QtCore
-    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray
+    from PySide6.QtCore import Signal, Slot, QObject, QThread, QTimer, QSize, QPoint, QRect, Qt, QEventLoop, QEvent, QUrl, QBuffer, QByteArray, QSettings
     from PySide6.QtGui import (
         QAction, QColor, QCursor, QDragEnterEvent, QDragLeaveEvent,
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
         QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QLinearGradient,
         QPaintEvent, QPixmap, QRegion, QTextCursor, QTextDocument, QTransform,
-        QPen, QBrush, QRadialGradient,
+        QPen, QBrush, QRadialGradient, QWheelEvent,
     )
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
@@ -137,11 +137,11 @@ def is_qobject_alive(obj) -> bool:
 
 __all__ = [
     "BACKEND", "Signal", "Slot", "QObject", "QThread", "QTimer", "QSize", "QPoint", "QRect", "Qt",
-    "QEventLoop", "QEvent", "QUrl", "QBuffer", "QByteArray",
+    "QEventLoop", "QEvent", "QUrl", "QBuffer", "QByteArray", "QSettings",
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
     "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",
-    "QPen", "QBrush", "QRadialGradient",
+    "QPen", "QBrush", "QRadialGradient", "QWheelEvent",
     "QApplication", "QCheckBox", "QComboBox", "QCompleter", "QDoubleSpinBox", "QFormLayout",
     "QFrame", "QGridLayout", "QGroupBox",
     "QHBoxLayout", "QLabel", "QLineEdit", "QDialog", "QDialogButtonBox", "QFileDialog",
