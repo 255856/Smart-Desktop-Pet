@@ -2216,8 +2216,9 @@ def test_v12_handle_command_supports_image_video_audio():
 
 
 def test_v12_multimodal_setup_config_injected_from_cfg_path():
-    """v12: ChatWindow 构造时, 从 cfg_path 读 multimodal 段注入 _multimodal._CONFIG。
-    直接调 setup_config 后再生成, tool 应能用注入的 base_url。
+    """v12 + v15: ChatWindow 构造时, 从 cfg_path 读整个 yaml 注入 _multimodal._CONFIG
+    (v15 改: setup_config 接受整个 cfg, 字段在 cfg.multimodal 段)。
+    验证 _multimodal._CONFIG["multimodal"] 段含 base_url / api_key。
     """
     import os
     import tempfile
@@ -2226,38 +2227,40 @@ def test_v12_multimodal_setup_config_injected_from_cfg_path():
     from app.core.config import LLMConfig, CharacterConfig
     from app.engine.tools import _multimodal
 
-    # 写一个临时 cfg_path, 含 multimodal 段
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "cfg.yaml"
+        # v15 简化 config: 主人 plan 走 llm 段共享 base_url, multimodal 段只配 model
         cfg_path.write_text(
+            "llm:\n"
+            "  base_url: https://api.minimaxi.com/v1\n"
+            "  api_key: sk-llm-shared\n"
+            "  model: MiniMax-M3\n"
             "multimodal:\n"
             "  enabled: true\n"
-            "  base_url: https://api.minimaxi.com/v1\n"
-            "  api_key: sk-v12-test\n"
-            "  image_model: MiniMax-image-01\n"
-            "  image_endpoint_path: images/generations\n",
+            "  image_model: image-01\n",
             encoding="utf-8",
         )
-        # 清掉可能的 env 干扰
         old = os.environ.pop("MULTIMODAL_API_KEY", None)
         old2 = os.environ.pop("MULTIMODAL_BASE_URL", None)
         try:
             cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                             'assets/sprites', asr_enabled=False,
                             cfg_path=str(cfg_path))
-            # _multimodal._CONFIG 已被注入 multimodal 段
-            assert _multimodal._CONFIG.get("base_url") == "https://api.minimaxi.com/v1", (
-                f"_multimodal._CONFIG 应含 cfg multimodal 段 base_url。 实际: {_multimodal._CONFIG}"
+            # v15: _multimodal._CONFIG 接收整个 yaml, 字段在 multimodal 段
+            mm_cfg = _multimodal._CONFIG.get("multimodal") or {}
+            assert mm_cfg.get("image_model") == "image-01", (
+                f"_CONFIG.multimodal 应含 image_model。 实际: {mm_cfg}"
             )
-            assert _multimodal._CONFIG.get("api_key") == "sk-v12-test"
-            assert _multimodal._CONFIG.get("image_model") == "MiniMax-image-01"
+            # 验证 _cfg 能从 llm 段共享 base_url / api_key (v15 主线)
+            assert _multimodal._cfg("base_url") == "https://api.minimaxi.com/v1"
+            assert _multimodal._cfg("api_key") == "sk-llm-shared"
         finally:
             if old is not None:
                 os.environ["MULTIMODAL_API_KEY"] = old
             if old2 is not None:
                 os.environ["MULTIMODAL_BASE_URL"] = old2
 
-    print("[OK] v12: ChatWindow 构造时 cfg_path multimodal 段注入 _multimodal._CONFIG")
+    print("[OK] v12+v15: ChatWindow 注入整个 cfg, multimodal 段共享 llm base_url")
 
 
 def test_v12_image_command_missing_config_raises():
@@ -2308,40 +2311,61 @@ def test_v12_image_command_missing_config_raises():
 
 
 def test_v13_endpoint_paths_default_to_minimax():
-    """v13: multimodal 默认 endpoint 路径按 MiniMax 官网实际值, 不是 OpenAI 兼容的
-    /images/generations (MiniMax 上 404)。"""
+    """v13 + v15: base_url 配 minimaxi.com / minimax.io / minimax.cn 时,
+    endpoint 走 MiniMax 官方 (image_generation / video_generation / t2a_v2),
+    不是 OpenAI 兼容的 /images/generations (MiniMax 上 404)。
+    """
     from app.engine.tools import _multimodal
-    _multimodal.setup_config({})  # 没 cfg, 走默认
+    # v15: 传 base_url 模拟主人 plan (含 minimax 域名)
+    _multimodal.setup_config({
+        "llm": {"base_url": "https://api.minimaxi.com/v1"},
+    })
     assert _multimodal._endpoint_path("image") == "image_generation", (
-        f"image 默认 endpoint 应是 MiniMax image_generation, 实际: "
+        f"minimax 域 image endpoint 应是 image_generation, 实际: "
         f"{_multimodal._endpoint_path('image')}"
     )
     assert _multimodal._endpoint_path("video") == "video_generation", (
-        f"video 默认 endpoint 应是 MiniMax video_generation, 实际: "
+        f"minimax 域 video endpoint 应是 video_generation, 实际: "
         f"{_multimodal._endpoint_path('video')}"
     )
     assert _multimodal._endpoint_path("audio") == "t2a_v2", (
-        f"audio 默认 endpoint 应是 MiniMax t2a_v2, 实际: "
+        f"minimax 域 audio endpoint 应是 t2a_v2, 实际: "
         f"{_multimodal._endpoint_path('audio')}"
     )
+    _multimodal.setup_config({})
 
-    print("[OK] v13: multimodal 默认 endpoint 走 MiniMax 实际路径")
+    # v15: 非 minimax 域 (如 openai) 走 OpenAI 兼容 endpoint
+    _multimodal.setup_config({
+        "llm": {"base_url": "https://api.openai.com/v1"},
+    })
+    assert _multimodal._endpoint_path("image") == "images/generations", (
+        f"openai 域 image endpoint 应是 OpenAI 兼容 images/generations, 实际: "
+        f"{_multimodal._endpoint_path('image')}"
+    )
+    _multimodal.setup_config({})
+
+    print("[OK] v13+v15: endpoint 路径按 base_url 域名自动判断")
 
 
 def test_v13_endpoint_path_overridden_by_cfg():
-    """v13: config.yaml multimodal.image_endpoint_path 等可覆盖默认。"""
+    """v15 改: endpoint_path 字段已被主人反馈「复杂化」删掉, 改为按 base_url
+    域名自动判断。 测试 base_url 域名切换 (含 minimax 各种后缀 + openai)。"""
     from app.engine.tools import _multimodal
-    _multimodal.setup_config({
-        "image_endpoint_path": "images/generations",
-        "video_endpoint_path": "videos/generate",
-        "audio_endpoint_path": "audio/speech",
-    })
-    assert _multimodal._endpoint_path("image") == "images/generations"
-    assert _multimodal._endpoint_path("video") == "videos/generate"
-    assert _multimodal._endpoint_path("audio") == "audio/speech"
-    _multimodal.setup_config({})  # 清掉避免污染
+    for base_url, exp in [
+        ("https://api.minimaxi.com/v1", "minimax"),
+        ("https://api.minimaxi.cn/v1", "minimax"),
+        ("https://api.minimax.io/v1", "minimax"),
+        ("https://api.minimaxi.chat/v1", "minimax"),
+        ("https://api.openai.com/v1", "openai"),
+    ]:
+        _multimodal.setup_config({"llm": {"base_url": base_url}})
+        domain = _multimodal._base_domain()
+        assert domain == exp, (
+            f"base_url={base_url} 应判到 {exp} 域, 实际: {domain}"
+        )
+    _multimodal.setup_config({})
 
-    print("[OK] v13: cfg multimodal.*_endpoint_path 覆盖默认")
+    print("[OK] v15: endpoint 路径按 base_url 域名自动判断 (移除 endpoint_path 字段)")
 
 
 def test_v13_extract_first_url_minimax_official_schema():
@@ -2627,3 +2651,123 @@ def test_v14_inline_local_images_resolves_assets_relative_path():
             target.unlink(missing_ok=True)
 
     print("[OK] v14: 项目内相对路径 assets/uploads/xxx.png 解析 + inline")
+
+
+
+# ============================================================
+# v15 调整 (2026-10-15):
+#   1) config.yaml multimodal 段大幅简化 (主人反馈「config.yaml 复杂化」):
+#      跟 llm 段共享 base_url / api_key, 只配 3 个 model, 移除 endpoint_path 等
+#   2) _multimodal.setup_config 接受整个 yaml cfg, 字段在 cfg.multimodal 段
+#      兼容: _cfg 顺序 顶层 → multimodal → llm → env (老测试直接 setup_config({...}) 仍过)
+#   3) _endpoint_path 按 base_url 域名自动判断 (minimax / openai / other)
+#   4) 默认 model 改 MiniMax Plan 实际可用值 (image-01 / MiniMax-H3 / speech-2.8-hd)
+# ============================================================
+
+
+def test_v15_cfg_multimodal_section_simplified():
+    """v15: config.yaml 的 multimodal 段被简化, 只剩 enabled + 3 个 model 字段,
+    不再含 base_url / api_key / image_size / duration_seconds / endpoint_path。
+    """
+    import yaml
+    from pathlib import Path
+    cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8-sig"))
+    mm = cfg.get("multimodal") or {}
+    # 必含字段
+    assert mm.get("enabled") is True
+    assert "image_model" in mm
+    assert "video_model" in mm
+    assert "audio_model" in mm
+    # 不应再有 (主人反馈「复杂化」删了)
+    assert "base_url" not in mm, (
+        "v15 multimodal.base_url 应删除, 跟 llm 共享"
+    )
+    assert "api_key" not in mm, (
+        "v15 multimodal.api_key 应删除, 跟 llm 共享"
+    )
+    assert "image_endpoint_path" not in mm, (
+        "v15 不再让用户配 endpoint_path, 按 base_url 域名自动判断"
+    )
+    assert "image_size" not in mm, (
+        "v15 移除冗余字段 (默认 1024x1024)"
+    )
+    assert "duration_seconds" not in mm, (
+        "v15 移除冗余字段 (默认 4s / 6s 按 endpoint)"
+    )
+    # 验证跟 llm 段共享 base_url / api_key
+    assert cfg.get("llm", {}).get("base_url") == cfg.get("llm", {}).get("base_url")
+
+    print("[OK] v15: config.yaml multimodal 段简化, 跟 llm 共享 base_url/api_key")
+
+
+def test_v15_cfg_multimodal_shares_llm_base_url_via_cfg():
+    """v15: _multimodal.setup_config(整个 cfg) 后, _cfg('base_url') 优先从
+    llm 段读 (主人 plan 是统一 key), 跟 multimodal 段无关。"""
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({
+        "llm": {
+            "base_url": "https://api.minimaxi.cn/v1",
+            "api_key": "sk-plan-key",
+        },
+        "multimodal": {
+            "enabled": True,
+            "image_model": "image-01",
+        },
+    })
+    assert _multimodal._cfg("base_url") == "https://api.minimaxi.cn/v1"
+    assert _multimodal._cfg("api_key") == "sk-plan-key"
+    assert _multimodal._cfg("image_model") == "image-01"
+    _multimodal.setup_config({})
+
+    print("[OK] v15: setup_config(整个 cfg) 让 multimodal 段共享 llm base_url")
+
+
+def test_v15_endpoint_path_auto_judges_by_domain():
+    """v15: endpoint 路径按 base_url 域名自动判断, 不再让用户配 endpoint_path。"""
+    from app.engine.tools import _multimodal
+    cases = [
+        # (base_url, image, video, audio)
+        ("https://api.minimaxi.com/v1",
+         "image_generation", "video_generation", "t2a_v2"),
+        ("https://api.minimaxi.cn/v1",
+         "image_generation", "video_generation", "t2a_v2"),
+        ("https://api.minimaxi.chat/v1",
+         "image_generation", "video_generation", "t2a_v2"),
+        # openai / 其他走 OpenAI 兼容
+        ("https://api.openai.com/v1",
+         "images/generations", "videos/generations", "audio/speech"),
+    ]
+    for base_url, exp_img, exp_vid, exp_aud in cases:
+        _multimodal.setup_config({"llm": {"base_url": base_url}})
+        assert _multimodal._endpoint_path("image") == exp_img, (
+            f"{base_url}: image 期望 {exp_img}, 实际 {_multimodal._endpoint_path('image')}"
+        )
+        assert _multimodal._endpoint_path("video") == exp_vid, (
+            f"{base_url}: video 期望 {exp_vid}, 实际 {_multimodal._endpoint_path('video')}"
+        )
+        assert _multimodal._endpoint_path("audio") == exp_aud, (
+            f"{base_url}: audio 期望 {exp_aud}, 实际 {_multimodal._endpoint_path('audio')}"
+        )
+    _multimodal.setup_config({})
+
+    print("[OK] v15: endpoint 路径按 base_url 域名自动判断")
+
+
+def test_v15_multimodal_segment_optional():
+    """v15: multimodal 段可以不写 (空), _multimodal 仍能从 llm 段共享
+    base_url / api_key, 不抛错。"""
+    from app.engine.tools import _multimodal
+    _multimodal.setup_config({
+        "llm": {
+            "base_url": "https://api.minimaxi.com/v1",
+            "api_key": "sk-llm-only",
+        },
+    })
+    # 没 multimodal 段, 仍能读 base_url / api_key
+    assert _multimodal._cfg("base_url") == "https://api.minimaxi.com/v1"
+    assert _multimodal._cfg("api_key") == "sk-llm-only"
+    # 但 _check_or_raise 还是要求 base_url + api_key 都有 (从 llm 段读 OK)
+    _multimodal._check_or_raise("image")  # 不抛
+    _multimodal.setup_config({})
+
+    print("[OK] v15: multimodal 段可选, 不写时跟 llm 共享 base_url/api_key")

@@ -36,22 +36,47 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-# module-level config, 由 setup_config() 注入 (chat_window 在 build tools
-# 之前调一次)。
+# module-level config, 由 setup_config() 注入 (chat_window 构造时调一次)
+# v15: 整个 config dict 注入 (含 llm / multimodal 段), 默认从 llm 段读
+# base_url / api_key 跟 chat 共享 — 主人 plan 是统一 key, 不用再配一份。
 _CONFIG: dict = {}
 
 
 def setup_config(cfg: dict) -> None:
-    """注入 multimodal 配置, 之后 tool fn 都从这里读。"""
+    """注入配置。cfg 是整个 config.yaml dict (含 llm / multimodal / ... 段),
+    之后 multimodal tool 优先从 cfg.multimodal 读, fallback 到 cfg.llm。
+
+    v15 简化 (主人实测 2026-10-15: 「config.yaml 里的配置好像在复杂化」):
+      - base_url / api_key 默认从 llm 段读 (主人 plan 是统一 key)
+      - endpoint_path 不再让用户配, 按 base_url 域名自动判断
+      - 3 个 model 字段 (image / video / audio) 是 multimodal 段唯一必填项
+    """
     global _CONFIG
     _CONFIG = dict(cfg or {})
 
 
 def _cfg(key: str, default: str = "") -> str:
-    """读 config 字段, 跟环境变量回退 (env 优先是 PyQt5 风格, 这里 cfg 优先)。"""
+    """读 config 字段 (v15 兼容顺序):
+      1) 顶层字段 (旧 v12-v14 测试 / 直接 setup_config({"base_url": ...}))
+      2) multimodal 段字段 (新 v15 习惯)
+      3) llm 段字段 (base_url / api_key 跟 chat 共享)
+      4) env 变量 (MULTIMODAL_BASE_URL 等)
+    """
+    # 1) 顶层 (兼容老测试)
     v = _CONFIG.get(key)
     if v:
         return str(v).strip()
+    # 2) multimodal 段
+    mm = _CONFIG.get("multimodal") or {}
+    v = mm.get(key) if isinstance(mm, dict) else None
+    if v:
+        return str(v).strip()
+    # 3) llm 段
+    llm = _CONFIG.get("llm") or {}
+    v = llm.get(key) if isinstance(llm, dict) else None
+    if v:
+        return str(v).strip()
+    # 4) env 变量
     env = os.environ.get("MULTIMODAL_" + key.upper())
     if env:
         return env.strip()
@@ -59,37 +84,47 @@ def _cfg(key: str, default: str = "") -> str:
 
 
 def _is_enabled() -> bool:
-    enabled = _CONFIG.get("enabled", True)
+    enabled = _CONFIG.get("multimodal", {}).get("enabled", True)
     if isinstance(enabled, str):
         return enabled.strip().lower() not in ("false", "0", "no", "")
     return bool(enabled)
 
 
+def _base_domain() -> str:
+    """base_url 的 hostname 部分, 用来判断走 MiniMax 官方 schema 还是 OpenAI 兼容。"""
+    base = _cfg("base_url", "").lower()
+    if "minimax" in base:
+        return "minimax"
+    if "openai" in base:
+        return "openai"
+    return "other"
+
+
 def _endpoint_path(action: str) -> str:
-    """不同 action 用不同 endpoint 路径 (主人截图 MiniMax 官网 image/video/
-    audio endpoint 路径各不相同, OpenAI 兼容的 /images/generations 在 MiniMax
-    上 404)。
+    """v15 简化: 按 base_url 域名自动判断 endpoint 路径, 不再让用户配
+    endpoint_path 字段 (主人反馈「config.yaml 里的配置好像在复杂化」)。
 
-    默认按 MiniMax 官网 2026-10-15 实测:
-        image = image_generation  (官方文档 api.minimax.io/v1/image_generation)
-        video = video_generation  (官方文档 api.minimax.io/v2/video_generation,
-                                   异步 task_id, 见 generate_video 处理)
-        audio = t2a_v2            (官方文档 api.minimax.io/v1/t2a_v2, TTS 同步)
-
-    主人也可以覆盖: config.yaml multimodal.image_endpoint_path / video_endpoint_path /
-    audio_endpoint_path, 跟其他多模态 provider (OpenAI / 智谱 / 阿里) 切。
+    规则:
+      minimax (含 minimax.cn / minimax.io / minimaxi.com / minimaxi.chat)
+        image = image_generation
+        video = video_generation  (异步 task_id, 见 generate_video)
+        audio = t2a_v2
+      openai / 其他
+        全部走 OpenAI 兼容的 /images/generations (image / video / audio 同路径)
     """
-    cfg_path = _CONFIG.get(f"{action}_endpoint_path")
-    if cfg_path:
-        return str(cfg_path).lstrip("/")
-    return _DEFAULT_ENDPOINTS.get(action, "image_generation")
-
-
-_DEFAULT_ENDPOINTS: dict = {
-    "image": "image_generation",
-    "video": "video_generation",
-    "audio": "t2a_v2",
-}
+    domain = _base_domain()
+    if domain == "minimax":
+        return {
+            "image": "image_generation",
+            "video": "video_generation",
+            "audio": "t2a_v2",
+        }.get(action, "image_generation")
+    # OpenAI 兼容 (含主人想用其他 provider)
+    return {
+        "image": "images/generations",
+        "video": "videos/generations",
+        "audio": "audio/speech",
+    }.get(action, "images/generations")
 
 
 def _post_json(url: str, body: dict, headers: dict, timeout: int = 120) -> dict:

@@ -231,21 +231,22 @@ class ChatWindow(QWidget):
         # 拼到 system_prompt 末尾)。v12 起主线改 per-message (msg.skill),
         # 这字段保留作为兜底 + 老测试兼容。
         self._active_skill: Optional[str] = None
-        # v12: 从 cfg_path 读 multimodal 段, 注入到 _multimodal.setup_config,
-        # 之后 generate_image / video / audio tool 直接读 cfg。v11 的
-        # multimodal_router / _active_api 段已删 (单一组 config 不再需要路由)。
-        # cfg 读失败 (yaml 没装 / 路径不对 / 没 multimodal 段) 都视作空 dict,
-        # 后续 _check_or_raise 会告诉主人怎么填。
+        # v15: 从 cfg_path 读整个 yaml, 注入到 _multimodal.setup_config(整个 cfg)。
+        # 简化设计: multimodal 段可选, base_url / api_key 默认从 llm 段共享
+        # (主人 plan 是统一 key, 不用再配一份)。v12-v14 旧的「只传 multimodal 段」
+        # 还在 _multimodal._cfg 里 fallback 处理, 向后兼容。
+        # cfg 读失败 (yaml 没装 / 路径不对) 视作空 dict。
         try:
             import yaml as _yaml
             with open(cfg_path, encoding="utf-8") as _f:
                 _full_cfg = _yaml.safe_load(_f) or {}
-            _mm_cfg = (_full_cfg.get("multimodal") or {}) if isinstance(_full_cfg, dict) else {}
+            if not isinstance(_full_cfg, dict):
+                _full_cfg = {}
         except Exception:  # noqa: BLE001
-            _mm_cfg = {}
+            _full_cfg = {}
         try:
             from app.engine.tools import _multimodal as _mm
-            _mm.setup_config(_mm_cfg)
+            _mm.setup_config(_full_cfg)
         except Exception:  # noqa: BLE001
             log.debug("multimodal.setup_config 注入失败 (非致命)", exc_info=True)
         self.sprite_dir = Path(sprite_dir)
