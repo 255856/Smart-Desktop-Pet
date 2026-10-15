@@ -3006,3 +3006,127 @@ def test_v17_understand_image_missing_config_returns_clear_error():
             _multimodal.setup_config({})
 
     print("[OK] v17: understand_image 缺 cfg 给清晰错")
+
+
+def test_v19_msg_html_empty_content_shows_placeholder():
+    """v19: assistant / user 空 content + 无 tools 时, _msg_html 返灰色
+    占位提示, 不渲染成空白文件图标。
+
+    主人反馈 2026-10-15 "每次打开后信息就没了, 图片之类的":
+    v12 之前 1004 鉴权失败批量产生 content=empty 的 assistant 消息,
+    chat_store 一直保留, 重启后 _msg_html 渲染成「label + 空 body」
+    = 视觉上像「空白文件图标」, 主人以为信息丢了。
+
+    v19 给空 content + 无 tools 消息渲染一个灰色提示, 让主人知道哪条
+    是空的, 主人按"清空"一键删掉。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+    from app.core.config import LLMConfig, CharacterConfig
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name="jingyu"),
+                    "assets/sprites", asr_enabled=False)
+
+    # v19 验证 1: assistant 空 content + 无 tools → 占位提示
+    msg_empty = Message(role="assistant", content="")
+    html = cw._msg_html(msg_empty)
+    assert "empty-msg-hint" in html, (
+        f"v19 应渲染 empty-msg-hint 占位 class. 实际: {html[:300]}"
+    )
+    assert "内容为空" in html, (
+        f"v19 应展示「内容为空」文字提示. 实际: {html[:300]}"
+    )
+    # 不能渲染成空白 (空 body 不应出现)
+    assert 'msg-body"></div>' not in html, (
+        f"v19 空 content 不应渲染空 body. 实际: {html[:300]}"
+    )
+
+    # v19 验证 2: assistant 纯空格 content 也算空
+    msg_spaces = Message(role="assistant", content="   \n  ")
+    html2 = cw._msg_html(msg_spaces)
+    assert "empty-msg-hint" in html2, (
+        f"v19 纯空格 content 也走占位. 实际: {html2[:300]}"
+    )
+
+    # v19 验证 3: 有 tools 的空 content 不走占位 (工具有信息要保留)
+    msg_with_tools = Message(role="assistant", content="", tools=[
+        ("tool_xyz", {"arg": 1}, "return_text", 100),
+    ])
+    html3 = cw._msg_html(msg_with_tools)
+    assert "empty-msg-hint" not in html3, (
+        f"v19 有 tools 不走占位 (工具步骤要渲染). 实际: {html3[:300]}"
+    )
+
+    # v19 验证 4: 正常 content 走老路径, 不出占位
+    msg_normal = Message(role="assistant", content="喵～主人好")
+    html4 = cw._msg_html(msg_normal)
+    assert "empty-msg-hint" not in html4, (
+        f"v19 正常 content 不应出占位. 实际: {html4[:300]}"
+    )
+
+    # v19 验证 5: user 空 content 也走占位 (防御性, 实际 user 不会空)
+    msg_user_empty = Message(role="user", content="")
+    html5 = cw._msg_html(msg_user_empty)
+    assert "empty-msg-hint" in html5, (
+        f"v19 user 空 content 也走占位. 实际: {html5[:300]}"
+    )
+
+    print("[OK] v19: _msg_html 空 content 显示灰色占位提示")
+
+
+def test_v19_chat_store_remove_empty_assistant():
+    """v19: chat_store.remove_empty_assistant 删掉空 content 历史
+    assistant 消息 (内存 + SQLite 双删), 让"打开桌宠看到空白文件图标"
+    的历史 bug 不再复现。"""
+    from app.engine.chat_store import ChatStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        db = Path(td) / "v19.db"
+        cs = ChatStore(db)
+        # 造一批乱消息模拟主人历史
+        cs.add("user", "主人问1")
+        cs.add("assistant", "喵～回答1")
+        cs.add("assistant", "")          # 1004 鉴权失败产生的空白
+        cs.add("assistant", "   \n  ")    # 纯空格的空白
+        cs.add("assistant", "", tools=[]) # 显式空 tools 空白
+        cs.add("assistant", "", tools=[   # 有 tools 的空 content 不删
+            ("tool_abc", {}, "out", 50),
+        ])
+        cs.add("user", "主人问2")
+        cs.add("system", "系统提示")       # system 不动
+        cs.add("assistant", "回答2")       # 正常回答
+
+        # v19 验证 1: remove_empty_assistant 删 3 条空白
+        # (assistant content 空 + tools 空)
+        removed = cs.remove_empty_assistant()
+        assert removed == 3, (
+            f"v19 应删 3 条空白 assistant (2 条全空 + 1 条纯空格). 实际: {removed}"
+        )
+
+        # v19 验证 2: 内存剩下的 assistant 应都非空或有 tools
+        remaining = [m for m in cs.all() if m.role == "assistant"]
+        for m in remaining:
+            assert (m.content or "").strip() or (m.tools or []), (
+                f"v19 剩下的 assistant 不应「content 空 AND tools 空」. "
+                f"实际 content={m.content!r} tools={m.tools!r}"
+            )
+
+        # v19 验证 3: 持久化也删了 (新建 ChatStore 读盘, 空白不再回来)
+        cs2 = ChatStore(db)
+        empty_count = sum(
+            1 for m in cs2.all()
+            if m.role == "assistant"
+            and not (m.content or "").strip()
+            and not (m.tools or [])
+        )
+        assert empty_count == 0, (
+            f"v19 重读 DB 后空白应已删. 实际剩 {empty_count} 条空白"
+        )
+
+        # v19 验证 4: 没空白时返回 0, 不报错
+        removed2 = cs.remove_empty_assistant()
+        assert removed2 == 0, (
+            f"v19 二次调用应返 0 (无空白). 实际: {removed2}"
+        )
+
+    print("[OK] v19: chat_store.remove_empty_assistant 双删空白历史")

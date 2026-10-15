@@ -1089,6 +1089,12 @@ class ChatWindow(QWidget):
 
     def _load_history(self) -> None:
         """从 ChatStore 加载上次的聊天记录到界面。"""
+        # v19: 启动时清掉历史空 content 消息 (v12 之前 1004 鉴权失败
+        # 批量产生的「废消息」, 重启后会被渲染成"空白文件图标")。
+        # chat_store.remove_empty_assistant 走 SQL DELETE 持久化清理,
+        # 一次启动搞一次, 之后加 add() 进来的新消息不受影响。
+        self.chat_store.remove_empty_assistant()
+
         stored = self.chat_store.all()
         if not stored:
             return
@@ -1096,6 +1102,12 @@ class ChatWindow(QWidget):
         for sm in stored:
             # 跳过系统欢迎消息（已在 _append_system_welcome 中添加）
             if sm.role == "assistant" and "主人你好呀" in sm.content:
+                continue
+            # v19: 兜底再跳一次 (若 remove_empty_assistant SQLite 失败,
+            # 至少界面上不渲染空白文件图标)。
+            if (sm.role == "assistant"
+                    and not (sm.content or "").strip()
+                    and not (sm.tools or [])):
                 continue
             # 解析情绪
             emotion = None
@@ -3139,8 +3151,36 @@ class ChatWindow(QWidget):
         role_label = "You" if is_user else _html_escape(
             self.char_cfg.name or "桌宠")
 
-        # 清理内容
+        # v19: 空 content + 无 tools → 灰色 placeholder 提示。
+        # 主人反馈 2026-10-15 "每次打开后信息就没了, 图片之类的":
+        # 实际是历史 bug, v12 之前 1004 鉴权失败批量产生了一批
+        # content="" 的 assistant 消息, chat_store 一直保留,
+        # 重启后空消息又渲染成空白文件图标, 看起来像"信息丢失"。
+        # 这里给灰色提示让主人知道哪条是空的, 主人按 "清空" 按钮
+        # (line 1119 _on_clear 已 chat_store.clear()) 一键清理。
+        # msg.tools 非空时不走 placeholder (工具调用消息 content
+        # 可能空但工具有信息, 仍要渲染)。
         raw = msg.content or ""
+        if not raw.strip() and not (msg.tools or []):
+            time_str = _format_time_short(msg.ts)
+            label_html = (
+                f'<div class="msg-label">'
+                f'<span class="who">{role_label}</span>'
+                f'<span class="ts">{time_str}</span>'
+                f'</div>'
+            )
+            role_class = "msg-user" if is_user else "msg-assistant"
+            return (
+                f'<div class="msg {role_class}">'
+                f'{label_html}'
+                '<div class="msg-body">'
+                '<span class="empty-msg-hint">'
+                '[此消息内容为空, 可能是早期生成失败]</span>'
+                '</div>'
+                '</div>'
+            )
+
+        # 清理内容
         raw = self._clean_content(raw)
         # 2026-10-15 v9: 上传 / 拖图产生的 file:// URL 在 markdown 里只是
         # 一段文字, QTextBrowser 不一定 load (PyQt5 5.x 对 file:// 嵌图不稳)。

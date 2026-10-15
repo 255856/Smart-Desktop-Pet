@@ -206,5 +206,51 @@ class ChatStore:
         except Exception as e:  # noqa: BLE001
             log.warning("ChatStore: clear 失败:%s", e)
 
+    def remove_empty_assistant(self) -> int:
+        """删掉 assistant 角色且 content 空 + tools 空的「废消息」。
+
+        v19: v12 之前 1004 鉴权失败批量产生 content="" 的 assistant 消息,
+        历史 chat_store 一直保留, 重启后界面渲染成"空白文件图标",
+        主人反馈"信息就没了"。这里在 ChatWindow._load_history 启动时
+        一次性清掉, 不打扰主人。
+
+        返回删掉的条数。
+
+        实现策略：Python ``str.strip()`` 能去全部 unicode 空白（含 \\n \\t），
+        但 SQLite 默认 trim 只去 ASCII 32，不去 \\n \\t —— 用 SQL 判空会漏。
+        max_messages=200 条上限内，整库「DELETE + re-INSERT kept」比纠结
+        SQL unicode whitespace 鲁棒得多。
+        """
+        before = len(self._messages)
+        kept = [
+            m for m in self._messages
+            if not (m.role == "assistant"
+                    and not (m.content or "").strip()
+                    and not (m.tools or []))
+        ]
+        removed = before - len(kept)
+        self._messages = kept
+        if not removed:
+            return 0
+        # 整库 re-INSERT kept。max_messages=200 没问题。
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM messages")
+                conn.executemany(
+                    "INSERT INTO messages(role, content, emotion, ts, "
+                    "tools_json) VALUES (?, ?, ?, ?, ?)",
+                    [(m.role, m.content, m.emotion, m.ts,
+                      json.dumps(m.tools or [], ensure_ascii=False))
+                     for m in kept],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ChatStore: remove_empty 失败:%s", e)
+        log.info("ChatStore: 清理 %d 条空 content 历史 assistant 消息", removed)
+        return removed
+
 
 __all__ = ["ChatStore", "StoredMessage"]
