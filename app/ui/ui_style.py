@@ -9,6 +9,7 @@ from app.core.qt_compat import Qt, QMenu
 # ui_style.py 位于 app/ui/，项目根需再上一层
 _ICON_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "icons"
 _ARROW_URL = (_ICON_DIR / "arrow_down.png").as_posix()
+_ARROW_UP_URL = (_ICON_DIR / "arrow_up.png").as_posix()
 _CHECK_URL = (_ICON_DIR / "check.png").as_posix()
 
 BG        = "#f5f5fb"   # 窗口底色（浅紫灰）
@@ -75,6 +76,89 @@ QToolButton#win_btn_close {{
 }}
 QToolButton#win_btn_close:hover {{ background: #ef5f7e; color: #ffffff; }}
 QToolButton#win_btn_close:pressed {{ background: #d64d6b; }}
+"""
+
+#  QSpinBox/QDoubleSpinBox 上下箭头：之前只给了 width + 透明背景，没给图标，
+#  箭头位置是纯空白（看起来像坏了）。用与下拉箭头同源的 arrow_up/arrow_down。
+_SPINBOX_ARROWS_QSS = f"""
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{_ARROW_UP_URL}"); width: 10px; height: 10px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{_ARROW_URL}"); width: 10px; height: 10px;
+}}
+QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover,
+QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {{
+    background: {ACCENT_BG}; border-radius: 3px;
+}}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{ opacity: 0.35; }}
+"""
+
+#  QMessageBox：项目里 QMessageBox.warning 用在 file_dialog / pet_window 等处，
+#  此前完全没套皮肤，深紫界面里弹出一个 Windows 原生灰框非常突兀。
+MESSAGE_BOX_QSS = f"""
+QMessageBox {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+}}
+QMessageBox QLabel {{
+    color: {TEXT};
+    font-family: {FONT};
+    font-size: 10pt;
+    background: transparent;
+}}
+QMessageBox QLabel#qt_msgbox_extradata {{ color: {TEXT_SUB}; font-size: 9pt; }}
+QMessageBox QPushButton {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 6px 20px;
+    font-family: {FONT};
+    font-weight: 600;
+    font-size: 9pt;
+    min-width: 68px;
+}}
+QMessageBox QPushButton:hover {{ border-color: {ACCENT_LT}; color: {ACCENT_DK}; background: {ACCENT_BG}; }}
+QMessageBox QPushButton:pressed {{ background: #e6e0fd; }}
+QMessageBox QPushButton[default="true"] {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #a78bfa, stop:1 {ACCENT});
+    color: #fff; border: none;
+}}
+QMessageBox QPushButton[default="true"]:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9a7ef8, stop:1 {ACCENT_DK});
+}}
+"""
+
+#  两个面板共用的收尾规则：提示气泡、裸 QLabel 透明、通用工具按钮、禁用态描边。
+#  这些控件在聊天页/设置页都在用，此前只有部分 objectName 变体有样式。
+COMMON_QSS = f"""
+QLabel {{ background: transparent; }}
+
+QToolTip {{
+    background: #2f2b45;
+    color: #ffffff;
+    border: 1px solid #4a4370;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-family: {FONT};
+    font-size: 9pt;
+}}
+
+/* 通用工具按钮：#ghost_btn / #win_btn 之外的裸 QToolButton 也能看 */
+QToolButton {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 9px;
+    padding: 4px 10px;
+    color: #5b4f9c;
+    font-family: {FONT};
+    font-size: 9pt;
+}}
+QToolButton:hover {{ background: {ACCENT_BG}; border-color: {ACCENT_LT}; }}
+QToolButton:pressed {{ background: #e6e0fd; }}
+QToolButton:disabled {{ color: #c3c1d4; border-color: #f0eff6; background: transparent; }}
 """
 
 #  聊天窗
@@ -174,6 +258,8 @@ QScrollBar::handle:vertical {{
 QScrollBar::handle:vertical:hover {{ background: {ACCENT_LT}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ height: 0; }}
+
+{COMMON_QSS}
 """
 
 # 聊天正文气泡（QTextBrowser 富文本子集）
@@ -216,6 +302,120 @@ CHAT_BUBBLE_CSS = (
     "margin:6px 0;}"
 )
 
+
+#  MiniMax Code 风格的聊天窗样式（线性流 + 完整 markdown 渲染）
+#  - 不再用 table + 气泡；每条消息是 div.msg 块，msg-label + msg-body 垂直堆叠
+#  - msg-body 内支持标准 markdown 元素（h1-h4 / ul / ol / pre / blockquote / hr / table）
+#  - 工具/思考/命令/文件编辑块用专用 class，整段使用浅灰/深色背景
+#
+# 类名约定（tests/test_chat_rendering.py 会断言）:
+#   msg / msg-user / msg-assistant
+#   msg-label / msg-body
+#   tools / thinking / execs / file-edits
+#   system-msg  (居中浅灰条)
+CHAT_MD_CSS = (
+    # 基础排版: 跟 MiniMax Code 类似的中性灰底
+    "body{margin:0;padding:8px 14px;background:#ffffff;"
+    "font-family:'Microsoft YaHei UI','Microsoft YaHei',"
+    "'PingFang SC','SF Pro Text','Segoe UI',sans-serif;"
+    "font-size:11pt;line-height:1.65;color:#1f2937;}"
+    # 消息主块: 上下 padding, 底部 1px 分隔线 (MiniMax Code 风格)
+    ".msg{padding:14px 4px 12px 4px;border-bottom:1px solid #eef0f4;}"
+    ".msg:last-child{border-bottom:none;}"
+    # 角色微调: user 有非常浅的灰底背景, assistant 纯白 (MiniMax Code 同款)
+    ".msg-user{background:#fafbfc;}"
+    ".msg-assistant{background:#ffffff;}"
+    # 角色标签 (You / 桌宠) + 时间
+    ".msg-label{font-size:9pt;font-weight:600;color:#6366f1;"
+    "letter-spacing:0.5px;margin-bottom:5px;}"
+    ".msg-user .msg-label{color:#475569;}"
+    ".msg-label .ts{font-weight:400;color:#94a3b8;margin-left:8px;"
+    "font-size:8.5pt;letter-spacing:0;}"
+    # 消息正文容器
+    ".msg-body{font-size:11pt;line-height:1.7;color:#1f2937;}"
+    ".msg-body p{margin:7px 0;}"
+    # markdown 元素
+    ".msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4"
+    "{font-weight:600;line-height:1.3;margin:14px 0 6px 0;color:#111827;}"
+    ".msg-body h1{font-size:18pt;border-bottom:1px solid #e5e7eb;"
+    "padding-bottom:6px;}"
+    ".msg-body h2{font-size:14pt;color:#3730a3;}"
+    ".msg-body h3{font-size:12.5pt;color:#4338ca;}"
+    ".msg-body h4{font-size:11.5pt;color:#4f46e5;}"
+    # 列表 (MiniMax Code 缩进风格)
+    ".msg-body ul,.msg-body ol{padding-left:24px;margin:6px 0;}"
+    ".msg-body li{margin:3px 0;line-height:1.6;}"
+    ".msg-body li>p{margin:2px 0;}"
+    # 行内代码 (MiniMax Code 风格: 浅紫底色)
+    ".msg-body code{background:#eef2ff;padding:1px 6px;border-radius:4px;"
+    "font-family:Consolas,Monaco,'Courier New',monospace;"
+    "font-size:0.9em;color:#4f46e5;}"
+    # 代码块 (深色终端风格)
+    ".msg-body pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;"
+    "border-radius:8px;font-family:Consolas,Monaco,'Courier New',monospace;"
+    "font-size:9.5pt;line-height:1.5;overflow:auto;margin:8px 0;"
+    "border:1px solid #1e293b;}"
+    ".msg-body pre code{background:transparent;color:inherit;"
+    "padding:0;font-size:inherit;}"
+    # 引用块
+    ".msg-body blockquote{border-left:3px solid #c7d2fe;"
+    "background:#f5f7ff;padding:6px 14px;margin:8px 0;color:#475569;"
+    "border-radius:0 4px 4px 0;}"
+    ".msg-body blockquote p{margin:4px 0;}"
+    # 表格 (兼容 GFM)
+    ".msg-body table{border-collapse:collapse;margin:8px 0;}"
+    ".msg-body th,.msg-body td{border:1px solid #e5e7eb;"
+    "padding:6px 12px;text-align:left;}"
+    ".msg-body th{background:#f8fafc;font-weight:600;color:#1f2937;}"
+    ".msg-body tr:nth-child(even) td{background:#fafbfc;}"
+    # 分隔线
+    ".msg-body hr{border:none;border-top:1px solid #e5e7eb;margin:12px 0;}"
+    # 链接
+    ".msg-body a{color:#4f46e5;text-decoration:none;}"
+    ".msg-body a:hover{text-decoration:underline;}"
+    # 加粗 / 斜体
+    ".msg-body strong{font-weight:600;color:#111827;}"
+    ".msg-body em{font-style:italic;color:#374151;}"
+    # 工具调用 (已执行操作) 卡片 - 仍类似 Claude Code 的紧凑小卡片
+    "div.tools{font-size:9.5pt;color:#1f2937;background-color:#f1f5f9;"
+    "border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;"
+    "margin:6px 0 10px 0;}"
+    "div.tools .tool-row{display:block;margin:2px 0;}"
+    "div.tools .tool-row .tool-name{color:#0f172a;font-weight:600;}"
+    "div.tools .tool-row .tool-target{color:#475569;}"
+    "div.tools .tool-row.failed .tool-name{color:#b91c1c;}"
+    "div.tools .tool-row.ok .tool-name{color:#15803d;}"
+    # 思考过程卡片
+    "div.thinking{font-size:9.5pt;color:#475569;background-color:#f8fafc;"
+    "border-left:3px solid #94a3b8;padding:8px 12px;margin:4px 0 8px 0;"
+    "border-radius:0 4px 4px 0;}"
+    "div.thinking .thinking-head{color:#64748b;font-weight:600;"
+    "margin-bottom:2px;}"
+    # 命令执行块 (终端黑色风格)
+    "div.execs{background:#0f172a;color:#e2e8f0;padding:10px 14px;"
+    "border-radius:6px;font-family:Consolas,Monaco,'Courier New',monospace;"
+    "font-size:9.5pt;line-height:1.5;margin:6px 0;border:1px solid #1e293b;}"
+    "div.execs .execs-head{color:#94a3b8;font-size:8.5pt;margin-bottom:4px;}"
+    "div.execs .execs-cmd{color:#a5f3fc;}"
+    "div.execs .execs-out{color:#cbd5e1;white-space:pre-wrap;}"
+    # 文件编辑块 (黄色提示风格)
+    "div.file-edits{font-size:9.5pt;color:#78350f;background-color:#fef3c7;"
+    "border-left:3px solid #f59e0b;padding:8px 12px;margin:6px 0;"
+    "border-radius:0 4px 4px 0;}"
+    "div.file-edits .file-edits-head{color:#b45309;font-weight:600;"
+    "margin-bottom:2px;}"
+    # 系统消息: 居中浅灰条
+    "span.system-msg{display:inline-block;background:#f1f5f9;"
+    "color:#64748b;padding:4px 12px;border-radius:12px;font-size:9pt;"
+    "margin:6px 0;}"
+    # 旧的"气泡"结构 (历史消息可能仍渲染): 保持视觉一致
+    "td.bubble{line-height:1.55;font-size:10pt;}"
+    # 三点跳动等待动画
+    ".typing-dot{display:inline-block;width:6px;height:6px;"
+    "border-radius:50%;margin:0 2px;background:#cbd5e1;vertical-align:middle;}"
+    ".typing-dot.active{background:#6366f1;}"
+)
+
 #  设置面板
 SETTINGS_QSS = f"""
 QWidget {{
@@ -246,16 +446,20 @@ QGroupBox {{
     background: {CARD_GRAD};
     border: 1px solid {BORDER};
     border-radius: 14px;
-    margin-top: 12px;
-    padding: 16px 12px 12px 12px;
+    margin-top: 20px;
+    padding: 18px 14px 14px 14px;
     font-weight: 600;
 }}
+/* 标题给实底色，才能盖住边框线形成「开口」的分组感；
+   透明背景时 1px 边框会从字上横穿过去，看着像被切掉半个字 */
 QGroupBox::title {{
     subcontrol-origin: margin;
+    subcontrol-position: top left;
     left: 14px;
-    padding: 0 8px;
+    padding: 2px 10px;
     color: {ACCENT_DK};
-    background: transparent;
+    background: {CARD};
+    border-radius: 6px;
 }}
 
 QPushButton {{
@@ -398,6 +602,22 @@ QComboBox QAbstractItemView {{
     selection-background-color: {ACCENT_BG};
     selection-color: {ACCENT_DK};
 }}
+/* 文本输入框：设置页有 8 个 QLineEdit，此前完全没有规则 —— 在紫白卡片里
+   夹着 Windows 原生方框，是「界面没做完」观感的主要来源 */
+QLineEdit {{
+    background: #ffffff;
+    border: 1.5px solid #e0e0ee;
+    border-radius: 10px;
+    padding: 7px 12px;
+    min-height: 20px;
+    selection-background-color: #dcd4ff;
+    selection-color: {TEXT};
+}}
+QLineEdit:hover {{ border-color: {ACCENT_LT}; }}
+QLineEdit:focus {{ border-color: {ACCENT}; background: #fefeff; }}
+QLineEdit:disabled {{ background: #f4f4f8; color: {TEXT_SUB}; border-color: #eceaf2; }}
+QLineEdit[readOnly="true"] {{ background: #fafafd; color: {TEXT_SUB}; }}
+
 QComboBox:editable QLineEdit {{
     background: transparent;
     border: none;
@@ -424,9 +644,26 @@ QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ height: 0; }}
 
+/* 禁用态：Tab / 分组 / 复选框 / 进度条 —— 之前只有 QPushButton 有 :disabled */
+QTabBar::tab:disabled {{ color: #cfcedd; }}
+QTabBar::tab:disabled:selected {{ background: #e9e8f2; color: #b3b1c6; }}
+QGroupBox:disabled {{ color: #b6b4c8; background: #f7f7fb; }}
+QGroupBox::title:disabled {{ color: #c9c7da; }}
+QCheckBox:disabled {{ color: #c3c1d4; }}
+QCheckBox::indicator:disabled {{ background: #f2f2f7; border-color: #e2e0ec; }}
+QCheckBox::indicator:checked:disabled {{ background: #d8d3f5; border-color: #d8d3f5; }}
+QProgressBar {{
+    background: #ecebf3; border: 1px solid #e4e3ee; border-radius: 8px;
+    min-height: 14px; text-align: center; font-size: 8pt; color: {TEXT_SUB};
+}}
+QProgressBar::chunk {{ border-radius: 8px; background: {ACCENT_LT}; }}
+
 /* 滚动区域与窗口卡片融为一体（模型配置 Tab 内容较多） */
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
+
+{_SPINBOX_ARROWS_QSS}
+{COMMON_QSS}
 """
 
 # 状态条配色（体力/饱食/口渴/心情/健康/好感）
@@ -477,6 +714,19 @@ QMenu::right-arrow {{
     width: 8px; height: 8px;
 }}
 """
+
+
+def warn(parent, title: str, text: str) -> None:
+    """带皮肤的警告框。
+
+    项目里 QMessageBox.warning 直接调用会弹出 Windows 原生灰框，在紫白
+    界面里非常突兀。统一走这里，保证所有警告框外观一致。
+    """
+    from PyQt5.QtWidgets import QMessageBox
+
+    box = QMessageBox(QMessageBox.Icon.Warning, title, text, QMessageBox.StandardButton.Ok, parent)
+    box.setStyleSheet(MESSAGE_BOX_QSS)
+    box.exec()
 
 
 def style_menu(menu: QMenu) -> None:

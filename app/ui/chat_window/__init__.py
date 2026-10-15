@@ -637,7 +637,9 @@ class ChatWindow(QWidget):
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
         chat_font.setPointSize(10)
         self.chat_view.setFont(chat_font)
-        self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_BUBBLE_CSS)
+        # 2026-10-15: 换成 MiniMax Code 风格的样式表 (CHAT_MD_CSS,线性流 + 完整 markdown)
+        # 旧 CHAT_BUBBLE_CSS 保留在 ui_style.py 里作历史兼容,以防有外部模块直接 import。
+        self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_MD_CSS)
         cl.addWidget(self.chat_view, 1)
 
         input_container = QFrame()
@@ -2226,20 +2228,25 @@ class ChatWindow(QWidget):
         )
 
     def _thoughts_html(self, thoughts: list) -> str:
-        """思考块：折叠展示（默认收起，主人点开看推理过程）。"""
+        """思考块：折叠展示（默认收起，主人点开看推理过程）。
+
+        2026-10-15 跟随 MiniMax Code 风格升级：用 div.thinking 类 + <details>
+        嵌套实现折叠；MiniMax Code 的 markdown 也用 blockquote 风格的引用，
+        但「思考过程」是内部的, 不放进 markdown 流, 单独走自定义 div。"""
         if not thoughts:
             return ""
         joined = "\n".join(f"> {t.strip()}" for t in thoughts if t.strip())
         # 折叠（<details>）：最多 6 行可折叠，避免铺满屏幕
         return (
-            '<details style="margin:2px 0;background:#fafafa;border:1px solid #e5e7eb;'
-            'border-radius:4px;padding:2px 8px;font-size:9pt;color:#6b7280;">'
-            '<summary style="cursor:pointer;font-weight:500;color:#7c3aed;">'
+            '<div class="thinking">'
+            '<details>'
+            '<summary class="thinking-head">'
             f'思考过程（{len(thoughts)} 步）</summary>'
             '<pre style="margin:4px 0 2px 0;white-space:pre-wrap;font-family:'
             'Consolas, Menlo, monospace;font-size:9pt;color:#374151;">'
             + _html_escape(joined) + '</pre>'
             '</details>'
+            '</div>'
         )
 
     def _execs_html(self, execs: list) -> str:
@@ -2315,20 +2322,34 @@ class ChatWindow(QWidget):
                 '</div>'
             )
         head = (
-            '<div style="color:#d97706;font-size:8pt;font-weight:bold;'
-            'margin:3px 0 2px;letter-spacing:0.5px;">文件编辑 · '
+            '<div class="file-edits-head">文件编辑 · '
             + str(len(edits)) + '</div>'
         )
-        return '<div class="file_edits">' + head + "".join(rows) + '</div>'
+        return '<div class="file-edits">' + head + "".join(rows) + '</div>'
 
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
-        """按已完成的 Message 渲染成 HTML 字符串（气泡式聊天）。
+        """按已完成的 Message 渲染成 HTML 字符串 (MiniMax Code 风格线性流)。
 
-        布局（Qt 富文本最稳的 table 方案）：
-            外层 table 宽 100%，两列：
-              - 头像列固定 44px（<img> 圆形头像，由 QPainter 预生成）
-              - 内容列：meta（名字/时间）+ 内层 shrink-to-fit table（整块气泡背景）
-            用户消息：内容列右对齐、头像列在右；桌宠消息反之。
+        布局 (CSS 驱动, 2026-10-15 重做):
+            <div class="msg msg-{role}">
+                <div class="msg-label">
+                    <span class="who">{role_label}</span>
+                    <span class="ts">{time}</span>
+                </div>
+                <div class="msg-body">
+                    <!-- 工具/思考/命令/文件块 (assistant only, prepend) -->
+                    <!-- markdown-rendered 文本 -->
+                </div>
+            </div>
+
+        角色标识:
+            - user: "You" (紧凑中性灰)
+            - assistant: character name (紫)
+            - system: 走 system-msg 居中浅灰条
+
+        头像不再放在 chat 内 (MiniMax Code 同款)。桌宠头顶像仍然由 pet_window
+        显示; chat 里只保留 markdown 渲染块, 让人/桌宠对话视觉跟其它 chat-style
+        AI 一致 ("跟 minimaxcode 一样" 用户实测指定)。
         """
         if msg.role == "system":
             raw = (msg.content or "").replace("&", "&amp;").replace(
@@ -2339,89 +2360,47 @@ class ChatWindow(QWidget):
             )
 
         is_user = msg.role == "user"
+        role_label = "You" if is_user else _html_escape(
+            self.char_cfg.name or "桌宠")
 
         # 清理内容
         raw = msg.content or ""
         raw = self._clean_content(raw)
 
-        # HTML 转义 + 换行转 <br/>
-        # 用户消息不做 markdown 处理（避免 weird 行为），bot 消息做简单 markdown
-        if is_user:
-            safe = (raw.replace("&", "&amp;").replace("<", "&lt;").replace(
-                ">", "&gt;").replace("\n", "<br/>"))
-        else:
-            safe = self._render_markdown(raw)
+        # HTML 转义 + markdown 渲染 (MiniMax Code 风格两边都做 markdown;
+        # user 消息内容一般很短, 走 markdown 没副作用)
+        body_html = self._render_markdown(raw)
 
-        # 流式输出中：bot 气泡末尾追加「三点跳动」等待动画
-        # - streaming_meta 为 truthy 字符串 + msg.emotion 未设 → 走三点跳动
-        # - 2026-10-15 修复：原来当 msg.emotion 已设时，会把 emotion 字面量（如 "happy"）
-        #   当 meta 渲染成 `· happy` 小尾巴，跟主人偏好冲突 —— 主程序不要在 chat
-        #   里出现情绪字样。emotion 仍保留在 Message 对象上驱动桌宠动画，但不再
-        #   显示在气泡里。
+        # 流式输出中：正文末尾追加「三点跳动」等待动画
         if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
-            safe = safe + " " + self._typing_dots_html()
-        # （旧逻辑：已设 emotion 时把 emotion 当 meta 显示成小尾巴 —— 已移除）
+            body_html = body_html + self._typing_dots_html()
 
-        # AI Coding 风格多块渲染：思考（折叠）→ 命令（终端）→ 文件编辑（黄色）→ 工具步骤 → 正文
-        thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
-        execs_html = self._execs_html(getattr(msg, "execs", []) or [])
-        file_edits_html = self._file_edits_html(msg.tools)
-        tools_html = self._tool_steps_html(msg.tools) if (msg.tools and self._show_tool_steps) else ""
-        prepend_html = (
-            (thoughts_html + execs_html + file_edits_html + tools_html) if not is_user else ""
-        )
-        if prepend_html:
-            safe = prepend_html + safe
+        # 工具/思考/命令/文件块 (assistant only, prepend 到 body 前)
+        if not is_user:
+            thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
+            execs_html = self._execs_html(getattr(msg, "execs", []) or [])
+            file_edits_html = self._file_edits_html(msg.tools)
+            tools_html = (
+                self._tool_steps_html(msg.tools)
+                if (msg.tools and self._show_tool_steps) else ""
+            )
+            prepend = thoughts_html + execs_html + file_edits_html + tools_html
+            if prepend:
+                body_html = prepend + body_html
 
         time_str = _format_time_short(msg.ts)
-
-        if is_user:
-            # 右对齐：内容列 + 头像列
-            meta_html = f'<span class="meta right">{time_str}</span><br/>'
-            bubble = (
-                '<table cellspacing="0" cellpadding="0" border="0">'
-                '<tr><td class="bubble user" '
-                f'style="{self._BUBBLE_STYLE_USER}">{safe}</td></tr></table>'
-            )
-            avatar = (
-                '<span class="avatar-col user">'
-                f'<img src="{self._avatar_data_user}" width="40" height="40" alt="我"/></span>'
-            )
-            return (
-                '<table width="100%" cellspacing="0" cellpadding="0" border="0" '
-                'style="margin:10px 0;">'
-                '<tr>'
-                '<td valign="top" align="right" style="padding:0 6px 0 48px;">'
-                f'{meta_html}{bubble}</td>'
-                '<td width="44" valign="top" align="center">'
-                f'{avatar}</td>'
-                '</tr></table>'
-            )
-
-        # 桌宠：头像列 + 内容列
-        meta_html = (
-            '<span class="meta left">'
-            f'<span class="name">{_html_escape(self.char_cfg.name or "桌宠")}</span>'
-            f'{time_str}</span><br/>'
+        label_html = (
+            f'<div class="msg-label">'
+            f'<span class="who">{role_label}</span>'
+            f'<span class="ts">{time_str}</span>'
+            f'</div>'
         )
-        bubble = (
-            '<table cellspacing="0" cellpadding="0" border="0">'
-            '<tr><td class="bubble bot" '
-            f'style="{self._BUBBLE_STYLE_BOT}">{safe}</td></tr></table>'
-        )
-        avatar = (
-            '<span class="avatar-col bot">'
-            f'<img src="{self._avatar_data_bot}" width="40" height="40" alt=""/></span>'
-        )
+        role_class = "msg-user" if is_user else "msg-assistant"
         return (
-            '<table width="100%" cellspacing="0" cellpadding="0" border="0" '
-            'style="margin:10px 0;">'
-            '<tr>'
-            '<td width="44" valign="top" align="center">'
-            f'{avatar}</td>'
-            '<td valign="top" align="left" style="padding:0 48px 0 6px;">'
-            f'{meta_html}{bubble}</td>'
-            '</tr></table>'
+            f'<div class="msg {role_class}">'
+            f'{label_html}'
+            f'<div class="msg-body">{body_html}</div>'
+            f'</div>'
         )
 
     def _clean_content(self, text: str) -> str:
@@ -2441,46 +2420,152 @@ class ChatWindow(QWidget):
         return text
 
     def _render_markdown(self, text: str) -> str:
-        """把 Markdown 文本渲染为 HTML（简单的实现，不依赖外部库）。"""
+        """把 Markdown 文本渲染为 HTML（MiniMax Code 风格的 CommonMark 子集）。
+
+        支持:
+          - ```fenced code``` 代码块 (映射到 <pre><code>)
+          - `inline code` 行内代码
+          - **bold** / *italic* / ~~strike~~ (忽略 strike,treat as italic 防止 XSS-like pattern)
+          - ## / ### / #### 标题 (H2/H3/H4，MiniMax Code 不真的用 H1 给正文)
+          - - / * 无序列表 (整段包成 <ul><li>)
+          - 1. / 2. 有序列表 (整段包成 <ol><li>)
+          - > blockquote 引用块
+          - --- hr 水平分隔线
+          - [text](url) 链接
+          - | col | col | 表格 (简化 GFM 表格)
+
+        实现约束：块元素 (代码块 / 标题 / 列表 / 引用 / 表格) 必须在 HTML 转义
+        之前抽出来匹配 (因为 `>` 转义后会变成 `&gt;` 而 blockquote 的 `^>` 模式
+        看不见了), 用 placeholder 保留位置, 最后再还原成 HTML。
+        """
         import re
 
-        # 先转义 HTML 特殊字符（防止 XSS）
+        if not text:
+            return ""
+
+        # 1. 在 HTML 转义前先把所有块元素抽出来, 留给最后还原
+        blocks: list[str] = []
+        def _stash(html: str) -> str:
+            blocks.append(html)
+            return f"\x00B{len(blocks) - 1}\x00"
+
+        # 1a. ```fenced code``` —— 同时保留原 char 内容, 不转义
+        def _save_code(m: "re.Match[str]") -> str:
+            lang = m.group(1) or ""
+            body = m.group(2)
+            return _stash(
+                f'<pre><code data-lang="{lang}">{body}</code></pre>'
+            )
+        text = re.sub(r'```(\w+)?\n(.*?)```', _save_code, text, flags=re.DOTALL)
+
+        # 1b. 水平分隔线 (3+ 个 -)
+        text = re.sub(r'(?m)^-{3,}\s*$',
+                      lambda _: _stash('<hr/>'), text)
+
+        # 1c. 标题 (## ... / ### ... / #### ...)
+        text = re.sub(r'(?m)^####\s+(.+?)\s*$',
+                      lambda m: _stash(f'<h4>{m.group(1)}</h4>'), text)
+        text = re.sub(r'(?m)^###\s+(.+?)\s*$',
+                      lambda m: _stash(f'<h3>{m.group(1)}</h3>'), text)
+        text = re.sub(r'(?m)^##\s+(.+?)\s*$',
+                      lambda m: _stash(f'<h2>{m.group(1)}</h2>'), text)
+        text = re.sub(r'(?m)^#\s+(.+?)\s*$',
+                      lambda m: _stash(f'<h1>{m.group(1)}</h1>'), text)
+
+        # 1d. 引用块 (> ...)
+        def _save_blockquote(m: "re.Match[str]") -> str:
+            inner = m.group(0)
+            inner = re.sub(r'(?m)^>\s?', '', inner)
+            inner_html = inner.replace("\n", "<br/>")
+            return _stash(f'<blockquote>{inner_html}</blockquote>')
+        text = re.sub(r'(?:^>.*\n?)+', _save_blockquote, text, flags=re.MULTILINE)
+
+        # 1e. 无序列表 (整段连续 - / * 行包一个 <ul>)
+        def _save_ul(m: "re.Match[str]") -> str:
+            items = re.findall(r'^[-*]\s+(.+?)\s*$', m.group(0), flags=re.MULTILINE)
+            return _stash('<ul>' + ''.join(f'<li>{it}</li>' for it in items) + '</ul>')
+        text = re.sub(r'(?:^[-*]\s+.+\n?)+', _save_ul, text, flags=re.MULTILINE)
+
+        # 1f. 有序列表 (整段连续 "1. ..." 行包一个 <ol>)
+        def _save_ol(m: "re.Match[str]") -> str:
+            items = re.findall(r'^\d+\.\s+(.+?)\s*$', m.group(0), flags=re.MULTILINE)
+            return _stash('<ol>' + ''.join(f'<li>{it}</li>' for it in items) + '</ol>')
+        text = re.sub(r'(?:^\d+\.\s+.+\n?)+', _save_ol, text, flags=re.MULTILINE)
+
+        # 1g. 表格 (简化 GFM: | col | col | / |---|...|)
+        def _save_table(m: "re.Match[str]") -> str:
+            lines = [ln for ln in m.group(0).splitlines() if ln.strip()]
+            if len(lines) < 2:
+                return m.group(0)
+            header_cells = [
+                c.strip() for c in lines[0].strip().strip('|').split('|')
+            ]
+            sep = lines[1].strip()
+            if not re.match(
+                r'^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$', sep,
+            ):
+                return m.group(0)
+            body_rows = []
+            for ln in lines[2:]:
+                cells = [c.strip() for c in ln.strip().strip('|').split('|')]
+                body_rows.append(
+                    '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
+                )
+            head = (
+                '<tr>' + ''.join(f'<th>{c}</th>' for c in header_cells) + '</tr>'
+            )
+            return _stash('<table>' + head + ''.join(body_rows) + '</table>')
+        text = re.sub(
+            r'(?:^[ \t]*\|.*\n){2,}',
+            _save_table, text, flags=re.MULTILINE,
+        )
+
+        # 2. 现在可以安全 HTML 转义 (因为块元素都已抽走, 不会误伤)
         text = text.replace("&", "&amp;")
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
 
-        # 代码块（用 class，由 CHAT_BUBBLE_CSS 接管样式）
-        text = re.sub(r'```(\w+)?\n(.*?)```',
-                      r'<pre><code>\2</code></pre>',
-                      text, flags=re.DOTALL)
+        # 3. 行内元素 —— 先做 code (避免被误判)
+        text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
 
-        # 行内代码
-        text = re.sub(r'`([^`]+)`',
-                      r'<code>\1</code>',
-                      text)
+        # 4. 链接 [text](url)  (只允许 http/https/mailto 防止 javascript: 注入)
+        def _link(m: "re.Match[str]") -> str:
+            label = m.group(1)
+            url = m.group(2)
+            if re.match(r'^(https?|mailto):', url, re.IGNORECASE):
+                return f'<a href="{url}">{label}</a>'
+            return m.group(0)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, text)
 
-        # 加粗
-        text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', text)
+        # 5. 加粗 (必须先于斜体,避免被斜体提前消耗)
+        text = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'__([^_\n]+)__', r'<strong>\1</strong>', text)
 
-        # 斜体
-        text = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', text)
+        # 6. 斜体
+        text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<em>\1</em>', text)
+        text = re.sub(r'(?<!_)_([^_\n]+)_(?!_)', r'<em>\1</em>', text)
 
-        # 无序列表（每行以 - 开头）— 整段连续 - 行包成一个 <ul>，避免 <br/> 串进列表
-        def _wrap_ul(m: "re.Match[str]") -> str:
-            items = re.findall(r'^- (.+)$', m.group(0), flags=re.MULTILINE)
-            return '<ul>' + ''.join(f'<li>{it}</li>' for it in items) + '</ul>'
-        text = re.sub(r'(?:^- .+\n?)+', _wrap_ul, text, flags=re.MULTILINE)
+        # 7. 还原所有占位 (代码块 + 其他块元素)
+        for i, blk in enumerate(blocks):
+            text = text.replace(f"\x00B{i}\x00", blk)
 
-        # 有序列表（数字. 开头）— 同上
-        def _wrap_ol(m: "re.Match[str]") -> str:
-            items = re.findall(r'^\d+\. (.+)$', m.group(0), flags=re.MULTILINE)
-            return '<ol>' + ''.join(f'<li>{it}</li>' for it in items) + '</ol>'
-        text = re.sub(r'(?:^\d+\. .+\n?)+', _wrap_ol, text, flags=re.MULTILINE)
-
-        # 剩余段落里的换行 → <br/>
-        text = text.replace("\n", "<br/>")
-
-        return text
+        # 8. 段落: 双换行分段, 块元素跳过 <p> 包裹
+        paragraphs = re.split(r'\n{2,}', text)
+        out_paragraphs: list[str] = []
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            if (para.startswith('<h') or para.startswith('<ul')
+                    or para.startswith('<ol') or para.startswith('<pre')
+                    or para.startswith('<blockquote') or para.startswith('<hr')
+                    or para.startswith('<table')):
+                out_paragraphs.append(para)
+            else:
+                out_paragraphs.append(
+                    '<p>' + para.replace("\n", "<br/>") + '</p>'
+                )
+        return "".join(out_paragraphs)
 
     def _insert_placeholder(self, msg: Message) -> int:
         """在 chat_view 文档末尾插入占位 div，返回该 div 起始的字符位置（作为 patch anchor）。
@@ -2542,15 +2627,17 @@ class ChatWindow(QWidget):
 
         Qt 富文本不支持 CSS @keyframes，所以动画由 QTimer 定时推进
         _typing_frame（0/1/2）并整体重绘占位气泡实现。
+        2026-10-15: 改用 CHAT_MD_CSS 里定义的 .typing-dot 类, 颜色统一交给 CSS;
+        当前高亮那个用 .typing-dot.active 标。MiniMax Code 风格: 浅灰底 + 紫高亮。
         """
         frame = getattr(self, "_typing_frame", 0) % 3
         dots = []
         for i in range(3):
-            color = "#8b5cf6" if i == frame else "#d3cdf0"
-            dots.append(f'<span style="color:{color};">●</span>')
+            cls = "typing-dot active" if i == frame else "typing-dot"
+            dots.append(f'<span class="{cls}">●</span>')
         return (
-            '<span style="font-size:11px;letter-spacing:1px;">'
-            + '&nbsp;&nbsp;'.join(dots) + '</span>'
+            '<span style="font-size:13px;letter-spacing:1px;">'
+            + ''.join(dots) + '</span>'
         )
 
     def _on_typing_tick(self) -> None:

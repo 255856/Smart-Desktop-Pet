@@ -35,33 +35,40 @@ def test_format_time_short():
 
 
 def test_msg_html_user_alignment():
-    """用户消息：右对齐 + user avatar + user bubble + right meta。"""
+    """用户消息：MiniMax Code 风格线性流，msg-user div + 浅灰底 + 'You' label。"""
     char_cfg = CharacterConfig(name="鲸鱼娘")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
     msg = Message(role="user", content="你好")
     html = cw._msg_html(msg)
-    assert "avatar-col user" in html
-    assert "bubble user" in html
-    assert "meta right" in html
-    assert '<table width="100%"' in html
-    print("[OK] User message HTML structure correct")
+    assert "msg msg-user" in html
+    assert "msg-body" in html
+    assert "msg-label" in html
+    # 用户消息: 标识 "You"
+    assert ">You<" in html
+    # 不再使用 table 布局 / 头像 col / 气泡 class
+    assert "avatar-col user" not in html
+    assert "bubble user" not in html
+    assert '<table width="100%"' not in html
+    print("[OK] User message uses new linear-flow structure (MiniMax Code style)")
 
 
 def test_msg_html_bot_alignment():
-    """桌宠消息：左对齐 + bot avatar + bot bubble + left meta。"""
+    """桌宠消息：MiniMax Code 风格线性流, msg-assistant div + 紫 '桌宠' label。"""
     char_cfg = CharacterConfig(name="鲸鱼娘")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
     msg = Message(role="assistant", content="你好呀~", emotion=Emotion.HAPPY)
     html = cw._msg_html(msg)
-    assert "avatar-col bot" in html
-    assert "bubble bot" in html
-    assert "meta left" in html
-    assert "鲸鱼娘" in html  # 名字应该显示在 meta
-    print("[OK] Bot message HTML structure correct")
+    assert "msg msg-assistant" in html
+    assert "msg-body" in html
+    assert "msg-label" in html
+    assert "鲸鱼娘" in html
+    assert "avatar-col bot" not in html
+    assert "bubble bot" not in html
+    print("[OK] Bot message uses new linear-flow structure (MiniMax Code style)")
 
 
 def test_render_markdown_list():
@@ -97,6 +104,173 @@ def test_render_markdown_ordered_list():
     print("[OK] Markdown ordered list wraps properly")
 
 
+def test_render_markdown_headers():
+    """MiniMax Code 风格: ##/###/#### 标题应正确渲染成 <h2>/<h3>/<h4>。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    html = cw._render_markdown("## 二级标题\n### 三级标题\n#### 四级")
+    assert "<h2>二级标题</h2>" in html
+    assert "<h3>三级标题</h3>" in html
+    assert "<h4>四级</h4>" in html
+    print("[OK] Markdown headers (h2-h4) render correctly")
+
+
+def test_render_markdown_blockquote():
+    """MiniMax Code 风格: > blockquote 应包成 <blockquote>。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    html = cw._render_markdown("> 这是一个引用\n> 第二行")
+    assert "<blockquote>" in html and "</blockquote>" in html
+    assert "这是一个引用" in html
+    print("[OK] Markdown blockquote wraps properly")
+
+
+def test_render_markdown_hr():
+    """MiniMax Code 风格: --- 应渲染为 <hr/>。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    html = cw._render_markdown("上文段落\n\n---\n\n下文段落")
+    assert "<hr/>" in html
+    print("[OK] Markdown hr renders correctly")
+
+
+def test_render_markdown_table():
+    """MiniMax Code 风格: GFM 表格应渲染成 <table>。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    md = (
+        "| 列1 | 列2 |\n"
+        "|------|------|\n"
+        "| a    | b    |\n"
+        "| c    | d    |\n"
+    )
+    html = cw._render_markdown(md)
+    assert "<table>" in html and "</table>" in html
+    assert "<th>列1</th>" in html
+    assert "<th>列2</th>" in html
+    assert "<td>a</td>" in html and "<td>d</td>" in html
+    print("[OK] Markdown table (GFM subset) renders correctly")
+
+
+def test_render_markdown_link_safe():
+    """MiniMax Code 风格: [text](url) 链接要渲染,但 javascript: 注入必须挡住。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    html_ok = cw._render_markdown("[主页](https://example.com)")
+    assert '<a href="https://example.com">主页</a>' in html_ok
+
+    html_bad = cw._render_markdown("[bad](javascript:alert(1))")
+    # javascript: 不在白名单,不应渲染成 <a>
+    assert "<a href=\"javascript:" not in html_bad
+    assert "[bad](javascript:alert(1))" in html_bad or "javascript" not in html_bad
+    print("[OK] Markdown links: http/https allowed, javascript: blocked")
+
+
+def test_render_markdown_xss_protection():
+    """MiniMax Code 风格: 普通用户输入含 <script> 必须被转义掉, 不能执行。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    html = cw._render_markdown("<script>alert(1)</script>")
+    # < 转义成 &lt;, <script> 不能出现
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    print("[OK] Markdown escapes < > & (XSS protection)")
+
+
+def test_render_markdown_code_block_preserves_special_chars():
+    """MiniMax Code 风格: 代码块 ``` 内 < > & 不应被转义 (常见代码含 < >)。"""
+    char_cfg = CharacterConfig(name="测试")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    md = "```python\nif x < y and a > b:\n    return a & b\n```"
+    html = cw._render_markdown(md)
+    assert "<pre><code data-lang=\"python\">" in html
+    # 代码块内应保留 < > & 字面
+    assert "if x < y and a > b:" in html
+    assert "return a & b" in html
+    print("[OK] Markdown code block preserves < > & inside")
+
+
+def test_msg_html_markdown_e2e():
+    """MiniMax Code 风格 end-to-end: markdown 在 _msg_html 里真正串通渲染。"""
+    char_cfg = CharacterConfig(name="桌宠")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    msg = Message(role="assistant", content=(
+        "## 报告\n"
+        "\n"
+        "今天我做了：\n"
+        "\n"
+        "- 写代码\n"
+        "- 测功能\n"
+        "\n"
+        "> 小结: 一切顺利\n"
+    ))
+    html = cw._msg_html(msg)
+    # msg-body 容器里有 markdown 元素
+    assert "msg-body" in html
+    assert "<h2>报告</h2>" in html
+    assert "<ul>" in html
+    assert "<li>写代码</li>" in html
+    assert "<blockquote>" in html
+    # 没漏掉文字
+    assert "小结" in html
+    print("[OK] MiniMax Code style: msg_html end-to-end renders full markdown")
+
+
+def test_chat_md_css_registered():
+    """Bug 3 守卫: chat_view 必须用新的 CHAT_MD_CSS, 不能悄悄退回 CHAT_BUBBLE_CSS;
+    _msg_html 必须产出 msg-user / msg-assistant 双角色。"""
+    import ast as _ast
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "ui" / "chat_window" / "__init__.py").read_text(
+        encoding="utf-8",
+    )
+    found_md = False
+    found_msg_html = False
+    has_user_branch = False
+    has_assistant_branch = False
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call) and len(node.args) >= 1:
+            func = node.func
+            if (isinstance(func, _ast.Attribute)
+                    and func.attr == "setDefaultStyleSheet"):
+                arg0 = node.args[0]
+                if (isinstance(arg0, _ast.Attribute)
+                        and arg0.attr == "CHAT_MD_CSS"):
+                    found_md = True
+        # _msg_html 函数体内必须包含 'msg msg-' 拼接 (runtime 构造 msg-user / msg-assistant)
+        if isinstance(node, _ast.FunctionDef) and node.name == "_msg_html":
+            found_msg_html = True
+            body = _ast.dump(node)
+            if "msg-user" in body:
+                has_user_branch = True
+            if "msg-assistant" in body:
+                has_assistant_branch = True
+    assert found_md, (
+        "chat_view.document().setDefaultStyleSheet 没接到 ui_style.CHAT_MD_CSS"
+    )
+    assert found_msg_html, "_msg_html 函数没找到"
+    assert has_user_branch, "_msg_html 函数体里没出现 msg-user (user 角色分支丢失)"
+    assert has_assistant_branch, "_msg_html 函数体里没出现 msg-assistant (assistant 角色分支丢失)"
+    print("[OK] Bug 3 AST 守卫: chat_view 用 CHAT_MD_CSS, _msg_html 产 new 双角色结构")
+
+
 def test_streaming_indicator():
     """流式输出：bot 气泡末尾应有「三点跳动」等待动画（无 emotion 时）。"""
     char_cfg = CharacterConfig(name="测试")
@@ -108,9 +282,15 @@ def test_streaming_indicator():
     # 旧的沙漏 ⏳ 已替换为三个圆点
     assert "⏳" not in html
     assert html.count("●") == 3, f"应渲染 3 个等待圆点，实际 {html.count('●')}"
-    # 初始帧恰好一个点高亮（主题紫）
-    assert html.count("#8b5cf6") == 1, "初始帧应有且仅有一个点高亮"
-    print("[OK] Streaming indicator (three bouncing dots) shown in bot bubble")
+    # 2026-10-15: MiniMax Code 风格改用 CSS class + active 标志, 不在 HTML 里硬编码颜色
+    # 初始帧恰好一个 .typing-dot.active
+    assert 'class="typing-dot active"' in html, (
+        "初始帧应有且仅有一个 typing-dot.active, 实际: " + html
+    )
+    assert html.count("typing-dot active") == 1, (
+        f"应该有且仅一个高亮点, 实际 {html.count('typing-dot active')}"
+    )
+    print("[OK] Streaming indicator (three bouncing dots) shown with new CSS-class pattern")
 
 
 def test_system_message():
