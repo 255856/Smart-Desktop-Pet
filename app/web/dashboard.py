@@ -168,6 +168,34 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .mem .content{font-size:14px;line-height:1.6;word-break:break-word;white-space:pre-wrap;}
   .mem .foot{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:11.5px;color:var(--sub);}
   .cat-tag{background:var(--accent-bg);color:var(--accent-d);border-radius:6px;padding:2px 9px;font-size:11px;font-weight:600;}
+  /* 桌宠养成 (v23) */
+  .cs-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
+  .cs-row .name{width:90px;flex:none;font-size:13px;font-weight:600;}
+  .cs-row .track{flex:1;height:20px;background:var(--bg);border-radius:6px;overflow:hidden;border:1px solid var(--line);}
+  .cs-row .fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;
+    color:#fff;font-size:11px;font-weight:700;padding-right:7px;min-width:34px;transition:width .5s;}
+  .cs-row .v{font-family:Consolas,monospace;font-size:12px;color:var(--sub);width:80px;text-align:right;flex:none;}
+  .cs-row .fill.satiety{background:linear-gradient(90deg,#fbbf24,#f59e0b);}
+  .cs-row .fill.mood{background:linear-gradient(90deg,#a78bfa,#7c6cf0);}
+  .cs-row .fill.exp{background:linear-gradient(90deg,#34d399,#10b981);}
+  .cs-row .fill.favor{background:linear-gradient(90deg,#f472b6,#ec4899);}
+  .cs-row .fill.level{background:linear-gradient(90deg,#60a5fa,#3b82f6);}
+  .cs-row .fill.exp_to_next{background:linear-gradient(90deg,#cbd5e1,#94a3b8);}
+  .qtag{display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;margin-left:6px;}
+  .qtag.LOW{background:#fdecec;color:#b42318;}
+  .qtag.MID{background:#fef4e3;color:#a36500;}
+  .qtag.HIGH{background:#e7f8f1;color:#0a7c45;}
+  .trace-row{display:grid;grid-template-columns:62px 1fr auto;gap:10px;align-items:center;
+    padding:6px 8px;border-radius:7px;margin-bottom:4px;font-size:12.5px;border-left:3px solid var(--accent);}
+  .trace-row.decision{border-left-color:var(--blue);background:#f0f6ff;}
+  .trace-row.outcome{border-left-color:var(--green);background:#f0faf3;}
+  .trace-row .ts{color:var(--sub);font-family:Consolas,monospace;font-size:11px;}
+  .trace-row .body{font-family:Consolas,monospace;}
+  .trace-row .arrow{font-size:11px;color:var(--sub);font-family:Consolas,monospace;text-align:right;}
+  .config-block{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 11px;
+    font-size:12px;line-height:1.7;margin-bottom:8px;}
+  .config-block b{color:var(--accent-d);}
+
   .bar-row{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
   .bar-row .name{width:150px;flex:none;font-size:13px;font-weight:600;}
   .bar-row .track{flex:1;height:22px;background:var(--bg);border-radius:7px;overflow:hidden;}
@@ -203,6 +231,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
     <div class="tab active" data-view="sessions" data-icon="chat">会话记录</div>
     <div class="tab" data-view="memory" data-icon="brain">长期记忆</div>
     <div class="tab" data-view="tools" data-icon="wrench">工具统计</div>
+    <div class="tab" data-view="companion" data-icon="heart">桌宠养成</div>
   </div>
 
   <!-- 会话 -->
@@ -243,6 +272,29 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div id="statusBars"></div>
     </div>
   </div>
+
+  <!-- 桌宠养成 (v23) -->
+  <div class="view" id="view-companion">
+    <div class="grid2" style="grid-template-columns:repeat(auto-fill,minmax(360px,1fr));">
+      <div class="panel" style="padding:18px;">
+        <div class="sub-head" style="margin-top:0;" data-icon="heart">当前 PetState <span id="csFile" class="mini-tag" style="font-weight:400;"></span></div>
+        <div id="csBars"></div>
+        <div class="hint" style="margin-top:10px;" id="csQuantize"></div>
+      </div>
+      <div class="panel" style="padding:18px;">
+        <div class="sub-head" style="margin-top:0;" data-icon="wrench">yaml 配置 (companion_config.yaml)</div>
+        <div id="csConfig"></div>
+      </div>
+    </div>
+    <div class="panel" style="padding:18px;margin-top:14px;">
+      <div class="sub-head" style="margin-top:0;" data-icon="eye">trace 决策 (最近 15 条, 调前 S=量化 / 决策结果)</div>
+      <div id="csDecisions"></div>
+    </div>
+    <div class="panel" style="padding:18px;margin-top:14px;">
+      <div class="sub-head" style="margin-top:0;" data-icon="check">trace 数值变化 (outcome, 调后 Δ)</div>
+      <div id="csOutcomes"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -253,6 +305,7 @@ const $$ = (s, el=document) => [...el.querySelectorAll(s)];
 // 统一 SVG 线条图标（Lucide 风格，currentColor；不使用 emoji，唯一例外是 logo 的鲸鱼）
 const ICONS = {
   chat:'<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
+  heart:'<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',
   check:'<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
   wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   zap:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
@@ -352,7 +405,7 @@ function renderRunList(){
   if(state.filter!=="all") list=list.filter(r=>r.status===state.filter);
   if(state.kw) list=list.filter(r=>(r.goal||"").toLowerCase().includes(state.kw));
   if(!list.length){
-    box.innerHTML=`<div class="empty" style="min-height:200px;"><div class="big">📭</div><div>没有符合条件的会话</div></div>`;
+    box.innerHTML=`<div class="empty" style="min-height:200px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;"><svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" style="opacity:.30;"><rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M4 9h16"/></svg><div>没有符合条件的会话</div></div>`;
     return;
   }
   const scrollTop=box.scrollTop;
@@ -563,6 +616,124 @@ function toggleResult(id,btn){
   btn.textContent=open?"收起 ▴":"展开结果 ▾";
 }
 
+
+// ---------- v23: 桌宠养成面板 ----------
+const RISK_CN = {0:"纯读", 1:"低", 2:"中", 3:"高", 4:"不可逆"};
+const RISK_CLS = {0:"LOW", 1:"LOW", 2:"MID", 3:"HIGH", 4:"HIGH"};
+const DEC_CLS = {ALLOW:"HIGH", CONFIRM:"MID", REJECT:"LOW", REFUSE:"LOW"};
+
+function renderCompanion(data){
+  // 1) PetState 5 维
+  const ps = data.state || {};
+  const cfg = data.config || {};
+  const items = [
+    {k:"satiety", name:"饱食度", v:ps.strength_food??0, hi:100, cls:"satiety", unit:"", fmt:false},
+    {k:"mood",    name:"心情",   v:ps.feeling??0,        hi:100, cls:"mood",    unit:"", fmt:false},
+    {k:"favor",   name:"好感",   v:ps.likability??0,     hi:100, cls:"favor",   unit:"", fmt:false},
+    {k:"level",   name:"等级",   v:ps.level??1,           hi:cfg.level_max||10, cls:"level", unit:"Lv.", fmt:false},
+    {k:"exp",     name:"EXP",    v:ps.exp??0,             hi:cfg.exp_to_next_lv2||300, cls:"exp", unit:"", fmt:true},
+  ];
+  $("#csBars").innerHTML = items.map(it=>{
+    const pct = Math.max(2, Math.min(100, it.v / it.hi * 100));
+    const txt = (it.unit||"") + (it.fmt ? Math.round(it.v) : (it.v % 1 === 0 ? it.v : it.v.toFixed(1)));
+    return `<div class="cs-row">
+      <div class="name">${esc(it.name)}</div>
+      <div class="track"><div class="fill ${it.cls}" style="width:${pct}%">${pct.toFixed(0)}%</div></div>
+      <div class="v">${esc(txt)}</div>
+    </div>`;
+  }).join("");
+
+  // 2) 量化 (4 维) + 升到下一级所需 EXP
+  const q = ps.quantize || {};
+  const expNeed = (cfg.exp_base||100) * Math.pow(ps.level||1, cfg.exp_pow||1.5);
+  const expLeft = Math.max(0, expNeed - (ps.exp||0));
+  $("#csQuantize").innerHTML = `
+    <div>调前 S = 量化
+      <span class="qtag ${q.satiety||"MID"}">sat=${esc(q.satiety||"?")}</span>
+      <span class="qtag ${q.mood||"MID"}">mood=${esc(q.mood||"?")}</span>
+      <span class="qtag ${q.level||"MID"}">level=${esc(q.level||"?")}</span>
+      <span class="qtag ${q.favor||"MID"}">favor=${esc(q.favor||"?")}</span>
+    </div>
+    <div style="margin-top:6px;color:var(--sub);">距 Lv.${(ps.level||1)+1} 还需 <b style="color:var(--accent-d);">${expLeft.toFixed(0)}</b> EXP
+      (公式: ${cfg.exp_base} × ${(ps.level||1).toFixed(0)}<sup>${cfg.exp_pow}</sup> = ${expNeed.toFixed(0)})</div>
+  `;
+  $("#csFile").textContent = data.persist_path || "";
+
+  // 3) yaml 配置 (5 段)
+  const ev = cfg.event_hooks || {};
+  const tk = (k) => ev[k] ? `<b>${esc(k)}</b> 心情${ev[k].mood>=0?"+":""}${ev[k].mood} 好感${ev[k].favor>=0?"+":""}${ev[k].favor} EXP${ev[k].exp>=0?"+":""}${ev[k].exp} 饱食${ev[k].satiety>=0?"+":""}${ev[k].satiety}` : "—";
+  $("#csConfig").innerHTML = `
+    <div class="config-block">
+      <b>数值范围</b> · 饱食 ${cfg.range_satiety} · 心情 ${cfg.range_mood} · 等级 1..${cfg.level_max} · 好感 ${cfg.range_favor}
+    </div>
+    <div class="config-block">
+      <b>升级公式</b> · ${cfg.exp_base} × level<sup>${cfg.exp_pow}</sup> · 当前 Lv.${ps.level||1} 升级需 ${expNeed.toFixed(0)} EXP
+    </div>
+    <div class="config-block">
+      <b>时间衰减</b> · 饱食度 ${cfg.satiety_per_hour}/h · 48h 不互动心情 ${cfg.mood_no_interact_48h} · 检查间隔 ${cfg.check_interval_seconds}s
+    </div>
+    <div class="config-block">
+      <b>好感规则</b> · ≥${cfg.favor_high} 高 (高风险 ALLOW) · &lt;${cfg.favor_low} 低 (MEDIUM+ CONFIRM/REJECT)
+    </div>
+    <div class="config-block">
+      <b>钩子权重</b> · ${tk("task_success")} · ${tk("task_failure")} · ${tk("user_rejected")} · ${tk("user_accepted")} · ${tk("user_feed")} · ${tk("user_interact")}
+    </div>
+  `;
+
+  // 4) trace 决策 (调前 S=量化 / 决策)
+  const decs = (data.decisions || []).slice(0, 15);
+  if(!decs.length){
+    $("#csDecisions").innerHTML = `<div class="hint">还没有 trace_decision 记录. 跑几个 MEDIUM+ 风险工具后会显示.</div>`;
+  } else {
+    $("#csDecisions").innerHTML = decs.map(d=>{
+      const risk = d.risk ?? 0;
+      const dec = d.decision || "?";
+      const cls = DEC_CLS[dec] || "MID";
+      return `<div class="trace-row decision">
+        <div class="ts">${esc(fmtTime(d.ts))}</div>
+        <div class="body">
+          <code>${esc(d.tool)}</code>
+          [<span class="qtag ${RISK_CLS[risk]||"MID"}">${esc(RISK_CN[risk]||"未知")}</span>]
+          sat=${esc(d.sat)} mood=${esc(d.mood)} level=${esc(d.level)} favor=${esc(d.favor||"?")}
+        </div>
+        <div class="arrow">→ <span class="qtag ${cls}">${esc(dec)}</span></div>
+      </div>`;
+    }).join("");
+  }
+
+  // 5) trace outcome (调后 Δ)
+  const outs = (data.outcomes || []).slice(0, 15);
+  if(!outs.length){
+    $("#csOutcomes").innerHTML = `<div class="hint">还没有 trace_outcome 记录. 跑完一次 LLM 任务后会显示 Δ数值.</div>`;
+  } else {
+    $("#csOutcomes").innerHTML = outs.map(o=>{
+      const fd = o.feeling_delta || 0;
+      const favd = o.favor_delta || 0;
+      const ed = o.exp_delta || 0;
+      const fod = o.food_delta || 0;
+      const arr = (n) => n > 0 ? `+${n.toFixed(1)}` : n < 0 ? n.toFixed(1) : "·";
+      const lv = (o.level_after !== o.level_before) ? ` Lv.${o.level_before}→${o.level_after}` : "";
+      return `<div class="trace-row outcome">
+        <div class="ts">${esc(fmtTime(o.ts))}</div>
+        <div class="body">
+          <code>${esc(o.tool||"—")}</code> ${esc(o.outcome)}
+          心情 ${arr(fd)} · 饱食 ${arr(fod)} · 好感 ${arr(favd)} · EXP ${arr(ed)}${esc(lv)}
+        </div>
+        <div class="arrow">success=${esc(String(o.success))}</div>
+      </div>`;
+    }).join("");
+  }
+}
+
+async function refreshCompanion(){
+  try{
+    const d = await api("/api/companion");
+    renderCompanion(d);
+  } catch(e){
+    $("#csBars").innerHTML = `<div class="hint" style="color:var(--red);">加载失败: ${esc(e.message)}<br><br>主程序可能没在运行, 或 pet_state.json 还没生成. 跑一次 LLM 任务后再刷新.</div>`;
+  }
+}
+
 async function refresh(){
   try{
     const [s,runs]=await Promise.all([api("/api/stats"),api("/api/runs?limit=100")]);
@@ -589,6 +760,7 @@ $$(".tab").forEach(t=>t.onclick=()=>{
   $$(".view").forEach(v=>v.classList.remove("active"));
   $("#view-"+t.dataset.view).classList.add("active");
   if(t.dataset.view==="memory") api("/api/memory").then(renderMemory);
+  if(t.dataset.view==="companion") refreshCompanion();
 });
 $("#runList").addEventListener("click",e=>{
   const item=e.target.closest(".run-item");
@@ -671,6 +843,105 @@ def create_app(trace_db: str | Path,
                                  -float(x.get("created_at", 0))))
         return {"items": data, "count": len(data)}
 
+    @app.get("/api/companion")
+    async def companion(decision_limit: int = 30, outcome_limit: int = 30):
+        """v23: 桌宠养成面板 - 当前 PetState + yaml 配置 + trace 日志.
+
+        数据源:
+          - state: data/pet_state.json (yaml persistence.file 配置)
+          - trace: data/companion_log.txt (v23-1 接好的 JSON-line)
+          - config: app/core/companion_config.yaml (实时读)
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config
+
+        # 1) 读 pet_state.json
+        ps_path = Path(cfg.persistence.file)
+        if not ps_path.is_absolute():
+            ps_path = Path.cwd() / ps_path
+        state_data = {}
+        if ps_path.is_file():
+            try:
+                state_data = json.loads(ps_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                state_data = {}
+        # 计算量化 4 维 (用 yaml 阈值)
+        qb = cfg.quantize
+        def q(v, lo, hi):
+            if v < lo: return "LOW"
+            if v > hi: return "HIGH"
+            return "MID"
+        quantize = {
+            "satiety": q(state_data.get("strength_food", 0), qb.low_below, qb.mid_below),
+            "mood":    q(state_data.get("feeling", 0),      qb.low_below, qb.mid_below),
+            "level":   "HIGH" if state_data.get("level", 1) >= 15 else ("LOW" if state_data.get("level", 1) < 5 else "MID"),
+            "favor":   q(state_data.get("likability", 0),  qb.low_below, qb.mid_below),
+        }
+        # 加 favor 进 state_data 让前端渲染
+        state_for_ui = {
+            "strength_food": state_data.get("strength_food", 0),
+            "feeling":       state_data.get("feeling", 0),
+            "level":         state_data.get("level", 1),
+            "exp":           state_data.get("exp", 0),
+            "likability":    state_data.get("likability", 0),
+            "quantize":      quantize,
+        }
+
+        # 2) 读 companion_log.txt
+        log_path = Path(cfg.trace.log_file)
+        if not log_path.is_absolute():
+            log_path = Path.cwd() / log_path
+        decisions = []
+        outcomes = []
+        if log_path.is_file():
+            try:
+                for line in log_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line: continue
+                    rec = json.loads(line)
+                    if rec.get("kind") == "outcome":
+                        outcomes.append(rec)
+                    elif "decision" in rec and "kind" not in rec:
+                        decisions.append(rec)
+            except Exception:  # noqa: BLE001
+                pass
+        # 倒序 (新→旧), 前端取前 N
+        decisions.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        outcomes.sort(key=lambda r: r.get("ts", 0), reverse=True)
+
+        # 3) 抽 yaml 配置关键字段
+        ev = cfg.event_hooks
+        cfg_dump = {
+            "range_satiety":   f"{cfg.satiety.minimum:.0f}..{cfg.satiety.maximum:.0f} (init {cfg.satiety.initial:.0f})",
+            "range_mood":      f"{cfg.mood.minimum:.0f}..{cfg.mood.maximum:.0f} (init {cfg.mood.initial:.0f})",
+            "range_favor":     f"{cfg.favor.minimum:.0f}..{cfg.favor.maximum:.0f} (init {cfg.favor.initial:.0f})",
+            "level_max":       cfg.leveling.max_level,
+            "exp_base":        cfg.leveling.base,
+            "exp_pow":         cfg.leveling.exp,
+            "exp_to_next_lv2": cfg.leveling.base * (2 ** cfg.leveling.exp),
+            "satiety_per_hour":       cfg.time_decay.satiety_per_hour,
+            "mood_no_interact_48h":   cfg.time_decay.mood_no_interact_48h,
+            "check_interval_seconds": cfg.time_decay.check_interval_seconds,
+            "favor_high": cfg.favor_rules.high_threshold,
+            "favor_low":  cfg.favor_rules.low_threshold,
+            "event_hooks": {
+                "task_success": {"mood": ev.task_success.mood, "favor": ev.task_success.favor, "exp": ev.task_success.exp, "satiety": ev.task_success.satiety},
+                "task_failure": {"mood": ev.task_failure.mood, "favor": ev.task_failure.favor, "exp": ev.task_failure.exp, "satiety": ev.task_failure.satiety},
+                "user_rejected":{"mood": ev.user_rejected.mood, "favor": ev.user_rejected.favor, "exp": ev.user_rejected.exp, "satiety": ev.user_rejected.satiety},
+                "user_accepted":{"mood": ev.user_accepted.mood, "favor": ev.user_accepted.favor, "exp": ev.user_accepted.exp, "satiety": ev.user_accepted.satiety},
+                "user_feed":    {"mood": ev.user_feed.mood,    "favor": ev.user_feed.favor,    "exp": ev.user_feed.exp,    "satiety": ev.user_feed.satiety},
+                "user_interact": {"mood": ev.user_interact.mood, "favor": ev.user_interact.favor, "exp": ev.user_interact.exp, "satiety": ev.user_interact.satiety},
+            },
+        }
+
+        return {
+            "state": state_for_ui,
+            "config": cfg_dump,
+            "decisions": decisions[:decision_limit],
+            "outcomes":  outcomes[:outcome_limit],
+            "persist_path": str(ps_path),
+        }
+
     return app
 
 
@@ -697,7 +968,7 @@ def main():
     except ImportError:
         raise RuntimeError("需要 uvicorn：pip install uvicorn")
 
-    print(f"📊 Dashboard 启动: http://{args.host}:{args.port}")
+    print(f"Dashboard 启动: http://{args.host}:{args.port}")
     print(f"   trace db: {trace_db}")
     print(f"   memory:   {memory_file}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
