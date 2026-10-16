@@ -590,11 +590,65 @@ class LangChainAgent:
                 # 已经因为 2013 触发重试:把 recovered 标 True,第二次还会再跑
                 # 一遍同样的逻辑(但这次如果再失败就不会再重试)
                 recovered = True
+            # v22-2: 任务级 outcome. 走完所有 yield 没异常 → success
+            self._finish_run_with_outcome(success=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("LangChainAgent 失败")
             yield ("error", str(e))
+            # v22-2: 异常路径 outcome=failure
+            self._finish_run_with_outcome(success=False)
+
+    # -------------------- v22-2: 桌宠状态反馈闭环接入 --------------------
+    # 任务结果 (success / failure / rejected) 反向更新 PetState.
+    # 应用方式: 主程序调 set_companion_state(state), 内部所有 task 调用都
+    # 走同一个 agent 实例, 所以 set 一次永久生效 (除非外部显式调用
+    # set_companion_state(None) 解除).
+
+    def set_companion_state(self, pet_state: "Optional[Any]") -> None:
+        """v22-2: 注入 / 解除桌宠 PetState, 任务结束后让 apply_outcome 写它。
+
+        主程序在 StateManager 构造后, 调用这里同步 (跟 v21-5 的
+        RiskyToolConfirm.set_companion_state 同源设计).
+        """
+        self._companion_state = pet_state
+
+    def _fire_outcome(self, outcome: str, tool_name: str = "",
+                      risk: int = 0) -> None:
+        """v22-2: 任务结果反向更新 PetState (如果注入了 state).
+
+        出错静默 (PetState 缺失字段, 数值越界等都不应炸 agent 主循环).
+        """
+        state = getattr(self, "_companion_state", None)
+        if state is None:
+            return
+        try:
+            apply = getattr(state, "apply_outcome", None)
+            if callable(apply):
+                apply(outcome, tool_name, risk_level=risk)
+            else:
+                log.warning(
+                    "LangChainAgent: state %r 没 apply_outcome 方法, 跳过",
+                    type(state).__name__,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "LangChainAgent: _fire_outcome(%s) 失败: %s", outcome, e,
+            )
+
+    def _finish_run_with_outcome(self, success: bool) -> None:
+        """在 run() 结尾调, 通知 PetState 一次 outcome (整体任务结果).
+
+        成功 / 失败边界: 走完所有 yield 后没异常 → success; 走中抛异常 →
+        failure. 这个是 v22-2 反馈层的"任务级"结局, 不跟单个 tool 调用 outcome
+        (那是 paper #10 中 rejection 那种"中途拒截"分支, 走 RiskyToolConfirm 路径).
+        """
+        outcome = "success" if success else "failure"
+        try:
+            self._fire_outcome(outcome)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -------------------- Plan mode --------------------
     # 当主程序接到 /plan <request> 时,调这个方法。语义:
