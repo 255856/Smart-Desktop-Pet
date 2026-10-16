@@ -12,7 +12,8 @@ class TestDashboard:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.trace_db = os.path.join(self.tmpdir, "traces.db")
-        self.memory_file = os.path.join(self.tmpdir, "memory.json")
+        # v23-10b: dashboard 读 sqlite memory.db, 改写 sqlite 而不是 json
+        self.memory_file = os.path.join(self.tmpdir, "memory.db")
         # 准备一些 trace 数据
         from app.brain.trace import TraceRecorder
         rec = TraceRecorder(self.trace_db)
@@ -23,20 +24,35 @@ class TestDashboard:
                                   "result": "已设置"})
         rec.record(rid, "reflection", {"verdict": "ok", "comment": ""})
         rec.end_run(rid, final_answer="已为你设好提醒～", status="success")
-        # 准备 memory
-        self.memory_data = [
-            {"id": "m1", "content": "主人喜欢咖啡", "category": "preference",
-             "importance": 0.8, "created_at": 1700000000.0,
-             "last_access_ts": 1700000000.0, "access_count": 1},
-            {"id": "m2", "content": "主人不喜欢香菜", "category": "preference",
-             "importance": 0.7, "created_at": 1700000100.0,
-             "last_access_ts": 1700000100.0, "access_count": 0},
-        ]
-        Path = __import__("pathlib").Path
-        Path(self.memory_file).write_text(
-            json.dumps(self.memory_data, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        # 准备 memory (sqlite schema, 2 条 fake 用于测重要性排序)
+        import sqlite3
+        conn = sqlite3.connect(self.memory_file)
+        try:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'other',
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    created_at REAL NOT NULL,
+                    last_access_ts REAL NOT NULL,
+                    access_count INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+            conn.executemany(
+                "INSERT INTO memories (id, content, category, importance, "
+                "created_at, last_access_ts, access_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("m1", "主人喜欢咖啡", "preference", 0.8,
+                     1700000000.0, 1700000000.0, 1),
+                    ("m2", "主人不喜欢香菜", "preference", 0.7,
+                     1700000100.0, 1700000100.0, 0),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         from app.web.dashboard import create_app
         self.app = create_app(self.trace_db, self.memory_file)
@@ -97,6 +113,9 @@ class TestDashboard:
         r = self.client.get("/api/memory")
         assert r.status_code == 200
         data = r.json()
+        # v23-10b: 读 sqlite memory.db (2 条 fake 用于测试)
         assert data["count"] == 2
         # 重要性高的排前
-        assert data["items"][0]["importance"] >= data["items"][1]["importance"]
+        items = data["items"]
+        for i in range(1, len(items)):
+            assert items[i-1]["importance"] >= items[i]["importance"]
