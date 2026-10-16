@@ -1901,6 +1901,9 @@ class ChatWindow(QWidget):
              (修「发送后卡顿 15-20s」)
           3) 后台线程用 QMetaObject.invokeMethod + QueuedConnection 跨线程
              切回主线程渲染结果, 保证 Qt 控件线程安全
+        v23-11: 调 tool 前查 companion_policy 决策 + trace_decision, 调完后
+          _fire_outcome("success") 走 yaml 钩子 + trace_outcome. 让 multimodal
+          路径跟主 LangChain run 一样被桌宠养成系统感知.
         """
         labels = {"image": "生成图片", "video": "生成视频",
                   "audio": "生成音频"}
@@ -1946,6 +1949,48 @@ class ChatWindow(QWidget):
             ))
             return
 
+        # v23-11: 调 tool 前查桌宠决策 (companion_policy 4 维查表)
+        risk_int = 2  # 默认 MEDIUM fallback
+        try:
+            from app.engine.tools._risk import risk_for_tool
+            risk_int = risk_for_tool(tool_name, default=2)
+        except Exception:
+            pass
+        decision = "ALLOW"
+        try:
+            lc_agent = getattr(self, "_lc_agent", None)
+            state = getattr(lc_agent, "_companion_state", None) if lc_agent else None
+            if state is not None:
+                from app.brain.companion_policy import lookup_decision
+                decision = lookup_decision(state, tool_name)
+            # 写 trace_decision
+            from app.brain._companion_log import trace_decision
+            from app.engine.tools._risk import RISK_LABELS
+            thread_id = getattr(lc_agent, "thread_id", "default") if lc_agent else "default"
+            if state is not None:
+                q = state.quantize()
+                trace_decision(
+                    thread_id=thread_id,
+                    tool=tool_name,
+                    risk=risk_int,
+                    decision=decision,
+                    sat=q.get("satiety", "MID"),
+                    mood=q.get("mood", "MID"),
+                    level=q.get("level", "MID"),
+                    favor=q.get("favor", "MID"),
+                    source="multimodal_path",
+                )
+            # REJECT/REFUSE 直接弹 assistant 消息, 不调 tool
+            if decision in ("REJECT", "REFUSE"):
+                cn = {"REJECT": "永久拒绝", "REFUSE": "本轮拒绝"}.get(decision, decision)
+                self._render_message(Message(
+                    role="assistant",
+                    content=f"{label} 被桌宠{cn} (心情/好感/状态不允许). prompt={prompt[:40]}"
+                ))
+                return
+        except Exception as e:  # noqa: BLE001
+            log.debug("multimodal 决策查表失败, 默认放行: %s", e)
+
         # 2) tool 放后台 worker thread, 不阻塞 chat_window 主线程
         self._append_system_msg(f"已发出{label}请求, 等模型回...")
         from PyQt5.QtCore import QMetaObject, Qt as _Qt, Q_ARG
@@ -1963,14 +2008,16 @@ class ChatWindow(QWidget):
                 self, "_on_multimodal_result", _Qt.QueuedConnection,
                 Q_ARG(str, kind), Q_ARG(str, label),
                 Q_ARG(str, prompt), Q_ARG(object, _result), Q_ARG(object, _exc),
+                Q_ARG(int, risk_int), Q_ARG(str, decision),
             )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    @pyqtSlot(str, str, str, object, object)
+    @pyqtSlot(str, str, str, object, object, int, str)
     def _on_multimodal_result(
         self, kind: str, label: str, prompt: str,
         result: object, exc: Optional[Exception],
+        risk_int: int = 2, decision: str = "ALLOW",
     ) -> None:
         """worker 完成后跨线程切回主线程 → 渲染结果到 chat。
 
@@ -1979,11 +2026,21 @@ class ChatWindow(QWidget):
         file:// 时 QTextBrowser 会试图 setSource 失败导致 chat_view 内容
         被清空。本函数生成 img-open:KEY 锚点, 点击走 _show_image_popup
         弹原图 QDialog, 不动 chat_view。
+
+        v23-11: 成功时调 _lc_agent._fire_outcome("success") 走 yaml 钩子 +
+        trace_outcome; 失败时调 "failure". 修原问题「模型没说图/视频生成好」,
+        加 announce 文案让主人明确知道.
         """
         if exc is not None:
             log.exception("multimodal %s tool failed", kind)
             self._render_message(Message(
                 role="assistant", content=f"{label} 调用失败: {exc}"))
+            try:
+                lc_agent = getattr(self, "_lc_agent", None)
+                if lc_agent is not None:
+                    lc_agent._fire_outcome("failure", f"generate_{kind}", risk=risk_int)
+            except Exception:  # noqa: BLE001
+                pass
             return
 
         url: Optional[str] = None
@@ -1995,6 +2052,12 @@ class ChatWindow(QWidget):
             self._render_message(Message(
                 role="assistant",
                 content=f"{label} 工具没返回 URL，原始结果: `{result!r}`"))
+            try:
+                lc_agent = getattr(self, "_lc_agent", None)
+                if lc_agent is not None:
+                    lc_agent._fire_outcome("failure", f"generate_{kind}", risk=risk_int)
+            except Exception:  # noqa: BLE001
+                pass
             return
 
         # v22: 渲染成 img-open:KEY 锚点 (点击放大原图, 不擦白 chat_view)
@@ -2006,7 +2069,9 @@ class ChatWindow(QWidget):
         # v23: 不在图片下方加可见的"[点击放大]"文字 (主人反馈「这个字样不该默认显示」)。
         # _render_markdown 的 _img() 会把 url 包成 <a href="img-open:KEY">
         # + <img src="url" title="点击放大">, 鼠标悬浮时系统 tooltip 自然显示。
-        content = f"![{kind_cn}: {prompt}]({url})"
+        # v23-11: 主人说"模型没说图/视频生成好了", 加一句 announce 让他知道.
+        announce = f"{label}已生成 (决策: {decision}, 风险等级: {risk_int})\n\n"
+        content = f"{announce}![{kind_cn}: {prompt}]({url})"
         msg = Message(role="assistant", content=content, tools=[(f"generate_{kind}", "", "")])
         self.history.append(msg)
         self._trim_history()
@@ -2015,6 +2080,14 @@ class ChatWindow(QWidget):
         except Exception:
             log.exception("chat_store.add failed (multimodal %s)", kind)
         self._render_message(msg)
+
+        # v23-11: 调 _fire_outcome 走 yaml 钩子 (心情 +8 / EXP +20 / 好感 +1)
+        try:
+            lc_agent = getattr(self, "_lc_agent", None)
+            if lc_agent is not None:
+                lc_agent._fire_outcome("success", f"generate_{kind}", risk=risk_int)
+        except Exception:  # noqa: BLE001
+            log.debug("multimodal _fire_outcome failed", exc_info=True)
 
     def _on_mic_pressed(self) -> None:
         """按住麦克风按钮：开始录音。"""

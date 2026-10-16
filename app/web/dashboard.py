@@ -769,16 +769,56 @@ def create_app(trace_db: str | Path,
 
     @app.get("/api/memory")
     async def memory():
-        if memory_file is None or not Path(memory_file).is_file():
-            return {"items": [], "note": "memory file not found"}
-        try:
-            data = json.loads(Path(memory_file).read_text("utf-8"))
-        except Exception as e:  # noqa: BLE001
-            return {"items": [], "error": str(e)}
-        # 排序：importance 高在前
-        data.sort(key=lambda x: (-float(x.get("importance", 0.5)),
-                                 -float(x.get("created_at", 0))))
-        return {"items": data, "count": len(data)}
+        """v23-10: 长期记忆读 sqlite memory.db (不是 memory.json).
+
+        桌宠实际存的路径是 data/memory.db (MemoryStore v22 改用 sqlite),
+        旧 memory.json 已废弃. memory_file 参数是兼容旧 dashboard 配置.
+        """
+        import sqlite3
+        # 优先读 sqlite memory.db (MemoryStore 实际路径)
+        # 1) 默认 cwd/data/memory.db
+        # 2) 兼容 memory_file 路径 (用 .db 后缀替换 .json)
+        candidates = []
+        if memory_file is not None:
+            mp = Path(memory_file)
+            candidates.append(mp.with_suffix(".db") if mp.suffix == ".json" else mp)
+            candidates.append(mp)  # 原路径也试
+        candidates.append(Path.cwd() / "data" / "memory.db")
+
+        for path in candidates:
+            if path.is_file():
+                try:
+                    conn = sqlite3.connect(str(path))
+                    try:
+                        cur = conn.execute(
+                            "SELECT id, content, category, importance, created_at "
+                            "FROM memories ORDER BY importance DESC, created_at DESC"
+                        )
+                        items = [
+                            {
+                                "id": row[0],
+                                "content": row[1],
+                                "category": row[2],
+                                "importance": row[3],
+                                "created_at": row[4],
+                            }
+                            for row in cur.fetchall()
+                        ]
+                    finally:
+                        conn.close()
+                    return {"items": items, "count": len(items), "source": str(path)}
+                except Exception as e:  # noqa: BLE001
+                    return {"items": [], "error": str(e), "tried": str(path)}
+        # 都没找到, fallback 到 JSON (兼容老 dashboard 配)
+        if memory_file is not None and Path(memory_file).is_file():
+            try:
+                data = json.loads(Path(memory_file).read_text("utf-8"))
+            except Exception as e:  # noqa: BLE001
+                return {"items": [], "error": str(e)}
+            data.sort(key=lambda x: (-float(x.get("importance", 0.5)),
+                                     -float(x.get("created_at", 0))))
+            return {"items": data, "count": len(data), "source": str(memory_file)}
+        return {"items": [], "note": "memory.db not found", "tried": [str(p) for p in candidates]}
 
     @app.get("/api/companion")
     async def companion(decision_limit: int = 30, outcome_limit: int = 30):
