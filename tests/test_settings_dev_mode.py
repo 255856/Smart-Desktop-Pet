@@ -188,3 +188,47 @@ def test_settings_update_state_view_keeps_dev_panel_in_sync(settings_window):
     assert sw._dev_value_labels["feeling"].text() == "70"
     assert sw._dev_value_labels["strength_food"].text() == "60"
     print("[OK] _update_state_view 同步 sliders + value labels")
+
+
+def test_v226_strategy_preview_panel_exists(settings_window):
+    """v22-6: dev_panel 应有 strategy 预览 label."""
+    sw = settings_window
+    sw._set_developer_mode(True)
+    assert hasattr(sw, "lbl_dev_strategy"), (
+        "v22-6 应加 lbl_dev_strategy label"
+    )
+    print("[OK] v22-6: lbl_dev_strategy 控件存在")
+
+
+def test_v226_strategy_preview_updates_with_sliders(settings_window):
+    """v22-6: 拖 slider 时策略预览应跟上 (跟 _strategy_guidance 输出一致)."""
+    sw = settings_window
+    sw._set_developer_mode(True)
+    # HIGH sat+mid mood → "状态好" 探索段
+    sw._dev_sliders["feeling"].setValue(85)
+    sw._dev_sliders["strength_food"].setValue(85)
+    sw._dev_sliders["level"].setValue(10)
+    txt_high = sw.lbl_dev_strategy.text()
+    assert "策略预览" in txt_high, f"应有策略预览头. 实际: {txt_high}"
+    assert "状态好" in txt_high or "主动建议" in txt_high, (
+        f"HIGH sat+mood 应有探索段. 实际: {txt_high}"
+    )
+
+    # LOW sat+low mood → 保守段
+    sw._dev_sliders["feeling"].setValue(20)
+    sw._dev_sliders["strength_food"].setValue(20)
+    sw._dev_sliders["level"].setValue(2)
+    txt_low = sw.lbl_dev_strategy.text()
+    assert "情绪低落" in txt_low or "简短" in txt_low, (
+        f"LOW mood 应有保守段. 实际: {txt_low}"
+    )
+
+    # 平稳态 (MID sat + MID mood) → (无 — 状态平稳无策略注入)
+    sw._dev_sliders["feeling"].setValue(50)
+    sw._dev_sliders["strength_food"].setValue(50)
+    sw._dev_sliders["level"].setValue(8)
+    txt_mid = sw.lbl_dev_strategy.text()
+    assert "无" in txt_mid and "状态平稳" in txt_mid, (
+        f"MID/mid state 应无策略. 实际: {txt_mid}"
+    )
+    print("[OK] v22-6: sliders 拖动策略预览实时跟 _strategy_guidance 同步")

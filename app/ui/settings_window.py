@@ -396,6 +396,17 @@ class SettingsWindow(QWidget):
             "background:#f4f4f8; padding:6px; border-radius:4px;")
         gv.addWidget(self.lbl_dev_decisions)
 
+        # v22-6: 策略层预览 — 跟 grounding_dynamic_prompt 实际拼出来的策略文本对齐。
+        # 给主人一个"我拖滑块时, 桌宠看到的 system_prompt 注入就是这样"的可视化。
+        self.lbl_dev_strategy = QLabel("策略预览: (无)")
+        self.lbl_dev_strategy.setWordWrap(True)
+        self.lbl_dev_strategy.setStyleSheet(
+            "color:#5b5b6e; font-size:8pt;"
+            "font-family:'Consolas','Monaco',monospace;"
+            "background:#faf6ef; padding:6px; border-radius:4px;"
+            "border-left:3px solid #c08e35;")  # 暖色调, 跟 decisions 区分
+        gv.addWidget(self.lbl_dev_strategy)
+
         # 预设按钮 (HIGH/HIGH/HIGH / LOW/LOW/LOW 等)
         preset_row = QHBoxLayout()
         preset_row.setSpacing(4)
@@ -498,6 +509,19 @@ class SettingsWindow(QWidget):
             self.lbl_dev_decisions.setText(
                 "决策预览:\n" + "\n".join(parts)
             )
+            # v22-6: 策略层预览 — 调 _strategy_guidance 拿实际拼接文本
+            try:
+                from app.brain.hallucination_guard import _strategy_guidance
+                strat = _strategy_guidance(mock)
+            except Exception:  # noqa: BLE001
+                strat = ""
+            if not strat:
+                self.lbl_dev_strategy.setText(
+                    "策略预览: (无 — 状态平稳无策略注入)"
+                )
+            else:
+                # 截掉头部前缀 "本轮按此调整行为风格" 给主人在 UI 里更易读
+                self.lbl_dev_strategy.setText("策略预览:\n" + strat.strip())
         except Exception as e:  # noqa: BLE001
             self.lbl_dev_decisions.setText(f"决策预览失败: {e}")
 
