@@ -90,6 +90,113 @@ class PetState:
     def feeling_max(self) -> float:
         return 100.0
 
+    # ---- v21-3: 创新点 2 状态量化 ----
+    # 把连续的 strength_food / feeling / level 离散化成 LOW/MID/HIGH 三档,
+    # 用来驱动 companion_policy 27 条规则的查表。
+    # 阈值 33 / 67 是论文里定的 (经验覆盖), hysteresis 用 prev 防抖动,
+    # 让"刚喂完食物"等瞬时变更不立刻跳档。
+
+    @staticmethod
+    def _quantize(value: float, hi: float = 100.0, prev: str = "MID") -> str:
+        """通用 0..hi 三档离散化 (LOW / MID / HIGH), 带 hysteresis。
+
+        prev 是上一档:
+          - prev=LOW 时, 必须涨到 40 才回 MID (避免 33/35 边界抖动)
+          - prev=HIGH 时, 必须跌到 60 才回 MID
+        prev 默认 MID 用于首次量化 (没历史)。
+        """
+        if prev == "LOW":
+            return "MID" if value >= 40.0 else "LOW"
+        if prev == "HIGH":
+            return "MID" if value <= 60.0 else "HIGH"
+        # prev == MID: 标准三档
+        third = hi / 3.0
+        if value < third:
+            return "LOW"
+        if value > 2 * third:
+            return "HIGH"
+        return "MID"
+
+    def quantize_mood(self, prev: str = "MID") -> str:
+        """feeling 离散化: <33 LOW, 33-67 MID, >67 HIGH, hysteresis 复用 prev。"""
+        return self._quantize(self.feeling, hi=100.0, prev=prev)
+
+    def quantize_satiety(self, prev: str = "MID") -> str:
+        """strength_food 离散化 (桌宠"饿不饿"信号)。"""
+        return self._quantize(self.strength_food, hi=100.0, prev=prev)
+
+    def quantize_level(self, prev: str = "MID") -> str:
+        """level 离散化: 1-4 LOW, 5-14 MID, 15+ HIGH (论文区间)。
+
+        等级离散化跟数值离散化不同, 范围不固定, 用区间判定而不是 1/3。
+        """
+        if prev == "LOW" and self.level >= 5:
+            prev = "MID"
+        if prev == "HIGH" and self.level <= 14:
+            prev = "MID"
+        if prev == "MID":
+            if self.level < 5:
+                return "LOW"
+            if self.level >= 15:
+                return "HIGH"
+        return "MID"
+
+    def quantize(self, prev_state: "Optional[dict[str, str]]" = None) -> dict[str, str]:
+        """一次性返回 {mood, satiety, level} 三档离散化结果。
+
+        prev_state 用来做 hysteresis 记忆, 比如上一轮 mood 是 HIGH,
+        这次注入后还是 60 → 不立刻掉到 MID。shape:
+            {"mood": "LOW|MID|HIGH", "satiety": "...", "level": "..."}
+        """
+        prev_state = prev_state or {}
+        return {
+            "mood": self.quantize_mood(prev_state.get("mood", "MID")),
+            "satiety": self.quantize_satiety(prev_state.get("satiety", "MID")),
+            "level": self.quantize_level(prev_state.get("level", "MID")),
+        }
+
+    # ---- v21-3: 反馈层闭环 ----
+    # 任务执行结果反作用于 PetState, 这是创新点 2 双向闭环的关键。
+
+    def apply_outcome(self, outcome_type: str, tool_name: str = "",
+                      risk_level: int = 0) -> None:
+        """任务结果如何更新 PetState (创新点 2 反馈闭环)。
+
+        outcome_type ∈ {"success", "failure", "rejected", "accepted"}:
+          - success: 任务跑通了 → feeling+, exp+按风险等级
+          - failure: 任务失败 → feeling-, strength_food-
+          - rejected: 主人拒绝执行 → feeling- (比 failure 重)
+          - accepted: 主人采纳建议 → feeling+, exp+
+
+        数值微调 (避免一次任务就把 80 打到 90):
+          - feeling   单步 ± 0.3~1.5 (按风险权重)
+          - exp       按 risk_level 给 0..2 (高风险工具成功经验多)
+          - strength_food 单步 -0.1 (失败微扣, 不至于饱食度骤减)
+
+        触发后 on_change 回调由 StateManager 负责调用 (本方法只动 state)。
+        """
+        if outcome_type == "success":
+            delta = 0.5 + 0.2 * risk_level  # 风险高 → 满足感强
+            self.feeling = min(self.feeling_max,
+                               self.feeling + delta)
+            self.exp = self.exp + max(0, risk_level)
+        elif outcome_type == "failure":
+            self.feeling = max(0.0, self.feeling - 0.3)
+            self.strength_food = max(0.0, self.strength_food - 0.1)
+        elif outcome_type == "rejected":
+            # 主人明确拒绝 = 强烈负面反馈, 比 failure 影响更大
+            self.feeling = max(0.0, self.feeling - 1.5)
+        elif outcome_type == "accepted":
+            self.feeling = min(self.feeling_max,
+                               self.feeling + 1.0)
+            self.exp = self.exp + 2
+        # 未知 outcome_type 静默 (不让 LLM 侧随意字段破坏状态)
+        log.debug(
+            "PetState.apply_outcome: %s tool=%s risk=%d → (feeling=%.1f, food=%.1f, exp=%.1f)",
+            outcome_type, tool_name, risk_level,
+            self.feeling, self.strength_food, self.exp,
+        )
+
     def normalize(self) -> None:
         # 把存档读入的数值钳制到合法范围（兼容旧版本越界值，如好感度曾随等级到 110）
         for _k in ("strength", "strength_food", "strength_drink",
@@ -451,11 +558,11 @@ class PetState:
         return s
 
     def stats_summary(self) -> str:
-        return (f"Lv.{self.level}  💪{self.strength:.0f}  "
-                f"🍚{self.strength_food:.0f}  💧{self.strength_drink:.0f}  "
-                f"😊{self.feeling:.0f}  ❤️{self.health:.0f}  "
-                f"💕{self.likability:.0f}/{self.likability_max:.0f}  "
-                f"💰{self.money:.0f}  [{self.mode.value}]")
+        return (f"Lv.{self.level}  体力{self.strength:.0f}  "
+                f"饱食{self.strength_food:.0f}  饮水{self.strength_drink:.0f}  "
+                f"心情{self.feeling:.0f}  健康{self.health:.0f}  "
+                f"好感{self.likability:.0f}/{self.likability_max:.0f}  "
+                f"金币{self.money:.0f}  [{self.mode.value}]")
 
 
 def is_night(now_ts: float | None = None) -> bool:
