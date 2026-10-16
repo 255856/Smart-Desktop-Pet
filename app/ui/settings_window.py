@@ -89,6 +89,8 @@ class SettingsWindow(QWidget):
     renderer_changed = Signal(str)             # sprite / live2d（重启生效）
     hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
     character_changed = Signal(dict)           # {name, persona}
+    developer_mode_changed = Signal(bool)      # 开发者模式开关: 开启后状态 Tab 显示 slider
+    dev_state_pushed = Signal(dict)            # 开发者模式下手改数值: {strength, strength_food, ...}
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
@@ -117,6 +119,8 @@ class SettingsWindow(QWidget):
         self._sticker_enabled = bool(sticker_enabled)
         # 窗口置顶初始状态（来自 cfg.window.always_on_top）
         self._always_on_top = bool(always_on_top)
+        # v22-1: 开发者模式开关 (默认关闭, 控制 Tab 切换后才会显示 dev_panel sliders)
+        self.developer_mode = False
         # Live2D 参数初始值（贴纸/随机间隔/帧率；来自 ui_controller 合并 store 后）
         st = live2d_state or {}
         self._live2d_state = {
@@ -230,6 +234,7 @@ class SettingsWindow(QWidget):
         cl.addWidget(tabs, 1)
 
         self.lbl_status = QLabel("就绪")
+        self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet(f"color: {ui_style.TEXT_SUB};")
         cl.addWidget(self.lbl_status)
 
@@ -245,6 +250,10 @@ class SettingsWindow(QWidget):
         row.addStretch(1)
         row.addWidget(self.btn_close)
         cl.addLayout(row)
+
+        # 无边框窗口补上「拖拽四边/四角调整大小」
+        from app.ui.frameless import FramelessResizer
+        self._resizer = FramelessResizer(self).attach()
 
     def _build_tab_status(self) -> QWidget:
         page = QWidget()
@@ -291,9 +300,236 @@ class SettingsWindow(QWidget):
         f = self.lbl_summary.font(); f.setBold(True); self.lbl_summary.setFont(f)
         self.lbl_summary.setStyleSheet("color:#6b6b7d; font-size:9pt; padding-top:2px;")
         gv.addWidget(self.lbl_summary)
+        # 卡片垂直居中：上下留白对称，避免内容挤在顶部、下方一大片空
+        v.addStretch(1)
+        v.addWidget(g)
+
+        # v22-1: 开发者模式 sliders (默认隐藏, _set_developer_mode 启可见)
+        self._dev_panel = self._build_tab_status_dev()
+        self._dev_panel.setVisible(False)
+        self._dev_panel.setObjectName("dev_panel")
+        v.addWidget(self._dev_panel)
+
+        v.addStretch(1)
+        return page
+
+    def _build_tab_status_dev(self) -> QWidget:
+        """v22-1: 开发者调试面板, 主人手动调整 PetState 数值看决策变化。
+
+        6 字段 slider + 1 决策预览:
+          - strength / strength_food / strength_drink / feeling / health / likability
+          - level (1-30)
+          - 「当前量化: sat=mood=level=」标签
+          - 「决策预览: lock_screen → CONFIRM」等若干常见工具的当前决策
+          - 「加载预设状态」按钮加速测试 (HIGH/HIGH/HIGH, LOW/LOW/LOW 等)
+
+        slider 拖动 → emit dev_state_pushed(dict) 让主程序接管,
+        主程序用 set_companion_state 同步给 RiskyToolConfirm.
+        """
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setSpacing(4)
+
+        g = QGroupBox("开发者调试（v22-1：手动调整状态验决策）")
+        gv = QVBoxLayout(g)
+        gv.setSpacing(6)
+
+        # 提示
+        tip = QLabel(
+            "拖动滑块改 PetState 数值, 下方决策预览会实时更新; "
+            "主程序会同步注入到 RiskyToolConfirm, 主人可在 chat 里实测。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#5b5b6e; font-size:8pt;")
+        gv.addWidget(tip)
+
+        self._dev_sliders: dict = {}
+        rows = [
+            ("体力",   "strength",       0, 100, 100),
+            ("饱食",   "strength_food",  0, 100, 100),
+            ("口渴",   "strength_drink", 0, 100, 100),
+            ("心情",   "feeling",        0, 100, 80),
+            ("健康",   "health",         0, 100, 100),
+            ("好感",   "likability",     0, 100, 0),
+            ("等级",   "level",          1, 30,  1),
+        ]
+        for text, attr, lo, hi, default in rows:
+            row = QHBoxLayout()
+            lbl = QLabel(text); lbl.setFixedWidth(36)
+            lbl.setStyleSheet("color:#4b4b5e; font-size:9pt;")
+            row.addWidget(lbl)
+
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setValue(default)
+            sl.setMinimumWidth(180)
+            sl.setTickPosition(QSlider.TickPosition.TicksBelow)
+            sl.setTickInterval((hi - lo) // 5 if hi > lo else 1)
+            sl.valueChanged.connect(
+                lambda v, a=attr: self._on_dev_slider_changed(a, v)
+            )
+            self._dev_sliders[attr] = sl
+            row.addWidget(sl, 1)
+
+            vlbl = QLabel(f"{default}")
+            vlbl.setFixedWidth(38)
+            vlbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            vlbl.setStyleSheet(
+                "color:#8a8a9c; font-size:8pt; border:none; background:transparent;")
+            self._dev_value_labels = getattr(self, "_dev_value_labels", {})
+            self._dev_value_labels[attr] = vlbl
+            row.addWidget(vlbl)
+            gv.addLayout(row)
+
+        # 量化 + 决策预览
+        self.lbl_dev_quantize = QLabel("量化: -- / -- / --")
+        self.lbl_dev_quantize.setStyleSheet(
+            "color:#4b4b5e; font-size:9pt; padding:4px 0;"
+            "font-weight:bold;")
+        gv.addWidget(self.lbl_dev_quantize)
+
+        self.lbl_dev_decisions = QLabel("决策预览：--")
+        self.lbl_dev_decisions.setWordWrap(True)
+        self.lbl_dev_decisions.setStyleSheet(
+            "color:#3b3b4e; font-size:8pt; "
+            "font-family:'Consolas','Monaco',monospace;"
+            "background:#f4f4f8; padding:6px; border-radius:4px;")
+        gv.addWidget(self.lbl_dev_decisions)
+
+        # 预设按钮 (HIGH/HIGH/HIGH / LOW/LOW/LOW 等)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(4)
+        presets = [
+            ("满状态",     {"strength_food": 90, "feeling": 90, "level": 18}),
+            ("低状态",     {"strength_food": 20, "feeling": 20, "level": 2}),
+            ("中状态",     {"strength_food": 50, "feeling": 50, "level": 8}),
+            ("差心情+饱",   {"strength_food": 30, "feeling": 25}),
+            ("高等级+低心情", {"strength_food": 60, "feeling": 25, "level": 18}),
+            ("重置默认",    {"strength_food": 100, "feeling": 80, "level": 1,
+                            "strength_drink": 100, "strength": 100,
+                            "health": 100, "likability": 0}),
+        ]
+        for label, values in presets:
+            btn = QPushButton(label)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "padding:3px 8px; font-size:8pt; border-radius:3px;")
+            btn.clicked.connect(
+                lambda _c=False, v=values: self._on_dev_preset_clicked(v)
+            )
+            preset_row.addWidget(btn)
+        preset_row.addStretch(1)
+        gv.addLayout(preset_row)
+
+        v.addStretch(1)
         v.addWidget(g)
         v.addStretch(1)
         return page
+
+    def _set_developer_mode(self, enabled: bool) -> None:
+        """切换开发者模式: 显示/隐藏 dev_panel, 重算决策预览。"""
+        self.developer_mode = bool(enabled)
+        if hasattr(self, "_dev_panel"):
+            self._dev_panel.setVisible(self.developer_mode)
+            if self.developer_mode:
+                # 切到开启时, 把 sliders 当前值发一次出去 (主程序同步)
+                self._emit_dev_state()
+                self._refresh_dev_preview()
+
+    def _on_dev_slider_changed(self, attr: str, value: int) -> None:
+        """slider 拖动: 更新 value label + emit dev_state_pushed + 重算 preview。"""
+        if hasattr(self, "_dev_value_labels") and attr in self._dev_value_labels:
+            self._dev_value_labels[attr].setText(f"{value}")
+        if self.developer_mode:
+            self._emit_dev_state()
+            self._refresh_dev_preview()
+
+    def _on_dev_preset_clicked(self, values: dict) -> None:
+        """预设按钮: 改 sliders → 自动 emit + preview。"""
+        if not self.developer_mode:
+            return
+        for attr, v in values.items():
+            if attr in self._dev_sliders:
+                self._dev_sliders[attr].blockSignals(True)
+                self._dev_sliders[attr].setValue(int(v))
+                self._dev_sliders[attr].blockSignals(False)
+        # 同步 value labels (因为我们 blockSignals 暂时屏蔽)
+        for attr, v in values.items():
+            if attr in getattr(self, "_dev_value_labels", {}):
+                self._dev_value_labels[attr].setText(f"{int(v)}")
+        self._emit_dev_state()
+        self._refresh_dev_preview()
+
+    def _emit_dev_state(self) -> None:
+        """发 dev_state_pushed 给主程序, 让它把 PetState 同步到 RiskyToolConfirm。"""
+        if not self._dev_sliders:
+            return
+        snapshot = {attr: int(sl.value())
+                    for attr, sl in self._dev_sliders.items()}
+        try:
+            self.dev_state_pushed.emit(snapshot)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_dev_preview(self) -> None:
+        """决策预览: 拿 snapshot 跑 quantize_state + 几个常见工具的 lookup_decision。"""
+        if not hasattr(self, "_dev_sliders") or not self._dev_sliders:
+            return
+        snapshot = {attr: float(sl.value())
+                    for attr, sl in self._dev_sliders.items()}
+        # quantize (复用 PetState.quantize)
+        try:
+            from app.engine.state import PetState
+            mock = PetState()
+            for attr, val in snapshot.items():
+                setattr(mock, attr, val)
+            state = mock.quantize()
+            self.lbl_dev_quantize.setText(
+                f"量化: sat={state['satiety']}  mood={state['mood']}  "
+                f"level={state['level']}"
+            )
+            # decision lookup
+            from app.brain.companion_policy import lookup_decision
+            sample_tools = ["get_current_time", "set_volume", "edit_file",
+                            "send_email", "run_script", "lock_screen"]
+            parts = []
+            for t in sample_tools:
+                parts.append(f"{t} → {lookup_decision(mock, t)}")
+            self.lbl_dev_decisions.setText(
+                "决策预览:\n" + "\n".join(parts)
+            )
+        except Exception as e:  # noqa: BLE001
+            self.lbl_dev_decisions.setText(f"决策预览失败: {e}")
+
+    def _update_state_view(self, state) -> None:
+        """公共接口: 主程序把当前 PetState 推进来 → 同步 progress bar + sliders。"""
+        # 现有 progress bar 同步 (基线)
+        if hasattr(self, "_stat_bars"):
+            for attr, bar in self._stat_bars:
+                try:
+                    bar.setValue(int(getattr(state, attr, 0)))
+                except Exception:
+                    pass
+        if hasattr(self, "lbl_summary"):
+            try:
+                self.lbl_summary.setText(
+                    f"等级 {state.cal_level()}  经验 {state.exp:.0f}  "
+                    f"金币 {state.money:.0f}  模式 {state.mode.value}"
+                )
+            except Exception:
+                self.lbl_summary.setText("（同步失败）")
+        # sliders 同步 (只在开发者模式有意义)
+        if self.developer_mode and hasattr(self, "_dev_sliders"):
+            for attr, sl in self._dev_sliders.items():
+                try:
+                    val = int(getattr(state, attr, sl.value()))
+                    sl.blockSignals(True)
+                    sl.setValue(val)
+                    sl.blockSignals(False)
+                    if attr in getattr(self, "_dev_value_labels", {}):
+                        self._dev_value_labels[attr].setText(f"{val}")
+                except Exception:
+                    pass
 
     def _build_tab_fps(self) -> QWidget:
         page = QWidget()
@@ -355,7 +591,7 @@ class SettingsWindow(QWidget):
         self.cb_fps_monitor = QCheckBox("开启 FPS 实时监测")
         row.addWidget(self.cb_fps_monitor, 1)
         gv.addLayout(row)
-        tip = QLabel("开启后桌宠头顶气泡每秒显示「⚡ 19.8 FPS」这种字样，可用于验证帧率是否真的改了。")
+        tip = QLabel("开启后桌宠头顶气泡每秒显示「19.8 FPS」这种字样，可用于验证帧率是否真的改了。")
         tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
         gv.addWidget(tip)
         v.addWidget(g_debug)
@@ -516,6 +752,28 @@ class SettingsWindow(QWidget):
                 r, c = divmod(i, 3)
                 gv.addWidget(btn, r, c)
         v.addWidget(g_emo)
+
+        # v22-1: 开发者模式开关
+        g_dev = QGroupBox("开发者模式")
+        gvd = QVBoxLayout(g_dev)
+        dev_row = QHBoxLayout()
+        self.chk_developer_mode = QCheckBox(
+            "开启开发者模式 (状态 Tab 显示 sliders, 主程序同步给 RiskyToolConfirm)"
+        )
+        self.chk_developer_mode.setChecked(self.developer_mode)
+        self.chk_developer_mode.toggled.connect(self._set_developer_mode)
+        dev_row.addWidget(self.chk_developer_mode, 1)
+        self.chk_developer_mode.setStyleSheet("font-size:9pt;")
+        gvd.addLayout(dev_row)
+        hint = QLabel(
+            "v22-1 调整数值看决策变化. "
+            "修改会同步到 RiskyToolConfirm.set_companion_state, "
+            "聊天下轮任务会按当前 state 走查表."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#5b5b6e; font-size:8pt;")
+        gvd.addWidget(hint)
+        v.addWidget(g_dev)
 
         g_motion = QGroupBox("自主行为")
         gv = QVBoxLayout(g_motion)

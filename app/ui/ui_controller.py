@@ -117,6 +117,16 @@ class UIController(QObject):
         self.pet.food_money_fn = lambda: self.state.money
         self.pet.pet_name_fn = lambda: self.cfg.character.name
 
+        # v22-1b: 开发者模式信号接线
+        #   - dev_state_pushed: settings 滑块改动 → 改 PetState + 同步到 RiskyToolConfirm
+        #   - developer_mode_changed: 开关状态 (目前主程序只 emit 不消费, 仅供测试观察)
+        self.settings_window.developer_mode_changed.connect(
+            self._on_developer_mode_changed
+        )
+        self.settings_window.dev_state_pushed.connect(
+            self._on_dev_state_pushed
+        )
+
         fallback_rel = self.cfg.sprite.fallback
         fallback_image = root / fallback_rel
         # 优先使用 ICO 文件（多尺寸，任务栏显示效果最佳）
@@ -246,6 +256,62 @@ class UIController(QObject):
         """countdown 到点（后台线程经 brain 信号转上来）。"""
         log.info("倒计时到点：%s", text)
         self._fire_alarm(text, kind=kind)
+
+    def _on_developer_mode_changed(self, enabled: bool) -> None:
+        """v22-1b: 开发者模式开关变化 (控制 Tab checkbox 切换)。
+
+        主程序不直接消费, 但留着这个 slot 让 settings.signal 连通。
+        pet / live2d 不依赖开发者模式 (开发者模式只调 settings 自己的 sliders)。
+        """
+        log.info("developer mode = %s", enabled)
+        try:
+            # 同步回 settings (开/关信号)
+            self.settings_window._set_developer_mode(enabled)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_dev_state_pushed(self, snapshot: dict) -> None:
+        """v22-1b: 滑块改动发来 → 改 PetState + 同步 RiskyToolConfirm。
+
+        流程:
+          1. snapshot 每项 (attr, value) setattr 到 self.state
+          2. self.state.normalize() 把数值钳到 [0, 100] 等合法范围
+          3. 同步给标准后端 LangChainAgent 的 confirm_ctrl,
+             让它之后的任务拦截走查表 (v21-5)
+          4. 回灌 settings UI: progress bar + lbl_summary 跟新值同步
+          5. 触发 state.on_change 让 pet_window / live2d 表情同步 (loop
+             衰减会让 next tick 覆盖这个值, 所以 on_change 调一次即可,
+             但开发者模式开启时衰减停下来避免视觉抖动)
+        """
+        try:
+            for attr, val in (snapshot or {}).items():
+                if not hasattr(self.state, attr):
+                    log.warning(
+                        "dev_state_pushed: PetState 没字段 %s, 跳过", attr)
+                    continue
+                setattr(self.state, attr, float(val))
+            self.state.normalize()
+            # 同步给 LangChainAgent 的 confirm_ctrl
+            cw = self._chat_window
+            if cw is not None:
+                lc = getattr(cw, "_lc_agent", None)
+                ctrl = getattr(lc, "_confirm_ctrl", None) if lc else None
+                if ctrl is not None:
+                    ctrl.set_companion_state(self.state)
+            # 回灌 settings 自己显示
+            try:
+                self.settings_window._update_state_view(self.state)
+            except Exception:  # noqa: BLE001
+                pass
+            # 触发 on_change 让 pet/Live2D 同步 (但不强制保存, 调试期间)
+            try:
+                if self.state.on_change:
+                    self.state.on_change()
+            except Exception:  # noqa: BLE001
+                pass
+            log.debug("dev_state_pushed applied: %s", snapshot)
+        except Exception as e:  # noqa: BLE001
+            log.warning("_on_dev_state_pushed 失败: %s", e)
 
     def _fire_alarm(self, text: str, kind: str = "⏰ 提醒") -> None:
         """到点提醒的统一处理。
