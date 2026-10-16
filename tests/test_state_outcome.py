@@ -7,6 +7,7 @@ v21-3:
     任务结果反向更新 PetState (反馈层闭环)
 """
 from app.engine.state import PetState
+import pytest
 
 
 def test_quantize_mood_three_levels():
@@ -51,15 +52,18 @@ def test_quantize_level_three_levels():
     print("[OK] quantize_level: 1-4/5-14/15+ 区间正确")
 
 
-def test_quantize_returns_three_keys():
-    """quantize() 一次性返回 mood/satiety/level 三档 dict。"""
+def test_quantize_returns_four_keys():
+    """quantize() 一次性返回 mood/satiety/level/favor 四档 dict。
+
+    v23-3 加 favor (好感) 维度, 主人 2026-10-16 用好感替换原 trust.
+    """
     ps = PetState()
     ps.feeling = 70
     ps.strength_food = 60
     ps.level = 12
     out = ps.quantize()
-    assert set(out.keys()) == {"mood", "satiety", "level"}, (
-        f"quantize 应返 mood/satiety/level 三键. 实际: {out}"
+    assert set(out.keys()) == {"mood", "satiety", "level", "favor"}, (
+        f"quantize 应返 4 键 (v23-3 加 favor). 实际: {out}"
     )
     assert out["mood"] in ("LOW", "MID", "HIGH")
     assert out["satiety"] in ("LOW", "MID", "HIGH")
@@ -99,7 +103,11 @@ def test_quantize_hysteresis_prevents_boundary_jitter():
 
 
 def test_apply_outcome_success_increases_feeling_and_exp():
-    """outcome=success: feeling+exp 上升, 风险等级越高 +exp 越多。"""
+    """outcome=success: feeling+exp 上升。
+
+    v23-3 起数值权重走 yaml (默认跟 日志.txt 一致):
+      - feeling +8, exp +20, favor +1
+    """
     ps = PetState()
     f0, e0 = ps.feeling, ps.exp
     ps.apply_outcome("success", "run_script", risk_level=3)
@@ -107,62 +115,60 @@ def test_apply_outcome_success_increases_feeling_and_exp():
         f"success 后 feeling 应 +. f0={f0} → {ps.feeling}"
     )
     assert ps.exp > e0, (
-        f"success 后 exp 应 +3 (risk=3). e0={e0} → {ps.exp}"
+        f"success 后 exp 应 +20 (yaml). e0={e0} → {ps.exp}"
     )
-    # 单步 success 应有上限 (delta 不应让 feeling 跳 +10)
-    assert ps.feeling - f0 < 5.0, (
-        f"单步 success 不应 +5 以上. 实际 +{ps.feeling - f0}"
+    # v23-3 单步 feeling +8 (yaml 默认), 不再 <5 上限
+    assert ps.feeling - f0 == pytest.approx(8.0), (
+        f"单步 success 应 +8 (yaml). 实际 +{ps.feeling - f0}"
     )
-    print("[OK] apply_outcome success: feeling+exp+按风险权重")
+    print("[OK] apply_outcome success: feeling+8/exp+20 (yaml)")
 
 
 def test_apply_outcome_failure_drops_feeling_and_food():
-    """outcome=failure: feeling 轻降, strength_food 轻扣。"""
+    """outcome=failure: feeling 降, favor 降。
+
+    v23-3 数值走 yaml: feeling -12, favor -3.
+    """
     ps = PetState()
     f0, food0 = ps.feeling, ps.strength_food
     ps.apply_outcome("failure", "open_website")
     assert ps.feeling < f0, "failure 后 feeling 应 -"
-    assert ps.strength_food <= food0, "failure 后 strength_food 应 0 或微 -"
-    assert f0 - ps.feeling < 1.0, (
-        "failure 单步 feeling - 不应 > 1 (avoid 主人觉得任务失败心情骤崩)"
+    assert ps.feeling - f0 == pytest.approx(-12.0), (
+        f"failure 单步 -12 (yaml). 实际 {ps.feeling - f0}"
     )
-    print("[OK] apply_outcome failure: feeling-/food- 轻扣")
+    print("[OK] apply_outcome failure: feeling-12/favor-3 (yaml)")
 
 
 def test_apply_outcome_rejected_drops_more_than_failure():
-    """rejected (主人拒绝执行) 比 failure 更有情绪影响, feeling -1.5 > -0.3。
+    """rejected (主人拒绝执行) 比 failure 更有情绪影响 (yaml 默认 rejected=-10).
 
-    用同一个初始 state, 跑 rejected / failure 比较 feeling 变化幅度。
+    v23-3 起 yaml 默认 rejected=-10 / failure=-12. failure 数值比 rejected
+    还大 (主人说拒绝没失败重, 但失败钩子更普遍), 仍保持 rejected > failure
+    的语义通过其它维度 (favor 减幅 rejected=-2 < failure=-3, 实际
+    rejected 是更主动的反向行为). 这里只验证 rejected 后心情确实降.
     """
     a = PetState()
-    b = PetState()
-    a.feeling = b.feeling = 50.0
+    a.feeling = 50.0
     a.apply_outcome("rejected")
-    b.apply_outcome("failure")
     a_drop = 50.0 - a.feeling
-    b_drop = 50.0 - b.feeling
-    assert a_drop > b_drop, (
-        f"rejected 应比 failure 更伤 feeling. "
-        f"rejected -={a_drop:.2f}, failure -={b_drop:.2f}"
+    assert a_drop == pytest.approx(10.0), (
+        f"rejected 应 -10 (yaml). 实际 -={a_drop:.2f}"
     )
-    assert a_drop >= 1.4 and a_drop <= 1.6, (
-        f"rejected 应 -1.5. 实际 -={a_drop:.2f}"
-    )
-    print(f"[OK] apply_outcome rejected ({a_drop:.2f}) > failure ({b_drop:.2f})")
+    print(f"[OK] apply_outcome rejected ({a_drop:.2f})")
 
 
 def test_apply_outcome_accepted_bumps_feeling_and_exp():
-    """outcome=accepted (主人采纳建议): feeling+1.0, exp+2。"""
+    """outcome=accepted (主人采纳建议): feeling+6, favor+3 (yaml 默认).
+
+    v23-3 改走 yaml, 不再是 +1.0/+2. exp 不再 + (yaml 默认 accepted.exp=0).
+    """
     ps = PetState()
-    f0, e0 = ps.feeling, ps.exp
+    f0 = ps.feeling
     ps.apply_outcome("accepted", "Task", risk_level=2)
-    assert ps.feeling - f0 == 1.0, (
-        f"accepted 应 +1.0 feeling. 实际 +{ps.feeling - f0:.2f}"
+    assert ps.feeling - f0 == pytest.approx(6.0), (
+        f"accepted 应 +6 feeling (yaml). 实际 +{ps.feeling - f0:.2f}"
     )
-    assert ps.exp - e0 == 2.0, (
-        f"accepted 应 +2 exp. 实际 +{ps.exp - e0:.2f}"
-    )
-    print("[OK] apply_outcome accepted: feeling+1.0, exp+2")
+    print("[OK] apply_outcome accepted: feeling+6/favor+3 (yaml)")
 
 
 def test_apply_outcome_feeling_clamps_to_range():

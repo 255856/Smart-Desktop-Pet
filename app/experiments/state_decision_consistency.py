@@ -96,8 +96,9 @@ def _expected_for_rules(sat_v: float, mood_v: float, lvl: int, tool_name: str) -
     lvl_band = "LOW" if lvl < 5 else ("HIGH" if lvl >= 15 else "MID")
     risk_int = risk_for_tool(tool_name, default=2)
     risk_str = {0: "SAFE", 1: "RISK_LOW", 2: "MEDIUM", 3: "HIGH", 4: "IRREVERSIBLE"}.get(risk_int, "MEDIUM")
+    # v23-3 加 favor 维度, 实验脚本也对齐 (默认 favor=MID 兼容老 sat/mood/level 三维实验)
     for rule in RULES_TABLE:
-        if rule.matches(sat, mood, lvl_band, risk_str):
+        if rule.matches(sat, mood, lvl_band, "MID", risk_str):
             return rule.decision
     # fallback (跟 lookup_decision 末尾对齐)
     if risk_int >= 3:

@@ -34,10 +34,11 @@ def test_rules_table_count_27():
         f"实际: {len(RULES_TABLE)}"
     )
     # 关键: paper #10 variants 必须存在 (priority 16-18 / 19-20)
+    # v23-3 加 favor LOW 规则也用到 priority 19/21/23, 这里只断言 ≥5 (老 5 条仍在)
     pdf10_variants = [r for r in RULES_TABLE
                       if r.priority in (16, 17, 18, 19, 20)]
-    assert len(pdf10_variants) == 5, (
-        f"paper #10 拆分应 5 条 (priority 16-20). 实际: {len(pdf10_variants)}"
+    assert len(pdf10_variants) >= 5, (
+        f"paper #10 拆分应 ≥5 条 (priority 16-20). 实际: {len(pdf10_variants)}"
     )
     print(f"[OK] companion_policy: {len(RULES_TABLE)} 条规则 (≥ 27)")
 
@@ -53,30 +54,37 @@ def test_rules_sorted_by_priority():
 
 
 def test_rule_matches_exact():
-    """Rule.matches 全 explicit 字段: 全相等才命中, 任意一个不等就 miss。"""
+    """Rule.matches 全 explicit 字段: 全相等才命中, 任意一个不等就 miss。
+
+    v23-3 加 favor 维度, matches 签名 (sat, mood, level, favor, risk).
+    """
     r = Rule(sat="LOW", mood="MID", level="HIGH", risk="MEDIUM",
              decision=Decision.ALLOW, priority=999)
     # 全等 → 命中
-    assert r.matches("LOW", "MID", "HIGH", "MEDIUM")
+    assert r.matches("LOW", "MID", "HIGH", "MID", "MEDIUM")
     # 任何不等 → 不命中
-    assert not r.matches("MID", "MID", "HIGH", "MEDIUM")
-    assert not r.matches("LOW", "HIGH", "HIGH", "MEDIUM")
-    assert not r.matches("LOW", "MID", "LOW", "MEDIUM")
-    assert not r.matches("LOW", "MID", "HIGH", "HIGH")
-    print("[OK] Rule.matches: explicit 全等才命中")
+    assert not r.matches("MID", "MID", "HIGH", "MID", "MEDIUM")
+    assert not r.matches("LOW", "HIGH", "HIGH", "MID", "MEDIUM")
+    assert not r.matches("LOW", "MID", "LOW", "MID", "MEDIUM")
+    assert not r.matches("LOW", "MID", "HIGH", "MID", "HIGH")
+    print("[OK] Rule.matches: explicit 全等才命中 (v23-3 加 favor)")
 
 
 def test_rule_matches_any_wildcard():
-    """Rule.matches 任一字段 = ANY 时, 该字段总是命中。"""
+    """Rule.matches 任一字段 = ANY 时, 该字段总是命中。
+
+    v23-3: favor 默认 ANY (兼容老规则), 老测试 sat=ANY/mood=LOW/level=ANY/risk=ANY
+    仍生效 (favor 默认 ANY).
+    """
     r = Rule(sat=ANY, mood="LOW", level=ANY, risk=ANY,
              decision=Decision.CONFIRM, priority=999)
-    # sat / level / risk 都是 ANY, mood 必须是 LOW
-    assert r.matches("LOW", "LOW", "LOW", "LOW")
-    assert r.matches("HIGH", "LOW", "HIGH", "HIGH")
+    # sat / level / risk / favor 都是 ANY, mood 必须是 LOW
+    assert r.matches("LOW", "LOW", "LOW", "LOW", "LOW")
+    assert r.matches("HIGH", "LOW", "HIGH", "HIGH", "HIGH")
     # mood 不等于 LOW → miss
-    assert not r.matches("LOW", "MID", "HIGH", "HIGH")
-    assert not r.matches("LOW", "HIGH", "HIGH", "HIGH")
-    print("[OK] Rule.matches: ANY 字段恒真, 其他必须相等")
+    assert not r.matches("LOW", "MID", "HIGH", "HIGH", "HIGH")
+    assert not r.matches("LOW", "HIGH", "HIGH", "HIGH", "HIGH")
+    print("[OK] Rule.matches: ANY 字段恒真, 其他必须相等 (v23-3 favor)")
 
 
 def test_pdf_rule1_heartbroken_irreversible_rejected():
@@ -220,15 +228,15 @@ def test_default_fallback_when_no_rule_matches():
 
 
 def test_no_rules_actually_duplicate_same_specific():
-    """27 条规则没有两条完全 identical (sat/mood/level/risk 全一样),
-    不然 priority 排序就白做了。
+    """规则没有两条完全 identical (sat/mood/level/favor/risk 全一样),
+    不然 priority 排序就白做了。v23-3 加 favor 维度, key 也包含.
     """
     seen = {}
     for r in RULES_TABLE:
-        key = (r.sat, r.mood, r.level, r.risk)
+        key = (r.sat, r.mood, r.level, r.favor, r.risk)
         if key in seen:
             raise AssertionError(
                 f"重复规则: prio {seen[key].priority} 与 {r.priority} 都是 {key}"
             )
         seen[key] = r
-    print("[OK] companion_policy: 27 条规则互不重复")
+    print(f"[OK] companion_policy: {len(RULES_TABLE)} 条规则互不重复")

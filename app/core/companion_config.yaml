@@ -1,0 +1,117 @@
+# 桌宠养成数值配置 (v23-2 创新点 2 数值参数化)
+#
+# 主人 2026-10-16 反馈: 数值 + 范围 + 公式 + 钩子权重都要走 yaml, 不要 hardcode.
+#
+# 用户覆盖路径: data/companion_config.yaml (不提交, 本地调试).
+#
+# 字段说明:
+#   ranges: 各维度 [minimum, maximum, initial]
+#   quantize: 三档离散化阈值 (LOW/MID/HIGH 分界 + hysteresis 防抖)
+#   leveling: 升级公式 base * level^exp
+#   time_decay: 时间驱动衰减 (每小时减饱食度 等)
+#   event_hooks: 事件驱动钩子 (per-run 颗粒, 任务成功/失败 + 用户确认/拒绝 + 喂食/互动)
+#   favor_rules: 好感维度额外规则 (替换原 trust 维度, 主人 2026-10-16 加)
+#   persistence: 数值持久化
+#   trace: trace 日志
+
+satiety:
+  minimum: 0
+  maximum: 100
+  initial: 80          # 饱食度初始值 (日志.txt)
+
+mood:
+  minimum: 0
+  maximum: 100
+  initial: 70          # 心情初始值 (日志.txt)
+
+level:
+  minimum: 1
+  maximum: 10          # 等级上限 10
+  initial: 1
+
+favor:                 # 好感 (主人 2026-10-16 用好感替换信任度)
+  minimum: 0
+  maximum: 100
+  initial: 50
+
+quantize:
+  low_below: 33        # <33 → LOW
+  mid_below: 67        # <67 → MID, 否则 HIGH
+  hysteresis_low_to_mid: 40    # prev=LOW 时涨到 40 才回 MID (防抖)
+  hysteresis_high_to_mid: 60   # prev=HIGH 时跌到 60 才回 MID (防抖)
+
+leveling:
+  base: 100
+  exp: 1.5             # 升级公式 100 * level^1.5 (主人日志.txt)
+  max_level: 10
+  exp_per_success: 20          # 任务成功 +20 EXP (日志.txt)
+  exp_per_accepted: 15         # 采纳 +15 EXP (日志.txt)
+  exp_per_positive_feedback: 15
+  exp_per_continuous_7d: 50    # 连续使用 7 天 +50 EXP (日志.txt)
+
+time_decay:
+  satiety_per_hour: -0.833            # 24h -20 折算 per hour
+  mood_no_interact_48h: -5            # 主人 48h 不互动 -5 心情 (日志.txt)
+  mood_low_satiety_extra_per_24h: -5  # 饱食<30 时每 24h 额外扣
+  check_interval_seconds: 600         # 主循环检查周期 (10 分钟)
+
+# 事件驱动钩子 (per-run 颗粒, 主人 2026-10-16 选 per-run)
+# 默认值取自 E:\study\日志.txt:
+#   - 任务成功: 心情 +8, 经验 +20, 好感 +1
+#   - 任务失败: 心情 -12, 好感 -3
+#   - 用户拒绝: 心情 -10, 好感 -2
+#   - 用户采纳: 心情 +6, 好感 +3
+#   - 用户喂食: 饱食 +15, 心情 +5
+#   - 用户互动: 心情 +3, 好感 +2
+event_hooks:
+  task_success:
+    satiety: 0
+    mood: 8
+    favor: 1
+    exp: 20
+  task_failure:
+    satiety: 0
+    mood: -12
+    favor: -3
+    exp: 0
+  user_rejected:
+    satiety: 0
+    mood: -10
+    favor: -2
+    exp: 0
+  user_accepted:
+    satiety: 0
+    mood: 6
+    favor: 3
+    exp: 0
+  user_feed:
+    satiety: 15
+    mood: 5
+    favor: 0
+    exp: 0
+  user_interact:
+    satiety: 0
+    mood: 3
+    favor: 2
+    exp: 0
+
+# 好感维度额外规则 (主人 2026-10-16 加, 替换 trust)
+# 当桌宠好感 ≥ high_threshold 时主人长期信任, 高风险工具可额外 ALLOW
+# 当桌宠好感 < low_threshold 时未建立信任关系, 任意 MEDIUM+ 都需 CONFIRM
+favor_rules:
+  high_threshold: 80
+  low_threshold: 30
+  high_allows_irreversible: false    # 即使好感 ≥80, 不可逆仍 confirm (不可逆就是不可逆)
+  low_forces_confirm_medium: true    # 好感 <30 时, MEDIUM 也 confirm
+
+# 数值持久化
+persistence:
+  file: data/pet_state.json
+  write_on_update: true              # 每次 update 后立刻写盘
+  write_min_interval_seconds: 5      # 防抖: 短时间内多次更新只写一次
+
+# trace 日志 (v23-1 接好, v23-7 加 UI)
+trace:
+  enabled: true
+  log_file: data/companion_log.txt
+  max_lines_in_memory: 500           # trace 页读盘后保留多少行

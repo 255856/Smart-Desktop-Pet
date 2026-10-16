@@ -165,24 +165,27 @@ def test_v224_companion_reject_drops_feeling():
 
     验证中间件在拦截路径上调了 _fire_companion_reject_outcome,
     这个 helper 调 state.apply_outcome('rejected', tool_name, risk_level).
+
+    v23-3 数值改走 yaml (rejected=-10), 这里只断言"心情确实降 + favor 降",
+    具体数值在 test_state_outcome_yaml.py 测.
     """
     from app.brain.hallucination_guard import RiskyToolConfirm
     from app.engine.state import PetState
     from app.engine.tools._risk import HIGH
     ctrl = RiskyToolConfirm()
     ps = PetState()
-    f0 = ps.feeling
+    ps.likability = 50.0    # 给 favor 一个非 0 值, 避免被钳到 0 时测不出变化
+    f0, fav0 = ps.feeling, ps.likability
     ctrl.set_companion_state(ps)
     # 调用 helper: 模拟一次 companion REJECT 拦阻 (心情 LOW + HIGH tool)
     ctrl._fire_companion_reject_outcome("run_script")
-    # apply_outcome("rejected") 让 feeling -1.5
     assert ps.feeling < f0, (
         f"rejected outcome 应让 feeling < f0. f0={f0} → {ps.feeling}"
     )
-    assert f0 - ps.feeling >= 1.4 and f0 - ps.feeling <= 1.6, (
-        f"rejected 单步 -1.5. 实际 -={f0 - ps.feeling:.2f}"
+    assert ps.likability < fav0, (
+        f"rejected outcome 应让 favor < fav0. fav0={fav0} → {ps.likability}"
     )
-    print(f"[OK] v22-4: companion reject → apply_outcome('rejected') -1.5")
+    print(f"[OK] v22-4: companion reject → apply_outcome('rejected') -{f0 - ps.feeling:.1f} feeling, -{fav0 - ps.likability:.1f} favor")
 
 
 def test_v224_companion_reject_state_missing_apply_silent():

@@ -97,15 +97,18 @@ def test_finish_run_failure_calls_apply_outcome_failure():
     ps = PetState()
     ps.feeling = 80
     ps.strength_food = 80
+    ps.likability = 50
     agent.set_companion_state(ps)
-    f0, sf0 = ps.feeling, ps.strength_food
+    f0, sf0, fav0 = ps.feeling, ps.strength_food, ps.likability
     agent._finish_run_with_outcome(success=False)
-    # failure 应让 feeling-, strength_food-
+    # failure 应让 feeling-, strength_food-, favor-
+    # v23-3 数值走 yaml (-12 mood, 0 food, -3 favor); food 不再被扣,
+    # 这里只断言 mood/favor 降.
     assert ps.feeling < f0, f"failure 应让 feeling-. f0={f0} → {ps.feeling}"
-    assert ps.strength_food < sf0, (
-        f"failure 应让 strength_food-. sf0={sf0} → {ps.strength_food}"
+    assert ps.likability < fav0, (
+        f"failure 应让 favor-. fav0={fav0} → {ps.likability}"
     )
-    print(f"[OK] _finish_run_with_outcome(success=False) -feeling/-food (feeling={ps.feeling:.1f}, food={ps.strength_food:.1f})")
+    print(f"[OK] _finish_run_with_outcome(success=False) -feeling/-favor (feeling={ps.feeling:.1f}, favor={ps.likability:.1f})")
 
 
 def test_v22_feedback_loop_changes_decision_after_failure():

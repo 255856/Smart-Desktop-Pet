@@ -142,60 +142,204 @@ class PetState:
         return "MID"
 
     def quantize(self, prev_state: "Optional[dict[str, str]]" = None) -> dict[str, str]:
-        """一次性返回 {mood, satiety, level} 三档离散化结果。
+        """一次性返回 {mood, satiety, level, favor} 四档离散化结果 (v23-3 加 favor)。
 
         prev_state 用来做 hysteresis 记忆, 比如上一轮 mood 是 HIGH,
         这次注入后还是 60 → 不立刻掉到 MID。shape:
-            {"mood": "LOW|MID|HIGH", "satiety": "...", "level": "..."}
+            {"mood": "LOW|MID|HIGH", "satiety": "...", "level": "...", "favor": "..."}
+
+        v23-3 加 favor 维度: 主人 2026-10-16 决定用好感 (likability) 替换
+        原 trust, 决策查表需要这维度才能跟 4 维数据对齐.
         """
         prev_state = prev_state or {}
         return {
             "mood": self.quantize_mood(prev_state.get("mood", "MID")),
             "satiety": self.quantize_satiety(prev_state.get("satiety", "MID")),
             "level": self.quantize_level(prev_state.get("level", "MID")),
+            "favor": self.quantize_favor(prev_state.get("favor", "MID")),
         }
+
+    def quantize_favor(self, prev: str = "MID") -> str:
+        """v23-3: likability 离散化 (主人 2026-10-16 加的好感维度)。
+
+        阈值走 companion_config.quantize.{low_below, mid_below, hysteresis_*}.
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config.quantize
+        return self._quantize_with_cfg(self.likability, hi=100.0, prev=prev, cfg=cfg)
+
+    def _quantize_with_cfg(self, value: float, hi: float, prev: str, cfg) -> str:
+        """走 yaml 配置的量化 (阈值 + hysteresis)。
+
+        阈值 low_below / mid_below 默认 33/67 (跟原 _quantize 一致),
+        hysteresis 默认 40 / 60, 主人可在 yaml 里调。
+        """
+        lo = float(cfg.low_below)
+        mid = float(cfg.mid_below)
+        h_lo = float(cfg.hysteresis_low_to_mid)
+        h_hi = float(cfg.hysteresis_high_to_mid)
+
+        if prev == "LOW":
+            return "MID" if value >= h_lo else "LOW"
+        if prev == "HIGH":
+            return "MID" if value <= h_hi else "HIGH"
+        # prev == MID
+        if value < lo:
+            return "LOW"
+        if value > mid:
+            return "HIGH"
+        return "MID"
 
     # ---- v21-3: 反馈层闭环 ----
     # 任务执行结果反作用于 PetState, 这是创新点 2 双向闭环的关键。
+    # v23-3: 数值权重改从 companion_config.event_hooks 读 (yaml 参数化),
+    # 主人 2026-10-16 反馈 "数值公式 + 范围 + 钩子权重走 yaml".
 
     def apply_outcome(self, outcome_type: str, tool_name: str = "",
                       risk_level: int = 0) -> None:
-        """任务结果如何更新 PetState (创新点 2 反馈闭环)。
+        """任务结果如何更新 PetState (创新点 2 反馈闭环, per-run 颗粒)。
 
-        outcome_type ∈ {"success", "failure", "rejected", "accepted"}:
-          - success: 任务跑通了 → feeling+, exp+按风险等级
-          - failure: 任务失败 → feeling-, strength_food-
-          - rejected: 主人拒绝执行 → feeling- (比 failure 重)
-          - accepted: 主人采纳建议 → feeling+, exp+
+        outcome_type (主人 2026-10-16 选 per-run, 一条 LLM run 结束才触发):
+          - "success":  任务跑通   → 心情 +, 经验 +, 好感 +
+          - "failure":  任务失败   → 心情 -, 好感 -
+          - "rejected": 主人拒绝   → 心情 -, 好感 -
+          - "accepted": 主人采纳   → 心情 +, 好感 +
 
-        数值微调 (避免一次任务就把 80 打到 90):
-          - feeling   单步 ± 0.3~1.5 (按风险权重)
-          - exp       按 risk_level 给 0..2 (高风险工具成功经验多)
-          - strength_food 单步 -0.1 (失败微扣, 不至于饱食度骤减)
+        数值权重不再 hardcode, 走 companion_config.event_hooks.{outcome_type}.
+        未知 outcome_type 静默 (不让 LLM 侧随意字段破坏状态).
+        喂食 / 互动走 apply_feed / apply_interact (不走 outcome, 主人语义不同).
 
-        触发后 on_change 回调由 StateManager 负责调用 (本方法只动 state)。
+        升级: 经验值增加后, 自动调 _maybe_levelup(), 公式
+            exp_to_next(level) = base * (level ** exp)
+        走 companion_config.leveling.{base, exp}.
+
+        on_change 回调由 StateManager / UI 层调用 (本方法只动 state)。
         """
-        if outcome_type == "success":
-            delta = 0.5 + 0.2 * risk_level  # 风险高 → 满足感强
-            self.feeling = min(self.feeling_max,
-                               self.feeling + delta)
-            self.exp = self.exp + max(0, risk_level)
-        elif outcome_type == "failure":
-            self.feeling = max(0.0, self.feeling - 0.3)
-            self.strength_food = max(0.0, self.strength_food - 0.1)
-        elif outcome_type == "rejected":
-            # 主人明确拒绝 = 强烈负面反馈, 比 failure 影响更大
-            self.feeling = max(0.0, self.feeling - 1.5)
-        elif outcome_type == "accepted":
-            self.feeling = min(self.feeling_max,
-                               self.feeling + 1.0)
-            self.exp = self.exp + 2
-        # 未知 outcome_type 静默 (不让 LLM 侧随意字段破坏状态)
-        log.debug(
-            "PetState.apply_outcome: %s tool=%s risk=%d → (feeling=%.1f, food=%.1f, exp=%.1f)",
-            outcome_type, tool_name, risk_level,
-            self.feeling, self.strength_food, self.exp,
+        # 延迟导入避免循环: companion_config 在 app.core, state 在 app.engine
+        from app.core.companion_config import companion_config
+        cfg = companion_config
+
+        # outcome_type → yaml 钩子字段 (兼容旧字符串, 新 yaml 字段名)
+        key_map = {
+            "success":  "task_success",
+            "failure":  "task_failure",
+            "rejected": "user_rejected",
+            "accepted": "user_accepted",
+        }
+        yaml_key = key_map.get(outcome_type)
+        if yaml_key is None:
+            log.debug("PetState.apply_outcome: 未知 outcome_type=%r, 跳过", outcome_type)
+            return
+        hook = getattr(cfg.event_hooks, yaml_key)
+
+        before = (
+            round(self.feeling, 3),
+            round(self.strength_food, 3),
+            round(self.likability, 3),
+            round(self.exp, 3),
+            self.level,
         )
+
+        # 4 维数值分别钳到合法范围
+        if hook.satiety:
+            self.strength_food = cfg.satiety.clamp(self.strength_food + hook.satiety)
+        if hook.mood:
+            self.feeling = cfg.mood.clamp(self.feeling + hook.mood)
+        if hook.favor:
+            self.likability = cfg.favor.clamp(self.likability + hook.favor)
+        if hook.exp:
+            self.exp = max(0.0, self.exp + hook.exp)
+            # 升级检查走自定义公式 (覆盖原 cal_level 的 sqrt 公式)
+            new_level = self._level_for_exp(self.exp, cfg.leveling)
+            if new_level > self.level:
+                old_level = self.level
+                self.level = min(cfg.leveling.max_level, new_level)
+                log.info("PetState 升级: Lv.%d → Lv.%d (exp=%.1f)",
+                         old_level, self.level, self.exp)
+                if self.on_level_up is not None:
+                    try:
+                        self.on_level_up(self.level)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("on_level_up 回调异常: %s", e)
+
+        log.debug(
+            "PetState.apply_outcome: %s tool=%s → "
+            "(feeling=%.1f, food=%.1f, fav=%.1f, exp=%.1f, lv=%d)",
+            outcome_type, tool_name,
+            self.feeling, self.strength_food, self.likability, self.exp, self.level,
+        )
+
+        # v23-3: trace_outcome 写盘 (主人在 trace 页能直接看 Δ)
+        try:
+            from app.brain._companion_log import trace_outcome
+            trace_outcome(
+                thread_id=getattr(self, "_owner_thread_id", None) or "default",
+                outcome=outcome_type,
+                tool=tool_name or "",
+                feeling_delta=round(self.feeling - before[0], 3),
+                food_delta=round(self.strength_food - before[1], 3),
+                favor_delta=round(self.likability - before[2], 3),
+                exp_delta=round(self.exp - before[3], 3),
+                level_before=before[4],
+                level_after=self.level,
+                success=(outcome_type == "success"),
+            )
+        except Exception:  # noqa: BLE001
+            pass    # trace 失败不影响主流程
+
+    def _level_for_exp(self, exp: float, leveling) -> int:
+        """升级公式: 反解 exp_to_next(level) = base * (level ** exp)。
+
+        输入 exp 算最大可能等级: 满足 base * (level ** exp) <= exp 的最大 level.
+        """
+        if exp <= 0:
+            return 1
+        base = max(1.0, leveling.base)
+        exp_pow = max(0.1, leveling.exp)
+        max_level = max(1, leveling.max_level)
+        # 解 base * level^exp_pow <= exp → level <= (exp / base) ** (1/exp_pow)
+        max_by_exp = int(((exp / base) ** (1.0 / exp_pow)) + 0.0001)
+        return max(1, min(max_level, max_by_exp))
+
+    # ---- v23-3: 喂食 / 互动钩子 (跟 outcome 分离, 主人 2026-10-16 设计) ----
+
+    def apply_feed(self, amount: float = 1.0) -> dict:
+        """主人喂食钩子: 走 yaml event_hooks.user_feed, 返回 Δ 字典 (trace 用)。
+
+        默认走 yaml 权重 (satiety +15, mood +5), amount 是倍率 (1.0 = 默认).
+        amount < 0 = 减扣 (主人撤回食物 / 强迫喂药).
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config
+        hook = cfg.event_hooks.user_feed
+        before = (round(self.strength_food, 3), round(self.feeling, 3))
+        self.strength_food = cfg.satiety.clamp(self.strength_food + hook.satiety * amount)
+        self.feeling = cfg.mood.clamp(self.feeling + hook.mood * amount)
+        log.debug("PetState.apply_feed(%.2f): food Δ=%.1f mood Δ=%.1f",
+                  amount, hook.satiety * amount, hook.mood * amount)
+        return {
+            "food_delta": round(self.strength_food - before[0], 3),
+            "mood_delta": round(self.feeling - before[1], 3),
+        }
+
+    def apply_interact(self, amount: float = 1.0) -> dict:
+        """主人互动钩子: 走 yaml event_hooks.user_interact, 返回 Δ 字典。
+
+        amount 是倍率 (1.0 = 默认 +3 心情 / +2 好感).
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config
+        hook = cfg.event_hooks.user_interact
+        before = (round(self.feeling, 3), round(self.likability, 3))
+        self.feeling = cfg.mood.clamp(self.feeling + hook.mood * amount)
+        self.likability = cfg.favor.clamp(self.likability + hook.favor * amount)
+        self._last_interact_ts = time.time()
+        log.debug("PetState.apply_interact(%.2f): mood Δ=%.1f fav Δ=%.1f",
+                  amount, hook.mood * amount, hook.favor * amount)
+        return {
+            "mood_delta": round(self.feeling - before[0], 3),
+            "favor_delta": round(self.likability - before[1], 3),
+        }
 
     def normalize(self) -> None:
         # 把存档读入的数值钳制到合法范围（兼容旧版本越界值，如好感度曾随等级到 110）

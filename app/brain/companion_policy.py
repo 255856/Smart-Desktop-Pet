@@ -53,11 +53,14 @@ ANY = "*"  # 规则四轴 (sat/mood/level/risk) 任意值匹配
 class Rule:
     """单条状态-权限规则。
 
-    sat/mood/level: 'LOW' | 'MID' | 'HIGH' | ANY
+    sat/mood/level/favor: 'LOW' | 'MID' | 'HIGH' | ANY
     risk:           'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'IRREVERSIBLE' | ANY
     decision:       Decision.{ALLOW, CONFIRM, REJECT, REFUSE}
     priority:       整数, 数字越小优先级越高 (遍历匹配时先匹配)
     note:           注释 (论文 §4.3 引用)
+
+    v23-3 加 favor 维度 (主人 2026-10-16 用好感替换原 trust).
+    favor 默认 ANY → 27 条老规则不动自动 favor=ANY, 决策时只检 sat/mood/level.
     """
     sat: str
     mood: str
@@ -66,12 +69,14 @@ class Rule:
     decision: str
     priority: int
     note: str = ""
+    favor: str = ANY    # v23-3 加, 默认 ANY 兼容老规则
 
-    def matches(self, sat: str, mood: str, level: str, risk: str) -> bool:
+    def matches(self, sat: str, mood: str, level: str, favor: str, risk: str) -> bool:
         return (
             (self.sat == ANY or self.sat == sat)
             and (self.mood == ANY or self.mood == mood)
             and (self.level == ANY or self.level == level)
+            and (self.favor == ANY or self.favor == favor)
             and (self.risk == ANY or self.risk == risk)
         )
 
@@ -156,6 +161,7 @@ def _anyfy(rule: Rule) -> Rule:
 
     Rule 用 'ANY' 作字段字面是因为人在编辑时易读 ('LOW', 'ANY', 'LOW' 比
     'LOW', '*', 'LOW' 直观), 但运行时匹配要走 ANY 常量 ('*') 比较。
+    v23-3 也处理 favor 字段。
     """
     return Rule(
         sat=ANY if rule.sat == "ANY" else rule.sat,
@@ -165,21 +171,62 @@ def _anyfy(rule: Rule) -> Rule:
         decision=rule.decision,
         priority=rule.priority,
         note=rule.note,
+        favor=ANY if rule.favor == "ANY" else rule.favor,
     )
 
 
-# 全表 (27 条), 按 priority 升序匹配
+# ---- v23-3 favor 维度额外规则 (主人 2026-10-16 加, 替换原 trust) ----
+# favor 高 (≥ favor_rules.high_threshold) → 高风险额外 ALLOW (主人长期信任)
+# favor 低 (< favor_rules.low_threshold)  → 任意 MEDIUM+ 都额外 CONFIRM/REJECT
+# priority 都设在 5..9, 比具体业务规则低 (10+), 但高于 catch-all (290+),
+# 这样 catch-all 不会一上来就 ALLOW; favor 中性 (MID) 走默认 ALLOW.
+_FAVOR_RULES = [
+    Rule("ANY", "ANY", "ANY", "IRREVERSIBLE", Decision.CONFIRM, 5,
+         favor="HIGH",
+         note="v23-3: 好感高 + 不可逆 → 仍 confirm (favor_rules.high_allows_irreversible=False)"),
+    Rule("ANY", "ANY", "ANY", "HIGH",        Decision.ALLOW,   6,
+         favor="HIGH",
+         note="v23-3: 好感高 + 高风险 → 放行 (主人长期信任)"),
+    # favor LOW 三条 mood 限制为 LOW/MID (非 HIGH), 主人心情好时, 就算好感
+    # 低也不拦 (老 sat+mood HIGH + favor LOW + MEDIUM 走老 priority 13 ALLOW,
+    # 这里不冲突). 只有 sat/mood 不好 + favor LOW 时, 才升级到 confirm/reject.
+    Rule("ANY", "LOW", "ANY", "MEDIUM",      Decision.CONFIRM, 19,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情非好 + 中风险 → confirm"),
+    Rule("ANY", "MID", "ANY", "MEDIUM",      Decision.CONFIRM, 19,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情中 + 中风险 → confirm"),
+    Rule("ANY", "LOW", "ANY", "HIGH",        Decision.CONFIRM, 21,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情差 + 高风险 → confirm"),
+    Rule("ANY", "MID", "ANY", "HIGH",        Decision.CONFIRM, 21,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情中 + 高风险 → confirm"),
+    Rule("ANY", "LOW", "ANY", "IRREVERSIBLE",Decision.REJECT,  23,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情差 + 不可逆 → REJECT"),
+    Rule("ANY", "MID", "ANY", "IRREVERSIBLE",Decision.REJECT,  23,
+         favor="LOW",
+         note="v23-3: 好感低 + 心情中 + 不可逆 → REJECT"),
+    Rule("ANY", "ANY", "ANY", "ANY",         Decision.ALLOW, 295,
+         favor="MID",
+         note="v23-3: catch-all favor 中性 → 走默认 (跟 ALLOW 一致)"),
+]
+
+
+# 全表 (27 + 6 favor 规则 = 33 条), 按 priority 升序匹配
 RULES_TABLE: list[Rule] = sorted(
-    [_anyfy(r) for r in _EXTRA_RULES + _PDF_RULES],
+    [_anyfy(r) for r in _EXTRA_RULES + _PDF_RULES + _FAVOR_RULES],
     key=lambda r: r.priority,
 )
 
 
 def quantize_state(pet_state: PetState) -> dict[str, str]:
-    """给 PetState 做三档离散化, 给 RULES_TABLE 查表用。
+    """给 PetState 做四档离散化 (v23-3 加 favor), 给 RULES_TABLE 查表用。
 
-    返回 {"satiety": "LOW|MID|HIGH", "mood": "...", "level": "..."}。
-    直接调 PetState.quantize() (v21-3), 不在本文件里重复实现。
+    返回 {"satiety": "LOW|MID|HIGH", "mood": "...", "level": "...",
+          "favor": "..."}。
+    直接调 PetState.quantize() (v23-3 加 favor 维度), 不在本文件里重复实现。
     """
     return pet_state.quantize()
 
@@ -214,12 +261,13 @@ def lookup_decision(pet_state: PetState, tool_name: str) -> str:
     sat = state["satiety"]
     mood = state["mood"]
     level = state["level"]
+    favor = state.get("favor", "MID")    # v23-3 加 favor 维度 (老测试可能没传)
 
     risk_int = risk_for_tool(tool_name, default=MEDIUM)
     risk_str = _RISK_NAMES.get(risk_int, "MEDIUM")
 
     for rule in RULES_TABLE:
-        if rule.matches(sat, mood, level, risk_str):
+        if rule.matches(sat, mood, level, favor, risk_str):
             return rule.decision
 
     # default fallback (跟原 RiskyToolConfirm 兼容)
