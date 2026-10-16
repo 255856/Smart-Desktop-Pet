@@ -4,6 +4,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / ".local-packages"))
 sys.path.insert(0, str(ROOT))
@@ -17,6 +19,17 @@ from app.core.config import CharacterConfig
 from app.ui.chat_window import ChatWindow, Message, _html_escape, _format_time_short
 from app.ui.settings_window import SettingsWindow
 from app.voice.character import Emotion
+
+
+@pytest.fixture(autouse=True)
+def _no_asr_native_load(monkeypatch):
+    """Autouse fixture: 拦截 ChatWindow._do_warmup 调 _get_model 路径, 避免
+    faster_whisper 真正加载 CTranslate2（与 test_reminder_timer_thread 同款）。
+    跑 chat_rendering 测试时 ASR 预热不需要真模型, patch 掉就跳过即可。
+    """
+    from app.voice import asr as asr_mod
+    monkeypatch.setattr(asr_mod.SpeechRecognizer, "_get_model",
+                        lambda self, *a, **k: None, raising=False)
 
 
 def test_html_escape():
@@ -1947,6 +1960,17 @@ def test_v12_image_command_runs_tool():
     #    resource, 不会出现在 toPlainText() 里; 直接看 history 里的 msg.content。
     cw.chat_view.clear()
     cw._handle_command("/image 一只橘猫")
+    # v22: tool 异步, 等 _on_multimodal_result 跑完
+    import time as _t
+    from PyQt5.QtCore import QCoreApplication
+    _deadline = _t.time() + 3.0
+    while _t.time() < _deadline:
+        QCoreApplication.processEvents()
+        _t.sleep(0.02)
+        # 上一条 message 是 user (/image 一只橘猫), 这条是 assistant 结果
+        if (len(cw.history) >= 2 and cw.history[-1].role == "assistant"
+                and "https://example.com/v12_cat.png" in cw.history[-1].content):
+            break
     assert cw.history[-1].role == "assistant", (
         f"/image 后应有一条 assistant msg。 history: {cw.history}"
     )
@@ -1956,15 +1980,33 @@ def test_v12_image_command_runs_tool():
     )
     assert "橘猫" in msg1, "/image 应把 prompt 写入 markdown alt"
 
-    # 2) /video 同样
+    # 2) /video 同样（等异步完成）
+    _base_len = len(cw.history)
     cw._handle_command("/video 猫走路")
+    _deadline = _t.time() + 3.0
+    while _t.time() < _deadline:
+        QCoreApplication.processEvents()
+        _t.sleep(0.02)
+        if (len(cw.history) > _base_len + 1
+                and cw.history[-1].role == "assistant"
+                and "https://example.com/v12_cat.mp4" in cw.history[-1].content):
+            break
     msg2 = cw.history[-1].content
     assert "https://example.com/v12_cat.mp4" in msg2, (
         f"/video 应写 URL。 实际: {msg2!r}"
     )
 
-    # 3) /audio 同样
+    # 3) /audio 同样（等异步完成）
+    _base_len = len(cw.history)
     cw._handle_command("/audio 猫叫声")
+    _deadline = _t.time() + 3.0
+    while _t.time() < _deadline:
+        QCoreApplication.processEvents()
+        _t.sleep(0.02)
+        if (len(cw.history) > _base_len + 1
+                and cw.history[-1].role == "assistant"
+                and "https://example.com/v12_cat.mp3" in cw.history[-1].content):
+            break
     msg3 = cw.history[-1].content
     assert "https://example.com/v12_cat.mp3" in msg3, (
         f"/audio 应写 URL。 实际: {msg3!r}"
@@ -2206,7 +2248,20 @@ def test_v12_handle_command_supports_image_video_audio():
 
     cw.chat_view.clear()
     cw._handle_command("/image 猫")
-    # QTextBrowser image 不在 toPlainText; 看 history[-1].content
+    # v22: _run_multimodal_action 走 worker thread 异步调 tool,
+    # 切回主线程时 _on_multimodal_result 才把 result 写进 history。
+    # 同步等异步完成 (tool.fn 是 lambda 同步返回, invokeMethod 跨线程
+    # 调度到主线程的事件循环里执行)。
+    import time as _t
+    from PyQt5.QtCore import QCoreApplication
+    _deadline = _t.time() + 3.0
+    while _t.time() < _deadline:
+        QCoreApplication.processEvents()
+        _t.sleep(0.02)
+        # user message 存盘 + 异步 tool 结果都写进 history 后,
+        # history[-2] 是 user 消息 (/image 猫), history[-1] 是 multimodal 结果
+        if (len(cw.history) >= 2 and "https://example.com/i.png" in cw.history[-1].content):
+            break
     msg = cw.history[-1].content
     assert "https://example.com/i.png" in msg, (
         f"/image 命令应把 URL 写到 msg.content。 实际: {msg!r}"

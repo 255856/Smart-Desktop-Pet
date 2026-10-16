@@ -1893,6 +1893,14 @@ class ChatWindow(QWidget):
 
         走 self.registry.get(f"generate_{kind}") 调 tool, 拿 URL, 嵌图。
         registry 不可用 / tool 没注册时, 弹清晰提示。
+
+        v22: 三处修:
+          1) 先把整条 /<kind> prompt 存为 user message (历史 + chat_store) 再调
+             tool —— 修「关窗后信息丢失」「看不到我发的内容」
+          2) tool.fn 放后台 worker thread 调, 不阻塞 chat_window 主线程
+             (修「发送后卡顿 15-20s」)
+          3) 后台线程用 QMetaObject.invokeMethod + QueuedConnection 跨线程
+             切回主线程渲染结果, 保证 Qt 控件线程安全
         """
         labels = {"image": "生成图片", "video": "生成视频",
                   "audio": "生成音频"}
@@ -1904,6 +1912,18 @@ class ChatWindow(QWidget):
                 content=f"用法: /{kind} <prompt>   (例: /{kind} 一只橘猫趴在窗台)"
             ))
             return
+
+        # 1) 先存 user message —— 关窗后不丢
+        user_text = f"/{kind} {prompt}"
+        user_msg = Message(role="user", content=user_text)
+        self.history.append(user_msg)
+        self._trim_history()
+        try:
+            self.chat_store.add("user", user_text)
+        except Exception:
+            log.exception("chat_store.add user failed (multimodal %s)", kind)
+        self._render_message(user_msg)
+
         if not hasattr(self, "registry") or self.registry is None:
             self._render_message(Message(
                 role="assistant",
@@ -1925,14 +1945,45 @@ class ChatWindow(QWidget):
                 ),
             ))
             return
-        try:
-            self._append_system_msg(f"已发出{label}请求, 等模型回...")
-            result = tool.fn(prompt=prompt)
-        except Exception as e:  # noqa: BLE001
+
+        # 2) tool 放后台 worker thread, 不阻塞 chat_window 主线程
+        self._append_system_msg(f"已发出{label}请求, 等模型回...")
+        from PyQt5.QtCore import QMetaObject, Qt as _Qt, Q_ARG
+        import threading
+
+        def _worker():
+            try:
+                _result = tool.fn(prompt=prompt)
+                _exc: Optional[Exception] = None
+            except Exception as _e:
+                _result = None
+                _exc = _e
+            # 3) 跨线程切回主线程（Qt 控件线程安全）
+            QMetaObject.invokeMethod(
+                self, "_on_multimodal_result", _Qt.QueuedConnection,
+                Q_ARG(str, kind), Q_ARG(str, label),
+                Q_ARG(str, prompt), Q_ARG(object, _result), Q_ARG(object, _exc),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @pyqtSlot(str, str, str, object, object)
+    def _on_multimodal_result(
+        self, kind: str, label: str, prompt: str,
+        result: object, exc: Optional[Exception],
+    ) -> None:
+        """worker 完成后跨线程切回主线程 → 渲染结果到 chat。
+
+        修原 bug 3 (image 生成完后, 点击图片 → chat 信息全看不到): 之前
+        /image 没有 img-open 锚点, 客户端默认用 file:// 链接, 点
+        file:// 时 QTextBrowser 会试图 setSource 失败导致 chat_view 内容
+        被清空。本函数生成 img-open:KEY 锚点, 点击走 _show_image_popup
+        弹原图 QDialog, 不动 chat_view。
+        """
+        if exc is not None:
             log.exception("multimodal %s tool failed", kind)
             self._render_message(Message(
-                role="assistant",
-                content=f"{label} 调用失败: {e}"))
+                role="assistant", content=f"{label} 调用失败: {exc}"))
             return
 
         url: Optional[str] = None
@@ -1946,10 +1997,16 @@ class ChatWindow(QWidget):
                 content=f"{label} 工具没返回 URL，原始结果: `{result!r}`"))
             return
 
-        # 渲染成 markdown image 进 chat (跟上传图片同款姿势, 走 _msg_html)
+        # v22: 渲染成 img-open:KEY 锚点 (点击放大原图, 不擦白 chat_view)
+        # url 既可能是 file:/// 本地路径, 也可能是 http(s):// 远程
+        import hashlib as _hashlib
+        key = _hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+        self._img_open_map[key] = url
         kind_cn = {"image": "图片", "video": "视频", "audio": "音频"}.get(kind, kind)
-        content = f"![{kind_cn}: {prompt}]({url})"
-        msg = Message(role="assistant", content=content)
+        # 用 img-open 锚点包图, 浏览器加载 file:// 立刻可见, 点击触发 _show_image_popup
+        # v22: 不放 emoji（test_v13 + 主设计约定 chat_window 不能有装饰符号）
+        content = f"![{kind_cn}: {prompt}]({url})\n\n[点击放大](img-open:{key})"
+        msg = Message(role="assistant", content=content, tools=[(f"generate_{kind}", "", "")])
         self.history.append(msg)
         self._trim_history()
         try:
