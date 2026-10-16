@@ -2885,64 +2885,6 @@ def test_v16_post_json_other_http_error_unchanged():
 # ============================================================
 
 
-def test_v18_render_markdown_image_responsive_size():
-    """v18: chat 渲染 markdown image 响应式 (主人 2026-10-15 实测:
-    图片尺寸要适应窗口大小, 不要固定像素)。
-
-    走 max-width: 100% (跟父容器 msg-body 同步) + max-height: 480px (上限)
-    + display:block (独占一行) + object-fit:contain (按比例缩)。
-    """
-    from app.ui.chat_window import ChatWindow
-    from app.ui.chat_window.message import Message
-    from app.core.config import LLMConfig, CharacterConfig
-    from app.core.qt_compat import QPixmap, QColor
-    import tempfile
-    from pathlib import Path
-    cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
-                    'assets/sprites', asr_enabled=False)
-    with tempfile.TemporaryDirectory() as td:
-        png = Path(td) / "v18_resp.png"
-        pix = QPixmap(1024, 1024)
-        pix.fill(QColor("#abcabc"))
-        pix.save(str(png), "PNG")
-        file_url = "file:///" + str(png).replace("\\", "/").lstrip("/")
-        md = f"![主人上传]({file_url})"
-        msg = Message(role="assistant", content=md)
-        html = cw._msg_html(msg)
-        # v18 验证: 响应式 CSS (跟窗口大小联动)
-        assert 'max-width:100%' in html, (
-            f"v18 应加 max-width:100% 跟窗口联动。 实际: {html[:500]}"
-        )
-        assert 'max-height:480px' in html, (
-            f"v18 应加 max-height:480px (上限高度)。 实际: {html[:500]}"
-        )
-        assert 'display:block' in html, (
-            f"v18 应 display:block 独占一行。 实际: {html[:500]}"
-        )
-        assert 'object-fit:contain' in html, (
-            f"v18 应 object-fit:contain 按比例缩。 实际: {html[:500]}"
-        )
-        assert 'width:auto' in html, (
-            f"v18 应 width:auto 不固定像素。 实际: {html[:500]}"
-        )
-        # v17 固定 width=240 / max-width:240px / max-height:240px 应移除
-        assert 'width="240"' not in html, (
-            f"v18 应移除 v17 固定 width=240。 实际: {html[:500]}"
-        )
-        assert 'max-width:240px' not in html, (
-            f"v18 应移除 v17 固定 max-width:240px。 实际: {html[:500]}"
-        )
-        assert 'max-height:240px' not in html, (
-            f"v18 应移除 v17 固定 max-height:240px。 实际: {html[:500]}"
-        )
-        # v8 旧固定 max-width:320px 也不能在
-        assert 'max-width:320px' not in html, (
-            f"v18 不应含 v8 旧 max-width:320px。 实际: {html[:500]}"
-        )
-
-    print("[OK] v18: chat 渲染 img 响应式 max-width:100% 跟窗口联动")
-
-
 def test_v17_understand_image_tool_registered():
     """v17: ocr 工具包 register 时同时注册 understand_image, 调 MiniMax M3
     多模态 chat completion 理解图片内容。"""
@@ -3130,3 +3072,160 @@ def test_v19_chat_store_remove_empty_assistant():
         )
 
     print("[OK] v19: chat_store.remove_empty_assistant 双删空白历史")
+
+
+def test_v20_render_markdown_image_thumb_and_click_to_zoom():
+    """v20: chat 渲染 markdown image = 缩略图 + 点击放大 (主人 2026-10-16
+    实测反馈「图片撑满整个窗口, 小窗口下看不全」)。
+
+    实现路径:
+      - <img> 用 HTML width=N (PyQt5 5.x 100% 支持, 不会撑开) 而非 v18 的
+        CSS max-width:100% (PyQt5 5.x CSS subset 支持不全, 大图仍撑开)
+      - 缩略图 width = min(340, max(200, viewport_w * 0.85)), chat 软
+        件标准上限 340, 小窗口 fallback 200 保证能看清
+      - 用 <a href="img-open:KEY"> 包裹, KEY 是 sha1(url)[:10], 点击
+        走 _on_chat_anchor_clicked 路由到 _show_image_popup 弹原图
+      - cursor:zoom-in 视觉提示可点击
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.core.qt_compat import QPixmap, QColor
+    import tempfile
+    from pathlib import Path
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name="test"),
+                    "assets/sprites", asr_enabled=False)
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "v20_thumb.png"
+        pix = QPixmap(2048, 2048)  # 大图
+        pix.fill(QColor("#abcabc"))
+        pix.save(str(png), "PNG")
+        file_url = "file:///" + str(png).replace("\\", "/").lstrip("/")
+        md = f"![主人上传]({file_url})"
+        msg = Message(role="assistant", content=md)
+        html = cw._msg_html(msg)
+
+    # v20 验证 1: 用 HTML width 属性 (PyQt5 100% 支持), 上限 340
+    assert 'width="340"' in html, (
+        f"v20 应给 width=340 上限。 实际: {html[:600]}"
+    )
+    assert 'style="display:block;width:340px' in html, (
+        f"v20 应给 style width:340px (跟 HTML width 同步, 防 PyQt5 拉伸). 实际: {html[:600]}"
+    )
+    # v20 验证 2: cursor:zoom-in 提示可点击
+    assert 'cursor:zoom-in' in html, (
+        f"v20 应给 cursor:zoom-in 视觉提示. 实际: {html[:600]}"
+    )
+    # v20 验证 3: 包在 <a href="img-open:KEY"> 里, 可点击放大
+    assert 'href="img-open:' in html, (
+        f"v20 应包 img-open:KEY 锚点 (点击弹原图). 实际: {html[:600]}"
+    )
+    assert 'title="点击放大"' in html, (
+        f"v20 应给 title 点击放大提示. 实际: {html[:600]}"
+    )
+    # v20 验证 4: img-open map 已记录真 URL
+    assert len(cw._img_open_map) >= 1, (
+        f"v20 应填 _img_open_map, 实际为空"
+    )
+    # 至少有一个 value 跟 file_url 等价 (data: url 转了 base64)
+    found = False
+    for v in cw._img_open_map.values():
+        if v.startswith("data:") or v == file_url:
+            found = True
+            break
+    assert found, (
+        f"v20 _img_open_map 应含 file_url 或 data: 转码值. 实际: {list(cw._img_open_map.values())[:2]}"
+    )
+
+    # v20 验证 5: 移除 v17 固定 width=240
+    assert 'width="240"' not in html, (
+        f"v20 应移除 v17 固定 width=240. 实际: {html[:600]}"
+    )
+    # v20 验证 6: 移除 v18 object-fit:contain (新路径用 width attr)
+    assert 'object-fit:contain' not in html, (
+        f"v20 走 HTML width attr, 不需要 v18 object-fit. 实际: {html[:600]}"
+    )
+    # v20 验证 7: 移除 v18 max-height:480px (新路径不靠 CSS 控制高度)
+    assert 'max-height:480px' not in html, (
+        f"v20 走 width attr, 不靠 max-height CSS. 实际: {html[:600]}"
+    )
+
+    print("[OK] v20: chat 渲染 img 缩略图 width=340 + 点击放大 anchor")
+
+
+def test_v20_img_open_key_stable():
+    """v20: _img_open_key 同 URL 出同 KEY, 让 _img_open_map 重渲染可去重.
+
+    用 sha1(url)[:10] 截前 10 位: 16^10 ≈ 1e12, 同一聊天 < 10 万张图不会撞。
+    """
+    from app.ui.chat_window.utils import _img_open_key
+
+    # v20 验证 1: 同 URL 出同 KEY
+    k1 = _img_open_key("file:///path/to/img.png")
+    k2 = _img_open_key("file:///path/to/img.png")
+    assert k1 == k2, f"v20 同 URL 应同 KEY. {k1} vs {k2}"
+
+    # v20 验证 2: 不同 URL 出不同 KEY (sanity check)
+    k3 = _img_open_key("file:///other.png")
+    assert k1 != k3, f"v20 不同 URL 应不同 KEY. {k1} vs {k3}"
+
+    # v20 验证 3: data: 长 base64 不抛异常
+    long_data = "data:image/png;base64," + "A" * 5000
+    k4 = _img_open_key(long_data)
+    assert len(k4) == 10, f"v20 KEY 应 10 字符. 实际: {len(k4)}"
+
+    # v20 验证 4: 中文 / unicode URL 也行
+    k5 = _img_open_key("file:///C:/中文/桌宠图.png")
+    assert len(k5) == 10, f"v20 unicode URL KEY 也应是 10. 实际: {len(k5)}"
+
+    print("[OK] v20: _img_open_key sha1[:10] 稳定 + 不抛")
+
+
+def test_v20_anchor_clicked_img_open_routes_to_popup():
+    """v20: 点击 <a href="img-open:KEY"> 走 _on_chat_anchor_clicked
+    路由到 _show_image_popup, KEY 不在 map 里就静默不弹。
+
+    不真弹 QDialog (PyQt5 modal 会卡测试), 用 mock 验证调用。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.core.config import LLMConfig, CharacterConfig
+    from app.core.qt_compat import QUrl
+
+    cw = ChatWindow(LLMConfig(), CharacterConfig(name="test"),
+                    "assets/sprites", asr_enabled=False)
+
+    # 模拟: 注册一个测试 img-open:KEY
+    cw._img_open_map["deadbeef01"] = "file:///fake/path/to/img.png"
+
+    # mock _show_image_popup 抓调用
+    called = {}
+    def _capture_popup(u):
+        called["url"] = u
+    cw._show_image_popup = _capture_popup  # type: ignore[method-assign]
+
+    # v20 验证 1: 点 img-open:deadbeef01 应路由
+    url = QUrl("img-open:deadbeef01")
+    cw._on_chat_anchor_clicked(url)
+    assert called.get("url") == "file:///fake/path/to/img.png", (
+        f"v20 应路由到 _show_image_popup 拿真 url. 实际: {called}"
+    )
+
+    # v20 验证 2: 未注册的 KEY 静默 (不抛, 不调 popup)
+    called.clear()
+    url2 = QUrl("img-open:unknown_key")
+    cw._on_chat_anchor_clicked(url2)
+    assert "url" not in called, (
+        f"v20 未知 KEY 应静默, 不调 _show_image_popup. 实际: {called}"
+    )
+
+    # v20 验证 3: img-open 不会被 cmd: / http: 分支误吞
+    # 用 __setitem__ 让 lambda 总更新值 (setdefault 第二次不会覆写)
+    called["url"] = None
+    url3 = QUrl("img-open:deadbeef01")
+    cw._on_chat_anchor_clicked(url3)
+    assert called["url"] == "file:///fake/path/to/img.png", (
+        f"v20 img-open 不应被 cmd/外部链接分支吃. 实际: {called}"
+    )
+
+    print("[OK] v20: _on_chat_anchor_clicked img-open 路由正确")

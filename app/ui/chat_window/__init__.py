@@ -140,7 +140,7 @@ from .worker import _AgentWorker, _StreamWorker, _PlanWorker  # noqa: F401
 
 
 # _html_escape / _format_time_short — 拆到 chat_window.utils
-from .utils import _html_escape, _format_time_short  # noqa: F401
+from .utils import _html_escape, _format_time_short, _img_open_key  # noqa: F401
 # _CommandCompleter — 拆到 chat_window.command_completer
 from .command_completer import _CommandCompleter  # noqa: F401
 
@@ -209,6 +209,9 @@ class ChatWindow(QWidget):
         # 的工具卡片 (用户实测「点击一个后所有的都会展开」)。
         self._tools_collapsed_by_msg: dict = {}
         self._tools_collapsed_default: bool = True  # 新消息默认折叠
+        # v20: chat 图片缩略图 → 点击放大。img-open:KEY 锚点用 dict 查真 URL,
+        # SHA1[:10] 稳定键, 重渲染不会失效, 也避免 data: base64 被 QUrl 截断。
+        self._img_open_map: dict = {}
         # 2026-10-14 美化：用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
@@ -2399,7 +2402,8 @@ class ChatWindow(QWidget):
         return cleaned
 
     def _on_chat_anchor_clicked(self, url):
-        """chat_view 上 <a href> 被点击,处理内部命令 (toggle_tools) + 外部链接。
+        """chat_view 上 <a href> 被点击,处理内部命令 (toggle_tools) + 外部链接
+        + 图片点击放大 (img-open) 。
 
         2026-10-15 v5: cmd:toggle_tools 处理改用 _rebuild_chat_view_from_history
         全量重建 chat_view, 不再调 _refresh_streaming_message —— 后者的
@@ -2411,11 +2415,25 @@ class ChatWindow(QWidget):
 
         v4 的 _NoCmdNavQTextBrowser 仍然有效 —— 它挡 QTextBrowser 默认
         doSetSource 对 cmd: scheme 错误地调 setSource 试图本地解析。
+
+        2026-10-16 v20: img-open:KEY 走 _show_image_popup 弹原图。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
         except Exception:  # noqa: BLE001
             scheme = ""
+        # v20: img-open:KEY 在前, 不要被 cmd: 分支吞掉
+        if scheme == "img-open":
+            try:
+                key = url.path().lstrip("/") if hasattr(url, "path") else ""
+            except Exception:  # noqa: BLE001
+                key = ""
+            if not key:
+                key = str(url).split(":", 1)[-1].split("#", 1)[0].split("?", 1)[0]
+            real = self._img_open_map.get(key)
+            if real:
+                self._show_image_popup(real)
+            return
         if scheme == "cmd":
             try:
                 cmd = url.path().lstrip("/") if hasattr(url, "path") else str(url).split(":", 1)[-1]
@@ -2440,6 +2458,100 @@ class ChatWindow(QWidget):
                 QDesktopServices.openUrl(url)
             except Exception:  # noqa: BLE001
                 log.warning("打开外部链接失败: %s", url)
+
+    def _show_image_popup(self, url: str) -> None:
+        """v20: 点击 chat 缩略图弹原图 QDialog, Esc / 点击空白关闭。
+
+        支持三种 src:
+          - file:/// 绝对路径 (本机落盘的 multimodal 文件)
+          - data:image/...;base64,... (chat 历史嵌图)
+          - http(s):// (网络图, 不下载, 提示"在线图无法放大")
+
+        对应不上 / 加载失败 / 空 QPixmap → 静默 return, 不弹错误框打扰主人。
+        """
+        try:
+            from PyQt5.QtGui import QPixmap, QDesktopServices
+            from PyQt5.QtCore import QUrl as _QUrl
+            from PyQt5.QtWidgets import (
+                QDialog, QVBoxLayout, QLabel, QScrollArea, QMessageBox,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        # 1. 网络图 → 不下载, 提示主人
+        if url.startswith(("http://", "https://")):
+            try:
+                QMessageBox.information(
+                    self, "图片预览",
+                    f"网络图片无法直接放大:\n{url}\n\n"
+                    "主人可在浏览器里打开, 或让桌宠先把图下载到本地。",
+                )
+            except Exception:
+                pass
+            return
+        # 2. 准备 QPixmap
+        pix = QPixmap()
+        try:
+            if url.startswith("data:"):
+                import base64, re as _re
+                m = _re.match(r"data:image/[^;]+;base64,([^,]*)", url)
+                if m:
+                    pix.loadFromData(base64.b64decode(m.group(1)))
+            elif url.startswith("file:///"):
+                # Windows: file:///C:/path → 本地 "C:/path"
+                local = url[len("file:///"):]
+                if (local.startswith("/")
+                        and len(local) > 2
+                        and local[2] == ":"):
+                    local = local.lstrip("/")
+                from urllib.parse import unquote
+                local = unquote(local)
+                pix = QPixmap(local)
+        except Exception as e:  # noqa: BLE001
+            log.warning("图片放大加载失败: %s (%s)", url, e)
+            return
+        if pix.isNull():
+            return
+        # 3. 弹 QDialog 显示原图
+        dlg = QDialog(self)
+        dlg.setWindowTitle("图片预览")
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        try:
+            dlg.setWindowFlags(
+                dlg.windowFlags() | Qt.WindowMaximizeButtonHint
+            )
+        except Exception:
+            pass
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setPixmap(pix)
+        scroll.setWidget(label)
+        layout.addWidget(scroll)
+        # 4. 大小: 不超过屏幕 85%, 但不小于 320, 看原图大小自动适配
+        try:
+            screen = (
+                QApplication.primaryScreen().availableGeometry()
+                if QApplication.primaryScreen() else None
+            )
+            if screen:
+                sw, sh = screen.width(), screen.height()
+                target_w = min(pix.width(), int(sw * 0.85))
+                target_h = min(pix.height(), int(sh * 0.85))
+            else:
+                target_w, target_h = pix.width(), pix.height()
+            target_w = max(320, target_w)
+            target_h = max(240, target_h)
+            dlg.resize(target_w, target_h)
+        except Exception:
+            dlg.resize(640, 480)
+        # 5. Esc 关闭 + 鼠标点关闭 (PyQt5 默认 QDialog Esc 关闭)
+        try:
+            dlg.exec_()
+        except Exception:
+            dlg.show()
 
     def _on_tool(self, name: str, args: str, result: str) -> None:
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""
@@ -3436,26 +3548,46 @@ class ChatWindow(QWidget):
         # 3. 行内元素 —— 先做 code (避免被误判)
         text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
 
-        # 3b. 2026-10-15 v8: markdown 图片 ![alt](url) → <img src=url>
+        # 3b. v8 markdown 图片 ![alt](url) → <img src=url>
         # v9 升级: 放行 http(s):// / file:// / data: 三种 scheme。
         # data: 是 _inline_local_images_to_data_url 的产物, 渲染稳定;
         # file:// 是降级路径 (file 太大 / 失败), QTextBrowser 不一定 load。
-        # v18 主人 2026-10-15 反馈「图片尺寸要适应窗口大小, 不要固定像素」:
-        #   - max-width: 100% 跟父容器 (msg-body) 同步, 父容器跟 chat_view resize
-        #   - max-height: 480px 上限, 超高图不撑开
-        #   - 不再用固定 width="240"
+        #
+        # v20 主人 2026-10-16 反馈「图片撑满整个窗口, 小窗口下看不全」:
+        #   主人期望 chat 软件标准模式: 缩略图固定上限 (340px) + 点击放大
+        #   看原图。 v17 固定 width=240, v18 max-width:100% + max-height:480px
+        #   在 PyQt5 5.x QTextBrowser CSS subset 支持不全, 大图仍撑开 chat_view。
+        #   这版改 HTML attr width=N (Qt 100% 支持), 嵌套 <a href="img-open:KEY">
+        #   让点击 anchor 走 _on_chat_anchor_clicked 弹原图 QDialog。KEY 用
+        #   sha1[:10] 稳定, 同一 URL 同一 key, 重渲染不丢映射, 避免 QUrl
+        #   对 data: 长 base64 URL 截断。
         def _img(m: "re.Match[str]") -> str:
             alt = m.group(1)
             url = m.group(2)
-            if re.match(r'^(https?|file|data):', url, re.IGNORECASE):
-                return (
-                    f'<img src="{url}" alt="{alt}" '
-                    f'style="display:block;max-width:100%;'
-                    f'max-height:480px;width:auto;height:auto;'
-                    f'border-radius:8px;margin:4px 0;'
-                    f'object-fit:contain;"/>'
-                )
-            return m.group(0)
+            if not re.match(r'^(https?|file|data):', url, re.IGNORECASE):
+                return m.group(0)
+            # 取 chat viewport 宽度, 用来算缩略图上限
+            # (PyQt5 5.x 是 viewport 真正宽度, 主窗口 0.85 倍, 上限 340 防
+            #  大屏时图过大, 下限 200 防小屏时图过窄)
+            try:
+                vp_w = self.chat_view.viewport().width()
+            except Exception:
+                vp_w = 0
+            if vp_w and vp_w > 200:
+                thumb_w = max(200, min(340, int(vp_w * 0.85)))
+            else:
+                thumb_w = 340  # 没 layout / 测试环境 fallback
+            key = _img_open_key(url)
+            self._img_open_map[key] = url
+            return (
+                f'<a href="img-open:{key}" title="点击放大" '
+                f'style="text-decoration:none;display:inline-block;">'
+                f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
+                f'style="display:block;width:{thumb_w}px;height:auto;'
+                f'max-width:100%;border-radius:8px;margin:4px 0;'
+                f'cursor:zoom-in;"/>'
+                f'</a>'
+            )
         text = re.sub(r'!\[([^\]]*)\]\(([^)\s]+)\)', _img, text)
 
         # 4. 链接 [text](url)  (只允许 http/https/mailto 防止 javascript: 注入)

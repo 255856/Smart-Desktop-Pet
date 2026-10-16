@@ -146,6 +146,17 @@ def _html_escape(text: str) -> str:
                 .replace('"', "&quot;"))
 
 
+def _img_open_key(url: str) -> str:
+    """v20: 给图片 src 算稳定 KEY, 用来作 <a href="img-open:KEY"> 的 id。
+
+    不用 URL 自身的原因: data:image/png;base64,... 会被 QUrl.toString()
+    截断/percent-encode, 不稳定。SHA1 截前 10 位够用且不会跟历史 key 冲突
+    (16^10 ≈ 1e12, 一张聊天图 < 10000 条不会撞)。
+    """
+    import hashlib
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+
+
 def _format_time_short(ts: float) -> str:
     """把时间戳格式化成 HH:MM（用于气泡上方 meta）。"""
     import datetime
@@ -159,5 +170,5 @@ __all__ = [
     "_DANGEROUS_LABELS", "_CONFIRM_TIMEOUT_S",
     "_TOOL_UI_META", "_CIRCLED_NUMS", "_TOOL_FAIL_MARKERS",
     "_unpack_tool", "_tool_label", "_tool_status", "_unpack_status_mark",
-    "_html_escape", "_format_time_short",
+    "_html_escape", "_format_time_short", "_img_open_key",
 ]
