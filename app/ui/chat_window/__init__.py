@@ -3363,7 +3363,11 @@ class ChatWindow(QWidget):
         body_html = self._render_markdown(raw)
 
         # 流式输出中：正文末尾追加「三点跳动」等待动画
-        if not is_user and streaming_meta and not (msg.emotion and msg.role == "assistant"):
+        # v23: 去掉 emotion 检查 —— _current_bot_msg 在 _kickoff_llm 时就设了
+        # emotion=HAPPY, 旧条件 not (msg.emotion and msg.role == "assistant") 永 False,
+        # 导致打字中动画从不显示, 最终 empty msg 走 placeholder 路径(显示「此消息
+        # 内容为空」)。修复: 只要 streaming_meta 非空就显示 dots, 与 emotion 无关。
+        if not is_user and streaming_meta:
             body_html = body_html + self._typing_dots_html()
 
         # 工具/思考/命令/文件块 (assistant only, prepend 到 body 前)
@@ -3706,12 +3710,30 @@ class ChatWindow(QWidget):
         return anchor
 
     def _render_message(self, msg: Message, streaming: bool = False) -> None:
-        """渲染一条消息到 chat_view 末尾，强制独立段落。"""
+        """渲染一条消息到 chat_view 末尾，强制独立段落。
+
+        v23: 滚动到最底改用 QTimer.singleShot(0, ...) 延迟到下一事件循环。
+        老代码直接 sb.setValue(sb.maximum()) 在 insertHtml 后立即调 —— 这时
+        layout 还没完成, sb.maximum() 可能是旧值, 看着像「没滚到底」。
+        延迟 0ms 让 chat_view 先 layout 完再算滚动条, 之后 setValue(maximum) 准。
+        """
         html = self._msg_html(msg)
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertHtml(html)
         cursor.insertBlock()
+        # 延后到下一事件循环再滚, 让 layout 把 scroll bar maximum 算准
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self) -> None:
+        """滚到 chat_view 底部(配合 _render_message / _insert_placeholder 延后用)。
+        仅当用户当前在底部 4px 范围内时强制滚 —— 否则保留他滚动到中间
+        看历史的位置, 避免被新消息「踢下去」打断阅读。
+        """
+        sb = self.chat_view.verticalScrollBar()
+        if sb.value() < sb.maximum() - 4:
+            return
+        sb.setValue(sb.maximum())
         sb = self.chat_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
