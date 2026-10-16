@@ -1,11 +1,14 @@
-"""v23: dashboard 加桌宠养成 tab + 3 API (state / config / trace).
+"""v23-9: dashboard 把桌宠养成 trace 反馈嵌到会话详情顶部 (不是独立 tab).
+
+主人 2026-10-16 反馈: 「决策和数值变化要在会话记录中的每一条对话的顶部显示而不是在桌宠养成页面」.
 
 覆盖:
-  - create_app 能构造, /api/companion endpoint 注册
+  - create_app 仍能构造, /api/companion endpoint 注册
   - /api/companion 返回 200 + 5 字段 (state/config/decisions/outcomes/persist_path)
   - state 含 5 维 + quantize 4 维
-  - config 含 yaml 关键字段 (range/leveling/time_decay/favor_rules/event_hooks)
-  - HTML 含「桌宠养成」tab 字符串
+  - config 含 yaml 关键字段
+  - HTML 删了「桌宠养成」独立 tab, 改嵌到会话详情顶部 (桌宠养成反馈)
+  - 客户端函数 renderCompanionForRun 存在
   - 决策/数值变化 trace 各返 list (按 ts 倒序)
 """
 from __future__ import annotations
@@ -31,17 +34,21 @@ def test_create_app_has_companion_route():
     assert "/api/companion" in paths, f"应注册 /api/companion. 实际: {paths}"
 
 
-def test_html_contains_companion_tab():
+def test_html_embeds_companion_in_run_detail_not_tab():
+    """v23-9 改: 删独立 tab, 把桌宠养成反馈嵌到会话详情顶部."""
     app = create_app(trace_db="data/traces.db", memory_file="data/memory.json")
     from fastapi.testclient import TestClient
     r = TestClient(app).get("/")
     assert r.status_code == 200
-    assert "桌宠养成" in r.text
+    # 独立 tab 删了
+    assert "view-companion" not in r.text, "桌宠养成 tab 应删除 (v23-9 改嵌到详情)"
+    assert "data-view=\"companion\"" not in r.text, "桌宠养成 tab 选项应删除"
+    # 桌宠养成反馈段在 renderDetail 里
+    assert "桌宠养成反馈" in r.text, "应在 renderDetail 里出现 '桌宠养成反馈' 段"
+    assert "renderCompanionForRun" in r.text, "客户端函数 renderCompanionForRun 应存在"
+    assert "loadCompanionCache" in r.text, "客户端函数 loadCompanionCache 应存在"
+    # API 仍存在
     assert "/api/companion" in r.text
-    assert "renderCompanion" in r.text
-    assert "csQuantize" in r.text
-    assert "csDecisions" in r.text
-    assert "csOutcomes" in r.text
 
 
 def test_api_companion_returns_5_fields(client):
@@ -80,7 +87,6 @@ def test_api_companion_config_has_yaml_fields(client):
     assert expected_keys.issubset(set(c.keys())), (
         f"config 应含 {expected_keys - set(c.keys())}"
     )
-    # 6 条 event_hooks
     eh = c["event_hooks"]
     for k in ("task_success", "task_failure", "user_rejected",
               "user_accepted", "user_feed", "user_interact"):
@@ -89,13 +95,20 @@ def test_api_companion_config_has_yaml_fields(client):
             assert dim in eh[k], f"{k} 应含 {dim}"
 
 
+def test_api_companion_supports_limit_params(client):
+    """/api/companion?decision_limit=200&outcome_limit=200 支持分页拉更多数据."""
+    r = client.get("/api/companion?decision_limit=10&outcome_limit=10")
+    data = r.json()
+    assert len(data["decisions"]) <= 10
+    assert len(data["outcomes"]) <= 10
+
+
 def test_api_companion_decisions_outcomes_sorted_by_ts(client):
     """decisions / outcomes 按 ts 倒序 (新→旧)."""
     r = client.get("/api/companion")
     data = r.json()
     decs = data["decisions"]
     outs = data["outcomes"]
-    # 至少有一条 (主程序应该写过 trace_decision 或 trace_outcome)
     if len(decs) >= 2:
         for i in range(1, len(decs)):
             assert decs[i-1]["ts"] >= decs[i]["ts"], (
@@ -114,7 +127,6 @@ def test_api_companion_persist_path_points_to_yaml_default(client):
     data = r.json()
     from app.core.companion_config import companion_config
     expected = companion_config.persistence.file
-    # 相对路径展开
     if not Path(expected).is_absolute():
         expected = str(Path.cwd() / expected)
     assert data["persist_path"] == expected, (
