@@ -3647,11 +3647,12 @@ class ChatWindow(QWidget):
             )
         text = re.sub(r'!\[([^\]]*)\]\(([^)\s]+)\)', _img, text)
 
-        # 4. 链接 [text](url)  (只允许 http/https/mailto 防止 javascript: 注入)
+        # 4. 链接 [text](url)  (允许 http/https/mailto/img-open; 后者由
+        #    _on_chat_anchor_clicked 路由到 _show_image_popup 弹原图 QDialog)
         def _link(m: "re.Match[str]") -> str:
             label = m.group(1)
             url = m.group(2)
-            if re.match(r'^(https?|mailto):', url, re.IGNORECASE):
+            if re.match(r'^(https?|mailto|img-open):', url, re.IGNORECASE):
                 return f'<a href="{url}">{label}</a>'
             return m.group(0)
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, text)
