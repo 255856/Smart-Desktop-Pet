@@ -2003,9 +2003,10 @@ class ChatWindow(QWidget):
         key = _hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
         self._img_open_map[key] = url
         kind_cn = {"image": "图片", "video": "视频", "audio": "音频"}.get(kind, kind)
-        # 用 img-open 锚点包图, 浏览器加载 file:// 立刻可见, 点击触发 _show_image_popup
-        # v22: 不放 emoji（test_v13 + 主设计约定 chat_window 不能有装饰符号）
-        content = f"![{kind_cn}: {prompt}]({url})\n\n[点击放大](img-open:{key})"
+        # v23: 不在图片下方加可见的"[点击放大]"文字 (主人反馈「这个字样不该默认显示」)。
+        # _render_markdown 的 _img() 会把 url 包成 <a href="img-open:KEY">
+        # + <img src="url" title="点击放大">, 鼠标悬浮时系统 tooltip 自然显示。
+        content = f"![{kind_cn}: {prompt}]({url})"
         msg = Message(role="assistant", content=content, tools=[(f"generate_{kind}", "", "")])
         self.history.append(msg)
         self._trim_history()
