@@ -23,7 +23,12 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # v21-5: Optional 类型 hint 避免运行时 import PetState (engine 在 brain
+    # 之上, 直接 import 有概率循环, 仅在静态检查时 import)。
+    from app.engine.state import PetState
 
 from langchain_core.messages import ToolMessage
 
@@ -266,6 +271,13 @@ class RiskyToolConfirm:
     def __init__(self) -> None:
         self._confirmed: set[str] = set()
         self._on_blocked: list = []
+        # v21-5: 桌宠养成状态注入 (创新点 2 反馈闭环接入).
+        # 主程序通过 set_companion_state 同步当前 PetState,中间件在拦截路径上
+        # 调用 companion_policy.lookup_decision(state, tool_name), 拿 Decision:
+        #   ALLOW  → 直接放行 (即便工具在 _RISKY_TOOLS 里也放行, 主人特权)
+        #   CONFIRM → 弹窗路径 (跟旧 _RISKY_TOOLS 行为一致)
+        #   REJECT / REFUSE → 拦截并返回拒绝 sentinel
+        self._companion_state = None  # type: Optional["PetState"]
 
     def confirm(self, tool_call_id: str) -> None:
         """标记一个 tool_call_id 为已确认(主程序 / UI 确认后调用)。"""
@@ -291,6 +303,35 @@ class RiskyToolConfirm:
     def on_blocked(self, callback) -> None:
         """注册拦截回调(callback(tool_call_id, tool_name, args))。"""
         self._on_blocked.append(callback)
+
+    def set_companion_state(self, pet_state: "Optional[PetState]") -> None:
+        """v21-5: 注入 (或清除 None) 当前桌宠 PetState, 让拦截路径走查表。
+
+        主程序应在每次 state 变更 (apply_outcome, 喂食, 升级, 衰减) 后调用
+        这里同步一次, 避免中间件拿到过期的 state。
+        """
+        self._companion_state = pet_state
+
+    def _get_companion_decision(self, tool_name: str) -> Optional[str]:
+        """根据 companion_state 跑 companion_policy.lookup_decision。
+
+        返回:
+          - None   : 没注入 state, 走旧 fallback 路径 (向后兼容)
+          - str    : Decision.{ALLOW, CONFIRM, REJECT, REFUSE}
+
+        注意: companion_policy 在 PetState 未知字段上抛, 这里 try/except 兜底,
+        出错就返 None (走 fallback 而非崩溃中间件)。
+        """
+        if self._companion_state is None:
+            return None
+        if not tool_name:
+            return None
+        try:
+            from app.brain.companion_policy import lookup_decision
+            return lookup_decision(self._companion_state, tool_name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("RiskyToolConfirm: 查表失败, 走 fallback: %s", e)
+            return None
 
     def _fire_blocked(self, tool_call_id: str, tool_name: str, args: Any) -> bool:
         """触发所有拦截回调,任意一个返回 True 即视为确认(放行)。
@@ -330,9 +371,64 @@ class RiskyToolConfirm:
             args = tc.get("args")
             tool_call_id = tc.get("id") or ""
 
-            # 非高风险工具: 直通
+            # 非高风险工具: 直通 (但 v21-5 仍查 companion_state, 主人 sat+mood LOW
+            # 时的 SAFE/LOW 工具也允许 ALLOW, 不会启动 confirm)
             if tool_name not in _RISKY_TOOLS:
+                companion_dec = outer._get_companion_decision(tool_name)
+                if companion_dec == "ALLOW":
+                    return await handler(request)
+                if companion_dec in ("REJECT", "REFUSE"):
+                    log.warning(
+                        "HallucinationGuard: 桌宠状态 REJECT/REFUSE 工具 %r (low risk)",
+                        tool_name,
+                    )
+                    return ToolMessage(
+                        content=json.dumps({
+                            "status": (
+                                "rejected_by_companion" if companion_dec == "REJECT"
+                                else "refused_by_companion"
+                            ),
+                            "tool": tool_name,
+                            "args": args if isinstance(args, dict) else {"_raw": args},
+                            "message": (
+                                f"桌宠当前状态拒绝执行 {tool_name}, "
+                                "请照顾一下桌宠再试。"
+                            ),
+                        }, ensure_ascii=False),
+                        tool_call_id=tool_call_id,
+                        name=tool_name or "",
+                    )
                 return await handler(request)
+
+            # v21-5: 高风险工具也查 companion_state, ALLOW 直接放行 (主人特权)
+            companion_dec = outer._get_companion_decision(tool_name)
+            if companion_dec == "ALLOW":
+                log.info(
+                    "HallucinationGuard: 桌宠特权 ALLOW 高风险工具 %r",
+                    tool_name,
+                )
+                outer.confirm(tool_call_id)  # 标记: 不用再 confirm
+                return await handler(request)
+            if companion_dec in ("REJECT", "REFUSE"):
+                log.warning(
+                    "HallucinationGuard: 桌宠状态 REJECT/REFUSE 高风险工具 %r",
+                    tool_name,
+                )
+                return ToolMessage(
+                    content=json.dumps({
+                        "status": (
+                            "rejected_by_companion" if companion_dec == "REJECT"
+                            else "refused_by_companion"
+                        ),
+                        "tool": tool_name,
+                        "args": args if isinstance(args, dict) else {"_raw": args},
+                        "message": (
+                            f"桌宠当前状态拒绝执行 {tool_name}, 请照顾一下桌宠再试。"
+                        ),
+                    }, ensure_ascii=False),
+                    tool_call_id=tool_call_id,
+                    name=tool_name or "",
+                )
 
             # 已被拒绝:永远不通过
             if outer.is_rejected(tool_call_id):
