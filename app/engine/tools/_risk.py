@@ -129,15 +129,16 @@ def risk_for_tool(name: str, default: int = MEDIUM) -> int:
     return TOOL_RISK_LEVEL.get(name, default)
 
 
-def is_risky(name: str, threshold: int = LOW) -> bool:
-    """name 风险 >= threshold 视为 risky, 默认门槛 LOW (1)。
+def is_risky(name: str, threshold: int = MEDIUM) -> bool:
+    """name 风险 >= threshold 视为 risky, 默认门槛 MEDIUM (2)。
 
-    默认 LOW 是兼容原 hallucination_guard._RISKY_TOOLS 9 条的集合:
+    默认 MEDIUM 是兼容原 hallucination_guard._RISKY_TOOLS 9 条的集合:
     lock_screen / kill_process / set_wifi / set_bluetooth / send_notification /
-    run_script / set_volume / set_brightness / send_email 全部 ≥ LOW (≥1),
-    is_risky(name) == True。生成视频 generate_video 也 ≥LOW (3=HIGH)。
+    run_script / set_volume / set_brightness / send_email 全部 ≥ MEDIUM (≥2),
+    is_risky(name) == True。生成视频 generate_video 也 ≥MEDIUM (3=HIGH)。
 
     如只想看"主人立刻被打断"那批 (≥ HIGH), 显式传 threshold=HIGH。
+    如想"任何非纯读" (含 LOW), 显式传 threshold=LOW。
     """
     return risk_for_tool(name) >= threshold
 

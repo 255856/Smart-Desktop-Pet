@@ -27,6 +27,16 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+# v21-2: 创新点 2 工具风险等级表派生。
+# 原本 _RISKY_TOOLS 是手写 frozenset, 容易跟 _risk.TOOL_RISK_LEVEL 漂移,
+# 这里改为: _RISKY_TOOLS = is_risky(name) (≥ LOW) 的工具名集。
+# 这样以后 _risk.py 加新工具 / 调等级, 自动同步影响 confirm 拦截范围。
+from app.engine.tools._risk import (
+    TOOL_RISK_LEVEL as _RISK_TABLE,
+    is_risky as _is_risky,
+    RISK_LABELS as _RISK_LABELS,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -35,11 +45,46 @@ log = logging.getLogger(__name__)
 #   - log.warning 不阻断，模型/重试路径仍可跑通，只是开发侧看到；线上无防御
 #   - 真拦截能让 lock_screen / kill_process / send_email 这类破坏性操作
 #     在主程序未接管 UI 弹窗的情况下也被模型侧挡住一道
-_RISKY_TOOLS = frozenset({
-    "lock_screen", "kill_process", "set_wifi", "set_bluetooth",
-    "send_notification", "run_script", "set_volume", "set_brightness",
-    "send_email",   # 参考项目示例：邮件类也需 HITL
-})
+# v21-2: _RISKY_TOOLS 改从 _risk.TOOL_RISK_LEVEL 派生 (≥ LOW 门槛, 兼容
+# 原 9 条: lock_screen / kill_process / set_wifi / set_bluetooth /
+# send_notification / run_script / set_volume / set_brightness / send_email)。
+# 新增 generate_video (HIGH) 也自动进集合, 主人写邮件 / 执行脚本前都被拦。
+_RISKY_TOOLS = frozenset(name for name in _RISK_TABLE if _is_risky(name))
+
+
+def _build_risky_prompt_fragment() -> str:
+    """v21-2: 从 TOOL_RISK_LEVEL 生成 HIGH + IRREVERSIBLE 档工具列表, 注入 prompt。
+
+    自动列出 ≥HIGH 风险的工具 (主人在 prompt 里看到"哪些是高风险"), 模型
+    看不到 SAFE / LOW / MEDIUM 档 (避免 prompt 过长导致注水)。
+    按 IRREVERSIBLE 先列, 再 HIGH。模块加载时一次性生成, 后续 prompt 拼接
+    直接复用, 不每次重算。
+    """
+    by_level: dict[int, list[str]] = {}
+    for name, level in _RISK_TABLE.items():
+        by_level.setdefault(level, []).append(name)
+    irreversible = sorted(by_level.get(4, []))
+    high = sorted(by_level.get(3, []))
+    parts = [
+        "以下工具属于高风险操作 (主人查 prompt 时按风险等级分组):",
+        "",
+        "【IRREVERSIBLE 档 (主人立刻被打断, 难撤销)】",
+        "  " + ", ".join(irreversible) if irreversible else "  (无)",
+        "",
+        "【HIGH 档 (网络/邮件/脚本执行, 影响显著)】",
+        "  " + ", ".join(high) if high else "  (无)",
+        "",
+        "对每一项调用前:",
+        "- 第一次调用必须不带 __confirmed 字段 —— 中间件会拦截并返回「请主人确认」提示。",
+        "- 看到拦截提示后, 向主人复述参数并询问:「要执行 X 吗?」。",
+        "- 主人明确说「确认 / 好的 / y / 可以」之类同意后, 用同样的参数加 __confirmed: True 重试一次。",
+        "- 主人拒绝则不要重试, 也不要「擅自决定」继续。",
+        "- 不要为非高风险工具添加 __confirmed 字段 (会污染正常调用)。",
+    ]
+    return "\n".join(parts)
+
+
+_RISKY_PROMPT_FRAGMENT = _build_risky_prompt_fragment()
 
 # 确认标记键名（注入到 tool args 里）。模型在第二次调用时携带，
 # 中间件检测到就放行并把该字段从 args 里剥掉再执行真实工具。
@@ -56,15 +101,7 @@ _ANTI_HALLUCINATION_SUFFIX = """
 - 如果已记住主人说过某事，可以引用；如果仅仅是「可能」，说「我不确定」。
 
 【高风险工具 confirm 协议】
-以下工具是高风险操作（lock_screen / kill_process / set_wifi / set_bluetooth /
-send_notification / run_script / set_volume / set_brightness / send_email）：
-- 第一次调用必须不带 __confirmed 字段 —— 中间件会拦截并返回「请主人确认」提示。
-- 看到拦截提示后，向主人复述参数并询问：「要执行 X 吗？」。
-- 主人明确说「确认 / 好的 / y / 可以」之类同意后，**用同样的参数加 " __confirmed": True 重试一次**。
-- 主人拒绝则不要重试，也不要「擅自决定」继续。
-- 不要为非高风险工具添加 __confirmed 字段（会污染正常调用）。
-"""
-
+""" + _RISKY_PROMPT_FRAGMENT
 
 def grounding_dynamic_prompt(request) -> str:
     """参考项目 graphs.py 的 dynamic_prompt_func：根据状态调整 system_prompt。

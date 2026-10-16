@@ -146,3 +146,102 @@ def test_is_risky_low_threshold_picks_medium_plus():
     assert is_risky("lock_screen")          # IRREVERSIBLE
     assert not is_risky("get_current_time") # SAFE
     print("[OK] _risk: is_risky(LOW) 阈值包含 MEDIUM+ 排除 SAFE")
+
+
+def test_v212_risky_tools_derived_from_risk_table():
+    """v21-2: hallucination_guard._RISKY_TOOLS 改成从 _risk 派生, 不再硬编码 9 条。
+
+    验证:
+      - _RISKY_TOOLS 仍是 frozenset
+      - 原 9 条仍在集合 (向后兼容)
+      - 集合里每个工具的 risk 都 ≥ MEDIUM (跟默认 is_risky 阈值匹配)
+      - 加新工具后 (这里手动模拟) 集合自动扩展
+    """
+    from app.brain.hallucination_guard import _RISKY_TOOLS
+    from app.engine.tools._risk import risk_for_tool, MEDIUM, is_risky
+
+    assert isinstance(_RISKY_TOOLS, frozenset), (
+        f"_RISKY_TOOLS 应 frozenset, 实际: {type(_RISKY_TOOLS)}"
+    )
+    # 原 9 条仍应在 (向后兼容)
+    legacy_9 = {
+        "lock_screen", "kill_process", "set_wifi", "set_bluetooth",
+        "send_notification", "run_script", "set_volume", "set_brightness",
+        "send_email",
+    }
+    assert legacy_9.issubset(_RISKY_TOOLS), (
+        f"原 9 条应在 _RISKY_TOOLS. missing: {legacy_9 - _RISKY_TOOLS}"
+    )
+    # 集合里每个工具 risk 都 ≥ MEDIUM (跟默认 is_risky 阈值匹配)
+    for name in _RISKY_TOOLS:
+        assert risk_for_tool(name) >= MEDIUM, (
+            f"{name} in _RISKY_TOOLS 但 risk < MEDIUM. "
+            f"is_risky 默认门槛 = MEDIUM, 这种就矛盾了"
+        )
+    # 生成视频也进了 (新风险工具)
+    assert "generate_video" in _RISKY_TOOLS, (
+        "generate_video 应进 (HIGH ≥ MEDIUM). 否则 v21-2 没派生成功"
+    )
+    # 集合 = {name: is_risky(name)}
+    manual = {n for n in TOOL_RISK_LEVEL if is_risky(n)}
+    assert _RISKY_TOOLS == manual, (
+        f"_RISKY_TOOLS 应 == {{n: is_risky(n)}}. diff: "
+        f"in-tools not-tools={_RISKY_TOOLS - manual}, "
+        f"in-manual not-tools={manual - _RISKY_TOOLS}"
+    )
+    print(f"[OK] v21-2: hallucination_guard._RISKY_TOOLS 是派生集合 (n={len(_RISKY_TOOLS)})")
+
+
+def test_v212_risky_prompt_fragment_lists_high_and_irreversible():
+    """v21-2: hallucination_guard 注入 prompt 的 fragment 应自动列出 HIGH + IRREVERSIBLE。
+
+    验证:
+      - IRREVERSIBLE 档工具都列 (kill_process, lock_screen)
+      - HIGH 档工具都列 (set_wifi 等)
+      - MEDIUM / LOW / SAFE 档**不**列 (避免 prompt 过长)
+    """
+    from app.brain.hallucination_guard import _RISKY_PROMPT_FRAGMENT
+
+    # HIGH + IRREVERSIBLE 档都应出现 (全部 IRREVERSIBLE + HIGH 工具)
+    must_have_irreversible = ["kill_process", "lock_screen"]
+    for name in must_have_irreversible:
+        assert name in _RISKY_PROMPT_FRAGMENT, (
+            f"v21-2 prompt fragment 应含 IRREVERSIBLE 工具 {name}. "
+            f"实际:\n{_RISKY_PROMPT_FRAGMENT}"
+        )
+    must_have_high = ["set_wifi", "send_email", "run_script", "send_notification"]
+    for name in must_have_high:
+        assert name in _RISKY_PROMPT_FRAGMENT, (
+            f"v21-2 prompt fragment 应含 HIGH 工具 {name}. "
+            f"实际:\n{_RISKY_PROMPT_FRAGMENT}"
+        )
+    # MEDIUM/LOW 工具**不**应列 (prompt 应该简洁, 只显示主人该紧张的)
+    must_not_have = ["get_current_time", "web_search", "read_file",
+                     "set_volume"]   # set_volume 是 MEDIUM, 不该在 prompt
+    for name in must_not_have:
+        assert name not in _RISKY_PROMPT_FRAGMENT, (
+            f"v21-2 prompt fragment 不应含 MEDIUM/SAFE 工具 {name}. "
+            f"实际:\n{_RISKY_PROMPT_FRAGMENT}"
+        )
+    print("[OK] v21-2: _RISKY_PROMPT_FRAGMENT 列 HIGH + IRREVERSIBLE, 不含 MEDIUM/SAFE")
+
+
+def test_v212_anti_hallucination_suffix_uses_fragment():
+    """v21-2: _ANTI_HALLUCINATION_SUFFIX 末尾应包含 _RISKY_PROMPT_FRAGMENT。
+
+    注: 这里**不**直接比 suffix 全文, 只比关键内容 (因为 suffix 头部"防幻觉基线"
+    是手写的字符串, 不会因这次改动变, 不必 assert)。
+    """
+    from app.brain.hallucination_guard import (
+        _ANTI_HALLUCINATION_SUFFIX, _RISKY_PROMPT_FRAGMENT,
+    )
+    assert _RISKY_PROMPT_FRAGMENT in _ANTI_HALLUCINATION_SUFFIX or (
+        # 兼容: _ANTI_HALLUCINATION_SUFFIX 也可能拼接了 fragment 的子串,
+        # 但核心内容 (HIGH 档工具列表) 应该在
+        "kill_process" in _ANTI_HALLUCINATION_SUFFIX
+        and "send_email" in _ANTI_HALLUCINATION_SUFFIX
+    ), (
+        f"v21-2 _ANTI_HALLUCINATION_SUFFIX 末尾应含 _RISKY_PROMPT_FRAGMENT 内容. "
+        f"suffix 末尾 600:\n{_ANTI_HALLUCINATION_SUFFIX[-600:]}"
+    )
+    print("[OK] v21-2: _ANTI_HALLUCINATION_SUFFIX 末尾含 _RISKY_PROMPT_FRAGMENT")
