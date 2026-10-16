@@ -147,3 +147,55 @@ def test_v215_decision_uses_state_after_apply_outcome():
         "v21-5 反馈闭环应让决策从 ALLOW 变 CONFIRM, 但实际前后一致"
     )
     print(f"[OK] v21-5 反馈闭环: ALLOW → CONFIRM (after rejected ×50)")
+
+
+def test_v224_fire_companion_reject_outcome_no_state_silent():
+    """v22-4: 没注入 state 时, _fire_companion_reject_outcome 静默不抛。"""
+    from app.brain.hallucination_guard import RiskyToolConfirm
+    ctrl = RiskyToolConfirm()
+    try:
+        ctrl._fire_companion_reject_outcome("lock_screen")
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f"无 state 不应抛: {e}")
+    print("[OK] v22-4: _fire_companion_reject_outcome 无 state 静默")
+
+
+def test_v224_companion_reject_drops_feeling():
+    """v22-4: companion REJECT/REFUSE 拦阻 → PetState.apply_outcome('rejected') → 心情骤降。
+
+    验证中间件在拦截路径上调了 _fire_companion_reject_outcome,
+    这个 helper 调 state.apply_outcome('rejected', tool_name, risk_level).
+    """
+    from app.brain.hallucination_guard import RiskyToolConfirm
+    from app.engine.state import PetState
+    from app.engine.tools._risk import HIGH
+    ctrl = RiskyToolConfirm()
+    ps = PetState()
+    f0 = ps.feeling
+    ctrl.set_companion_state(ps)
+    # 调用 helper: 模拟一次 companion REJECT 拦阻 (心情 LOW + HIGH tool)
+    ctrl._fire_companion_reject_outcome("run_script")
+    # apply_outcome("rejected") 让 feeling -1.5
+    assert ps.feeling < f0, (
+        f"rejected outcome 应让 feeling < f0. f0={f0} → {ps.feeling}"
+    )
+    assert f0 - ps.feeling >= 1.4 and f0 - ps.feeling <= 1.6, (
+        f"rejected 单步 -1.5. 实际 -={f0 - ps.feeling:.2f}"
+    )
+    print(f"[OK] v22-4: companion reject → apply_outcome('rejected') -1.5")
+
+
+def test_v224_companion_reject_state_missing_apply_silent():
+    """v22-4: 注入 state 但没 apply_outcome 方法时, 静默 (不抛, 不调假函数)."""
+    from app.brain.hallucination_guard import RiskyToolConfirm
+    ctrl = RiskyToolConfirm()
+
+    class FakeNoApply:
+        pass
+
+    ctrl.set_companion_state(FakeNoApply())
+    try:
+        ctrl._fire_companion_reject_outcome("run_script")
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f"缺 apply_outcome 不应抛: {e}")
+    print("[OK] v22-4: 缺 apply_outcome 静默")

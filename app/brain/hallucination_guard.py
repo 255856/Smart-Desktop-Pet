@@ -333,6 +333,31 @@ class RiskyToolConfirm:
             log.warning("RiskyToolConfirm: 查表失败, 走 fallback: %s", e)
             return None
 
+    def _fire_companion_reject_outcome(self, tool_name: str) -> None:
+        """v22-4: 工具被 companion (REJECT/REFUSE) 拒截 → 反向更新 PetState。
+
+        跟 paper §3.3 反馈闭环: 任务被拒 → 心情-1.5 (owner 明确拒绝).
+        因为 REJECT/REFUSE 不是"主人主动拒绝"但语义上一致 (工具被拒,
+        不调用), 用 v21-3 apply_outcome("rejected") 让心情骤降即可.
+
+        注意: companion_state 上层已 set, 这里直接调 outcome. 字段缺失
+        / 数值越界等异常吞掉不抛 (中间件失败不能让 agent 崩)。
+        """
+        state = getattr(self, "_companion_state", None)
+        if state is None:
+            return
+        try:
+            apply = getattr(state, "apply_outcome", None)
+            if callable(apply):
+                # risk 字段从 _RISK_TABLE 拿; 缺工具默认 MEDIUM.
+                from app.engine.tools._risk import risk_for_tool, MEDIUM
+                risk = risk_for_tool(tool_name, default=MEDIUM)
+                apply("rejected", tool_name, risk_level=risk)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "RiskyToolConfirm: companion_reject outcome 失败: %s", e,
+            )
+
     def _fire_blocked(self, tool_call_id: str, tool_name: str, args: Any) -> bool:
         """触发所有拦截回调,任意一个返回 True 即视为确认(放行)。
 
@@ -382,6 +407,9 @@ class RiskyToolConfirm:
                         "HallucinationGuard: 桌宠状态 REJECT/REFUSE 工具 %r (low risk)",
                         tool_name,
                     )
+                    # v22-4: 拒截后调 PetState.apply_outcome("rejected") 让
+                    # 心情-1.5; 拦阻本身是一种 "交互结果" 应该影响状态。
+                    outer._fire_companion_reject_outcome(tool_name)
                     return ToolMessage(
                         content=json.dumps({
                             "status": (
@@ -414,6 +442,8 @@ class RiskyToolConfirm:
                     "HallucinationGuard: 桌宠状态 REJECT/REFUSE 高风险工具 %r",
                     tool_name,
                 )
+                # v22-4: 同上, 拒截后调 outcome="rejected" 反馈 PetState.
+                outer._fire_companion_reject_outcome(tool_name)
                 return ToolMessage(
                     content=json.dumps({
                         "status": (
