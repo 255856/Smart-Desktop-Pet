@@ -108,6 +108,49 @@ _ANTI_HALLUCINATION_SUFFIX = """
 【高风险工具 confirm 协议】
 """ + _RISKY_PROMPT_FRAGMENT
 
+def _strategy_guidance(state) -> str:
+    """v22-3: 策略层 — 根据桌宠状态调整 system_prompt 的「探索 / 保守」风格。
+
+    论文 §3.2 策略层:
+      - 心情好 + 饱食高 → 倾向探索 (主动建议扩展动作)
+      - 心情低 → 倾向保守 (简短回复, 一次只走一步)
+      - 饱食低 → 优先完成核心, 不走长链路
+
+    state=None 走 fallback 保守 (无状态注入), 不影响 persona.
+    PetState 字段缺失 / 越界 → 静默, 不注入策略块.
+    """
+    if state is None:
+        return ""
+    try:
+        sat_v = float(getattr(state, "strength_food", 50.0))
+        mood_v = float(getattr(state, "feeling", 50.0))
+        lvl = int(getattr(state, "level", 1))
+    except Exception:
+        return ""
+
+    sat = "HIGH" if sat_v > 67 else ("LOW" if sat_v < 33 else "MID")
+    mood = "HIGH" if mood_v > 67 else ("LOW" if mood_v < 33 else "MID")
+
+    parts: list[str] = []
+    if mood == "LOW":
+        parts.append("桌宠情绪低落, 请用简短的话回复, 一次只走一步, "
+                    "不要主动建议额外操作.")
+    elif mood == "HIGH" and sat == "HIGH":
+        parts.append("桌宠和主人都状态好, 你可以主动建议一两步能增强效率的扩展动作.")
+
+    if sat == "LOW":
+        parts.append("桌宠饱食度低, 优先完成核心任务, 避免多步长链路.")
+
+    if lvl >= 15:
+        parts.append("桌宠等级已高, 你可以自主做主人授权过的小决定, "
+                    "避免每个细节都问.")
+
+    if not parts:
+        return ""
+    return ("\n\n【桌宠状态策略 (v22-3 策略层)】 (本轮按此调整行为风格, "
+            "不要主动告诉主人此段):\n" + "- " + "\n- ".join(parts) + "\n")
+
+
 def grounding_dynamic_prompt(request) -> str:
     """参考项目 graphs.py 的 dynamic_prompt_func：根据状态调整 system_prompt。
 
@@ -116,13 +159,30 @@ def grounding_dynamic_prompt(request) -> str:
       - 强制模型在每次调用里都看到防幻觉规则（不仅仅在开始一次性 system_prompt 里看）
       - 在调用中提供「现在是什么时间」让模型错不了时间类问题
       - 注入「高风险工具 confirm 协议」让模型知道拦截-重试约定
+      - v22-3: 注入「状态策略」,心情好走探索 / 心情低走保守
     """
     base = getattr(request, "system_prompt", None) or ""
     if not base:
         base = "你是一个有用的桌面助手。"
+    # v22-3: 按 thread_id 取桌宠 state, 计算策略文本
+    state_for_prompt = None
+    try:
+        # request.config 是 dict, 形如 {"configurable": {"thread_id": "..."}, ...}
+        cfg = getattr(request, "config", None) or {}
+        configurable = cfg.get("configurable") if isinstance(cfg, dict) else None
+        thread_id = (
+            configurable.get("thread_id") if isinstance(configurable, dict) else None
+        ) if configurable else None
+        if thread_id:
+            from app.brain._companion_registry import get_state_for_thread
+            state_for_prompt = get_state_for_thread(thread_id)
+    except Exception:
+        state_for_prompt = None
+    strategy = _strategy_guidance(state_for_prompt)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     weekday = "一二三四五六日"[datetime.datetime.now().weekday()]
-    return base + _ANTI_HALLUCINATION_SUFFIX + f"\n\n[当前时间:{now} 星期{weekday}]"
+    return (base + strategy + _ANTI_HALLUCINATION_SUFFIX
+            + f"\n\n[当前时间:{now} 星期{weekday}]")
 
 
 def _extract_confirm_flag(args: Any) -> tuple[Any, bool]:

@@ -607,12 +607,26 @@ class LangChainAgent:
     # set_companion_state(None) 解除).
 
     def set_companion_state(self, pet_state: "Optional[Any]") -> None:
-        """v22-2: 注入 / 解除桌宠 PetState, 任务结束后让 apply_outcome 写它。
+        """v22-2 + v22-3: 注入 / 解除桌宠 PetState.
 
-        主程序在 StateManager 构造后, 调用这里同步 (跟 v21-5 的
-        RiskyToolConfirm.set_companion_state 同源设计).
+        1) 写到 self._companion_state, 任务结束 _finish_run_with_outcome
+           写回 PetState 反馈 (v22-2)
+        2) 注册到 _companion_registry (按 thread_id), 让 grounding_dynamic_prompt
+           在策略层注入时拿到这个 state (v22-3)
+
+        pet_state=None 解除同步 (主线程关闭 / 测试 cleanup).
         """
         self._companion_state = pet_state
+        try:
+            from app.brain._companion_registry import (
+                set_state_for_thread, clear_state_for_thread,
+            )
+            if pet_state is None:
+                clear_state_for_thread(self.thread_id)
+            else:
+                set_state_for_thread(self.thread_id, pet_state)
+        except Exception as e:  # noqa: BLE001
+            log.warning("LangChainAgent.set_companion_state 写 registry 失败: %s", e)
 
     def _fire_outcome(self, outcome: str, tool_name: str = "",
                       risk: int = 0) -> None:

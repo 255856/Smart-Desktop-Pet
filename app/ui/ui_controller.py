@@ -291,10 +291,20 @@ class UIController(QObject):
                     continue
                 setattr(self.state, attr, float(val))
             self.state.normalize()
-            # 同步给 LangChainAgent 的 confirm_ctrl
+            # v22-3: 同步给 LangChainAgent (策略层 + 反馈层). 这是除了
+            # RiskyToolConfirm 之外的第二条路径: LangChainAgent.set_companion_state
+            # 内部还会调 _companion_registry.set_state_for_thread 让
+            # grounding_dynamic_prompt 拿到当前 state 拼 strategy 文本.
             cw = self._chat_window
             if cw is not None:
                 lc = getattr(cw, "_lc_agent", None)
+                if lc is not None and hasattr(lc, "set_companion_state"):
+                    try:
+                        lc.set_companion_state(self.state)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "sync to LangChainAgent failed: %s", e)
+                # 同步给 LangChainAgent 的 confirm_ctrl (v21-5)
                 ctrl = getattr(lc, "_confirm_ctrl", None) if lc else None
                 if ctrl is not None:
                     ctrl.set_companion_state(self.state)
