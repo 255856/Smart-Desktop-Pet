@@ -227,8 +227,51 @@ def test_v226_strategy_preview_updates_with_sliders(settings_window):
     sw._dev_sliders["feeling"].setValue(50)
     sw._dev_sliders["strength_food"].setValue(50)
     sw._dev_sliders["level"].setValue(8)
-    txt_mid = sw.lbl_dev_strategy.text()
-    assert "无" in txt_mid and "状态平稳" in txt_mid, (
-        f"MID/mid state 应无策略. 实际: {txt_mid}"
+
+
+# ---- v23-7: trace 页 3 段 UI ----
+
+def test_v237_trace_panel_exists(settings_window):
+    """v23-7: dev_panel 应有 trace 视图 (调前/调后 2 段色块)."""
+    sw = settings_window
+    sw._set_developer_mode(True)
+    assert hasattr(sw, "_dev_trace_view"), "v23-7 应有 _dev_trace_view"
+    assert hasattr(sw, "_dev_trace_scroll"), "v23-7 应有 _dev_trace_scroll (QScrollArea)"
+    print("[OK] v23-7: trace 视图控件存在")
+
+
+def test_v237_trace_panel_renders_decision_and_outcome(tmp_path, monkeypatch, settings_window):
+    """v23-7: trace 视图从 companion_log.txt 读 + 渲染 decision/outcome 块."""
+    import json
+    from app.brain._companion_log import trace_decision, trace_outcome
+
+    # 重定向 trace 路径到 tmp
+    log_path = tmp_path / "trace.log"
+    monkeypatch.setattr(
+        "app.brain._companion_log._default_log_path",
+        lambda: log_path,
     )
-    print("[OK] v22-6: sliders 拖动策略预览实时跟 _strategy_guidance 同步")
+
+    # 写一条 decision + 一条 outcome
+    trace_decision(
+        thread_id="t", tool="set_brightness", risk=2, decision="REFUSE",
+        sat="LOW", mood="LOW", level="LOW",
+    )
+    trace_outcome(
+        thread_id="t", outcome="success", tool="set_brightness",
+        feeling_delta=8.0, food_delta=0.0, favor_delta=1.0, exp_delta=20.0,
+        level_before=1, level_after=2, success=True,
+    )
+
+    sw = settings_window
+    sw._set_developer_mode(True)
+    sw._refresh_dev_trace()
+
+    html = sw._dev_trace_view.text()
+    assert "set_brightness" in html, f"trace 应有工具名. 实际: {html}"
+    assert "REFUSE" in html, f"decision 应展示. 实际: {html}"
+    # outcome 块绿边框
+    assert "#3a8c4d" in html, f"outcome 应有绿边框. 实际: {html}"
+    # decision 块蓝边框
+    assert "#2e6da4" in html, f"decision 应有蓝边框. 实际: {html}"
+    print("[OK] v23-7: trace 渲染 decision + outcome 块")

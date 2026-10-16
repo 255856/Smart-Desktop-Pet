@@ -1,4 +1,11 @@
-"""存档系统：把 PetState 持久化到磁盘 + 自动定时保存。"""
+"""存档系统：把 PetState 持久化到磁盘 + 自动定时保存。
+
+v23-4: 路径 + 写盘时机走 companion_config.persistence yaml
+  - file: 默认 data/pet_state.json (项目本地, 跟 chat_history.db 同目录)
+  - write_on_update: 立即写 (每次 state 改动就触发 mark_dirty → write_sync)
+  - write_min_interval_seconds: 防抖 (主人 2026-10-16 默认 5s)
+  - autosave_seconds: QTimer 周期 (60s 兜底, 即使没 mark_dirty 也强写)
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +13,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -20,8 +28,30 @@ def default_save_path() -> Path:
     return Path.home() / ".desktop-pet" / "save.json"
 
 
+def _resolve_save_path(yaml_path: str) -> Path:
+    """v23-4: 解析 yaml persistence.file 路径。
+
+    优先相对 cwd (项目根), 缺省 fallback 到 ~/.desktop-pet/save.json.
+    """
+    p = Path(yaml_path)
+    if p.is_absolute():
+        return p
+    # 相对路径: cwd 优先, 找不到父目录就 fallback 到家目录
+    cwd_candidate = Path.cwd() / p
+    if cwd_candidate.parent.is_dir():
+        return cwd_candidate
+    return default_save_path()
+
+
 class SaveStore(QObject):
-    """存档管理器。"""
+    """存档管理器。
+
+    v23-4 起路径/写盘时机走 yaml companion_config.persistence:
+      - persistence.file  (默认 data/pet_state.json)
+      - persistence.write_on_update (默认 True, 改 state 立即写)
+      - persistence.write_min_interval_seconds (默认 5, 防抖)
+      - autosave_seconds (默认 60, QTimer 兜底)
+    """
 
     saved = Signal()    # 每次落盘发一次
 
@@ -29,14 +59,32 @@ class SaveStore(QObject):
                  autosave_seconds: int = 60,
                  parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self.path = Path(path) if path else default_save_path()
+        if path is None:
+            # v23-4: 默认走 yaml persistence.file (data/pet_state.json)
+            try:
+                from app.core.companion_config import companion_config
+                path = _resolve_save_path(companion_config.persistence.file)
+            except Exception:  # noqa: BLE001
+                path = default_save_path()
+        self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.autosave_seconds = int(autosave_seconds)
+
+        # v23-4: write_on_update + 防抖
+        try:
+            from app.core.companion_config import companion_config
+            self.write_on_update = bool(companion_config.persistence.write_on_update)
+            self.write_min_interval = int(companion_config.persistence.write_min_interval_seconds)
+        except Exception:  # noqa: BLE001
+            self.write_on_update = True
+            self.write_min_interval = 5
+
         self._state: PetState = PetState()
         self._timer = QTimer(self)
         self._timer.setInterval(self.autosave_seconds * 1000)
         self._timer.timeout.connect(self._on_tick)
         self._dirty = False
+        self._last_write_ts: float = 0.0    # v23-4: 防抖用
 
     def start(self) -> None:
         if self.autosave_seconds > 0:
@@ -68,9 +116,9 @@ class SaveStore(QObject):
             raw = self.path.read_text("utf-8")
             data = json.loads(raw)
             self._state = PetState.from_dict(data)
-            log.info("存档读取成功：Lv.%d exp=%d money=%.1f mode=%s",
+            log.info("存档读取成功：Lv.%d exp=%d money=%.1f mode=%s path=%s",
                      self._state.level, self._state.exp,
-                     self._state.money, self._state.mode.value)
+                     self._state.money, self._state.mode.value, self.path)
             return self._state
         except Exception as e:  # noqa: BLE001
             log.warning("存档损坏：%s，使用默认", e)
@@ -106,6 +154,7 @@ class SaveStore(QObject):
                     log.debug("ignored: %s", e)
             os.replace(tmp, self.path)
             self._dirty = False
+            self._last_write_ts = time.time()    # v23-4: 防抖
             self.saved.emit()
             log.debug("存档写入：%s", self.path)
         except Exception:
@@ -117,8 +166,24 @@ class SaveStore(QObject):
             raise
 
     def mark_dirty(self) -> None:
-        """外部在改 state 后调用，标记下次 tick 自动存。"""
+        """外部在改 state 后调用: 标记 dirty, 如果 write_on_update 立即写.
+
+        v23-4 防抖: 距离上次写 < write_min_interval 就不写, 累计多次再写一次.
+        """
         self._dirty = True
+        if not self.write_on_update:
+            return
+        # 防抖: 距离上次写 < min_interval → 等 timer 兜底
+        now = time.time()
+        if self._last_write_ts and (now - self._last_write_ts) < self.write_min_interval:
+            log.debug("mark_dirty: 防抖中, 距离上次写 %.1fs (< %ds), 跳过",
+                      now - self._last_write_ts, self.write_min_interval)
+            return
+        if self._state is not None:
+            try:
+                self.write_sync(self._state)
+            except Exception as e:  # noqa: BLE001
+                log.warning("mark_dirty 立即写盘失败: %s", e)
 
     def _on_tick(self) -> None:
         if self._dirty and self._state is not None:

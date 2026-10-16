@@ -1,11 +1,16 @@
-"""状态管理器：封装 PetState + SaveStore + ReminderStore 的管理逻辑。"""
+"""状态管理器：封装 PetState + SaveStore + ReminderStore 的管理逻辑。
+
+v23-4 数值持久化 (走 yaml companion_config.persistence)
+v23-5 事件驱动钩子 (apply_feed / apply_interact 走 yaml event_hooks)
+v23-6 时间驱动: 每小时 -0.833 饱食度衰减 (yaml time_decay.satiety_per_hour)
+"""
 from __future__ import annotations
 
 import logging
 import time
 from pathlib import Path
 
-from app.core.qt_compat import QObject, Signal
+from app.core.qt_compat import QObject, QTimer, Signal
 from app.engine.reminder import ReminderStore
 from app.core.save import SaveStore, default_save_path
 from app.engine.state import PetState, is_night
@@ -38,7 +43,8 @@ class StateManager(QObject):
         self.root = root
         self.cfg = cfg
 
-        self.save_store = SaveStore(path=default_save_path(), autosave_seconds=60)
+        # v23-4: 路径走 yaml persistence.file, 默认 data/pet_state.json
+        self.save_store = SaveStore(path=None, autosave_seconds=60)
         self._last_food_warn = 0.0
 
         if args.reset_state:
@@ -48,7 +54,7 @@ class StateManager(QObject):
             self.state = self.save_store.load()
             self.save_store.set_state(self.state)
 
-        # 任何 state 改动都触发 mark_dirty → 下一次 autosave 落盘
+        # 任何 state 改动都触发 mark_dirty → write_on_update 立即写 (yaml 配)
         self.state.on_change = self.save_store.mark_dirty
 
         # mode 切换信号转发
@@ -65,9 +71,24 @@ class StateManager(QObject):
         self.reminders.reminder_triggered.connect(self.reminder_fired.emit)
         self._last_tick_ts: float = 0.0   # 上次状态 tick 时间：按真实 dt 推进，支持降频
 
+        # v23-6 时间驱动: 每小时检查一次衰减 + 互动时间检查
+        from app.core.companion_config import companion_config
+        self._decay_timer = QTimer(self)
+        # yaml check_interval_seconds 默认 600s (10分钟); 主人要求每小时 -0.833,
+        # 这里采用 600s (10分钟) 一次, 每次按实际 elapsed 算 (跟 v22 衰减走法一致).
+        self._decay_timer.setInterval(
+            companion_config.time_decay.check_interval_seconds * 1000
+        )
+        self._decay_timer.timeout.connect(self._on_decay_tick)
+        self._decay_timer.start()
+        # v23-6: 记录上次衰减检查时间, 用真实 dt 算衰减量
+        self._last_decay_ts: float = 0.0
+
     def start(self) -> None:
-        """启动自动存档定时器。"""
+        """启动自动存档定时器 + 时间衰减定时器。"""
         self.save_store.start()
+        if not self._decay_timer.isActive():
+            self._decay_timer.start()
 
     def on_about_to_quit(self) -> None:
         """退出前最终存档。"""
@@ -76,6 +97,8 @@ class StateManager(QObject):
             self.save_store.write_sync(self.state)
         except Exception as e:  # noqa: BLE001
             log.warning("退出存档失败：%s", e)
+        if self._decay_timer.isActive():
+            self._decay_timer.stop()
 
     def state_tick_once(self, is_sleeping: bool = False) -> None:
         """按真实流逝时间推进状态（衰减 + 跨夜）。
@@ -102,12 +125,63 @@ class StateManager(QObject):
             self._last_food_warn = now
 
     def on_eat_requested(self) -> None:
-        """吃饭：涨饱食度 + 体力 + 心情。"""
-        self.state.feed(
-            strength=20, strength_food=40, strength_drink=15,
-            feeling=10, health=5, exp=3,
-        )
-        self.state.on_interact(feeling_gain=8, likability_gain=2)
+        """吃饭: 走 yaml event_hooks.user_feed (主人 2026-10-16).
+
+        v23-5 起改成走 yaml, 默认 satiety +15, mood +5. 同时调 on_interact
+        记录互动时间戳 (心情衰减计时用).
+        """
+        # v23-5: 走 yaml 钩子, 不再 hardcode feed 参数
+        self.state.apply_feed()
+        self.state.apply_interact()    # 记录 _last_interact_ts, 心情 +3 / 好感 +2
+        # 食物给 exp 算 v23-5 yaml 钩子没动, 沿用旧 +3 (主人没明说, 暂保留)
+        self.state.exp = self.state.exp + 3.0
+
+    def _on_decay_tick(self) -> None:
+        """v23-6 时间驱动衰减 (每 10 分钟一次, 按真实 dt 算).
+
+        yaml time_decay:
+          - satiety_per_hour = -0.833 (24h -20)
+          - mood_no_interact_48h = -5
+          - mood_low_satiety_extra_per_24h = -5
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config.time_decay
+        now = time.time()
+        if not self._last_decay_ts:
+            self._last_decay_ts = now
+            return
+        hours = (now - self._last_decay_ts) / 3600.0
+        self._last_decay_ts = now
+        if hours <= 0:
+            return
+
+        before = (self.state.strength_food, self.state.feeling, self.state.likability)
+        # 饱食度按小时衰减
+        if cfg.satiety_per_hour:
+            self.state.strength_food = max(
+                0.0,
+                self.state.strength_food + cfg.satiety_per_hour * hours
+            )
+        # 心情: 48h 没互动扣 5
+        last_interact = self.state._last_interact_ts or 0.0
+        if cfg.mood_no_interact_48h and last_interact:
+            hours_no_interact = (now - last_interact) / 3600.0
+            if hours_no_interact >= 48:
+                # 按比例缩放 (-5 / 24h, 但只在 48h+ 时扣)
+                self.state.feeling = max(
+                    0.0,
+                    self.state.feeling + cfg.mood_no_interact_48h
+                )
+        # 饱食度<30 时, 心情额外扣 (按 24h -5 折算每小时)
+        if cfg.mood_low_satiety_extra_per_24h and self.state.strength_food < 30:
+            self.state.feeling = max(
+                0.0,
+                self.state.feeling + (cfg.mood_low_satiety_extra_per_24h / 24.0) * hours
+            )
+        after = (self.state.strength_food, self.state.feeling, self.state.likability)
+        if before != after:
+            log.info("时间驱动衰减: hours=%.2f food %.1f→%.1f mood %.1f→%.1f",
+                     hours, before[0], after[0], before[1], after[1])
 
     def _forward_mode_change(self, old, new) -> None:
         """转发 mode 切换信号。"""

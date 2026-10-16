@@ -353,16 +353,35 @@ class PetState:
         self.level = max(1, int(self.level))
 
     def level_up_need(self) -> int:
-        return int(math.pow(self.cal_level() * 10, 2))
+        """v23-4: 升级公式走 yaml leveling (主人 2026-10-16 要求 100 * level^1.5).
+
+        exp_to_next(level) = base * (level ** exp)
+        level_up_need 返回到下一级需要的 EXP 增量.
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config.leveling
+        return int(cfg.base * (self.level ** cfg.exp))
 
     @property
     def exp_to_next(self) -> float:
         return max(0.0, self.level_up_need() - self.exp)
 
     def cal_level(self) -> int:
-        if self.exp < 0:
+        """v23-4: 升级公式 100 * level^1.5 走 yaml leveling.
+
+        反解: 满足 base * level^exp <= self.exp 的最大 level, 钳到 [1, max_level].
+        """
+        from app.core.companion_config import companion_config
+        cfg = companion_config.leveling
+        if self.exp <= 0:
             return 1
-        return int(math.sqrt(self.exp) / 10) + 1
+        base = max(1.0, cfg.base)
+        exp_pow = max(0.1, cfg.exp)
+        max_level = max(1, cfg.max_level)
+        # base * level^exp_pow <= self.exp
+        # level <= (self.exp / base) ** (1 / exp_pow)
+        max_by_exp = int(((self.exp / base) ** (1.0 / exp_pow)) + 0.0001)
+        return max(1, min(max_level, max_by_exp))
 
     def cal_mode(self) -> Mode:
         realhel = 60

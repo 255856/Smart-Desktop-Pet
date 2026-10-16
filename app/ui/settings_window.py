@@ -313,6 +313,125 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         return page
 
+    def _build_dev_trace_block(self, parent_layout):
+        """v23-7: trace 页 3 段 UI (调前 S=量化 / 决策+命中 / 调后 Δ).
+
+        从 data/companion_log.txt 读最近 N 条 (decision + outcome) JSON-line,
+        用不同色块区分两种记录, 主人可以直观看到每次工具调用的查表 + 反馈闭环.
+        """
+        # 标题 + 刷新按钮
+        title_row = QHBoxLayout()
+        title = QLabel("trace 日志 (data/companion_log.txt 最近 20 条):")
+        title.setStyleSheet("color:#5b5b6e; font-size:9pt; font-weight:600;")
+        title_row.addWidget(title, 1)
+
+        btn_refresh = QPushButton("刷新")
+        btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_refresh.setStyleSheet("padding:2px 10px; font-size:8pt; border-radius:3px;")
+        btn_refresh.clicked.connect(self._refresh_dev_trace)
+        title_row.addWidget(btn_refresh)
+        parent_layout.addLayout(title_row)
+
+        # trace 输出框 (滚动条)
+        self._dev_trace_view = QLabel("(无 trace, 跑几次工具调用后刷新)")
+        self._dev_trace_view.setWordWrap(True)
+        self._dev_trace_view.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self._dev_trace_view.setTextFormat(Qt.TextFormat.RichText)
+        self._dev_trace_view.setStyleSheet(
+            "color:#3a3a3a; font-size:8pt;"
+            "font-family:'Consolas','Monaco',monospace;"
+            "background:#f6f6fa; padding:6px; border-radius:4px;"
+            "border:1px solid #d0d0d0;"
+        )
+        from app.core.qt_compat import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidget(self._dev_trace_view)
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(220)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        parent_layout.addWidget(scroll)
+        self._dev_trace_scroll = scroll
+        try:
+            self._refresh_dev_trace()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_dev_trace(self) -> None:
+        """v23-7: 重读 companion_log.txt 渲染到 _dev_trace_view.
+
+        决策行 (decision) 蓝边框, outcome 行绿边框, 区分清晰.
+        """
+        try:
+            from app.brain._companion_log import read_recent
+        except Exception:  # noqa: BLE001
+            self._dev_trace_view.setText("(trace 模块未就绪)")
+            return
+
+        decisions = read_recent(limit=20, kind="decision")
+        outcomes = read_recent(limit=20, kind="outcome")
+        lines: list[str] = []
+        risk_label = {0: "SAFE", 1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "IRREVERSIBLE"}
+
+        for d in reversed(decisions):
+            tool = d.get("tool", "?")
+            risk = risk_label.get(d.get("risk", 0), "?")
+            decision = d.get("decision", "?")
+            sat = d.get("sat", "?")
+            mood = d.get("mood", "?")
+            level = d.get("level", "?")
+            ts = d.get("ts", 0)
+            import datetime
+            time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            lines.append(
+                f'<div style="margin:2px 0; padding:3px 6px; border-left:3px solid #2e6da4; '
+                f'background:#eef3f8;">'
+                f'<span style="color:#888;">[{time_str}]</span> '
+                f'<b style="color:#2e6da4;">调前</b> '
+                f'<code>{tool}</code> '
+                f'[<span style="color:#a45b2e;">{risk}</span>] '
+                f'sat={sat} mood={mood} level={level} → '
+                f'<b>{decision}</b></div>'
+            )
+
+        for o in reversed(outcomes):
+            outcome = o.get("outcome", "?")
+            tool = o.get("tool", "") or "—"
+            fd = o.get("feeling_delta", 0)
+            fod = o.get("food_delta", 0)
+            favd = o.get("favor_delta", 0)
+            ed = o.get("exp_delta", 0)
+            lb = o.get("level_before", 0)
+            la = o.get("level_after", 0)
+            ts = o.get("ts", 0)
+            import datetime
+            time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            lv_str = f" Lv.{lb}→{la}" if la != lb else ""
+            arrow = "▲" if fd > 0 else ("▼" if fd < 0 else "·")
+            fav_arrow = "▲" if favd > 0 else ("▼" if favd < 0 else "·")
+            lines.append(
+                f'<div style="margin:2px 0; padding:3px 6px; border-left:3px solid #3a8c4d; '
+                f'background:#f0f6f1;">'
+                f'<span style="color:#888;">[{time_str}]</span> '
+                f'<b style="color:#3a8c4d;">调后</b> '
+                f'<code>{tool}</code> {outcome} '
+                f'心情 {arrow}{abs(fd):.1f} '
+                f'饱食 {arrow}{abs(fod):.1f} '
+                f'好感 {fav_arrow}{abs(favd):.1f} '
+                f'EXP {arrow}{abs(ed):.0f}{lv_str}</div>'
+            )
+
+        if not lines:
+            self._dev_trace_view.setText("(无 trace, 跑几次工具调用后刷新)")
+            return
+        html = (
+            '<div style="line-height:1.4;">'
+            + "".join(lines)
+            + '</div>'
+        )
+        self._dev_trace_view.setText(html)
+
     def _build_tab_status_dev(self) -> QWidget:
         """v22-1: 开发者调试面板, 主人手动调整 PetState 数值看决策变化。
 
@@ -406,6 +525,10 @@ class SettingsWindow(QWidget):
             "background:#faf6ef; padding:6px; border-radius:4px;"
             "border-left:3px solid #c08e35;")  # 暖色调, 跟 decisions 区分
         gv.addWidget(self.lbl_dev_strategy)
+
+        # v23-7: trace 页 - 调前/决策/调后 3 段最近记录 (读 data/companion_log.txt)
+        # 主人 2026-10-16 要求 trace 页明确记录桌宠工具权限 + 每次数值变化.
+        self._build_dev_trace_block(gv)
 
         # 预设按钮 (HIGH/HIGH/HIGH / LOW/LOW/LOW 等)
         preset_row = QHBoxLayout()
