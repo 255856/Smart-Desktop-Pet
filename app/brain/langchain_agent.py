@@ -226,6 +226,13 @@ class LangChainAgent:
         except Exception as e:  # noqa: BLE001
             log.warning("RiskyToolConfirm 初始化失败: %s", e)
             self._confirm_ctrl = None
+        # v34: post-LLM 拦截器 (Prompt 工程走到极限, 切到 response-time 兜底)
+        try:
+            from app.brain.hallucination_guard import PostLLMStateGuard
+            self._post_llm_guard: Optional[PostLLMStateGuard] = PostLLMStateGuard()
+        except Exception as e:  # noqa: BLE001
+            log.warning("PostLLMStateGuard 初始化失败: %s", e)
+            self._post_llm_guard = None
         self._checkpointer_cm: Optional[Any] = None
         self._checkpointer: Optional[Any] = None
         self._model: Optional[Any] = None
@@ -482,6 +489,10 @@ class LangChainAgent:
             middlewares = list(std_mws)
             if self._confirm_ctrl is not None:
                 middlewares.append(self._confirm_ctrl.as_middleware())
+            # v34: post-LLM 拦截器, 状态差时改写 preemptive 问文案
+            # 加在最后, 在 model response 出来后第一道拦截
+            if getattr(self, "_post_llm_guard", None) is not None:
+                middlewares.append(self._post_llm_guard.as_middleware())
         except Exception as e:  # noqa: BLE001
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
@@ -631,6 +642,12 @@ class LangChainAgent:
                 self._confirm_ctrl.set_companion_state(pet_state)
             except Exception as e:  # noqa: BLE001
                 log.warning("LangChainAgent.set_companion_state 同步 _confirm_ctrl 失败: %s", e)
+        # v34: 同步给 PostLLMStateGuard, post-LLM 拦截器也读 state
+        if getattr(self, "_post_llm_guard", None) is not None:
+            try:
+                self._post_llm_guard.set_companion_state(pet_state)
+            except Exception as e:  # noqa: BLE001
+                log.warning("LangChainAgent.set_companion_state 同步 _post_llm_guard 失败: %s", e)
         try:
             from app.brain._companion_registry import (
                 set_state_for_thread, clear_state_for_thread,

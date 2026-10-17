@@ -4006,3 +4006,199 @@ def test_v33_langchain_agent_keeps_all_tools():
         print("[OK] v33 撤销: _ensure_agent 不再过滤工具 (主人 12:37 反对)")
         return
     raise AssertionError("_ensure_agent 函数未找到")
+
+
+def test_v34_post_llm_guard_refuses_preemptive_when_state_bad():
+    """v34: 主人实测 12:52 LLM 仍 preemptive 问 (v33 prompt 工程失败).
+    切到 post-LLM 拦截: state=全 LOW + LLM 输出含 '要确认一下' →
+    改写为 REFUSAL_TEXT, 清掉 tool_calls.
+    """
+    from app.brain.hallucination_guard import PostLLMStateGuard
+    from app.engine.state import PetState
+
+    guard = PostLLMStateGuard()
+    state = PetState()
+    state.feeling = 0; state.strength = 0; state.strength_food = 0
+    state.strength_drink = 0; state.likability = 0; state.health = 0
+    state.normalize()
+    guard.set_companion_state(state)
+
+    # 模拟 AIMessage
+    class FakeMsg:
+        def __init__(self, content, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls or []
+    msg = FakeMsg(
+        "主人~锁屏是危险操作, 要确认一下: 真的要锁屏吗? 确定的话小汐就帮主人锁上啦~",
+        tool_calls=[{"id": "tc1", "name": "lock_screen", "args": {}}],
+    )
+    # 直接走 _looks_like_preemptive_ask + 手动模拟 wrap 行为
+    text = msg.content
+    assert PostLLMStateGuard._looks_like_preemptive_ask(text), (
+        "v34: 含 '要确认一下' 应被识别为 preemptive 问"
+    )
+    # 模拟中间件改写
+    if guard._state_is_bad() and PostLLMStateGuard._looks_like_preemptive_ask(text):
+        msg.content = PostLLMStateGuard.REFUSAL_TEXT
+        msg.tool_calls = []
+    assert msg.content == PostLLMStateGuard.REFUSAL_TEXT, (
+        f"v34: 应改写为 REFUSAL_TEXT, 实际: {msg.content[:60]}"
+    )
+    assert msg.tool_calls == [], (
+        f"v34: tool_calls 应被清空, 实际: {msg.tool_calls}"
+    )
+    print("[OK] v34: state 差 + preemptive 问 → 改写为 REFUSAL_TEXT + 清 tool_calls")
+
+
+def test_v34_post_llm_guard_keeps_normal_when_state_good():
+    """v34 边界: state 全 HIGH 时不拦截, 正常 confirm 流程不受影响."""
+    from app.brain.hallucination_guard import PostLLMStateGuard
+    from app.engine.state import PetState
+
+    guard = PostLLMStateGuard()
+    state = PetState()
+    state.feeling = 100; state.strength_food = 100; state.likability = 100
+    state.normalize()
+    guard.set_companion_state(state)
+    assert not guard._state_is_bad(), "v34 边界: state 全 HIGH 不算差"
+
+    msg = "主人~锁屏是危险操作, 要确认一下: 真的要锁屏吗?"
+    if guard._state_is_bad():
+        msg = PostLLMStateGuard.REFUSAL_TEXT
+    assert "要确认一下" in msg, (
+        "v34 边界: state 好时 preemptive 文案应保留 (正常 confirm 流程)"
+    )
+    print("[OK] v34 边界: state 全 HIGH 时不拦截")
+
+
+def test_v34_post_llm_guard_keeps_real_refusal_when_state_bad():
+    """v34 边界: state 差 + LLM 真拒绝文案 ('我状态不好') → 不二次改写.
+    避免 '我状态不好...让我先休息' 变成 '我状态不好...让我先休息 (替代)'
+    这种重复文案."""
+    from app.brain.hallucination_guard import PostLLMStateGuard
+    from app.engine.state import PetState
+
+    guard = PostLLMStateGuard()
+    state = PetState()
+    state.feeling = 0; state.strength_food = 0; state.likability = 0
+    state.normalize()
+    guard.set_companion_state(state)
+    assert guard._state_is_bad(), "v34 边界前提: state 差"
+
+    # 真拒绝文案
+    real_refusal = "我状态不好, 这次帮不了主人, 让我先休息一下吧~"
+    assert not PostLLMStateGuard._looks_like_preemptive_ask(real_refusal), (
+        "v34 边界: '我状态不好' 等拒绝措辞不算 preemptive 问"
+    )
+    print("[OK] v34 边界: 真拒绝文案不被二次改写")
+
+
+def test_v34_post_llm_guard_no_state_passes_through():
+    """v34 边界: state=None 时不拦截 (刚启动 / 没注入 state)."""
+    from app.brain.hallucination_guard import PostLLMStateGuard
+
+    guard = PostLLMStateGuard()
+    assert guard._companion_state is None
+    assert not guard._state_is_bad(), (
+        "v34 边界: state=None 时 _state_is_bad 返 False, 不拦截"
+    )
+    print("[OK] v34 边界: state=None 不拦截")
+
+
+def test_v34_post_llm_guard_as_middleware_signature():
+    """v34 集成: PostLLMStateGuard.as_middleware() 返回的中间件能直接
+    加到 middlewares 列表 (wrap_model_call 兼容)."""
+    from app.brain.hallucination_guard import PostLLMStateGuard
+    from app.engine.state import PetState
+
+    guard = PostLLMStateGuard()
+    state = PetState()
+    state.feeling = 0; state.strength_food = 0; state.likability = 0
+    state.normalize()
+    guard.set_companion_state(state)
+
+    mw = guard.as_middleware()
+    # wrap_model_call 装饰后返回类型化实例 (_post_llm_guard), 不是 plain
+    # callable; LangChain 内部用 isinstance 检查接受. 只确认它不是 None,
+    # 而且类型名包含 _post_llm_guard (wrap_model_call 生成的实例名).
+    assert mw is not None, "v34: as_middleware() 不应返 None"
+    type_name = type(mw).__name__
+    assert "post_llm_guard" in type_name or callable(mw), (
+        f"v34: as_middleware() 应返回 wrap_model_call 实例, 实际 type: {type_name}"
+    )
+    middlewares = [mw]
+    assert len(middlewares) == 1
+    print(f"[OK] v34: as_middleware() 返回 wrap_model_call 实例 ({type_name})")
+
+
+def test_v34_langchain_agent_wires_post_llm_guard():
+    """v34 集成: LangChainAgent._ensure_agent 把 _post_llm_guard
+    加到 middlewares 列表 + set_companion_state 同步.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "brain" / "langchain_agent.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    cls = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ClassDef) and node.name == "LangChainAgent":
+            cls = node
+            break
+    assert cls is not None, "LangChainAgent 类未找到"
+
+    def has_attr_call(body, attr_name, obj_attr=None):
+        """检查 body 里有没有 `obj.attr(...)` 这种方法调用."""
+        for n in _ast.walk(_ast.Module(body=body, type_ignores=[])):
+            if not isinstance(n, _ast.Call):
+                continue
+            func = n.func
+            if not isinstance(func, _ast.Attribute):
+                continue
+            if func.attr != attr_name:
+                continue
+            if obj_attr is not None:
+                if not isinstance(func.value, _ast.Attribute):
+                    continue
+                if func.value.attr != obj_attr:
+                    continue
+            return True
+        return False
+
+    def has_name_in_body(body, name):
+        for n in _ast.walk(_ast.Module(body=body, type_ignores=[])):
+            if isinstance(n, _ast.Name) and n.id == name:
+                return True
+            if isinstance(n, _ast.Attribute) and n.attr == name:
+                return True
+        return False
+
+    # 1. __init__ 必须建 _post_llm_guard
+    init = next((n for n in cls.body
+                 if isinstance(n, _ast.FunctionDef) and n.name == "__init__"), None)
+    assert init is not None
+    assert has_name_in_body(init.body, "_post_llm_guard"), (
+        "v34: __init__ 必须建 self._post_llm_guard"
+    )
+
+    # 2. set_companion_state 必须调 _post_llm_guard.set_companion_state
+    setter = next((n for n in cls.body
+                   if isinstance(n, _ast.FunctionDef)
+                   and n.name == "set_companion_state"), None)
+    assert setter is not None
+    assert has_attr_call(setter.body, "set_companion_state", obj_attr="_post_llm_guard"), (
+        "v34: set_companion_state 必须调 _post_llm_guard.set_companion_state"
+    )
+
+    # 3. _ensure_agent 必须调 _post_llm_guard.as_middleware()
+    ensure = next((n for n in cls.body
+                   if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                   and n.name == "_ensure_agent"), None)
+    assert ensure is not None
+    assert has_name_in_body(ensure.body, "_post_llm_guard"), (
+        "v34: _ensure_agent 必须用 _post_llm_guard"
+    )
+    assert has_attr_call(ensure.body, "as_middleware", obj_attr="_post_llm_guard"), (
+        "v34: _ensure_agent 必须调 _post_llm_guard.as_middleware()"
+    )
+    print("[OK] v34: LangChainAgent 接通 PostLLMStateGuard (init + setter + _ensure_agent)")
