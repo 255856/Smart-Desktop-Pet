@@ -3842,3 +3842,67 @@ def test_v31_grounding_dynamic_prompt_does_not_override_when_state_none():
         "v31: state=None / 没 thread_id 时不应有 v31 override"
     )
     print("[OK] v31 边界: state=None / 没 thread_id 不追加 override")
+
+
+def test_v32_risky_prompt_fragment_no_longer_teaches_preemptive_ask():
+    """v32: 主人 2026-10-17 12:25 实测 LLM 仍 preemptive 问'要确认一下'.
+    之前 _RISKY_PROMPT_FRAGMENT 里有一行 '看到拦截提示后, 向主人复述
+    参数并询问:「要执行 X 吗?」', LLM 把这条**误读成**'调危险工具
+    前 preemptive 问'. 修法: 改成 '直接调 tool (不要 preemptive 问
+    「要执行 X 吗」「要确认一下」)', 把 preemptive 行为直接从 prompt
+    里删掉.
+    """
+    from app.brain.hallucination_guard import _RISKY_PROMPT_FRAGMENT
+    # 1. 老的 '向主人复述参数并询问' 必须消失
+    assert "向主人复述参数并询问" not in _RISKY_PROMPT_FRAGMENT, (
+        "v32 regression: _RISKY_PROMPT_FRAGMENT 不能教 LLM "
+        "preemptively 问'要执行 X 吗'. 实际: " + _RISKY_PROMPT_FRAGMENT
+    )
+    # 2. 新指令: 直接调 tool
+    assert "直接调 tool" in _RISKY_PROMPT_FRAGMENT, (
+        "v32: 必须明确告诉 LLM '直接调 tool, 不要 preemptive 问'"
+    )
+    # 3. 显式禁止 preemptive 问
+    assert "不要 preemptive 问" in _RISKY_PROMPT_FRAGMENT, (
+        "v32: 必须显式说'不要 preemptive 问'"
+    )
+    # 4. 仍保留 confirmation 协议 (不是删 confirm 流程, 是改行为)
+    assert "awaiting_confirmation" in _RISKY_PROMPT_FRAGMENT, (
+        "v32: 还是需要 LLM 知道中间件会返 awaiting_confirmation 提示"
+    )
+    assert "__confirmed" in _RISKY_PROMPT_FRAGMENT, (
+        "v32: 还是需要 __confirmed 标记重试协议"
+    )
+    print("[OK] v32: confirm 协议改成'直接调 tool, 不要 preemptive 问'")
+
+
+def test_v32_state_bad_prompt_has_no_preemptive_ask_instruction():
+    """v32 集成: state 差时, 完整 system_prompt 不应有 'preemptive 问'
+    教学 (会教 LLM 在调工具前先问主人).
+    """
+    from app.engine.state import PetState
+    from app.brain.hallucination_guard import grounding_dynamic_prompt
+    from app.brain._companion_registry import set_state_for_thread, clear_all
+
+    clear_all()
+    state = PetState()
+    state.feeling = 0; state.strength_food = 0; state.likability = 0
+    state.normalize()
+    set_state_for_thread("test-v32", state)
+
+    class FakeRequest:
+        def __init__(self, tid, sp):
+            self.system_prompt = sp
+            self.config = {"configurable": {"thread_id": tid}}
+    sp = grounding_dynamic_prompt(FakeRequest("test-v32", "persona"))
+    clear_all()
+    # 老 prompt 里的 '向主人复述参数并询问' 不能出现 (v32 删了)
+    assert "向主人复述参数并询问" not in sp, (
+        "v32: state 差时 prompt 不能教 LLM preemptively 问. 实际末尾 300 字:\n"
+        + sp[-300:]
+    )
+    # 仍应有 v31 override (状态差直接拒绝)
+    assert "本轮最高优先级" in sp, (
+        "v32: state 差仍应有 v31 override 块"
+    )
+    print("[OK] v32: state 差时 prompt 拼装, 无 preemptive 问教学")
