@@ -613,10 +613,21 @@ class LangChainAgent:
            写回 PetState 反馈 (v22-2)
         2) 注册到 _companion_registry (按 thread_id), 让 grounding_dynamic_prompt
            在策略层注入时拿到这个 state (v22-3)
+        3) v27: 同步给 self._confirm_ctrl —— 中间件用 _confirm_ctrl 的
+           _companion_state 做查表, 不然查表路径永远 state=None, 工具被
+           RiskyToolConfirm 静默放行 (实测 10-17 11:18 主人设 state=0 后
+           lock_screen 还是没拒绝).
 
         pet_state=None 解除同步 (主线程关闭 / 测试 cleanup).
         """
         self._companion_state = pet_state
+        # v27: 关键 — 同步给 RiskyToolConfirm, 不然 middleware 走查表时
+        # _get_companion_decision 返 None, 工具被弹窗确认后照样执行
+        if getattr(self, "_confirm_ctrl", None) is not None:
+            try:
+                self._confirm_ctrl.set_companion_state(pet_state)
+            except Exception as e:  # noqa: BLE001
+                log.warning("LangChainAgent.set_companion_state 同步 _confirm_ctrl 失败: %s", e)
         try:
             from app.brain._companion_registry import (
                 set_state_for_thread, clear_state_for_thread,

@@ -3591,3 +3591,85 @@ def test_v27_companion_state_None_in_middleware_means_no_state():
         f"实际: {ctrl._get_companion_decision('lock_screen')}"
     )
     print("[OK] v27: RiskyToolConfirm _companion_state 注入前后决策差异")
+
+
+def test_v28_langchain_agent_set_companion_state_propagates_to_confirm_ctrl():
+    """v28 修: 主人 2026-10-17 11:18 反馈 v27 没真正解决问题.
+    根因: LangChainAgent.set_companion_state(state) 之前只设了
+    self._companion_state, 没同步给 self._confirm_ctrl. 但 RiskyToolConfirm
+    middleware 读的是 _confirm_ctrl._companion_state, 所以查表路径
+    永远拿到 None → 工具被静默放行.
+
+    修法: set_companion_state 里同步给 _confirm_ctrl. 锁死这条
+    propagation 不能丢.
+    """
+    import sys
+    # 用 mock 跑 (LangChainAgent 构造很重, 实际跑需要 LangChain 全套)
+    from unittest.mock import MagicMock
+    from app.brain.langchain_agent import LangChainAgent
+
+    # 直接调 set_companion_state 方法 (不需要完整 agent 构造)
+    # 我们 mock 一个 minimal LangChainAgent 实例
+    agent = LangChainAgent.__new__(LangChainAgent)
+    agent._companion_state = None
+    # _confirm_ctrl 是真正的 RiskyToolConfirm 实例
+    from app.brain.hallucination_guard import RiskyToolConfirm
+    agent._confirm_ctrl = RiskyToolConfirm()
+    # _companion_registry 需要 thread_id
+    agent.thread_id = "test-thread-v28"
+
+    from app.engine.state import PetState
+    state = PetState()
+    state.feeling = 0; state.strength = 0; state.strength_food = 0
+    state.strength_drink = 0; state.likability = 0; state.health = 0; state.exp = 0
+    state.normalize()
+
+    # 1. 调用 set_companion_state
+    agent.set_companion_state(state)
+    # 2. 必须同步到 _confirm_ctrl._companion_state
+    assert agent._confirm_ctrl._companion_state is state, (
+        "v28 regression: LangChainAgent.set_companion_state 必须同步给 "
+        "_confirm_ctrl. 不然 middleware 永远 state=None, 工具被静默放行. "
+        f"实际 _confirm_ctrl._companion_state = "
+        f"{agent._confirm_ctrl._companion_state}"
+    )
+    # 3. 决策要真的能查 (state=0 + lock_screen → REFUSE)
+    dec = agent._confirm_ctrl._get_companion_decision("lock_screen")
+    assert dec == "REFUSE", (
+        f"v28 regression: state 同步后 _get_companion_decision 必须能查到 "
+        f"REFUSE (state=全 LOW + IRREVERSIBLE). 实际: {dec}"
+    )
+    # 4. 解除 (set None) 也得同步
+    agent.set_companion_state(None)
+    assert agent._confirm_ctrl._companion_state is None, (
+        "v28 regression: set_companion_state(None) 也得清 _confirm_ctrl, "
+        "不然旧 state 残留. 实际: "
+        f"{agent._confirm_ctrl._companion_state}"
+    )
+    print("[OK] v28: LangChainAgent.set_companion_state 同步 _confirm_ctrl")
+
+
+def test_v28_ast_guard_langchain_set_companion_state_propagates():
+    """v28 AST 守卫: LangChainAgent.set_companion_state 必须调
+    _confirm_ctrl.set_companion_state. 锁死 propagation 不丢.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "brain" / "langchain_agent.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.FunctionDef):
+            continue
+        if node.name != "set_companion_state":
+            continue
+        body_src = ' '.join(_ast.dump(s) for s in node.body)
+        # 必须有 _confirm_ctrl.set_companion_state 调用
+        assert "_confirm_ctrl" in body_src and "set_companion_state" in body_src, (
+            "v28 regression: LangChainAgent.set_companion_state 必须同步给 "
+            "_confirm_ctrl.set_companion_state. 不然 middleware 永远 state=None. "
+            f"函数体: {body_src[:400]}"
+        )
+        print("[OK] v28 AST 守卫: LangChainAgent.set_companion_state propagation 存在")
+        return
+    raise AssertionError("LangChainAgent.set_companion_state 函数未找到")
