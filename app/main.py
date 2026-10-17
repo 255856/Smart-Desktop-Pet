@@ -1007,6 +1007,13 @@ def _main_inner() -> int:
             ),
             memory_store=core.brain.memory,
             chat_cfg=core.cfg.chat,
+            # v27: 桌宠状态拉取器 —— 每次 chat_window._kickoff_llm 创建新
+            # LangChainAgent 时拿当前 PetState 注入. 不传这个 callback 的话,
+            # 新 agent._companion_state 永远是 None, 工具调
+            # _get_companion_decision 返 None, middleware bypass 查表走
+            # "弹窗确认" fallback (主人实测 10-17 10:46: 设 state=0/0/0/0
+            # 后 lock_screen 还是被弹窗确认后调通).
+            state_provider=lambda: core.state,
         )
         cw.reply_ready.connect(core._on_chat_reply_ready)
         cw.show()

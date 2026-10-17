@@ -171,7 +171,13 @@ class ChatWindow(QWidget):
                  session_store: Optional[object] = None,
                  skills_dir: Optional[str] = None,
                  auto_load_skills: Optional[list] = None,
-                 extra_docs_paths: Optional[list] = None):
+                 extra_docs_paths: Optional[list] = None,
+                 # v27: 桌宠状态拉取器 —— 每次 _kickoff_llm 创建新 LangChainAgent
+                 # 时调一次拿当前 PetState 注入, 否则新 agent._companion_state
+                 # 永远是 None, 主人 dev mode 滑块改 state 也没用 (查表路径 bypass,
+                 # 全部走"弹窗确认"fallback). 修 v27: 用 lambda 包 core.state
+                 # 这种"返回当前 state"的回调, 主程序传过来即可.
+                 state_provider: Optional[Callable[[], Any]] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
@@ -231,6 +237,11 @@ class ChatWindow(QWidget):
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
         self._extra_docs_paths: list = list(extra_docs_paths or [])
+        # v27: 桌宠状态拉取器 (主程序传 lambda: core.state). 每次
+        # _kickoff_llm 创建新 LangChainAgent 调一次拿当前 PetState 注入.
+        # 不存 state 本身是因为 state 是引用, 主人 dev mode 改完 0/0/0/0 后
+        # 再发消息, 我们希望新 agent 看到的是最新值, 不是 __init__ 时的快照.
+        self._state_provider: Optional[Callable[[], Any]] = state_provider
         # v9: 当前会话激活的 skill 名 (单独 /skills/<name> 切换, 整段对话期间
         # 拼到 system_prompt 末尾)。v12 起主线改 per-message (msg.skill),
         # 这字段保留作为兜底 + 老测试兼容。
@@ -2479,6 +2490,21 @@ class ChatWindow(QWidget):
                     r = self._confirm_dangerous_tool(tool_name, args_json)
                     return bool(r)
                 lc_agent.on_confirm_needed(_confirm_bridge)
+                # v27: 新 LangChainAgent 立刻注当前 PetState. 之前这条
+                # 没有, 主人 dev mode 滑块把 state 设 0/0/0/0 后, 新建的
+                # agent._companion_state 仍是 None, 工具调
+                # _get_companion_decision 返 None, middleware 走 fallback
+                # 弹窗确认 → 主人感受是"设了 0 还是没拒绝" (实测 10-17 10:46).
+                # 修法: 主程序传 self._state_provider, 每次 kickoff 拉一次
+                # 当前 state, 主人改 state 后新 agent 立即看到.
+                if self._state_provider is not None:
+                    try:
+                        _state_now = self._state_provider()
+                        if _state_now is not None:
+                            lc_agent.set_companion_state(_state_now)
+                    except Exception:  # noqa: BLE001
+                        log.debug("state_provider 拉取失败, agent 走无 state 路径",
+                                  exc_info=True)
                 self._worker = _AgentWorker(
                     lc_agent,
                     [{"role": m.role, "content": m.content} for m in msgs])

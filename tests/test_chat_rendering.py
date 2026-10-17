@@ -3498,3 +3498,96 @@ def test_v26_ast_guard_settings_trace_has_thread_combo():
         "出现过的 thread_id 填到 combobox. 实际: " + refresh_src[:200]
     )
     print("[OK] v26 AST 守卫: settings trace per-conversation 过滤存在")
+
+
+def test_v27_ast_guard_chat_window_has_state_provider_param():
+    """v27: 主人 2026-10-17 10:48 反馈 'state=0/0/0/0 后 lock_screen 还是
+    没拒绝'. 根因: chat_window._kickoff_llm 每次新建 LangChainAgent,
+    新 agent._companion_state 永远是 None, 工具调
+    _get_companion_decision 返 None, middleware bypass 查表走
+    '弹窗确认' fallback. 修法: ChatWindow.__init__ 必须有 state_provider
+    参数, _kickoff_llm 创建新 agent 后调 state_provider() 拉当前 state
+    注入. AST 守卫锁死这个 path 不能丢.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "chat_window" / "__init__.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    # 1. __init__ 必须有 state_provider 形参
+    found_init = None
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.FunctionDef):
+            continue
+        if node.name != "__init__":
+            continue
+        # 跳过非 ChatWindow 类的 __init__ (找 arg name 含 'llm_cfg' 的)
+        arg_names = [a.arg for a in node.args.args]
+        if "llm_cfg" in arg_names:
+            found_init = node
+            break
+    assert found_init is not None, "ChatWindow.__init__ 找不到"
+    init_args = [a.arg for a in found_init.args.args]
+    assert "state_provider" in init_args, (
+        "v27 regression: ChatWindow.__init__ 必须有 state_provider 形参. "
+        f"实际: {init_args}"
+    )
+    # 2. self._state_provider 必须在 __init__ 里被赋值
+    # AST dump 把 self._state_provider 拆成 Attribute(value=Name(id='self'),
+    # attr='_state_provider') — 直接 substring 匹配 'self._state_provider'
+    # 找不到点, 改用 '_state_provider' 字符段
+    init_src = ' '.join(_ast.dump(s) for s in found_init.body)
+    assert "_state_provider" in init_src, (
+        "v27 regression: ChatWindow.__init__ 必须存 self._state_provider. "
+        f"__init__ 体内: {init_src[:300]}"
+    )
+    # 3. _kickoff_llm 必须在创建 LangChainAgent 后调
+    # self._state_provider() 拉 state 注入
+    kickoff_fn = next(
+        (n for n in _ast.walk(tree)
+         if isinstance(n, _ast.FunctionDef) and n.name == "_kickoff_llm"),
+        None,
+    )
+    assert kickoff_fn is not None, "_kickoff_llm 找不到"
+    kickoff_src = ' '.join(_ast.dump(s) for s in kickoff_fn.body)
+    # _kickoff_llm 必须有 set_companion_state 调用 (v27 注入)
+    assert "set_companion_state" in kickoff_src, (
+        "v27 regression: _kickoff_llm 必须在创建 LangChainAgent 后调 "
+        "set_companion_state 注入当前 state. 否则新 agent 永远 state=None. "
+        f"实际: {kickoff_src[:300]}"
+    )
+    # 必须引用 _state_provider
+    assert "_state_provider" in kickoff_src, (
+        "v27 regression: _kickoff_llm 必须用 self._state_provider() 拉 state. "
+        f"实际: {kickoff_src[:300]}"
+    )
+    print("[OK] v27 AST 守卫: state_provider 在 __init__ + _kickoff_llm 注入")
+
+
+def test_v27_companion_state_None_in_middleware_means_no_state():
+    """v27 验证: 当 RiskyToolConfirm._companion_state=None 时, 调
+    _get_companion_decision 返 None (跟 v25 multimodal 路径一致), 而
+    state 设进去后, _get_companion_decision 返真实决策 (ALLOW/CONFIRM/
+    REJECT/REFUSE). 锁死这个差异, 主程序没注入 state 时 middleware 走
+    fallback, 注入后走查表.
+    """
+    from app.brain.hallucination_guard import RiskyToolConfirm
+    from app.engine.state import PetState
+    # 1. 无 state: 返 None
+    ctrl = RiskyToolConfirm()
+    assert ctrl._companion_state is None
+    assert ctrl._get_companion_decision("lock_screen") is None, (
+        "无 _companion_state 时 _get_companion_decision 必须返 None. "
+        "middleware 走 fallback 弹窗确认 (v27 待修)."
+    )
+    # 2. 注入 state=0/0/0/0 + IRREVERSIBLE: 返 REFUSE
+    ps = PetState()
+    ps.feeling = 0; ps.strength = 0; ps.strength_food = 0; ps.strength_drink = 0
+    ps.likability = 0; ps.health = 0; ps.exp = 0
+    ps.normalize()
+    ctrl.set_companion_state(ps)
+    assert ctrl._get_companion_decision("lock_screen") == "REFUSE", (
+        f"state=全 LOW + lock_screen (IRREVERSIBLE) 应 REFUSE. "
+        f"实际: {ctrl._get_companion_decision('lock_screen')}"
+    )
+    print("[OK] v27: RiskyToolConfirm _companion_state 注入前后决策差异")
