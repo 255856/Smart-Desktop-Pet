@@ -1,11 +1,4 @@
-"""RiskyToolConfirm 接入 companion_state (创新点 2 最后一步: 反馈层闭环接入 confirm 路径)
-
-v21-5:
-  - set_companion_state(pet_state) 注入/清除 PetState
-  - _get_companion_decision(tool_name) 跑 companion_policy.lookup_decision
-  - as_middleware 在拦截路径上优先查表, ALLOW→直通, REJECT/REFUSE→拦截,
-    CONFIRM 或无 state → 走原 callback 路径 (向后兼容)
-"""
+"""RiskyToolConfirm 接入 companion_state 单元测试。"""
 import asyncio
 from app.brain.hallucination_guard import RiskyToolConfirm, _RISKY_TOOLS
 from app.brain.companion_policy import Decision
@@ -115,7 +108,7 @@ def test_legacy_fallback_still_works_for_unknown_tool():
 def test_v215_decision_uses_state_after_apply_outcome():
     """owner 反馈循环: apply_outcome('rejected') 后 mood 跌落, 决策应从 ALLOW 变 CONFIRM。
 
-    验证反馈层 (v21-3) + 决策层 (v21-5) 闭环:
+    验证闭环:
       - 初始 mood HIGH + level HIGH + run_script → ALLOW
       - apply_outcome('rejected') 后 mood LOW
       - 同一 tool 现在查决策 → CONFIRM (心情 LOW + HIGH risk → paper #2)
@@ -150,7 +143,7 @@ def test_v215_decision_uses_state_after_apply_outcome():
 
 
 def test_v224_fire_companion_reject_outcome_no_state_silent():
-    """v22-4: 没注入 state 时, _fire_companion_reject_outcome 静默不抛。"""
+    """没注入 state 时, _fire_companion_reject_outcome 静默不抛。"""
     from app.brain.hallucination_guard import RiskyToolConfirm
     ctrl = RiskyToolConfirm()
     try:
@@ -161,13 +154,12 @@ def test_v224_fire_companion_reject_outcome_no_state_silent():
 
 
 def test_v224_companion_reject_drops_feeling():
-    """v22-4: companion REJECT/REFUSE 拦阻 → PetState.apply_outcome('rejected') → 心情骤降。
+    """companion REJECT/REFUSE 拦阻 → PetState.apply_outcome('rejected') → 心情骤降。
 
     验证中间件在拦截路径上调了 _fire_companion_reject_outcome,
-    这个 helper 调 state.apply_outcome('rejected', tool_name, risk_level).
+    这个 helper 调 state.apply_outcome('rejected', tool_name, risk_level)。
 
-    v23-3 数值改走 yaml (rejected=-10), 这里只断言"心情确实降 + favor 降",
-    具体数值在 test_state_outcome_yaml.py 测.
+    这里只断言"心情确实降 + favor 降", 具体数值在 test_state_outcome_yaml.py 测.
     """
     from app.brain.hallucination_guard import RiskyToolConfirm
     from app.engine.state import PetState
@@ -189,7 +181,7 @@ def test_v224_companion_reject_drops_feeling():
 
 
 def test_v224_companion_reject_state_missing_apply_silent():
-    """v22-4: 注入 state 但没 apply_outcome 方法时, 静默 (不抛, 不调假函数)."""
+    """注入 state 但没 apply_outcome 方法时, 静默 (不抛, 不调假函数)。"""
     from app.brain.hallucination_guard import RiskyToolConfirm
     ctrl = RiskyToolConfirm()
 

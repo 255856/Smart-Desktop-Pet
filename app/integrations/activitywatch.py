@@ -1,16 +1,12 @@
 """ActivityWatch 客户端封装（桌宠主进程内 HTTP 客户端）。
 
-跟 app/mcp/activitywatch_server.py 是姐妹模块:
-  - aw server 通过 stdio JSON-RPC 给 LLM 用 (有 tool schema)
-  - 这个文件被 ProactiveBrain 直接 import, 用于在主线程拉活动 context
-    (不用经过 MCP 协议 — 一次 HTTP GET 比 spawn 子进程 + JSON-RPC 简单)
+跟 app/mcp/activitywatch_server.py 是姐妹模块：
+  - aw server 通过 stdio JSON-RPC 给 LLM 用（有 tool schema）
+  - 这个文件被 ProactiveBrain 直接 import，用于在主线程拉活动 context
+    （一次 HTTP GET 比 spawn 子进程 + JSON-RPC 简单）
 
-为什么不像 mcp 那样起子进程:
-  ProactiveBrain._fire 在主线程 25-45 分钟触发一次, 直接走 HTTP 最简单。
-  LLM 想查活动数据仍然走 aw_* 工具 (经 MCP), 两条路并行不冲突。
-
-失败语义: 所有公开函数都返 None / 空字符串 / False, 不抛异常。
-ProactiveBrain 看到 None 就当「AW 没开 / 没数据」处理, 不会让主动发言挂掉。
+失败语义：所有公开函数都返 None / 空字符串 / False，不抛异常。
+ProactiveBrain 看到 None 就当「AW 没开 / 没数据」处理。
 """
 from __future__ import annotations
 
@@ -57,15 +53,16 @@ def is_available(server_url: Optional[str] = None) -> bool:
 
 
 def _find_bucket(buckets, prefix: str, hostname: str):
-    """aw 0.14+ bucket 命名是 `aw-watcher-<type>_<hostname>` (下划线).
-    早期版本用 -, 兼容两种。
+    """aw 0.14+ bucket 命名是 `aw-watcher-<type>_<hostname>`（下划线）。
+
+    早期版本用 -，兼容两种。
     """
     host = hostname.lower()
     for b in buckets:
         bid = b.get("id", "")
         if bid.startswith((f"{prefix}-{host}", f"{prefix}_{host}")):
             return bid
-    # fallback: 任意同 prefix bucket (单设备/老 hostname 时也能用)
+    # fallback: 任意同 prefix bucket（单设备/老 hostname 时也能用）
     for b in buckets:
         bid = b.get("id", "")
         if bid.startswith((prefix, prefix)):

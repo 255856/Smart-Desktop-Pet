@@ -5,8 +5,7 @@ from pathlib import Path
 
 from app.core.qt_compat import Qt, QMenu
 
-# 图标资源（QSS 的 image: url 对 SVG 支持不稳定，统一用 PNG）
-# ui_style.py 位于 app/ui/，项目根需再上一层
+# 图标资源（统一用 PNG，SVG 在 QSS 里支持不稳定）
 _ICON_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "icons"
 _ARROW_URL = (_ICON_DIR / "arrow_down.png").as_posix()
 _ARROW_UP_URL = (_ICON_DIR / "arrow_up.png").as_posix()
@@ -78,8 +77,7 @@ QToolButton#win_btn_close:hover {{ background: #ef5f7e; color: #ffffff; }}
 QToolButton#win_btn_close:pressed {{ background: #d64d6b; }}
 """
 
-#  QSpinBox/QDoubleSpinBox 上下箭头：之前只给了 width + 透明背景，没给图标，
-#  箭头位置是纯空白（看起来像坏了）。用与下拉箭头同源的 arrow_up/arrow_down。
+# QSpinBox/QDoubleSpinBox 上下箭头（用 PNG 图标）
 _SPINBOX_ARROWS_QSS = f"""
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
     image: url("{_ARROW_UP_URL}"); width: 10px; height: 10px;
@@ -95,8 +93,7 @@ QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
 QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{ opacity: 0.35; }}
 """
 
-#  QMessageBox：项目里 QMessageBox.warning 用在 file_dialog / pet_window 等处，
-#  此前完全没套皮肤，深紫界面里弹出一个 Windows 原生灰框非常突兀。
+# QMessageBox 皮肤（统一风格，避免弹出 Windows 原生灰框）
 MESSAGE_BOX_QSS = f"""
 QMessageBox {{
     background: {CARD};
@@ -131,8 +128,7 @@ QMessageBox QPushButton[default="true"]:hover {{
 }}
 """
 
-#  两个面板共用的收尾规则：提示气泡、裸 QLabel 透明、通用工具按钮、禁用态描边。
-#  这些控件在聊天页/设置页都在用，此前只有部分 objectName 变体有样式。
+# 两个面板共用的收尾规则：提示气泡、裸 QLabel 透明、通用工具按钮
 COMMON_QSS = f"""
 QLabel {{ background: transparent; }}
 
@@ -171,8 +167,7 @@ QWidget {{
 QMainWindow {{ background: transparent; }}
 QWidget#chat_root {{ background: transparent; }}
 
-/* 聊天气泡区 + 输入容器 - 2026-10-15 v2:统一为同一套视觉风格,
-   让输入框与显示框"搭得上"(用户实测:输入框与显示框不搭)。 */
+/* 聊天气泡区 + 输入容器 - 统一为同一套视觉风格 */
 QTextBrowser#chat_view, QFrame#input_container {{
     background: #fbfbfd;
     border: 1px solid #e7e3f5;
@@ -182,9 +177,7 @@ QTextBrowser#chat_view, QFrame#input_container {{
 QTextBrowser#chat_view {{
     padding: 10px 8px;
 }}
-/* 2026-10-15 v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」，
-   不再让 focus 改 input_container / chat_view 边框颜色, 永远中性灰。
-   之前的 :focus / :focus-within 规则删除。 */
+/* focus 不改边框颜色，永远中性灰 */
 QTextBrowser#chat_view:focus {{ border-color: #e7e3f5; }}
 
 /* 输入框 */
@@ -268,15 +261,13 @@ QScrollBar:horizontal {{ height: 0; }}
 
 # 聊天正文气泡（QTextBrowser 富文本子集）
 #
-# 重要：Qt 富文本（QTextDocument）只支持有限 CSS —— 不支持 display:inline-block、
-# max-width、box-shadow，也不支持 span 上的 border-radius/width，td 上 border-radius 也不生效。
+# Qt 富文本（QTextDocument）只支持有限 CSS — 不支持 display:inline-block、
+# max-width、box-shadow、span 上的 border-radius/width；td 上 border-radius 也不生效。
 # 气泡布局完全依赖 <table>：外层两列（头像列 44px + 内容列），内容列再嵌一个
 # shrink-to-fit 的 table 作为整块气泡背景（td 背景色）。头像由 QPainter 预先画成
-# 圆形 PNG，转成自包含 data URI 以 <img> 注入（document.addResource 在 chat_view.clear()
-# 后会失效），保证圆形与稳定占位。
+# 圆形 PNG，转成自包含 data URI 以 <img> 注入。
 #
-# 类名必须保留（tests/test_chat_rendering.py 有断言）：
-#   avatar-col user / avatar-col bot / bubble user / bubble bot / meta right / meta left
+# 类名必须保留（tests/test_chat_rendering.py 有断言）
 CHAT_BUBBLE_CSS = (
     # 基础排版
     "body{margin:0;padding:4px 4px;background:#fbfbfd;}"
@@ -307,16 +298,9 @@ CHAT_BUBBLE_CSS = (
 )
 
 
-#  MiniMax Code 风格的聊天窗样式（线性流 + 完整 markdown 渲染）
-#  - 不再用 table + 气泡；每条消息是 div.msg 块，msg-label + msg-body 垂直堆叠
-#  - msg-body 内支持标准 markdown 元素（h1-h4 / ul / ol / pre / blockquote / hr / table）
-#  - 工具/思考/命令/文件编辑块用专用 class，整段使用浅灰/深色背景
-#
-# 类名约定（tests/test_chat_rendering.py 会断言）:
-#   msg / msg-user / msg-assistant
-#   msg-label / msg-body
-#   tools / thinking / execs / file-edits
-#   system-msg  (居中浅灰条)
+# MiniMax Code 风格的聊天窗样式（线性流 + 完整 markdown 渲染）
+# 每条消息是 div.msg 块，msg-label + msg-body 垂直堆叠。
+# 类名必须保留（tests/test_chat_rendering.py 有断言）
 CHAT_MD_CSS = (
     # 基础排版: 跟 MiniMax Code 类似的中性灰底
     "body{margin:0;padding:8px 14px;background:#ffffff;"
@@ -329,10 +313,7 @@ CHAT_MD_CSS = (
     # 角色微调: user 有非常浅的灰底背景, assistant 纯白 (MiniMax Code 同款)
     ".msg-user{background:#fafbfc;}"
     ".msg-assistant{background:#ffffff;}"
-    # v24: 主人再次反馈 — 桌宠名字 (assistant label) 在左、主人名字
-    # (user label) 在右。这是常见 IM 风格 (微信 / iMessage) — 主人身份
-    # 在自己这一侧, AI 名字固定在左。恢复 2026-10-15 v2 的右对齐 user label,
-    # 但确保 assistant label 用 margin-right:auto (稳定靠左)。
+    # user label 右对齐，assistant label 左对齐（IM 风格）
     ".msg-user .msg-label{text-align:right;color:#475569;}"
     ".msg-user .msg-body{text-align:right;}"
     ".msg-assistant .msg-label{text-align:left;}"
@@ -343,14 +324,10 @@ CHAT_MD_CSS = (
     ".msg-user .msg-label{color:#475569;}"
     ".msg-label .ts{font-weight:400;color:#94a3b8;margin-left:8px;"
     "font-size:8.5pt;letter-spacing:0;}"
-    # 2026-10-15 v2: user 块右对齐 — 用 margin-left:auto 把内容挤到右边,
-    # body 里的多行文本走 text-align:right, 这样图片/链接/代码块等会自然
-    # 收在右半边。v24 主人确认: user label 也跟 body 一起靠右 (桌宠在左)。
+    # user 块右对齐（margin-left:auto 挤到右边，body 文本走 text-align:right）
     ".msg-user .msg-label, .msg-user .msg-body{display:block;"
     "margin-left:auto;width:fit-content;max-width:75%;}"
-    # v24: assistant 块左对齐 — label 也要稳在左, 不被 body 拉走。
-    # msg-label margin-right:auto 让 name 固定靠左, body 同样靠左,
-    # 跟桌宠消息形成完整的「左侧身份块」(name + content 同列同侧)。
+    # assistant 块左对齐（label + body 同列同侧，左侧身份块）
     ".msg-assistant .msg-label{display:block;margin-right:auto;"
     "width:fit-content;max-width:90%;text-align:left;}"
     ".msg-assistant .msg-body{display:block;margin-right:auto;"
@@ -474,8 +451,7 @@ QGroupBox {{
     padding: 18px 14px 14px 14px;
     font-weight: 600;
 }}
-/* 标题给实底色，才能盖住边框线形成「开口」的分组感；
-   透明背景时 1px 边框会从字上横穿过去，看着像被切掉半个字 */
+/* 标题给实底色，才能盖住边框线形成「开口」的分组感 */
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
@@ -598,7 +574,7 @@ QCheckBox::indicator:checked {{
 
 QLabel {{ background: transparent; }}
 
-/* 下拉框 / 数字框：统一圆角输入框样式，且重置内嵌 QLineEdit（避免双重边框） */
+/* 下拉框 / 数字框：统一圆角输入框样式，重置内嵌 QLineEdit 避免双重边框 */
 QComboBox {{
     background: #ffffff;
     border: 1.5px solid #e0e0ee;
@@ -626,8 +602,7 @@ QComboBox QAbstractItemView {{
     selection-background-color: {ACCENT_BG};
     selection-color: {ACCENT_DK};
 }}
-/* 文本输入框：设置页有 8 个 QLineEdit，此前完全没有规则 —— 在紫白卡片里
-   夹着 Windows 原生方框，是「界面没做完」观感的主要来源 */
+/* 文本输入框：统一圆角，避免紫白卡片里夹 Windows 原生方框 */
 QLineEdit {{
     background: #ffffff;
     border: 1.5px solid #e0e0ee;
@@ -668,7 +643,7 @@ QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ height: 0; }}
 
-/* 禁用态：Tab / 分组 / 复选框 / 进度条 —— 之前只有 QPushButton 有 :disabled */
+/* 禁用态：Tab / 分组 / 复选框 / 进度条 */
 QTabBar::tab:disabled {{ color: #cfcedd; }}
 QTabBar::tab:disabled:selected {{ background: #e9e8f2; color: #b3b1c6; }}
 QGroupBox:disabled {{ color: #b6b4c8; background: #f7f7fb; }}
@@ -692,6 +667,7 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 
 # 状态条配色（体力/饱食/口渴/心情/健康/好感）
 # 状态条渐变配色（左浅右深）：体力/饱食/口渴/心情/健康/好感
+# 状态条配色（体力/饱食/口渴/心情/健康/好感）
 STAT_BAR_COLORS = {
     "strength":   ("#fbbf24", "#f59e0b"),
     "food":       ("#34d399", "#10b981"),
@@ -741,11 +717,7 @@ QMenu::right-arrow {{
 
 
 def warn(parent, title: str, text: str) -> None:
-    """带皮肤的警告框。
-
-    项目里 QMessageBox.warning 直接调用会弹出 Windows 原生灰框，在紫白
-    界面里非常突兀。统一走这里，保证所有警告框外观一致。
-    """
+    """带皮肤的警告框。"""
     from PyQt5.QtWidgets import QMessageBox
 
     box = QMessageBox(QMessageBox.Icon.Warning, title, text, QMessageBox.StandardButton.Ok, parent)
@@ -756,8 +728,7 @@ def warn(parent, title: str, text: str) -> None:
 def style_menu(menu: QMenu) -> None:
     """给菜单（及其子菜单）套用圆角卡片皮肤。"""
     menu.setStyleSheet(MENU_QSS)
-    # 圆角需要透明背景，否则 QSS 圆角外露出系统底色；
-    # 同时去掉 Windows 系统矩形阴影（阴影层是矩形，会在圆角四个角露出黑边）。
+    # 圆角需要透明背景；去掉 Windows 系统矩形阴影避免圆角四角露出黑边
     menu.setWindowFlags(
         menu.windowFlags()
         | Qt.WindowType.FramelessWindowHint

@@ -119,10 +119,7 @@ def test_unknown_tool_defaults_to_medium_not_safe():
 
 
 def test_is_risky_threshold_consistent_with_old_set():
-    """is_risky(HIGH) 应至少覆盖原 hallucination_guard._RISKY_TOOLS 9 条。
-
-    v22-2 会改 _RISKY_TOOLS 从 _risk 派生, 必须保证不漏。
-    """
+    """is_risky(HIGH) 应至少覆盖原 hallucination_guard._RISKY_TOOLS 9 条。"""
     must_be_risky = {
         "lock_screen", "kill_process", "set_wifi", "set_bluetooth",
         "send_notification", "run_script", "set_volume", "set_brightness",
@@ -149,7 +146,7 @@ def test_is_risky_low_threshold_picks_medium_plus():
 
 
 def test_v212_risky_tools_derived_from_risk_table():
-    """v21-2: hallucination_guard._RISKY_TOOLS 改成从 _risk 派生, 不再硬编码 9 条。
+    """hallucination_guard._RISKY_TOOLS 改成从 _risk 派生。
 
     验证:
       - _RISKY_TOOLS 仍是 frozenset
@@ -193,7 +190,7 @@ def test_v212_risky_tools_derived_from_risk_table():
 
 
 def test_v212_risky_prompt_fragment_lists_high_and_irreversible():
-    """v21-2: hallucination_guard 注入 prompt 的 fragment 应自动列出 HIGH + IRREVERSIBLE。
+    """hallucination_guard 注入 prompt 的 fragment 应自动列出 HIGH + IRREVERSIBLE。
 
     验证:
       - IRREVERSIBLE 档工具都列 (kill_process, lock_screen)
@@ -227,7 +224,7 @@ def test_v212_risky_prompt_fragment_lists_high_and_irreversible():
 
 
 def test_v212_anti_hallucination_suffix_uses_fragment():
-    """v21-2: _ANTI_HALLUCINATION_SUFFIX 末尾应包含 _RISKY_PROMPT_FRAGMENT。
+    """_ANTI_HALLUCINATION_SUFFIX 末尾应包含 _RISKY_PROMPT_FRAGMENT。
 
     注: 这里**不**直接比 suffix 全文, 只比关键内容 (因为 suffix 头部"防幻觉基线"
     是手写的字符串, 不会因这次改动变, 不必 assert)。

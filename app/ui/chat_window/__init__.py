@@ -1,15 +1,4 @@
-"""聊天窗口：把桌宠和大模型对话接到一起。
-
-本模块是包 `chat_window/`，主类 ChatWindow 在此。其余辅助代码拆分到子模块：
-    chat_window.message            - 聊天消息 dataclass (Message)
-    chat_window.utils              - 常量、HTML 转义、工具元数据
-    chat_window.worker             - _AgentWorker / _StreamWorker (QThread)
-    chat_window.command_completer  - _CommandCompleter（/命令弹窗）
-    chat_window.chrome             - _TitleBarDrag / _InputFocusWatcher
-
-向后兼容：`from app.ui.chat_window import ChatWindow, Message, _AgentWorker, ...`
-全部继续工作（re-export）。
-"""
+"""聊天窗口：消息渲染、工具卡片、命令补全、Agent/Stream Worker、拖放上传。"""
 from __future__ import annotations
 
 import logging
@@ -19,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-# 2026-10-14 美化：用户/桌宠头像持久化目录(.gitignore 的 data/ 兜底,不会入库)
+# 头像持久化目录(.gitignore 的 data/ 兜底,不会入库)
 AVATAR_DIR = Path("data") / "avatars"
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -27,8 +16,7 @@ AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 def _safe_qapp():
     """返回当前 QApplication 实例（无 GUI 环境返回 None）。
 
-    用于「阻塞等 worker 完成 + 处理 Qt 事件」的场景：
-    不阻塞会导致 Qt 信号无法投递，UI 死锁；processEvents 又必须有 QApplication。
+    用于「阻塞等 worker 完成 + 处理 Qt 事件」场景：processEvents 必须有 QApplication。
     """
     try:
         from PyQt5.QtWidgets import QApplication
@@ -42,11 +30,7 @@ def _convert_loaded_tools(stored_tools):
     Message dataclass 期望的 list[tuple[str, str, str]] 形态。
 
     SQLite 里存的是 tools_json = JSON，每个工具是 [name, args, result] 三元 list。
-    _on_done 里写入是 tools_list = [list(t) for t in self._current_bot_msg.tools]，
-    反序列化后应当还原成 tuple 给 Message(... tools=...)，否则 _msg_html 渲染时
-    isintance 检查失败，"已执行操作" 工具卡片丢失（Bug 2：重进聊天窗没工具信息）。
-
-    兼容旧版 2 元组 (name, summary)；丢掉一切损坏项（避免单条坏数据搞挂整次加载）。
+    兼容旧版 2 元组 (name, summary)；损坏项跳过。
     """
     out = []
     for t in (stored_tools or []):
@@ -91,19 +75,7 @@ log = logging.getLogger(__name__)
 
 
 class _NoCmdNavQTextBrowser(QTextBrowser):
-    """chat_view 专用 QTextBrowser —— 覆盖 doSetSource 让内部 cmd: 链接不导航。
-
-    2026-10-15 v4: PyQt5 5.x 的 setOpenLinks(False) 在 openLinks=False 时
-    不只是禁止默认导航, 还会**禁用 click** (mousePressEvent 不再走链接路径,
-    anchorClicked 信号也不发, 用户实测「点击没反应」)。
-
-    正确做法是 subclass QTextBrowser 覆盖 doSetSource —— 默认实现尝试把
-    url 解析成本地文件路径, 找不到时用空 QTextDocument 替换 view 造成白屏。
-    我们的 override 让 cmd: scheme 走 no-op (不让 QTextBrowser 替换 view),
-    http/https/mailto 走父类默认 (setOpenExternalLinks(False) 之后不会
-    触发 OS 弹窗, anchorClicked 信号在 click 时仍正常 emit, 由
-    _on_chat_anchor_clicked 路由到对应 handler)。
-    """
+    """chat_view 专用 QTextBrowser —— 覆盖 doSetSource 让内部 cmd: 链接不导航。"""
     def doSetSource(self, name):
         try:
             url = name.toUrl() if hasattr(name, "toUrl") else name
@@ -172,21 +144,13 @@ class ChatWindow(QWidget):
                  skills_dir: Optional[str] = None,
                  auto_load_skills: Optional[list] = None,
                  extra_docs_paths: Optional[list] = None,
-                 # v27: 桌宠状态拉取器 —— 每次 _kickoff_llm 创建新 LangChainAgent
-                 # 时调一次拿当前 PetState 注入, 否则新 agent._companion_state
-                 # 永远是 None, 主人 dev mode 滑块改 state 也没用 (查表路径 bypass,
-                 # 全部走"弹窗确认"fallback). 修 v27: 用 lambda 包 core.state
-                 # 这种"返回当前 state"的回调, 主程序传过来即可.
+                 # 桌宠状态拉取器 —— 每次 _kickoff_llm 创建新 LangChainAgent 时
+                 # 调一次拿当前 PetState 注入。
                  state_provider: Optional[Callable[[], Any]] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
-        # 把 llm.project_dirs(用户配置)+ cwd(自动注入) 加进沙箱白名单。
-        # grep_files / glob_files / search_files / edit_file / multi_edit 等工具都受这条
-        # 限制影响。
-        # 关键:cwd 是项目根(如 E:\study\desktop-pet),即使用户没在 config.yaml 里
-        # 写 project_dirs,自动把 cwd 加进白名单,这样 chat 里说「在 E:\study\xxx
-        # 项目下搜 YY」也能跑通,而不是被一句「不在沙箱内」挡掉。
+        # 把 cwd 加进沙箱白名单,允许 chat 里说「在项目下搜 YY」能跑通
         try:
             from app.engine.tools import _filesearch
             extra = list(getattr(self.llm_cfg, "project_dirs", []) or [])
@@ -204,53 +168,35 @@ class ChatWindow(QWidget):
         self._chat_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
-        # 在 AI 气泡上方展示「已执行操作 · N」卡片（开关见 ChatConfig.show_tool_steps），
-        # 主人如果嫌啰嗦可以在 config.yaml / 设置面板里关掉。
+        # 在 AI 气泡上方展示「已执行操作 · N」卡片,开关见 ChatConfig.show_tool_steps。
         self._show_tool_steps: bool = (
             chat_cfg.show_tool_steps if chat_cfg is not None else True
         )
         # 工具步骤默认折叠 —— Qt QTextBrowser 不支持 <details>,用 anchorClicked
-        # 切回 setHtml 模拟。新一轮 chat 起始 reset 成 True。
-        # 2026-10-15 v6: 改成按消息分别记折叠状态（dict，键 = id(msg)）——
-        # 之前 self._tools_collapsed 是全局 bool, 点 A 消息的 toggle 会影响所有消息
-        # 的工具卡片 (用户实测「点击一个后所有的都会展开」)。
+        # 切回 setHtml 模拟。新一轮 chat 起始 reset 成 True。按消息分别记折叠状态。
         self._tools_collapsed_by_msg: dict = {}
         self._tools_collapsed_default: bool = True  # 新消息默认折叠
-        # v20: chat 图片缩略图 → 点击放大。img-open:KEY 锚点用 dict 查真 URL,
-        # SHA1[:10] 稳定键, 重渲染不会失效, 也避免 data: base64 被 QUrl 截断。
+        # chat 图片缩略图 → 点击放大,img-open:KEY 锚点用 dict 查真 URL
         self._img_open_map: dict = {}
-        # 2026-10-14 美化：用户改头像后,要把 chat 段写回 config.yaml
+        # 用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
-        # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频，让聊天窗回复与声音同步）
+        # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频）
         self.tts = tts
         # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
         self.memory_store = memory_store
         self._memory_dlg: Optional[MemoryDialog] = None
-        # 接线(a):Phase 2/3 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
-        # cwd:项目根(用作 AGENTS.md 向上查找的起点 + 项目级指令上下文)
-        # session_id/session_store:对齐 Claude Code/ZCode 的会话列表 / 续接
-        # skills_dir/auto_load_skills:加载 skills/*.md 行为说明
-        # extra_docs_paths:主程序注入的额外 AGENTS.md / CLAUDE.md 路径
+        # 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
         self._cwd = cwd
         self._session_id = session_id
         self._session_store = session_store
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
         self._extra_docs_paths: list = list(extra_docs_paths or [])
-        # v27: 桌宠状态拉取器 (主程序传 lambda: core.state). 每次
-        # _kickoff_llm 创建新 LangChainAgent 调一次拿当前 PetState 注入.
-        # 不存 state 本身是因为 state 是引用, 主人 dev mode 改完 0/0/0/0 后
-        # 再发消息, 我们希望新 agent 看到的是最新值, 不是 __init__ 时的快照.
+        # 桌宠状态拉取器:主程序传 lambda 包 core.state,每次创建新 agent 取最新
         self._state_provider: Optional[Callable[[], Any]] = state_provider
-        # v9: 当前会话激活的 skill 名 (单独 /skills/<name> 切换, 整段对话期间
-        # 拼到 system_prompt 末尾)。v12 起主线改 per-message (msg.skill),
-        # 这字段保留作为兜底 + 老测试兼容。
+        # 当前会话激活的 skill 名,整段对话期间拼到 system_prompt 末尾
         self._active_skill: Optional[str] = None
-        # v15: 从 cfg_path 读整个 yaml, 注入到 _multimodal.setup_config(整个 cfg)。
-        # 简化设计: multimodal 段可选, base_url / api_key 默认从 llm 段共享
-        # (主人 plan 是统一 key, 不用再配一份)。v12-v14 旧的「只传 multimodal 段」
-        # 还在 _multimodal._cfg 里 fallback 处理, 向后兼容。
-        # cfg 读失败 (yaml 没装 / 路径不对) 视作空 dict。
+        # 从 cfg_path 读整个 yaml, 注入到 _multimodal.setup_config。
         try:
             import yaml as _yaml
             with open(cfg_path, encoding="utf-8") as _f:
@@ -281,9 +227,7 @@ class ChatWindow(QWidget):
         self._trace_run_id: Optional[str] = None
         self.history: list[Message] = []
         self._MAX_HISTORY = 50  # 最多保留 50 条对话（超出则丢弃最早的）
-        # 送给 LLM 的上下文字符预算。只按条数裁剪会让长对话越滚越贵：
-        # 单条输入上限 2000 字符，50 条最坏 10 万字符，每轮全量重发。
-        # 12000 字符 ≈ 4~6K token，够覆盖最近十来个来回，又不至于拖垮延迟。
+        # 送给 LLM 的上下文字符预算,覆盖最近十来个来回
         self._CTX_CHAR_BUDGET = 12000
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
@@ -305,7 +249,25 @@ class ChatWindow(QWidget):
             log.warning("ASR 不可用（未安装 sounddevice / faster-whisper，或配置关闭），语音输入按钮将隐藏")
 
         self.setWindowTitle(f"和 {char_cfg.name} 聊天")
-        # 设置窗口图标
+        # 工具注册表：非 None 时走 Agent 循环（能调工具），否则纯聊天
+        self.registry = registry
+        # 每次发消息前调用，返回追加到 system prompt 的动态上下文
+        # （当前时间 / 桌宠状态 / 长期记忆）
+        self.context_provider = context_provider
+        # Agent Trace recorder（None = 不记录）
+        self.trace = trace_recorder
+        # Agent 后端选择："lightweight"（手写 ReAct） 或 "standard"（LangChain 1.0+）
+        self.backend = backend
+        self.langchain_cfg = langchain_cfg or LangChainAgentConfig()
+        self._trace_run_id: Optional[str] = None
+        self.history: list[Message] = []
+        self._MAX_HISTORY = 50  # 最多保留 50 条对话（超出则丢弃最早的）
+        # 送给 LLM 的上下文字符预算,覆盖最近十来个来回
+        self._CTX_CHAR_BUDGET = 12000
+        self._worker: Optional[_StreamWorker] = None
+        self._generating = False
+        self._mic_busy = False
+        self.chat_store = ChatStore()  # 聊天历史持久化
         _ico = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
             from app.core.qt_compat import QIcon
@@ -316,14 +278,10 @@ class ChatWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setObjectName("chat_root")
         self.setStyleSheet(ui_style.CHAT_QSS)
-        # 2026-10-15 v8: 主人实测要求「拖动图片直接渲染」—— 整个窗口接收 drag&drop
-        # 进入时拦截, 把图片保存到 assets/uploads 后渲染进 chat_view。
+        # 整个窗口接收 drag&drop,图片保存到 assets/uploads 后渲染进 chat_view
         self.setAcceptDrops(True)
 
-        # 2026-10-15:修复「Bug 3 窗口重叠 / 错位显示」——
-        # 默认让 chat 出现在「桌宠精灵的右侧」(主人大概率会在那里点),如果没有
-        # 桌宠位置就居中。同时用 QSettings 记忆上次关闭时的位置,下次打开就
-        # 恢复到那里(不会每次跳到屏幕正中)。超出当前屏幕也裁回。
+        # 默认让 chat 出现在桌宠精灵的右侧,用 QSettings 记忆上次位置,下次恢复
         self._restore_or_position_window(parent)
 
         # 移动事件 → 实时记到 QSettings,下次打开恢复
@@ -334,9 +292,7 @@ class ChatWindow(QWidget):
         # 富文本圆形头像（QTextBrowser 对 document 资源在 clear() 后会失效，
         # 改用自包含的 data URI：<img src="data:image/png;base64,...">）
         self._avatar_data_bot: str = ""
-        # 2026-10-15 v2: 用户头像已移除(用户实测指定"把更改头像中的我的头像功能去除,
-        # 只保留桌宠头像"), 不再需要 _avatar_data_user / _user_avatar_path。
-        # 桌宠头像保留 (chat_cfg.bot_avatar_path)。
+        # 桌宠头像保留 (chat_cfg.bot_avatar_path)
         self._bot_avatar_path: str = (
             chat_cfg.bot_avatar_path if chat_cfg is not None else ""
         ) or ""
@@ -356,9 +312,7 @@ class ChatWindow(QWidget):
         self._committed_text = ""
         # 句子 prepare worker（每句一个，完成后 emit sentence_ready）
         self._sentence_workers = []   # QThread 列表，保留引用防 GC
-        # 2026-10-15:句子朗读串行化 — 每句分配 _seq 序号,准备完成不直接 speak,
-        # 而是入队到 _pending_speak;_drain_speak_queue 按编号连续性 speak,
-        # 保证朗读顺序跟句子到达顺序一致(避免并发 prepare 颠倒)。
+        # 句子朗读串行化：每句分配 _seq 序号,入队 _pending_speak 后按序 speak
         self._tts_seq_next = 0
         self._tts_seq_drain = 0
         self._pending_speak: dict[int, str] = {}
@@ -385,13 +339,7 @@ class ChatWindow(QWidget):
         return None
 
     def _make_avatar_pixmap(self, role: str, size: int = 40) -> QPixmap:
-        """生成圆形头像 QPixmap（外圈 2px 白边）。
-
-        2026-10-15 v2:用户头像已移除,_make_avatar_pixmap('user', ...) 现在
-        直接返回空 QPixmap(不再生成「我」字蓝渐变)。chat 内部不再 render
-        用户头像,所以这个方法对 user 角色来说没用了, 但保留入口以防
-        外部代码意外调用, 给出空 pixmap 比生成假图更安全。
-        """
+        """生成圆形头像 QPixmap（外圈 2px 白边）。"""
         if role != "bot":
             # user 角色已禁用,返回空 pixmap
             return QPixmap()
@@ -463,10 +411,7 @@ class ChatWindow(QWidget):
         return pm
 
     def _load_custom_avatar_pixmap(self, role: str) -> Optional[QPixmap]:
-        """读用户自定义头像(返回 None = 没设/读不到,继续走默认)。
-
-        2026-10-15 v2: 只支持 bot (桌宠) 角色;user 角色已移除。
-        """
+        """读用户自定义头像(返回 None = 没设/读不到,继续走默认)。"""
         if role != "bot":
             return None
         path = self._bot_avatar_path
@@ -520,10 +465,7 @@ class ChatWindow(QWidget):
         return "data:image/png;base64," + base64.b64encode(bytes(ba)).decode("ascii")
 
     def _register_avatar_resources(self) -> None:
-        """生成并缓存桌宠圆形头像的 data URI（40px）。
-
-        2026-10-15 v2: 只生成 bot 头像;user 头像已移除。
-        """
+        """生成并缓存桌宠圆形头像的 data URI（40px）。"""
         self._avatar_data_bot = self._pixmap_to_data_uri(self._make_avatar_pixmap("bot", 40))
 
     def set_avatar(self, path: Path) -> None:
@@ -535,12 +477,9 @@ class ChatWindow(QWidget):
         # 富文本头像缓存（只影响之后的新消息）
         self._register_avatar_resources()
 
-    # 2026-10-14 美化：用户和桌宠头像自定义入口
+    # 头像自定义入口
     def pick_bot_avatar(self, parent=None) -> bool:
-        """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。
-
-        2026-10-15 v2: 用户头像已移除,只保留桌宠头像。
-        """
+        """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。"""
         from PyQt5.QtWidgets import QFileDialog
         src, _ = QFileDialog.getOpenFileName(
             parent or self,
@@ -554,8 +493,6 @@ class ChatWindow(QWidget):
 
     def _set_custom_avatar(self, role: str, src_path: str) -> bool:
         """复制 src_path 到 data/avatars/<role>.png,更新 self._<role>_avatar_path,刷新 UI。
-
-        2026-10-15 v2: 只支持 bot 角色;user 角色已移除。
 
         选空文件 / 复制失败 / 加载 QPixmap 失败 → 返回 False,不污染当前状态。
         """
@@ -582,7 +519,7 @@ class ChatWindow(QWidget):
             self.avatar_label.setFixedSize(44, 44)
         # 富文本头像缓存(影响之后的新消息)
         self._register_avatar_resources()
-        # 2026-10-14 持久化：把 chat 段写回 config.yaml,下次启动自动恢复
+        # 把 chat 段写回 config.yaml,下次启动自动恢复
         self._persist_chat_overrides()
         return True
 
@@ -686,7 +623,7 @@ class ChatWindow(QWidget):
         self.btn_memory.clicked.connect(self._open_memory)
         hl.addWidget(self.btn_memory)
 
-        # v24: 设置按钮 —— 跳到 settings_window(头像/系统提示词/音调/快捷指令等)
+        # 设置按钮 —— 跳到 settings_window
         self.btn_settings = QPushButton("设置")
         self.btn_settings.setObjectName("ghost_btn")
         self.btn_settings.setToolTip("设置（头像 / 提示词 / TTS / 多模态等）")
@@ -700,8 +637,7 @@ class ChatWindow(QWidget):
         self.btn_min.clicked.connect(self.showMinimized)
         hl.addWidget(self.btn_min)
 
-        # 2026-10-15 v2: 加最大化/还原按钮 —— 跟常见窗口右上角控件一致
-        # (用户实测"右上角要有全屏和窗口功能")
+        # 最大化/还原按钮 —— 跟常见窗口右上角控件一致
         self.btn_max = QToolButton()
         self.btn_max.setObjectName("win_btn")
         self.btn_max.setText("▢")
@@ -709,8 +645,7 @@ class ChatWindow(QWidget):
         self.btn_max.clicked.connect(self._toggle_maximized)
         hl.addWidget(self.btn_max)
 
-        # 2026-10-15 v3: 用户实测 "只需要最小化最大化和关闭, 不需要多余的全屏"。
-        # 全屏按钮 + F11 快捷键已移除。
+        # 关闭按钮
         self.btn_close = QToolButton()
         self.btn_close.setObjectName("win_btn_close")
         self.btn_close.setText("X")
@@ -718,8 +653,7 @@ class ChatWindow(QWidget):
         self.btn_close.clicked.connect(self.close)
         hl.addWidget(self.btn_close)
 
-        # 2026-10-15 美化：标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区
-        # (ElidedLabel) 省略，而不是把按钮文字裁掉（曾出现 Demo 被压成 em）。
+        # 标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区省略,而不是把按钮文字裁掉
         for _tb in (self.btn_clear, self.btn_memory,
                 ):
             _tb.setMinimumWidth(_tb.sizeHint().width())
@@ -735,28 +669,17 @@ class ChatWindow(QWidget):
 
         self.chat_view = _NoCmdNavQTextBrowser()
         self.chat_view.setObjectName("chat_view")
-        # 2026-10-15 修复: 不要 setOpenExternalLinks(True) —— 它让 Qt 试图用
-        # OS shell 打开 scheme,Windows 找不到 cmd: handler 会弹「获取打开此
-        # cmd 链接的应用」系统对话框(用户实测)。内部命令用 anchorClicked
-        # signal 拦截,外部链接用 openExternalLinks event filter 自己处理。
+        # 内部命令用 anchorClicked 拦截,外部链接交给 openExternalLinks event filter
         self.chat_view.setOpenExternalLinks(False)
-        # 2026-10-15 v4: 不要 setOpenLinks(False) —— PyQt5 5.x 在 openLinks=False
-        # 时会**禁用 click** (用户实测「点击没反应」)。改用 _NoCmdNavQTextBrowser
-        # 覆盖 doSetSource: cmd: scheme 走 no-op, 不替换 view; http/https
-        # 走 setOpenExternalLinks(False) 那一路。
-        # click 时 anchorClicked 信号照常 emit, _on_chat_anchor_clicked 路由
-        # cmd:toggle_tools / http/https/mailto。
+        # doSetSource 改由 _NoCmdNavQTextBrowser 覆盖, cmd: 不替换 view, 外部链接不动
         self.chat_view.anchorClicked.connect(self._on_chat_anchor_clicked)
         chat_font = QFont()
         chat_font.setFamily("Microsoft YaHei, PingFang SC, Segoe UI, sans-serif")
         chat_font.setPointSize(10)
         self.chat_view.setFont(chat_font)
-        # 2026-10-15: 换成 MiniMax Code 风格的样式表 (CHAT_MD_CSS,线性流 + 完整 markdown)
-        # 旧 CHAT_BUBBLE_CSS 保留在 ui_style.py 里作历史兼容,以防有外部模块直接 import。
+        # 线性流 markdown 样式表;旧 CHAT_BUBBLE_CSS 保留作历史兼容
         self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_MD_CSS)
-        # v24: 加右侧工具详情面板 (默认收起)。点击 chat_view 内 assistant 消息的
-        # 工具调用 / 思考过程卡片时, 把内容塞进右侧 panel 显示, 不挡住 chat 主区。
-        # QSplitter 支持用户拖宽 / 关闭, 默认比例 100:0 (藏起来)。
+        # 加右侧工具详情面板(默认收起), QSplitter 支持用户拖宽 / 关闭
         self._tools_panel = _NoCmdNavQTextBrowser()
         self._tools_panel.setObjectName("tools_panel")
         self._tools_panel.setOpenExternalLinks(False)
@@ -776,13 +699,7 @@ class ChatWindow(QWidget):
         il.setContentsMargins(12, 8, 12, 8)
         il.setSpacing(4)
 
-        # 2026-10-15 v10: 主人在聊天开头 / 按发送之前, 拖入 / 上传的图片先
-        # 堆到 "输入框上方" 的缩略图条 (iMessage / 微信 / QQ 同款姿势) ——
-        # 不再 v8/v9 那样"拖入立刻渲染进 chat", 因为主人实测:
-        # "拖进去应该显示在输入框上方, 缩小版, 而不是直接进入对话框"。
-        # pending_strip 是一个 QScrollArea (横向), 内部用 QHBoxLayout 装
-        # 缩略图 + 文件名 + 关闭按钮。主人按发送时, 这些 attachment 跟
-        # 当前 input_edit 文本一起作为 user message 渲染进 chat + 持久化。
+        # 拖入 / 上传的图片先堆到 "输入框上方" 的缩略图条;按发送时再作为 user message 渲染
         self._pending_attachments: list[Path] = []   # 待发送文件 (复制到 uploads 后)
         self._pending_thumb_widgets: list[QFrame] = []  # 缩略图条上每个 QLabel 容器
         self.pending_strip = QScrollArea()
@@ -809,9 +726,7 @@ class ChatWindow(QWidget):
         self.input_edit.setMaximumHeight(110)
         # 自定义按键事件：Enter 发送，Shift+Enter 换行
         self.input_edit.keyPressEvent = self._input_key_press
-        # / 命令补全 (2026-10-15 v6: 改为英文 + 加 /plan / /skills)
-        # v10: 动态拼 /skills/<name> 候选项 —— 让主人输入 "/skills/" 时 popup
-        # 列出当前 skills_dir 下所有 skill 名字。
+        # / 命令补全 —— 让主人输入 "/skills/" 时 popup 列出当前 skills_dir 下所有 skill 名字
         skill_names: list[str] = []
         try:
             from app.brain.skills import list_skills
@@ -825,7 +740,7 @@ class ChatWindow(QWidget):
         ] + [f"/skills/{n} " for n in skill_names]
         self._cmd_completer = _CommandCompleter(self.input_edit, candidates)
         il.addWidget(self.input_edit)
-        # v24: 底部状态栏 — CPU/内存/token 数 (1 Hz 刷新)
+        # 底部状态栏 — CPU/内存/token 数 (1 Hz 刷新)
         self.statusbar = QStatusBar()
         self.statusbar.setObjectName("chat_statusbar")
         self.statusbar.setSizeGripEnabled(False)
@@ -847,10 +762,7 @@ class ChatWindow(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
 
-        # 2026-10-15 v8: 主人实测要求 — 「拖入图片直接显示，底部 + 上传，
-        #   多模态生成（图 / 视频）也加在底部」。
-        # 这一排三个辅助按钮：上传 +  / 多模态 ▼  / 语音。
-        # 上传 +：打开 QFileDialog 选图片/文件，走和拖拽相同的渲染路径。
+        # 底部辅助按钮排:上传 / 多模态 / 语音
         self.upload_btn = QToolButton()
         self.upload_btn.setText("+")
         self.upload_btn.setObjectName("ghost_btn")
@@ -926,12 +838,7 @@ class ChatWindow(QWidget):
         il.addLayout(bottom_row)
         cl.addWidget(input_container)
 
-        # 2026-10-15 v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」，
-        # 不再用 _InputFocusWatcher 高亮边框，输入容器永远保持中性灰。
-        # 上一版的 _InputFocusWatcher 已在 chat_window/chrome.py 删除。
-
-        # 无边框窗口没有系统边框，补上「拖拽四边/四角调整大小」
-        # （后装于标题拖拽，边缘命中优先，不与顶部拖动冲突）
+        # 无边框窗口没有系统边框,补上「拖拽四边/四角调整大小」
         from app.ui.frameless import FramelessResizer
         self._resizer = FramelessResizer(self).attach()
 
@@ -1005,7 +912,7 @@ class ChatWindow(QWidget):
         self._memory_dlg.activateWindow()
 
     def _open_settings(self) -> None:
-        """v24: chat 顶部「设置」按钮 —— 跳到 settings_window（头像改在那改）。"""
+        """chat 顶部「设置」按钮 —— 跳到 settings_window（头像改在那改）。"""
         app = self._find_app()
         if app is not None and hasattr(app, "settings_window"):
             sw = app.settings_window
@@ -1016,9 +923,8 @@ class ChatWindow(QWidget):
         self.pick_bot_avatar(self)
 
     def _toggle_maximized(self) -> None:
-        """最大化 / 还原 切换 (2026-10-15 加)。
-
-        全屏状态下要先退出全屏, 否则 maximize 会被忽略。"""
+        """最大化 / 还原 切换。"""
+        # 全屏状态下要先退出全屏, 否则 maximize 会被忽略
         if self.isFullScreen():
             self.showNormal()
         if self.isMaximized():
@@ -1031,7 +937,7 @@ class ChatWindow(QWidget):
             self.btn_max.setToolTip("还原")
 
     def _open_demo(self) -> None:
-        """打开纯静态 Live2D Demo（本地 8765）—— v24 改从任务栏入口触发，chat 顶部 Demo 按钮已删, 此方法保留供托盘菜单调用。"""
+        """打开纯静态 Live2D Demo（本地 8765）,供托盘菜单调用。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_demo"):
             app.open_demo()
@@ -1132,10 +1038,7 @@ class ChatWindow(QWidget):
 
     def _load_history(self) -> None:
         """从 ChatStore 加载上次的聊天记录到界面。"""
-        # v19: 启动时清掉历史空 content 消息 (v12 之前 1004 鉴权失败
-        # 批量产生的「废消息」, 重启后会被渲染成"空白文件图标")。
-        # chat_store.remove_empty_assistant 走 SQL DELETE 持久化清理,
-        # 一次启动搞一次, 之后加 add() 进来的新消息不受影响。
+        # 启动时清掉历史空 content 消息
         self.chat_store.remove_empty_assistant()
 
         stored = self.chat_store.all()
@@ -1146,8 +1049,7 @@ class ChatWindow(QWidget):
             # 跳过系统欢迎消息（已在 _append_system_welcome 中添加）
             if sm.role == "assistant" and "主人你好呀" in sm.content:
                 continue
-            # v19: 兜底再跳一次 (若 remove_empty_assistant SQLite 失败,
-            # 至少界面上不渲染空白文件图标)。
+            # 兜底再跳一次 (若 remove_empty_assistant SQLite 失败,界面上不渲染空白文件图标)
             if (sm.role == "assistant"
                     and not (sm.content or "").strip()
                     and not (sm.tools or [])):
@@ -1159,9 +1061,7 @@ class ChatWindow(QWidget):
                     emotion = Emotion(sm.emotion)
                 except ValueError:
                     pass
-            # 把 ChatStore 反序列化的 list-of-lists 还原成 tuple，让 Message 的
-            # tools 字段在重进聊天窗时也被填上（Bug 2：旧版 _load_history 没传
-            # sm.tools，导致"已执行操作"卡片丢失）。
+            # 把 ChatStore 反序列化的 list-of-lists 还原成 tuple
             tools_loaded = _convert_loaded_tools(sm.tools)
             msg = Message(role=sm.role, content=sm.content,
                           emotion=emotion, tools=tools_loaded)
@@ -1184,7 +1084,7 @@ class ChatWindow(QWidget):
         if self._generating:
             return
         text = self.input_edit.toPlainText().strip()
-        pending = self._consume_pending_attachments()  # v10: 取出待发送附件
+        pending = self._consume_pending_attachments()  # 取出待发送附件
         if not text and not pending:
             return
         # 限长：>2000 字符警告并截断
@@ -1193,9 +1093,7 @@ class ChatWindow(QWidget):
                 f"消息太长（{len(text)} 字符），已截断到 2000")
             text = text[:2000]
 
-        # v10: 主人按发送时, 如果有待发送附件, 把它们的 markdown image
-        # 引用拼到 user message 内容里 (render 时走 _inline_local_images_to_data_url
-        # 转 base64 嵌图, 跟单图路径一致)。
+        # 主人按发送时,如果有待发送附件,把它们的 markdown image 引用拼到 user message 内容
         if pending:
             lines: list[str] = []
             for p in pending:
@@ -1208,15 +1106,7 @@ class ChatWindow(QWidget):
             attach_block = "\n".join(lines)
             text = (attach_block + ("\n\n" + text if text else "")).strip()
 
-        # v11 主人实测设计: 聊天开头写 `/api/<name> ...` 视为「切换 API
-        # provider + 剩余文本作为 user message」。v12 删了 —— config-driven 后
-        # 单一组 config 参数, 不再需要路由切换, multimodal tool 走 config.yaml
-        # multimodal 段。
-
-        # v12 主人实测设计: 聊天开头写 `/skills/<name> ...` 视为「这一次对话
-        # 用这个 skill + 剩余文本作为 user message」—— skill 只对当条 msg 生效,
-        # 下一条 user message 没 skill 就不拼进 system_prompt。不再持久到
-        # self._active_skill (那是 v9 老的 session 持久姿势)。
+        # 聊天开头写 `/skills/<name> ...` 时:这一次对话用这个 skill,剩余文本作为 user message
         if text.startswith("/skills/"):
             head, _, rest = text.partition(" ")
             # head 形如 /skills/<name>
@@ -1224,7 +1114,7 @@ class ChatWindow(QWidget):
             if name:
                 ok, msg = self._activate_skill(name)
                 self._append_system_msg(msg)
-                # v12: skill 仅对当条消息生效; 设到 msg.skill 而非 self._active_skill
+                # skill 仅对当条消息生效;设到 msg.skill
                 if ok and rest.strip():
                     self.input_edit.clear()
                     self._quick_send(rest.strip(), skill=name)
@@ -1247,11 +1137,7 @@ class ChatWindow(QWidget):
     def _handle_command(self, text: str) -> None:
         """处理 / 快捷命令（chat 顶上的输入框以 / 开头时走这里）。
 
-        2026-10-15 v12: 删了 v11 的 /api[/<name>] —— config-driven 后不需要
-        路由切换; 加 /image /video /audio 三个命令 —— 跟 input_edit 前 insert
-        前缀 + 多模态按钮是同一姿势, 但支持从输入框直接打命令。
-        2026-10-15 v6: 命令字面量统一改成英文，避开中文输入法切换的问题。
-        后续若新增命令, 仍按英文命名; 内部说明文案 / 给主人看的内容用中文。
+        命令字面量统一英文；内部说明 / 给主人看的内容用中文。
         """
         self.input_edit.clear()
         cmd = text.split()[0].lower()
@@ -1353,12 +1239,10 @@ class ChatWindow(QWidget):
             return
 
         # /skills[/<name>]: 列出所有 / 单独激活某个 skill。
-# 主人 2026-10-15 实测设计: 「如果有 /skills/<name> 在聊天开头, 那么这次对话将使用这个 skill」——
-# _handle_command 也走同一条激活路径, 让主人在输入框里单独打 `/skills/poem` 也能激活。
+# `/skills/<name>` 跟「聊天开头写 /skills/<name>」是同一条激活路径
         if cmd == "/skills" or cmd.startswith("/skills/"):
             from app.brain.skills import list_skills
             skills_dir = getattr(self, "_skills_dir", None) or "skills"
-            # /skills/<name>: 激活 (跟「聊天开头写 /skills/<name>」是同一动作)
             if cmd.startswith("/skills/"):
                 skill_name = cmd[len("/skills/"):].strip().strip("/")
                 ok, msg = self._activate_skill(skill_name)
@@ -1445,12 +1329,8 @@ class ChatWindow(QWidget):
         self._quick_send(hint)
 
     def _quick_send(self, text: str, skill: Optional[str] = None) -> None:
-        """从快捷输入框发送消息（直接传入文本，不走 input_edit）。
+        """从快捷输入框发送消息（直接传入文本，不走 input_edit）。"""
 
-        v12: 加 skill kwarg —— 当条 user message 拼 msg.skill, _kickoff_llm
-        读 history[-1].skill 拼到 system_prompt; 不传就不拼。per-message 语义,
-        下一条 user msg 不传 skill 就不带。
-        """
         if self._generating:
             return
         text = text.strip()
@@ -1606,13 +1486,13 @@ class ChatWindow(QWidget):
             self.stop_btn.setVisible(False)
 
     # ------------------------------------------------------------------
-    # v8 上传 / 拖放 / 多模态生成按钮 (2026-10-15 主人实测要求)
+    # 上传 / 拖放 / 多模态生成按钮
     #
     # 设计:
     #   - 拖入图片 / 点 + 上传 → 都走 _handle_uploaded_files,
     #     图片存到 assets/uploads/ (项目根目录下), 用 file:// 路径
     #     渲染进 chat_view。这样下次重启桌宠也能看见。
-    #   - 多模态生成 (图 / 视频 / 音效) → 当前 v8 留 stub,
+    #   - 多模态生成 (图 / 视频 / 音效) → 当前留 stub,
     #     弹一行提示告诉主人"等模型接上后端", 但 UI 按钮先有位置。
     # ------------------------------------------------------------------
 
@@ -1621,9 +1501,7 @@ class ChatWindow(QWidget):
     _MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 MiB cap, 太大会让 chat_view 渲染卡
 
     # ------------------------------------------------------------------
-    # v9 skill 激活路径
-    # 主人实测设计: 在聊天开头写 /skills/<name>, 整段对话期间
-    # 该 skill 内容会拼到 system_prompt 末尾; 切换别的不丢之前的聊天。
+    # skill 激活路径
     # ------------------------------------------------------------------
 
     def _activate_skill(self, name: str) -> tuple[bool, str]:
@@ -1658,12 +1536,7 @@ class ChatWindow(QWidget):
         )
 
     def _active_skill_prompt(self) -> str:
-        """返回要拼到 system_prompt 末尾的当前激活 skill 文本。无激活时返回空串。
-
-        v12 兜底用 —— 主线读 per-message msg.skill; 这条 session-level 路径
-        留给老测试 + 兜底 (主人在 /skills/<name> 单独激活但没跟 user 文本
-        一起发的情况下仍生效)。
-        """
+        """返回要拼到 system_prompt 末尾的当前激活 skill 文本。无激活时返回空串。"""
         if not self._active_skill:
             return ""
         from app.brain.skills import load_skill
@@ -1676,11 +1549,7 @@ class ChatWindow(QWidget):
         )
 
     def _skill_prompt_for(self, name: str) -> str:
-        """v12 per-message 主线: 给定 skill 名字, 返回对应的 skill prompt 段。
-
-        跟 _active_skill_prompt 同样的格式 (前端模板是 [Active Skill: <name>]),
-        但读 msg.skill 而不是 self._active_skill session 字段。
-        """
+        """per-message 主线: 给定 skill 名字, 返回对应的 skill prompt 段。"""
         if not name:
             return ""
         from app.brain.skills import load_skill
@@ -1776,18 +1645,15 @@ class ChatWindow(QWidget):
     def _handle_uploaded_files(self, paths: list) -> None:
         """主人上传 (拖放 / 点 + 选) 的多个文件, 进入"待发送"区。
 
-        v10 行为 (主人 2026-10-15 实测设计):
-          - 拖入 / 选完文件后**不再立刻进 chat**, 而是堆在 input_edit 上方
-            的 horizontal 缩略图条 (pending_strip), 主人能继续编辑文字
-            / 拖更多 / 按发送。Q iMessage / 微信 / QQ 同款姿势。
-          - 主人按「发送」时 (_on_send), 这些 attachment 跟当前 input_edit
-            文本一起作为一条 user message 渲染进 chat + 持久化 + kickoff LLM。
-          - 单个文件缩略图右上角有 × 按钮, 主人能单独剔除某个 attachment。
+        拖入 / 选完文件后不再立刻进 chat, 而是堆在 input_edit 上方
+        的 horizontal 缩略图条 (pending_strip)。
+        主人按「发送」时, 这些 attachment 跟当前 input_edit
+        文本一起作为一条 user message 渲染进 chat + 持久化 + kickoff LLM。
+        单个文件缩略图右上角有 × 按钮, 主人能单独剔除某个 attachment。
 
         文件落地:
-          - 复制到 assets/uploads/<ts>_<name> (v8 那条), 避免原始路径泄露 +
-            跨 session 引用稳定。
-          - > 12 MiB 跳过 + 渲染一条 assistant 提示。
+          - 复制到 assets/uploads/<ts>_<name>, 避免原始路径泄露
+          - > 12 MiB 跳过 + 渲染一条 assistant 提示
         """
         if not paths:
             return
@@ -1894,11 +1760,8 @@ class ChatWindow(QWidget):
     def _on_media_action(self, kind: str) -> None:
         """多模态下拉 (图片 / 视频 / 音频) 入口。
 
-        2026-10-15 v12 owner 实测设计: 主人说「点击生成图片按钮就在输入框前面
-        加 /image 之类的命令, 然后再输入内容」 —— 跟 iMessage / 微信 / QQ
-        同款姿势, 不弹 QInputDialog 也不直接调 tool。让主人在输入框里接着
-        输, 按发送才走 /image 命令 → _handle_command → _run_multimodal_action。
-        /image /video /audio 命令在 _handle_command 里处理。
+        在 input_edit 前 insert /<kind> 前缀, focus 回去, 让主人在输入框里
+        接着输, 按发送就走 /image /video /audio 命令路径。
         """
         if kind not in ("image", "video", "audio"):
             # 配置入口 (v12 集中到 config.yaml multimodal 段, 不再弹窗)
@@ -1928,22 +1791,12 @@ class ChatWindow(QWidget):
         self.input_edit.setTextCursor(cursor)
 
     def _run_multimodal_action(self, kind: str, prompt: str) -> None:
-        """/image /video /audio 命令的真正干活入口 (v12) —— 跟 _on_media_action
-        按钮插前缀是同一姿势的键盘版。
+        """/image /video /audio 命令的真正干活入口。
 
         走 self.registry.get(f"generate_{kind}") 调 tool, 拿 URL, 嵌图。
         registry 不可用 / tool 没注册时, 弹清晰提示。
-
-        v22: 三处修:
-          1) 先把整条 /<kind> prompt 存为 user message (历史 + chat_store) 再调
-             tool —— 修「关窗后信息丢失」「看不到我发的内容」
-          2) tool.fn 放后台 worker thread 调, 不阻塞 chat_window 主线程
-             (修「发送后卡顿 15-20s」)
-          3) 后台线程用 QMetaObject.invokeMethod + QueuedConnection 跨线程
-             切回主线程渲染结果, 保证 Qt 控件线程安全
-        v23-11: 调 tool 前查 companion_policy 决策 + trace_decision, 调完后
-          _fire_outcome("success") 走 yaml 钩子 + trace_outcome. 让 multimodal
-          路径跟主 LangChain run 一样被桌宠养成系统感知.
+        tool.fn 放后台 worker thread 调, 不阻塞 chat_window 主线程,
+        后台用 QMetaObject.invokeMethod + QueuedConnection 跨线程切回主线程渲染。
         """
         labels = {"image": "生成图片", "video": "生成视频",
                   "audio": "生成音频"}
@@ -1989,12 +1842,9 @@ class ChatWindow(QWidget):
             ))
             return
 
-        # v23-11: 调 tool 前查桌宠决策 (companion_policy 4 维查表)
-        # v25: 即使 state=None 也要写 trace_decision —— 之前 state is not None
-        # 守住的话, 主程序没启 PetWindow / _lc_agent 没接 companion_state 时
-        # multimodal 整条路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠
-        # trace 记录". fallback 默认 sat/mood/level/favor = "MID".
-        # 决策降级成 ALLOW (没有 state 也没法走查表), 让 tool 照调.
+        # 调 tool 前查桌宠决策(companion_policy 4 维查表)
+        # 即使 state=None 也要写 trace_decision 让 multimodal 行为可观察
+        # 默认 fallback:sat/mood/level/favor = "MID",决策降级 ALLOW
         risk_int = 2  # 默认 MEDIUM fallback
         try:
             from app.engine.tools._risk import risk_for_tool
@@ -2067,18 +1917,7 @@ class ChatWindow(QWidget):
         result: object, exc: Optional[Exception],
         risk_int: int = 2, decision: str = "ALLOW",
     ) -> None:
-        """worker 完成后跨线程切回主线程 → 渲染结果到 chat。
-
-        修原 bug 3 (image 生成完后, 点击图片 → chat 信息全看不到): 之前
-        /image 没有 img-open 锚点, 客户端默认用 file:// 链接, 点
-        file:// 时 QTextBrowser 会试图 setSource 失败导致 chat_view 内容
-        被清空。本函数生成 img-open:KEY 锚点, 点击走 _show_image_popup
-        弹原图 QDialog, 不动 chat_view。
-
-        v23-11: 成功时调 _lc_agent._fire_outcome("success") 走 yaml 钩子 +
-        trace_outcome; 失败时调 "failure". 修原问题「模型没说图/视频生成好」,
-        加 announce 文案让主人明确知道.
-        """
+        """worker 完成后跨线程切回主线程 → 渲染结果到 chat。"""
         if exc is not None:
             log.exception("multimodal %s tool failed", kind)
             self._render_message(Message(
@@ -2108,19 +1947,12 @@ class ChatWindow(QWidget):
                 pass
             return
 
-        # v22: 渲染成 img-open:KEY 锚点 (点击放大原图, 不擦白 chat_view)
-        # url 既可能是 file:/// 本地路径, 也可能是 http(s):// 远程
+        # 渲染成 img-open:KEY 锚点 (点击放大原图,不擦白 chat_view)
+        # url 既可能是 file:/// 本地路径,也可能是 http(s):// 远程
         import hashlib as _hashlib
         key = _hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
         self._img_open_map[key] = url
         kind_cn = {"image": "图片", "video": "视频", "audio": "音频"}.get(kind, kind)
-        # v23: 不在图片下方加可见的"[点击放大]"文字 (主人反馈「这个字样不该默认显示」)。
-        # _render_markdown 的 _img() 会把 url 包成 <a href="img-open:KEY">
-        # + <img src="url" title="点击放大">, 鼠标悬浮时系统 tooltip 自然显示。
-        # v23-11: 主人说"模型没说图/视频生成好了", 加一句 announce 让他知道.
-        # v25: 删 \n\n —— 之前用 \n\n 在 markdown → HTML 时会插一个空段落, 加上
-        # <img> 本身 display:block + margin, 主人反馈「图片下面有一大段空白」。
-        # 改成单换行, _render_markdown 走 <br/>, 不另起段, 视觉上紧贴图片.
         announce = f"{label}已生成 (决策: {decision}, 风险等级: {risk_int})\n"
         content = f"{announce}![{kind_cn}: {prompt}]({url})"
         msg = Message(role="assistant", content=content, tools=[(f"generate_{kind}", "", "")])
@@ -2132,7 +1964,7 @@ class ChatWindow(QWidget):
             log.exception("chat_store.add failed (multimodal %s)", kind)
         self._render_message(msg)
 
-        # v23-11: 调 _fire_outcome 走 yaml 钩子 (心情 +8 / EXP +20 / 好感 +1)
+        # 走 yaml 钩子 + trace_outcome,让 multimodal 路径跟主 LangChain run 一样被养成系统感知
         try:
             lc_agent = getattr(self, "_lc_agent", None)
             if lc_agent is not None:
@@ -2222,18 +2054,7 @@ class ChatWindow(QWidget):
         if getattr(self, "_confirm_in_progress", False):
             log.warning("嵌套危险工具确认，自动通过（避免套弹窗）")
             return True
-        # 2026-10-15 修复 Bug 7 第二处旁路:
-        # 之前 `name not in DANGEROUS_TOOLS` 直接 return True,
-        # 但 RiskyToolConfirm 用的是 hallucination_guard._RISKY_TOOLS —— 两者
-        # 不一致(例如 send_email 在 _RISKY_TOOLS 但不在 DANGEROUS_TOOLS)。
-        # 中间件拦下来 → 调到本 callback → 看到不在 DANGEROUS_TOOLS 就放行
-        # → 完全不弹窗就执行了。
-        # 修法:既然走到了本 callback(RiskyToolConfirm 已经拦下来),就是
-        # 高风险工具,不区分 DANGEROUS_TOOLS vs _RISKY_TOOLS,统一弹窗。
-        # 把早 return 删掉,让所有情况都进入下面的弹窗逻辑。
-        # (历史兼容:对未接 standard middleware 的轻量 backend,AgentLoop
-        #  仍然自己用 DANGEROUS_TOOLS 判定要不要调到这里 —— 即「非 DANGEROUS
-        #  工具」根本不会进本方法,所以这个删除安全。)
+        # 走进了本 callback 就是高风险工具,统一弹窗,不区分 DANGEROUS_TOOLS vs _RISKY_TOOLS
 
         # 解析参数（子线程做，没 Qt 依赖）
         try:
@@ -2244,9 +2065,7 @@ class ChatWindow(QWidget):
         args_pretty = "\n".join(f"  {k}: {v}" for k, v in (args_obj or {}).items())
 
         self._confirm_in_progress = True
-        # 投递到主线程弹窗；用 threading.Event 跨线程等结果
-        # （不能用 QEventLoop.exec：QEventLoop 必须由拥有 QThread 的线程启动，
-        # 子线程用 QEventLoop().exec() 会卡死或 abort，PyQt5 强制要求）
+        # 用 threading.Event 跨线程等结果(不能用 QEventLoop.exec:子线程用会卡死)
         result_event = threading.Event()
         result: dict[str, bool] = {}    # 主线程把 ok 写进来,子线程读
 
@@ -2255,34 +2074,13 @@ class ChatWindow(QWidget):
             result["ok"] = ok
             result_event.set()    # 唤醒子线程 wait()
 
-        # 2026-10-15 关键修复(用户实测 + probe 复现):
-        # 之前 QTimer.singleShot(0, lambda) 跨 child thread → main thread
-        # 投递,在 PyQt5 5.x 上静默失败 —— QTimer 是 child thread-owned,
-        # child thread 没 event loop,永远不 fire。这是用户反馈
-        # 「高危工具没弹窗」的真因:模型调 lock_screen,中间件拦下来 →
-        # _confirm_dangerous_tool 走 QTimer.singleShot → 静默挂死 → 60s 后
-        # 子线程 wait 超时 → 拒绝执行,弹窗根本不会出现。
-        #
-        # 唯一可靠的跨线程投递方式: QMetaObject.invokeMethod + Qt.QueuedConnection。
-        # 这是 Qt 官方保证的方式 —— Qt 在主线程 event queue 投递一个
-        # QEvent::MetaCall,主线程派发时调 slot。child thread 不需要 event loop。
-        # 关键约束:被 invokeMethod 调的方法必须是已定义的 slot(@pyqtSlot 装饰),
-        # 用动态字符串 invokeMethod 是 PyQt5 不支持的。
-        # 解法:chat_window 上挂一个固定 slot `_invoke_confirm_dispatch_slot`,
-        # 内部读 `self._pending_confirm_dispatch` 决定要调哪个 lambda。
-        # 同时只能有一个 _confirm_dangerous_tool 在飞(被 _confirm_in_progress 锁
-        # 保证),所以单 slot 够用。
+        # 跨线程投递用 QMetaObject.invokeMethod + Qt.QueuedConnection
+        # (PyQt5 5.x 的 QTimer.singleShot 在 child thread 上静默失败)
         self._pending_confirm_dispatch = lambda: self._show_confirm_box(
             name, args_pretty, _on_result,
         )
         from PyQt5.QtCore import QMetaObject
         from app.core.qt_compat import Qt as _Qt
-        # PyQt5 5.x 上 invokeMethod 返回值不可靠(可能 None/0/1 都出现),
-        # 但实际 slot 派发是工作正常的(slot 被主线程调到了)。所以不去看 ok 值,
-        # 而是在 slot 里检查 _pending_confirm_dispatch 是否还在,如果 invokeMethod
-        # 真的派发了,主线程派发 slot 时会调 fn,result_event 会被 set。
-        # 如果 invokeMethod 失败,主线程不会派发 slot,result_event 永远不 set,
-        # 子线程 wait 超时后走 60s 超时路径。
         QMetaObject.invokeMethod(
             self,
             "_invoke_confirm_dispatch_slot",
@@ -2290,9 +2088,7 @@ class ChatWindow(QWidget):
         )
         # 子线程阻塞等主线程弹完弹窗（60s 超时防卡死）
         if not result_event.wait(timeout=_CONFIRM_TIMEOUT_S):
-            # 超时：把还留在屏幕上的弹窗关掉。原实现直接 return，
-            # 而主线程仍卡在 box.exec() 里 → 屏幕上留一个僵尸模态框，
-            # 下一个危险工具还能再叠一个（2026-10-04 日志实况）。
+            # 超时：把还留在屏幕上的弹窗关掉,避免留一个僵尸模态框
             log.warning("危险工具确认超时（%ds），拒绝执行并关闭弹窗",
                         int(_CONFIRM_TIMEOUT_S))
             self._confirm_in_progress = False
@@ -2318,11 +2114,6 @@ class ChatWindow(QWidget):
     def _invoke_confirm_dispatch_slot(self) -> None:
         """主线程槽:QMetaObject.invokeMethod + QueuedConnection 跨线程投递后,
         主线程 event loop 派发到这里。读 self._pending_confirm_dispatch 调真版。
-
-        为什么不用 QTimer.singleShot:PyQt5 5.x 在 child thread 调
-        QTimer.singleShot(0, lambda) 时,内部创建的 QTimer 是 child thread-owned,
-        child thread 没 event loop → 永远不 fire,弹窗静默挂死(用户实测)。
-        QMetaObject.invokeMethod 是 Qt 官方保证的跨线程 slot 调用方式。
         """
         fn = getattr(self, "_pending_confirm_dispatch", None)
         if fn is None:
@@ -2337,19 +2128,9 @@ class ChatWindow(QWidget):
     def _show_confirm_box(self, name: str, args_pretty: str, on_done) -> None:
         """主线程槽：弹危险工具确认弹窗 → 调 on_done（Event.set() 唤醒子线程）。
 
-        2026-10-15 改用自定义 _DangerConfirmDialog(QDialog):
-        - QMessageBox 在 FramelessWindowHint + WA_TranslucentBackground 父窗口
-          下被 Qt 当 transient child 立刻 dismiss(用户实测「只闪一下」)
-        - 自定义 QDialog 显式控制所有 flags,不被父窗口属性干扰
-
-        2026-10-15 v2 修正:parent 改回 self(chat_window)而不是 None。
-        用户反馈「弹窗不能在聊天窗口弹出进行确认」,希望弹窗在 chat 窗口内
-        显示。parent=self 时:
-          - z-order 跟随 chat_window(在 chat 上面)
-          - 焦点自动回到 chat
-          - 关闭 chat 时弹窗自动关
-        _DangerConfirmDialog 自己有完整 window flags(不是依赖父),
-        所以不会触发 QMessageBox 那种「transient child 被 dismiss」的问题。
+        用自定义 _DangerConfirmDialog(QDialog)：QMessageBox 在 FramelessWindowHint
+        父窗口下被 Qt 当 transient child 立刻 dismiss。
+        parent=self(chat_window) 让弹窗在 chat 内显示,z-order 跟随 chat。
         """
         try:
             from app.ui.chat_window.confirm_dialog import _DangerConfirmDialog
@@ -2412,10 +2193,8 @@ class ChatWindow(QWidget):
                     system_prompt = system_prompt + "\n\n" + extra
             except Exception as e:  # noqa: BLE001
                 log.warning("context_provider 失败：%s", e)
-        # v12: 主人激活的 skill 内容拼到 system_prompt 末尾 —— 但**只在当条
-        # user message 生效** (per-message 语义, 下一条不带就不拼)。
-        # 主线: 读 self.history[-1].skill (v12 设的); 兜底: 老的 self._active_skill
-        # 字段 (v9 之前留下的, 测试 + 老调用还能用)。
+        # 主人激活的 skill 内容拼到 system_prompt 末尾(per-message 语义,当条 message 生效)
+        # 主线:读 history[-1].skill;兜底:老的 self._active_skill 字段(老测试兼容)
         skill_prompt = ""
         if self.history:
             last_user = next(
@@ -2452,9 +2231,7 @@ class ChatWindow(QWidget):
                 meta={"model": self.llm_cfg.model,
                       "base_url": self.llm_cfg.base_url[:60]},
             )
-        # 2026-10-15:新一轮 chat 起始,工具步骤 reset 成折叠
-        # v6: 不再 reset 全局, 旧消息保留各自状态 (dict 留着)
-        # v6 之前有 self._tools_collapsed = True 这种 reset; 现在已经不需要
+        # 工具步骤折叠状态:按消息分别记(dict),新一轮 chat 起始不 reset
 
         self._generating = True
         self.send_btn.setEnabled(False)
@@ -2490,13 +2267,7 @@ class ChatWindow(QWidget):
                     r = self._confirm_dangerous_tool(tool_name, args_json)
                     return bool(r)
                 lc_agent.on_confirm_needed(_confirm_bridge)
-                # v27: 新 LangChainAgent 立刻注当前 PetState. 之前这条
-                # 没有, 主人 dev mode 滑块把 state 设 0/0/0/0 后, 新建的
-                # agent._companion_state 仍是 None, 工具调
-                # _get_companion_decision 返 None, middleware 走 fallback
-                # 弹窗确认 → 主人感受是"设了 0 还是没拒绝" (实测 10-17 10:46).
-                # 修法: 主程序传 self._state_provider, 每次 kickoff 拉一次
-                # 当前 state, 主人改 state 后新 agent 立即看到.
+                # 新 LangChainAgent 立刻注当前 PetState
                 if self._state_provider is not None:
                     try:
                         _state_now = self._state_provider()
@@ -2519,17 +2290,7 @@ class ChatWindow(QWidget):
                 # 标准后端关闭在 _on_done / _on_failed 里做
                 self._lc_agent = lc_agent
             else:
-                # 轻量 backend：直接用 AgentLoop（真正的 ReAct 循环）。
-                # 这是与 LangChain create_agent 语义对齐的手写实现：
-                #   模型自主决定 → Thought: 调什么工具 → Action: 调工具 →
-                #   Observation: 工具结果作为 ToolMessage 回传 →
-                #   模型继续推理 → 直到模型给出 final answer（不再调工具）。
-                # 关键特性：
-                #   1. force_tool_use=True（首轮）+ 服务端降级（user-prompt 强制）
-                #   2. 第一轮没调工具 → 注入强提示 + force_retry 重试
-                #   3. 连续 N 轮纯调工具 → 强制进入 final 阶段让模型总结
-                # 这样更智能：
-                #   模型可以自己决定调几次工具、什么时候给 final answer。
+                # 轻量 backend:直接用 AgentLoop ReAct 循环
                 self._worker = _AgentWorker(
                     AgentLoop(client, self.registry, confirm_tool=self._confirm_dangerous_tool),
                     [{"role": m.role, "content": m.content} for m in msgs])
@@ -2605,26 +2366,18 @@ class ChatWindow(QWidget):
 
     def _on_chat_anchor_clicked(self, url):
         """chat_view 上 <a href> 被点击,处理内部命令 (toggle_tools) + 外部链接
-        + 图片点击放大 (img-open) 。
+        + 图片点击放大 (img-open)。
 
-        2026-10-15 v5: cmd:toggle_tools 处理改用 _rebuild_chat_view_from_history
-        全量重建 chat_view, 不再调 _refresh_streaming_message —— 后者的
-        「从 anchor 删到末尾再 insertHtml」模式在某些状态下会让 chat 区域
-        被擦白 (用户实测 v4 反馈「点击后聊天窗口信息清空」)。
-
-        2026-10-15 v6: 按消息分别切换折叠状态。URL 用 fragment (#N) 编码 msg id,
-        这里从 fragment 读回, 只切换那条消息的 _tools_collapsed_by_msg[id]。
-
-        v4 的 _NoCmdNavQTextBrowser 仍然有效 —— 它挡 QTextBrowser 默认
-        doSetSource 对 cmd: scheme 错误地调 setSource 试图本地解析。
-
-        2026-10-16 v20: img-open:KEY 走 _show_image_popup 弹原图。
+        cmd:toggle_tools 用 _rebuild_chat_view_from_history 全量重建,
+        不再调 _refresh_streaming_message(后者某些状态会擦白 chat 区域)。
+        按消息分别切换折叠状态,URL 用 fragment (#N) 编码 msg id。
+        img-open:KEY 走 _show_image_popup 弹原图。
         """
         try:
             scheme = url.scheme() if hasattr(url, "scheme") else ""
         except Exception:  # noqa: BLE001
             scheme = ""
-        # v20: img-open:KEY 在前, 不要被 cmd: 分支吞掉
+        # img-open:KEY 在前,不要被 cmd: 分支吞掉
         if scheme == "img-open":
             try:
                 key = url.path().lstrip("/") if hasattr(url, "path") else ""
@@ -2642,7 +2395,7 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 cmd = ""
             if cmd == "toggle_tools":
-                # v6: fragment 是 msg_id 整数, 默认 0
+                # fragment 是 msg_id 整数,默认 0
                 try:
                     msg_id = int(url.fragment() or 0) if hasattr(url, "fragment") else 0
                 except (TypeError, ValueError):
@@ -2650,7 +2403,7 @@ class ChatWindow(QWidget):
                 cur = self._tools_collapsed_by_msg.get(
                     msg_id, self._tools_collapsed_default)
                 self._tools_collapsed_by_msg[msg_id] = not cur
-                # v5: 全量重建, 不动 anchor/cursor
+                # 全量重建,不动 anchor/cursor
                 self._rebuild_chat_view_from_history()
             return
         # 外部链接:手动打开(setOpenExternalLinks(False) 不会自动开)
@@ -2714,10 +2467,8 @@ class ChatWindow(QWidget):
         if pix.isNull():
             return
         # 3. 弹 QDialog 显示原图
-        # v25: 把 dlg parent 设 None (top-level) —— 之前传 self 当 parent,
-        # 关闭 × 时 WA_DeleteOnClose 调度 deleteLater + 焦点回 chat_view,
-        # 个别机器上会触发 chat_view 重绘走白屏路径 (复现窗口错乱).
-        # 无 parent 的 top-level QDialog 跟 chat_window 互不影响.
+        # parent 设 None (top-level):之前传 self 当 parent 关闭 × 时会触发
+        # chat_view 重绘走白屏路径。top-level 跟 chat_window 互不影响。
         dlg = QDialog(None)
         dlg.setWindowTitle("图片预览")
         dlg.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -2769,25 +2520,14 @@ class ChatWindow(QWidget):
             self._parse_run_script_into_blocks(name, args, result)
         else:
             self._current_bot_msg.tools.append((name, args or "", result or ""))
-            # v24: 主人反馈「直接让桌宠生成图片(不走 /image 命令)时,
-            # 聊天窗口只显示一行工具结果 + 一段文字, 不显示生成的图片」。
-            # 根因: LLM 通过 tool 调 generate_image / generate_video /
-            # generate_audio 时, _on_tool 把结果 URL 塞进 tools 列表,
-            # 但 msg.content 没拼图片/视频/音频 → 渲染时只看到工具卡片
-            # + 模型文字回复, 看不到产物。修法: 检测 multimodal 工具,
-            # 把结果 (file:/// 或 http(s):// 路径) 自动追加到 msg.content
-            # 作为 markdown image / video / audio, 跟 /image 命令走同一条路径。
+            # multimodal 工具结果自动追加到 msg.content,渲染时显示产物
             self._maybe_inject_multimodal_to_content(name, result)
         # Trace
         if self.trace is not None and self._trace_run_id:
             try:
                 import json as _json
-                # 2026-10-15:LangChainAgent._astream_with_retry yield 工具事件时
-                # args 是空字符串("")(它只携带 ToolMessage.name + content,真实
-                # args 在 AIMessage.tool_calls 上但 stream 模式没保留)。_json.loads("")
-                # 会抛 JSONDecodeError,被 except 吞 → trace 里看不到 tool 事件
-                # → dashboard 调试面板「执行过程」不显示工具。修法:空字符串
-                # 视为空 dict,非空才解析。
+                # LangChainAgent._astream_with_retry yield 工具事件时 args 可能是空字符串,
+                # _json.loads("") 抛 JSONDecodeError;空字符串视为空 dict
                 if isinstance(args, str):
                     _args = _json.loads(args) if args.strip() else {}
                 else:
@@ -3124,12 +2864,7 @@ class ChatWindow(QWidget):
 
     def _launch_sentence_prepare(self, sentence: str) -> None:
         """为单句启动后台 QThread 调 tts.prepare(sentence)，完成后 emit (seq, sentence)
-        给 _on_sentence_ready 入队。
-
-        2026-10-15 Bug 6 修复把 done 信号由 (sentence) → (seq, sentence)
-        —— 这里补上对 seq 的分配 + 传递,避免 slot 报
-        "missing 1 required positional argument: 'sentence'"。
-        """
+        给 _on_sentence_ready 入队。"""
         from app.core.qt_compat import QThread, Signal
 
         seq = self._tts_seq_next
@@ -3159,12 +2894,7 @@ class ChatWindow(QWidget):
         w.start()
 
     def _on_sentence_ready(self, seq: int, sentence: str) -> None:
-        """单句 TTS prepare 完成:把该句入队等按序播放。
-
-        2026-10-15:不再直接 speak —— 入队到 _pending_speak[seq],让
-        _drain_speak_queue 按编号连续性消费,避免并发 prepare 导致朗读
-        顺序颠倒（短句先完成先播，长句后播;模型长输出时尤其明显）。
-        """
+        """单句 TTS prepare 完成:把该句入队等按序播放。"""
         self._committed_text = (self._committed_text or "") + sentence
         self._pending_speak[seq] = sentence
         self._drain_speak_queue()
@@ -3254,11 +2984,8 @@ class ChatWindow(QWidget):
         # 2. **等所有 prepare worker 完成**（主线程短时阻塞；GPT-SoVITS 通常 3-5 秒）
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
-        # v24: LLM 通过 generate_image/video/audio 工具生成产物时, _on_tool
-        # 已在 _on_done 之前把图片/视频/音频 markdown 注入过 content, 但上面
-        # content = parsed.text 那行把它覆盖掉了 → 主人看到的聊天窗口没有
-        # 图片。修法: 从 msg.tools 倒着扫, 把 multimodal URL 重新拼到 content
-        # 末尾 (跟 _on_tool 注入逻辑等价, 但能扛住覆盖)。
+        # LLM 通过 generate_image/video/audio 工具生成产物时,从 msg.tools 倒着扫
+        # 把 multimodal URL 重新拼到 content 末尾(扛住上面 content=parsed.text 的覆盖)
         self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._flush_tts_tail_to_prepare()  # 启动尾部 prepare
         self._wait_all_sentence_workers(timeout_s=120.0)  # 阻塞等全部 prepare 完
@@ -3266,8 +2993,7 @@ class ChatWindow(QWidget):
         self.history.append(self._current_bot_msg)
         self._trim_history()
         tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
-        # v24: 持久化用的是 msg.content (已经被 re-inject 拼上 multimodal markdown),
-        # 不再用 parsed.text — 否则重启后历史消息里看不到图片, 主人得重新生图。
+        # 持久化用 msg.content(已 re-inject),不是 parsed.text;否则历史看不到图
         self.chat_store.add(
             "assistant", self._current_bot_msg.content or "",
             emotion=parsed.emotion.value if parsed.emotion else "",
@@ -3313,8 +3039,7 @@ class ChatWindow(QWidget):
             self._lc_agent = None
         self._current_bot_msg.content = f"[错误] {err}"
         self._current_bot_msg.emotion = Emotion.SAD
-        # v24: 即使失败也尝试把 multimodal 产物补回来 (主人在出错消息下面
-        # 还能看见刚才生成的图, 不至于被错误气泡擦掉)。
+        # 即使失败也尝试把 multimodal 产物补回来
         self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._refresh_streaming_message(finished=True, emotion="sad")
         # Trace：失败
@@ -3342,7 +3067,7 @@ class ChatWindow(QWidget):
         "background:#ffffff;border:1px solid #e9e6f7;padding:9px 13px;"
         "color:#2c2c38;font-size:10pt;line-height:1.55;")
 
-    # -------------------- 窗口位置持久化(2026-10-15 修复 Bug 3) --------------------
+    # -------------------- 窗口位置持久化 --------------------
 
     def _restore_or_position_window(self, parent):
         """默认位置策略:
@@ -3405,9 +3130,8 @@ class ChatWindow(QWidget):
     def changeEvent(self, event):
         """窗口状态变化(最大化)时,同步更新右上角 max 按钮图标。
 
-        2026-10-15 v3: 全屏按钮已移除, changeEvent 只剩 max 同步。
-        拖动窗口到屏幕顶端触发系统最大化时, 按钮文字也要跟着切到「还原」,
-        否则按钮状态和实际窗口状态对不上。"""
+        拖动窗口到屏幕顶端触发系统最大化时, 按钮文字也要跟着切到「还原」。
+        """
         try:
             from app.core.qt_compat import QEvent
             if event.type() == QEvent.Type.WindowStateChange:
@@ -3426,17 +3150,8 @@ class ChatWindow(QWidget):
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
 
         工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
-
-        2026-10-15 v3:保留点击折叠/展开的 toggle 功能 (cmd:toggle_tools),
-        但 head 文本里只显示「已执行操作 · N ▾ / ▴」,不再出现"点击展开"/
-        "点击收起"字样 —— 用户实测 2026-10-15「去掉点击展开这4个文字,
-        功能还要」。Bug 1 (_current_bot_msg=None 时点链接 chat 变空白)
-        由 _on_chat_anchor_clicked 里的守卫挡住, 不影响功能。
-
-        2026-10-15 v6: 改成按消息分别记折叠状态。msg_id 是 id(msg) 整数,
-        URL 用 `cmd:toggle_tools#{msg_id}` 编码, _on_chat_anchor_clicked
-        从 fragment 读回, 找到对应消息的折叠状态。dict 里没记录的消息
-        走默认 (self._tools_collapsed_default, 折叠)。
+        head 文本里只显示「已执行操作 · N ▾ / ▴」,不再出现"点击展开"字样。
+        按消息分别记折叠状态:URL 用 `cmd:toggle_tools#{msg_id}` 编码。
         """
         if not tools:
             return ""
@@ -3502,9 +3217,8 @@ class ChatWindow(QWidget):
     def _thoughts_html(self, thoughts: list) -> str:
         """思考块：折叠展示（默认收起，主人点开看推理过程）。
 
-        2026-10-15 跟随 MiniMax Code 风格升级：用 div.thinking 类 + <details>
-        嵌套实现折叠；MiniMax Code 的 markdown 也用 blockquote 风格的引用，
-        但「思考过程」是内部的, 不放进 markdown 流, 单独走自定义 div。"""
+        用 div.thinking 类 + <details> 嵌套实现折叠;思考过程单独走自定义 div。
+        """
         if not thoughts:
             return ""
         joined = "\n".join(f"> {t.strip()}" for t in thoughts if t.strip())
@@ -3602,7 +3316,7 @@ class ChatWindow(QWidget):
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
         """按已完成的 Message 渲染成 HTML 字符串 (MiniMax Code 风格线性流)。
 
-        布局 (CSS 驱动, 2026-10-15 重做):
+        布局 (CSS 驱动):
             <div class="msg msg-{role}">
                 <div class="msg-label">
                     <span class="who">{role_label}</span>
@@ -3613,15 +3327,7 @@ class ChatWindow(QWidget):
                     <!-- markdown-rendered 文本 -->
                 </div>
             </div>
-
-        角色标识:
-            - user: "You" (紧凑中性灰)
-            - assistant: character name (紫)
-            - system: 走 system-msg 居中浅灰条
-
-        头像不再放在 chat 内 (MiniMax Code 同款)。桌宠头顶像仍然由 pet_window
-        显示; chat 里只保留 markdown 渲染块, 让人/桌宠对话视觉跟其它 chat-style
-        AI 一致 ("跟 minimaxcode 一样" 用户实测指定)。
+        头像不再放在 chat 内,桌宠头顶像由 pet_window 显示。
         """
         if msg.role == "system":
             raw = (msg.content or "").replace("&", "&amp;").replace(
@@ -3635,21 +3341,8 @@ class ChatWindow(QWidget):
         role_label = "You" if is_user else _html_escape(
             self.char_cfg.name or "桌宠")
 
-        # v19: 空 content + 无 tools → 灰色 placeholder 提示。
-        # 主人反馈 2026-10-15 "每次打开后信息就没了, 图片之类的":
-        # 实际是历史 bug, v12 之前 1004 鉴权失败批量产生了一批
-        # content="" 的 assistant 消息, chat_store 一直保留,
-        # 重启后空消息又渲染成空白文件图标, 看起来像"信息丢失"。
-        # 这里给灰色提示让主人知道哪条是空的, 主人按 "清空" 按钮
-        # (line 1119 _on_clear 已 chat_store.clear()) 一键清理。
-        # msg.tools 非空时不走 placeholder (工具调用消息 content
-        # 可能空但工具有信息, 仍要渲染)。
-        # v23 修流式期间 placeholder 错显示 bug: _insert_placeholder 用
-        # streaming_meta="typing…" 渲染「三点跳动」占位 (content 此刻确实空),
-        # 旧代码不管 streaming_meta 都走 placeholder, 主人看到「三点 + 灰色空内容」
-        # 同时存在。修: 流式时跳过 placeholder, 走正常分支由 _typing_dots_html
-        # 负责显示 dots; 流式结束 (_on_done 调 _refresh_streaming_message
-        # finished=True) content 非空 → 正常 markdown 渲染。
+        # 空 content + 无 tools → 灰色 placeholder 提示
+        # 流式时跳过 placeholder,由 _typing_dots_html 负责显示 dots
         raw = msg.content or ""
         if (not raw.strip() and not (msg.tools or []) and not streaming_meta):
             time_str = _format_time_short(msg.ts)
@@ -3672,21 +3365,15 @@ class ChatWindow(QWidget):
 
         # 清理内容
         raw = self._clean_content(raw)
-        # 2026-10-15 v9: 上传 / 拖图产生的 file:// URL 在 markdown 里只是
-        # 一段文字, QTextBrowser 不一定 load (PyQt5 5.x 对 file:// 嵌图不稳)。
-        # 渲染前把 markdown 里的 ![alt](file://...) 替换成 data: URL,
-        # 这样 QTextBrowser 自包含 base64 嵌图, 不会显示裸路径。
+        # 上传 / 拖图产生的 file:// URL 在 markdown 里 QTextBrowser 不一定 load;
+        # 渲染前把 ![alt](file://...) 替换成 data: URL,让 QTextBrowser 自包含 base64 嵌图
         raw = self._inline_local_images_to_data_url(raw)
 
-        # HTML 转义 + markdown 渲染 (MiniMax Code 风格两边都做 markdown;
-        # user 消息内容一般很短, 走 markdown 没副作用)
+        # HTML 转义 + markdown 渲染 (两边都做 markdown;user 消息内容一般很短, 走 markdown 没副作用)
         body_html = self._render_markdown(raw)
 
-        # 流式输出中：正文末尾追加「三点跳动」等待动画
-        # v23: 去掉 emotion 检查 —— _current_bot_msg 在 _kickoff_llm 时就设了
-        # emotion=HAPPY, 旧条件 not (msg.emotion and msg.role == "assistant") 永 False,
-        # 导致打字中动画从不显示, 最终 empty msg 走 placeholder 路径(显示「此消息
-        # 内容为空」)。修复: 只要 streaming_meta 非空就显示 dots, 与 emotion 无关。
+        # 流式输出中:正文末尾追加「三点跳动」等待动画
+        # 只要 streaming_meta 非空就显示 dots, 与 emotion 无关
         if not is_user and streaming_meta:
             body_html = body_html + self._typing_dots_html()
 
@@ -3695,7 +3382,7 @@ class ChatWindow(QWidget):
             thoughts_html = self._thoughts_html(getattr(msg, "thoughts", []) or [])
             execs_html = self._execs_html(getattr(msg, "execs", []) or [])
             file_edits_html = self._file_edits_html(msg.tools)
-            # v6: 传 id(msg) 让 _tool_steps_html 把折叠状态按消息分别存
+            # 传 id(msg) 让 _tool_steps_html 把折叠状态按消息分别存
             tools_html = (
                 self._tool_steps_html(msg.tools, msg_id=id(msg))
                 if (msg.tools and self._show_tool_steps) else ""
@@ -3720,11 +3407,9 @@ class ChatWindow(QWidget):
         )
 
     def _clean_content(self, text: str) -> str:
-        """清理消息内容：去掉首尾空白，字面量 \\n 转实际换行，折叠连续空行。
+        """清理消息内容:去掉首尾空白,字面量 \\n 转实际换行,折叠连续空行。
 
-        2026-10-15:折叠 3+ 连续空行 → 2 行,避免 read_file PDF/Word 解析输出
-        时多个段落间空行被放大成整段空白(用户实测「内容排版有问题,太多
-        换行」)。`\n\n` 段间隔保留(语义需要),但 `\n\n\n\n+` 折叠。
+        \n\n 段间隔保留(语义需要),但 \n\n\n\n+ 折叠。
         """
         import re
         # 字面量 \n（反斜杠+n）→ 实际换行
@@ -3736,13 +3421,9 @@ class ChatWindow(QWidget):
         return text
 
     def _inline_local_images_to_data_url(self, text: str) -> str:
-        """v9: 渲染前预处理 — 把 markdown 里的本地图片引用 (file:///) 替换
-        成 data: URL, 让 QTextBrowser 真的嵌图, 而不是只显示一段路径文字。
-
-        为什么不直接 setHtml + file:// :
-          PyQt5 5.x 的 QTextBrowser 对 file:// 嵌图支持不稳, 经常只显示 alt
-          文字 (用户实测「图片拖进去是这样子」截图)。data: URL 是 QTextBrowser
-          内置 base64 解码, 稳定可靠。
+        """把 markdown 里的本地图片引用 (file:///) 替换成 data: URL,
+        让 QTextBrowser 自包含 base64 嵌图。
+        PyQt5 5.x 的 QTextBrowser 对 file:// 嵌图支持不稳,data: URL 稳定可靠。
 
         范围:
           - 只处理 markdown 形式 `![alt](file:///...)`, 扫的是 image 链接
@@ -3775,7 +3456,7 @@ class ChatWindow(QWidget):
                     return Path(local)
                 except Exception:
                     return None
-            # v14: 项目内相对路径 (assets/uploads/xxx.png)
+            # 项目内相对路径 (assets/uploads/xxx.png)
             if project_root is not None and (
                 url.startswith("assets/")
                 or url.startswith("./assets/")
@@ -3788,7 +3469,7 @@ class ChatWindow(QWidget):
             alt = m.group(1) or "图片"
             url = m.group(2)
 
-            # http(s):// data: → 原样保留 (跟 v9 一致)
+            # http(s):// data: → 原样保留
             if url.startswith(("http://", "https://", "data:")):
                 return m.group(0)
 
@@ -3796,7 +3477,7 @@ class ChatWindow(QWidget):
             if p is None:
                 return m.group(0)
             if not p.is_file():
-                # v14: 文件丢失 → 给清晰提示, 不再空白
+                # 文件丢失给清晰提示,不再空白
                 return f"*[图片已丢失: {p.name}]*"
             try:
                 if p.stat().st_size > 8 * 1024 * 1024:
@@ -3935,22 +3616,14 @@ class ChatWindow(QWidget):
         # data: 是 _inline_local_images_to_data_url 的产物, 渲染稳定;
         # file:// 是降级路径 (file 太大 / 失败), QTextBrowser 不一定 load。
         #
-        # v20 主人 2026-10-16 反馈「图片撑满整个窗口, 小窗口下看不全」:
-        #   主人期望 chat 软件标准模式: 缩略图固定上限 (340px) + 点击放大
-        #   看原图。 v17 固定 width=240, v18 max-width:100% + max-height:480px
-        #   在 PyQt5 5.x QTextBrowser CSS subset 支持不全, 大图仍撑开 chat_view。
-        #   这版改 HTML attr width=N (Qt 100% 支持), 嵌套 <a href="img-open:KEY">
-        #   让点击 anchor 走 _on_chat_anchor_clicked 弹原图 QDialog。KEY 用
-        #   sha1[:10] 稳定, 同一 URL 同一 key, 重渲染不丢映射, 避免 QUrl
-        #   对 data: 长 base64 URL 截断。
+        # 缩略图固定上限 (340px) + 点击放大看原图。HTML attr width=N Qt 100% 支持
+        # KEY 用 sha1[:10] 稳定,同一 URL 同一 key,重渲染不丢映射,避免 QUrl 对 data: 长 base64 截断
         def _img(m: "re.Match[str]") -> str:
             alt = m.group(1)
             url = m.group(2)
             if not re.match(r'^(https?|file|data):', url, re.IGNORECASE):
                 return m.group(0)
-            # 取 chat viewport 宽度, 用来算缩略图上限
-            # (PyQt5 5.x 是 viewport 真正宽度, 主窗口 0.85 倍, 上限 340 防
-            #  大屏时图过大, 下限 200 防小屏时图过窄)
+            # 上限 340 防大屏时图过大,下限 200 防小屏时图过窄
             try:
                 vp_w = self.chat_view.viewport().width()
             except Exception:
@@ -3964,9 +3637,6 @@ class ChatWindow(QWidget):
             return (
                 f'<a href="img-open:{key}" title="点击放大" '
                 f'style="text-decoration:none;display:inline-block;">'
-                # v25: img margin 4px → 2px (上下), 避免主人反馈「图片下面
-                # 有一大段空白」时跟 announce \n\n 复合撑出更大段位. block
-                # 元素上下 margin 跟 anchor inline-block 之间留 2px 已足.
                 f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
                 f'style="display:block;width:{thumb_w}px;height:auto;'
                 f'max-width:100%;border-radius:8px;margin:2px 0;'
@@ -4064,25 +3734,9 @@ class ChatWindow(QWidget):
         """完全重建 chat_view:从 self.history 重新渲染所有消息,再加上
         当前 streaming 占位 (如果有)。
 
-        2026-10-15 v5: 这是 cmd:toggle_tools 点击处理用的最稳路径。
-        _refresh_streaming_message 的「从 anchor 删到末尾再 insertHtml」模式
-        在某些状态下会让 chat 区域被擦白 (用户实测 v4 反馈「点击后
-        聊天窗口信息清空」)。重建整个 chat_view 慢一点但安全 —— 不动
-        anchor, 不动 cursor, 用 setHtml-style 全量重渲染。
-
-        性能: history 长度通常 < 200, 每条 _msg_html 跑一次 markdown 渲染,
-        实测 < 50ms, 在 60 fps 桌宠上下文完全无感。
+        这是 cmd:toggle_tools 点击处理用的最稳路径,不动 anchor/cursor,
+        用全量重渲染替代「从 anchor 删到末尾再 insertHtml」(后者某些状态会擦白 chat)。
         """
-        # 1. 滚到底 (重渲染后还要在底部)
-        sb = self.chat_view.verticalScrollBar()
-        was_at_bottom = (sb.value() >= sb.maximum() - 4)
-        # 2. 清空 chat_view
-        self.chat_view.clear()
-        # 3. 重新渲染 history 里所有消息
-        #    注意: 这里不能调 _on_done 之后才有的 _current_bot_msg = None 路径,
-        #    只渲染 history 里的 (历史 assistant 消息 tools 已带)
-        for msg in self.history:
-            self._render_message(msg)
         # 4. 重建 streaming 占位 (如果还在 streaming)
         if (self._current_bot_msg is not None
                 and getattr(self, "_streaming_anchor_pos", None) is not None):
@@ -4127,10 +3781,8 @@ class ChatWindow(QWidget):
     def _typing_dots_html(self) -> str:
         """回复等待中的「三点跳动」动画：三个圆点依次点亮、循环流动。
 
-        Qt 富文本不支持 CSS @keyframes，所以动画由 QTimer 定时推进
-        _typing_frame（0/1/2）并整体重绘占位气泡实现。
-        2026-10-15: 改用 CHAT_MD_CSS 里定义的 .typing-dot 类, 颜色统一交给 CSS;
-        当前高亮那个用 .typing-dot.active 标。MiniMax Code 风格: 浅灰底 + 紫高亮。
+        Qt 富文本不支持 CSS @keyframes，动画由 QTimer 定时推进 _typing_frame
+        并整体重绘占位气泡。颜色交给 CHAT_MD_CSS 里定义的 .typing-dot 类。
         """
         frame = getattr(self, "_typing_frame", 0) % 3
         dots = []

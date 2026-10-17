@@ -25,7 +25,7 @@ from app.animation.live2d_scene import (
 from app.animation.pet_renderer import PetRenderer
 from app.core.qt_compat import QObject, QTimer, QUrl
 
-# 否则 PyQtWebEngine 会在模块加载时初始化 OpenGL plugin 并报错
+# PyQtWebEngine 会在模块加载时初始化 OpenGL plugin，先设置共享上下文
 from PyQt5.QtCore import Qt, QCoreApplication, pyqtSlot as Slot
 QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
@@ -99,8 +99,7 @@ class _ConsolePage(QWebEnginePage):
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
         src = Path(str(sourceId)).name
-        # JS 的常规 INFO（模型加载进度/Cubism 启动横幅）是纯噪音 → DEBUG；
-        # WARN/ERROR 保留（真问题时才有日志可看）
+        # JS 常规 INFO（模型加载进度/Cubism 启动横幅）→ DEBUG；WARN/ERROR 保留
         if level == QWebEnginePage.InfoMessageLevel:
             log.debug("[Live2D JS INFO] %s (%s:%s)", message, src, lineNumber)
         elif level == QWebEnginePage.WarningMessageLevel:

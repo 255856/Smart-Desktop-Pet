@@ -1,4 +1,4 @@
-"""TTS 语音合成 —— 使用 Microsoft edge-tts（免费，无需 API key）。"""
+"""TTS 语音合成：Microsoft edge-tts（免费，无需 API key）。"""
 from __future__ import annotations
 
 import asyncio

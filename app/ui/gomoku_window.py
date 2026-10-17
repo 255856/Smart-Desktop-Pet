@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""五子棋小游戏窗口：玩家执黑（先手）vs 桌宠 AI（白棋）。
-
-- 无边框圆角紫色主题弹窗，与设置 / 聊天窗同一套皮肤，可拖动标题栏。
-- 自绘 15×15 木纹棋盘，鼠标落子；桌宠 AI 用 QTimer 延迟应招，避免界面卡顿。
-- 三档难度（切换即重开一局）；胜负通过 game_finished 信号交控制器结算金币、
-  触发桌宠表情/气泡；窗口本身不直接改 PetState。
-"""
+"""五子棋弹窗：玩家执黑 vs 桌宠 AI。"""
 from __future__ import annotations
 
 import logging
@@ -26,7 +20,7 @@ from app.games.gomoku import (
 
 log = logging.getLogger(__name__)
 
-# 难度 → 中文 / 金币奖励（赢 / 和 / 输；认输 0）
+# 难度 → 中文 / 金币奖励
 DIFF_LABEL = {"easy": "简单", "normal": "普通", "hard": "困难"}
 REWARDS = {
     "easy":   {"win": 10, "draw": 3, "lose": 0},
@@ -34,7 +28,7 @@ REWARDS = {
     "hard":   {"win": 40, "draw": 10, "lose": 2},
 }
 
-# 桌宠局势解说（关键棋型 / 结算时触发，由控制器朗读 TTS）
+# 局势解说（控制器朗读 TTS）
 COMMENTS = {
     # 玩家刚把棋走成对应威胁
     "player_live_four": ["不好！两头都堵不住了……", "完了完了，这要怎么防呀！"],
@@ -279,7 +273,7 @@ class GomokuWindow(QDialog):
     game_finished = Signal(str, str)
     # 桌宠局势解说（控制器负责气泡 + TTS 朗读）
     comment = Signal(str)
-    # 对局会话状态：True=进入一局（保持游戏动作），False=关闭退出（回默认）
+    # 对局会话状态：True=进入一局，False=关闭退出
     game_session_active = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None,
@@ -425,7 +419,7 @@ class GomokuWindow(QDialog):
         btns.addWidget(self.btn_close)
         body.addLayout(btns)
 
-        # AI 延迟落子定时器（成员化，便于重开/关窗时取消）
+        # AI 延迟落子定时器
         self._ai_timer = QTimer(self)
         self._ai_timer.setSingleShot(True)
         self._ai_timer.timeout.connect(self._ai_move)

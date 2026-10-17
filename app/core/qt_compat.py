@@ -84,17 +84,12 @@ except ImportError:
 BACKEND = _BACKEND
 
 
-# Qt 6 (PySide6 / PyQt6):  QMouseEvent 有 .position() / .globalPosition()，返回 QPointF
-# Qt 5 (PyQt5):           仅有 .pos() / .globalPos()，返回 QPoint
-# 业务代码里需要的是「event 里的位置」、规范到 QPoint —— 跨版本稳定的 helper：
+# Qt 6: QMouseEvent 有 .position() / .globalPosition()，返回 QPointF
+# Qt 5: 仅有 .pos() / .globalPos()，返回 QPoint
+# 业务代码需要跨版本稳定地取 event 里的位置、规范到 QPoint
 
 def event_global_pos(evt) -> "QPoint":
-    """跨 Qt5/Qt6 取鼠标事件的全局位置，统一返回 QPoint。
-
-    调用：
-        drag_start = event_global_pos(evt) - win.frameGeometry().topLeft()
-    """
-    # 优先 Qt6 API
+    """跨 Qt5/Qt6 取鼠标事件的全局位置，统一返回 QPoint。"""
     try:
         return evt.globalPosition().toPoint()
     except AttributeError:
@@ -112,13 +107,12 @@ def event_local_pos(evt) -> "QPoint":
 def is_qobject_alive(obj) -> bool:
     """QObject 的 C++ 侧是否还活着。
 
-    为什么需要：后台线程（如倒计时提醒线程、agent 的 to_thread 工具线程）
-    可能在 QObject 析构之后才回来调它的信号。Python 侧的 bound method 不会
-    阻止 C++ 对象被销毁，此时再 emit 就是访问已释放内存——Windows 上直接
-    `access violation` 打崩整个进程（测试里必现）。
+    后台线程（如倒计时提醒线程、agent 的 to_thread 工具线程）可能在 QObject
+    析构之后才回来调它的信号——再 emit 就是访问已释放内存，Windows 上会
+    access violation 打崩整个进程。
 
-    PyQt5 走 `sip.isdeleted`，PySide6 走 `shiboken6.isValid`；
-    非 QObject 或后端没提供对应 API 时保守返回 True（维持原行为）。
+    PyQt5 走 sip.isdeleted，PySide6 走 shiboken6.isValid；非 QObject 或
+    后端没提供 API 时保守返回 True。
     """
     if obj is None:
         return False

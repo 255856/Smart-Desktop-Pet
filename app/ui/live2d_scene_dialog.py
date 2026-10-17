@@ -1,14 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Live2D「触发场景动作」配置弹窗。
-
-两类编辑共用同一个外观选择表单：
-  - SceneEditDialog：编辑固定场景（开心/思考/摸头/深夜…）的外观组合；
-  - ActionEditDialog：新增/编辑用户自定义动作（自命名 + 可选绑定工具动作键）。
-
-外观组合（SceneBundle）：表情单选、发型单选（含「默认发型」）、配件/手势/特殊
-多选，全部留空 = 触发时不改变该项。固定场景可「恢复默认」（回退到模型 YAML
-triggers 推导的默认值）；保存直接落盘（按模型一份 JSON）。
-"""
+"""Live2D 触发场景动作配置弹窗。"""
 from __future__ import annotations
 
 import logging

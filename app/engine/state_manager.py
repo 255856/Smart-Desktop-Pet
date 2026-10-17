@@ -1,8 +1,7 @@
 """状态管理器：封装 PetState + SaveStore + ReminderStore 的管理逻辑。
 
-v23-4 数值持久化 (走 yaml companion_config.persistence)
-v23-5 事件驱动钩子 (apply_feed / apply_interact 走 yaml event_hooks)
-v23-6 时间驱动: 每小时 -0.833 饱食度衰减 (yaml time_decay.satiety_per_hour)
+数值持久化走 yaml companion_config.persistence；事件钩子走 yaml event_hooks；
+时间驱动衰减走 yaml time_decay。
 """
 from __future__ import annotations
 
@@ -43,7 +42,7 @@ class StateManager(QObject):
         self.root = root
         self.cfg = cfg
 
-        # v23-4: 路径走 yaml persistence.file, 默认 data/pet_state.json
+        # 路径走 yaml persistence.file，默认 data/pet_state.json
         self.save_store = SaveStore(path=None, autosave_seconds=60)
         self._last_food_warn = 0.0
 
@@ -54,7 +53,7 @@ class StateManager(QObject):
             self.state = self.save_store.load()
             self.save_store.set_state(self.state)
 
-        # 任何 state 改动都触发 mark_dirty → write_on_update 立即写 (yaml 配)
+        # 任何 state 改动都触发 mark_dirty → write_on_update 立即写（yaml 配）
         self.state.on_change = self.save_store.mark_dirty
 
         # mode 切换信号转发
@@ -71,11 +70,9 @@ class StateManager(QObject):
         self.reminders.reminder_triggered.connect(self.reminder_fired.emit)
         self._last_tick_ts: float = 0.0   # 上次状态 tick 时间：按真实 dt 推进，支持降频
 
-        # v23-6 时间驱动: 每小时检查一次衰减 + 互动时间检查
+        # 时间驱动：每小时检查一次衰减 + 互动时间检查
         from app.core.companion_config import companion_config
         self._decay_timer = QTimer(self)
-        # yaml check_interval_seconds 默认 600s (10分钟); 主人要求每小时 -0.833,
-        # 这里采用 600s (10分钟) 一次, 每次按实际 elapsed 算 (跟 v22 衰减走法一致).
         self._decay_timer.setInterval(
             companion_config.time_decay.check_interval_seconds * 1000
         )

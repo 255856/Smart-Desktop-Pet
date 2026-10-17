@@ -1,8 +1,4 @@
-"""chat_window 子模块：/ 命令自动补全。
-
-QPlainTextEdit 没有原生 setCompleter；本类用 QListWidget 当 popup，
-按 / 前缀过滤候选，Tab/Enter/Esc/鼠标点击 都能交互。
-"""
+"""chat_window / 命令自动补全。"""
 from __future__ import annotations
 
 from app.core.qt_compat import (
@@ -11,14 +7,7 @@ from app.core.qt_compat import (
 
 
 class _CommandCompleter(QObject):
-    """监听 QPlainTextEdit 的按键事件，当输入行以 / 开头时弹候选列表。
-
-    实现：
-        - 监听 keyPress（Up/Down/Tab/Enter/Esc/字符键）
-        - 用一个 QListWidget 当 popup
-        - 匹配 prefix 的命令显示在 popup 里
-        - Enter / Tab 接受第一个候选；Esc 关闭；鼠标点击也能选
-    """
+    """监听 QPlainTextEdit 的按键事件，当输入行以 / 开头时弹候选列表。"""
 
     def __init__(self, edit: QPlainTextEdit, candidates: list[str]):
         super().__init__(edit)
@@ -47,6 +36,7 @@ class _CommandCompleter(QObject):
         # 才会显示」的问题。keypress 事件在 Qt 处理之前, 此时 doc 还没插入新字符,
         # _current_word() 读不到 /, popup 不显示。textChanged 在 doc 变化之后才发,
         # 这时已经能读到 / + 后续字符。
+        # 文本变化时刷新 popup（textChanged 在 doc 变化之后才发，能读到 / + 后续字符）
         edit.textChanged.connect(self._refresh)
 
     def eventFilter(self, obj, event):

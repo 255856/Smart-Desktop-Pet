@@ -1,13 +1,4 @@
-"""LangChainAgent 任务结果回写 PetState (v22-2 反馈闭环接入) 单元测试。
-
-覆盖:
-  - set_companion_state(None) / set_companion_state(PetState) 接受
-  - _finish_run_with_outcome(success=True) 触发 apply_outcome(success)
-  - _finish_run_with_outcome(success=False) 触发 apply_outcome(failure)
-  - _fire_outcome 缺少 state 不抛
-  - _fire_outcome 缺 apply_outcome 方法 静默
-  - 不依赖网络/LLM, 直接调 _fire_outcome / _finish_run_with_outcome
-"""
+"""LangChainAgent 任务结果回写 PetState 单元测试。"""
 from app.engine.state import PetState
 from app.brain.companion_policy import Decision
 from app.brain.langchain_agent import LangChainAgent
@@ -101,9 +92,7 @@ def test_finish_run_failure_calls_apply_outcome_failure():
     agent.set_companion_state(ps)
     f0, sf0, fav0 = ps.feeling, ps.strength_food, ps.likability
     agent._finish_run_with_outcome(success=False)
-    # failure 应让 feeling-, strength_food-, favor-
-    # v23-3 数值走 yaml (-12 mood, 0 food, -3 favor); food 不再被扣,
-    # 这里只断言 mood/favor 降.
+    # failure 应让 feeling-, strength_food-, favor-; food 不再被扣, 这里只断言 mood/favor 降.
     assert ps.feeling < f0, f"failure 应让 feeling-. f0={f0} → {ps.feeling}"
     assert ps.likability < fav0, (
         f"failure 应让 favor-. fav0={fav0} → {ps.likability}"
@@ -112,7 +101,7 @@ def test_finish_run_failure_calls_apply_outcome_failure():
 
 
 def test_v22_feedback_loop_changes_decision_after_failure():
-    """v22-2 实测闭环: 多次 failure 后 mood 跌, 决策从 ALLOW 变 CONFIRM。
+    """多次 failure 后 mood 跌, 决策从 ALLOW 变 CONFIRM。
 
     这条跟 test_risky_companion.test_v215 验证一样, 但走 LangChainAgent._finish_run 入口.
 

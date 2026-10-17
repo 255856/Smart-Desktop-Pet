@@ -23,6 +23,14 @@ CATEGORY_LABELS = {
     "Drug": "药品",
     "Gift": "礼物",
 }
+CATEGORY_LABELS = {
+    "Drink": "饮料",
+    "Meal": "正餐",
+    "Snack": "零食",
+    "Functional": "功能",
+    "Drug": "药品",
+    "Gift": "礼物",
+}
 _TYPE_ALIASES = {"snacks": "Snack"}
 
 
@@ -116,7 +124,6 @@ class Job:
     def calculate_rewards(self, *, level: int = 1, lucky: Optional[float] = None) -> tuple[float, int]:
         """返回 (money, exp)；按 level 倍率 + 随机完成奖励。"""
         money = self.money_base * (1 + (level - 1) * 0.05)
-        # bonus
         r = lucky if lucky is not None else random.random()
         money *= (1 + self.finish_bonus * r)
         # exp 简单按 level 线性
@@ -144,6 +151,7 @@ class ItemStore:
         items = [Item.from_dict(d) for d in raw.get("items", [])]
         # data/foods.json 的父目录是 data/，再上一级是项目根（取绝对路径，避免 cwd 不同）
         base_dir = p.resolve().parent.parent
+        log.info("ItemStore: 加载 %d 个物品", len(items))
         log.info("ItemStore: 加载 %d 个物品", len(items))
         return cls(items=items, base_dir=base_dir)
 

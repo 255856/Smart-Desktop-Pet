@@ -36,16 +36,10 @@ class MoveDecision:
 class MotionController:
     """周期性决定下一个动作 + 执行中更新位置。
 
-    PR4 增强：
-        - screen_geometry_getter 期望返回**所有屏幕**可用区域的并集（不再假设单屏）。
-        - SideHide 模式有 settle_time，到点后**主动爬回来**而不是永远停在屏边。
-        - smartmove：每 ~10 s 抽样鼠标位置，若桌宠与鼠标距离 > 阈值，朝鼠标走一段。
-          这是 VPet 同款「smartmove#True」行为。
-
-    get_window:           () -> QWidget
-    screen_geometry_getter: () -> QRect | None
-    animator:             PetRenderer  # 实际为 SpriteRenderer（继承 PetAnimator）
-    cursor_pos_getter:    () -> QPoint (可选，默认走 QCursor.pos())
+    增强点：
+        - 支持多屏（screen_geometry_getter 返回所有屏幕可用区域并集）
+        - SideHide 模式到点后主动爬回来
+        - smartmove：朝鼠标走一段（VPet 同款）
     """
 
 

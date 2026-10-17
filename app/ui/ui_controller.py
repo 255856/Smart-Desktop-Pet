@@ -19,8 +19,7 @@ log = logging.getLogger(__name__)
 class UIController(QObject):
     """封装所有 UI 窗口管理和信号连接。"""
 
-    # 口型同步信号桥：TTS 播放钩子在工作线程被调，emit 本信号自动 queued 到主线程
-    # （QTimer.singleShot 不能在非 Qt 线程调用，之前用它导致嘴巴不动）
+    # 口型同步信号桥（TTS 工作线程 emit，自动 queued 到主线程）
     _lipSyncChanged = Signal(bool)
 
     # 聊天/主动搭话情绪 → Live2D 固定场景 id（未列出的情绪回退直接切表情）
@@ -84,10 +83,7 @@ class UIController(QObject):
                               getattr(_r0, "max_fps", 30) if _r0 else 30))
         _renderer_cfg = getattr(self.cfg.pet, "renderer", "sprite")
         _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
-        # v24: 启动时用 settings.json 里的 activitywatch 值覆盖 cfg (跟 _apply_stored
-# 模式一致 — 用户在 UI 改过, 重启后仍是 UI 设的值, 而不是 yaml 默认值)。
-        # 注意: 必须在 SettingsWindow 之前, 这样 SettingsWindow 通过 set_aw_config
-        # 拿到的就是用户最近的值。
+        # 启动时用 settings.json 里的 activitywatch 值覆盖 cfg（必须在 SettingsWindow 之前）
         _store_pre = None
         try:
             from app.core.settings_store import SettingsStore
@@ -131,8 +127,7 @@ class UIController(QObject):
                 },
             },
         )
-        # v24: 启动时把 cfg.activitywatch 灌进 settings_window, 让「活动感知」
-        # Tab 反映当前 cfg (主人重启后看到的状态跟在 yaml 存的一致)。
+        # 启动时把 cfg.activitywatch 灌进 settings_window
         try:
             self.settings_window.set_aw_config(getattr(self.cfg, "activitywatch", None))
         except Exception:
@@ -141,9 +136,7 @@ class UIController(QObject):
         self.pet.food_money_fn = lambda: self.state.money
         self.pet.pet_name_fn = lambda: self.cfg.character.name
 
-        # v22-1b: 开发者模式信号接线
-        #   - dev_state_pushed: settings 滑块改动 → 改 PetState + 同步到 RiskyToolConfirm
-        #   - developer_mode_changed: 开关状态 (目前主程序只 emit 不消费, 仅供测试观察)
+        # 开发者模式信号接线
         self.settings_window.developer_mode_changed.connect(
             self._on_developer_mode_changed
         )
@@ -242,8 +235,7 @@ class UIController(QObject):
         self.state_mgr.food_low.connect(self._on_food_low)
         self.state_mgr.reminder_fired.connect(self._on_reminder_triggered)
 
-        # 闹钟 / 倒计时到点的统一出口：置顶窗 + 循环提示音 + TTS 播报 +
-        # Windows 系统通知。原先提醒到点只弹一个气泡，主人忙起来完全注意不到。
+        # 闹钟 / 倒计时到点的统一出口：置顶窗 + 循环提示音 + TTS 播报
         from app.ui.alarm_window import AlarmPresenter
         self.alarm = AlarmPresenter(speak_fn=self._speak_alarm)
 
@@ -257,8 +249,7 @@ class UIController(QObject):
             self.brain.alarm_fired.connect(self._on_alarm_fired)
 
         self.brain.bubble_requested.connect(self.pet.show_bubble)
-        # clear_bubble 工具需要一条真能把气泡收掉的通道；
-        # 之前 _power.set_bubble_clear_hook 从没被主程序注入，该工具恒定空转。
+        # clear_bubble 工具需要一条真能把气泡收掉的通道
         hide = getattr(self.pet, "hide_bubble", None) or \
             getattr(self.pet, "_hide_bubble", None)
         if callable(hide) and hasattr(self.brain, "bubble_cleared"):
@@ -283,11 +274,7 @@ class UIController(QObject):
         self._fire_alarm(text, kind=kind)
 
     def _on_developer_mode_changed(self, enabled: bool) -> None:
-        """v22-1b: 开发者模式开关变化 (控制 Tab checkbox 切换)。
-
-        主程序不直接消费, 但留着这个 slot 让 settings.signal 连通。
-        pet / live2d 不依赖开发者模式 (开发者模式只调 settings 自己的 sliders)。
-        """
+        """开发者模式开关变化（slot 让 settings.signal 连通）。"""
         log.info("developer mode = %s", enabled)
         try:
             # 同步回 settings (开/关信号)
@@ -296,22 +283,15 @@ class UIController(QObject):
             pass
 
     def _on_dev_state_pushed(self, snapshot: dict) -> None:
-        """v22-1b: 滑块改动发来 → 改 PetState + 同步 RiskyToolConfirm。
+        """滑块改动发来 → 改 PetState + 同步 RiskyToolConfirm。
 
         流程:
           1. snapshot 每项 (attr, value) setattr 到 self.state
-          2. self.state.normalize() 把数值钳到 [0, 100] 等合法范围
-          3. 同步给标准后端 LangChainAgent 的 confirm_ctrl,
-             让它之后的任务拦截走查表 (v21-5)
-          4. 回灌 settings UI: progress bar + lbl_summary 跟新值同步
-          5. 触发 state.on_change 让 pet_window / live2d 表情同步 (loop
-             衰减会让 next tick 覆盖这个值, 所以 on_change 调一次即可,
-             但开发者模式开启时衰减停下来避免视觉抖动)
-          6. v29: 立即 write_sync (不走 5s 防抖) —— 主人 2026-10-17 11:46
-             反馈 "dev mode 改的数值没实时保存, 聊天时状态与我设置的不
-             一致". 防抖在 dev mode 是反模式, 主人期望滑块每次拖动
-             立刻落盘, 不然切回 chat / 关程序重开 / dashboard 看就是
-             5s 前的旧值.
+          2. self.state.normalize() 把数值钳到合法范围
+          3. 同步给 LangChainAgent 的 confirm_ctrl
+          4. 回灌 settings UI（progress bar + lbl_summary）
+          5. 触发 state.on_change 让 pet_window / live2d 表情同步
+          6. 立即 write_sync（不走 5s 防抖，dev mode 下主程序期望滑块每次拖动立刻落盘）
         """
         try:
             for attr, val in (snapshot or {}).items():
@@ -321,10 +301,7 @@ class UIController(QObject):
                     continue
                 setattr(self.state, attr, float(val))
             self.state.normalize()
-            # v22-3: 同步给 LangChainAgent (策略层 + 反馈层). 这是除了
-            # RiskyToolConfirm 之外的第二条路径: LangChainAgent.set_companion_state
-            # 内部还会调 _companion_registry.set_state_for_thread 让
-            # grounding_dynamic_prompt 拿到当前 state 拼 strategy 文本.
+            # 同步给 LangChainAgent（策略层 + 反馈层 + confirm_ctrl）
             cw = self._chat_window
             if cw is not None:
                 lc = getattr(cw, "_lc_agent", None)
@@ -334,7 +311,7 @@ class UIController(QObject):
                     except Exception as e:  # noqa: BLE001
                         log.warning(
                             "sync to LangChainAgent failed: %s", e)
-                # 同步给 LangChainAgent 的 confirm_ctrl (v21-5)
+                # 同步给 LangChainAgent 的 confirm_ctrl
                 ctrl = getattr(lc, "_confirm_ctrl", None) if lc else None
                 if ctrl is not None:
                     ctrl.set_companion_state(self.state)
@@ -343,18 +320,13 @@ class UIController(QObject):
                 self.settings_window._update_state_view(self.state)
             except Exception:  # noqa: BLE001
                 pass
-            # 触发 on_change 让 pet/Live2D 同步 (走 _combined → mark_dirty)
+            # 触发 on_change 让 pet/Live2D 同步（走 _combined → mark_dirty）
             try:
                 if self.state.on_change:
                     self.state.on_change()
             except Exception:  # noqa: BLE001
                 pass
-            # v29: 立即写盘 (不走 5s 防抖) —— 主人 2026-10-17 11:46 反馈
-            # "dev mode 改的数值没实时保存, 聊天时状态与我设置的不一致".
-            # mark_dirty 上面 on_change 链已经走过, 但 5s 防抖可能不写,
-            # 主人滑完滑块立刻切回 chat, 内存里有新值, 但 SaveStore 还没
-            # 落盘. 走 write_sync 强制落盘, 主程序重启 / dashboard 都能
-            # 看到最新值.
+            # 立即写盘（不走 5s 防抖）
             try:
                 if self.state_mgr is not None and self.state_mgr.save_store is not None:
                     self.state_mgr.save_store.write_sync(self.state)
@@ -365,14 +337,7 @@ class UIController(QObject):
             log.warning("_on_dev_state_pushed 失败: %s", e)
 
     def _fire_alarm(self, text: str, kind: str = "⏰ 提醒") -> None:
-        """到点提醒的统一处理。
-
-        四件事一起做，缺一不可：
-          1) 桌宠气泡（顺带播一个 reminder 动画）；
-          2) 置顶闹钟窗（主人在忙别的、桌宠在角落时也能看见）；
-          3) 循环系统提示音；
-          4) Windows 系统通知（进通知中心，桌宠隐藏也留痕）。
-        """
+        """到点提醒的统一处理：气泡 + 置顶窗 + 提示音 + 系统通知。"""
         self.pet.show_bubble(f"{kind}：{text}")
         anim = getattr(self.pet, "animator", None)
         if anim is not None and hasattr(anim, "trigger_scene"):
@@ -382,11 +347,9 @@ class UIController(QObject):
                 log.debug("reminder 动画触发失败", exc_info=True)
         alarm = getattr(self, "alarm", None)
         if alarm is not None:
-            # speak=True：让桌宠朗读提醒内容（"⏰ 闹钟到点啦~ 喝水"）。
-            # 之前默认 False，但用户明确要求「希望桌宠能够朗读提醒」——
-            # TTS 引擎若不可用，alarm.fire 内部 try/except 兜底，不会影响其他通道。
+            # speak=True：让桌宠朗读提醒内容
             alarm.fire(text, kind=kind, sound=True, speak=True)
-        # 系统通知失败也没关系：桌宠自己的置顶窗已经是可靠通道了
+        # 系统通知（桌宠自己的置顶窗已是可靠通道，失败也无所谓）
         from app.core import toast
         toast.show(kind, text)
 
@@ -481,7 +444,7 @@ class UIController(QObject):
         return None
 
     def _on_werewolf_finished(self, result: dict) -> None:
-        # 胜 30 金币、负/参与 5 金币（受每日游戏金币上限约束）
+        # 胜 30 金币、负/参与 5 金币
         amount = 30 if result.get("player_won") else 5
         granted = self.state.add_game_reward(amount) if amount else 0
         self.state.on_interact(feeling_gain=2)
@@ -547,7 +510,7 @@ class UIController(QObject):
         xw.set_wallet(self.state.money, self.state.game_coin_remaining())
 
     def _on_xiangqi_pet_mood(self, mood: str) -> None:
-        """象棋窗口报告的桌宠情绪:分派到 thinking / 表情键 / 复位。"""
+        """象棋窗口报告的桌宠情绪：分派到 thinking / 表情键 / 复位。"""
         anim = getattr(self.pet, "animator", None)
         if anim is None:
             return
@@ -557,7 +520,7 @@ class UIController(QObject):
             elif mood == "idle":
                 anim.set_idle()
             elif mood:
-                # 其他键(happy/sad/surprised/shy)走表情键
+                # 其他键走表情键
                 self.pet.play_emotion(mood)
         except Exception:  # noqa: BLE001
             log.warning("象棋桌宠情绪切换失败：%s", mood)
@@ -574,7 +537,7 @@ class UIController(QObject):
         if xw is not None:
             xw.set_wallet(self.state.money, self.state.game_coin_remaining())
             xw.show_reward(granted, amount > 0 and granted <= 0)
-        # 困毙/和棋都判 draw → 不触发胜负外观（保持平静）
+        # 困毙/和棋不触发胜负外观
         _xq_ev = {"win": "game_win", "lose": "game_lose",
                   "draw": "game_lose", "giveup": "game_lose",
                   "resign": "game_win",
@@ -689,18 +652,13 @@ class UIController(QObject):
         log.info("chat reply ready: %r / %s tts=%s", text, emotion, tts_enabled)
         self._apply_chat_emotion(emotion)
         if tts_enabled and self.tts is not None:
-            # 流式期间 chat_window 已按句 speak 过；这里判断一下避免重复播整段。
-            # 只看 state.fr 这一个对象（其实它在 chat_window 里；这里粗暴地用长度阈值）：
-            # 若 text 很短（无句末标点的尾部），让 chat_window 自己 speak。
-            # 实际更可靠：让 chat_window 自己 speak 整段前再判断，所以我们只在
-            # chat_window 没 speak 过时才补 speak。
+            # 流式期间 chat_window 已按句 speak 过；这里补播剩余尾部
             cw = getattr(self, "_chat_window", None)
             if cw is None:
                 self.tts.speak(text)
             else:
                 spoken = getattr(cw, "_tts_spoken_chars", 0)
                 if spoken < len(text):
-                    # 还有未 speak 的尾部 → 补播整段
                     self.tts.speak(text)
 
     def _apply_chat_emotion(self, emotion) -> None:
@@ -741,7 +699,7 @@ class UIController(QObject):
             last = float(getattr(self.state, "_last_interact_ts", 0.0) or 0.0)
             if last <= 0:
                 last = now
-            # 许久未理（30 分钟）
+            # 30 分钟未互动
             if now - last >= 1800:
                 if not self._in_idle_lonely:
                     self._in_idle_lonely = True
@@ -763,8 +721,7 @@ class UIController(QObject):
     def _on_streaming_chunk(self, text: str) -> None:
         """流式输出增量：同步显示到桌宠头顶气泡。"""
         self.pet.show_streaming_bubble(text)
-        # 流式文本阶段不张嘴——此时 TTS 还没开始朗读，先动嘴会「对不上口型」。
-        # TTS 关闭（纯气泡聊天）时才退化为按文字节奏张嘴。
+        # TTS 关闭时按文字节奏张嘴（开了 TTS 等引擎信号，避免对不上口型）
         if not getattr(self.tts, "enabled", True):
             self._stream_talking = True
             self._update_talking()
@@ -778,15 +735,13 @@ class UIController(QObject):
     def _setup_lipsync(self) -> None:
         self._tts_talking = False
         self._stream_talking = False
-        # TTS 播放钩子（引擎工作线程回调 → 本信号桥 → queued 到主线程）。
-        # 不能用 QTimer.singleShot：PyQt5 禁止在非 Qt 线程起 timer，会静默失败。
-        # 信号只 connect 一次（TTS 热切换会重进本方法，重复 connect 会多次触发）。
+        # TTS 工作线程回调 → 本信号桥 → queued 到主线程（不能用 QTimer.singleShot）
+        # 信号只 connect 一次（TTS 热切换会重进本方法）
         if not getattr(self, "_lipsync_wired", False):
             self._lipSyncChanged.connect(self._set_tts_talking)
             self._lipsync_wired = True
         if hasattr(self.tts, "on_speak_start"):
-            # TTS 工作线程调 on_speak_start()/on_speak_end()（无参）；
-            # emit 信号跨线程 queued 到主线程 → _set_tts_talking
+            # TTS 工作线程调 on_speak_start()/on_speak_end()（无参）
             self.tts.on_speak_start = lambda: self._lipSyncChanged.emit(True)
             self.tts.on_speak_end = lambda: self._lipSyncChanged.emit(False)
 
@@ -1005,23 +960,13 @@ class UIController(QObject):
                 tts=self.tts,
                 memory_store=self.brain.memory,
                 chat_cfg=self.cfg.chat,
-                # 接线(a):把 phase 2/3 引擎层做好的「上下文对象」喂给 ChatWindow
-                # cwd:Agent 当前工作目录(AGENTS.md 向上查找起点 + 项目级工具的根)。
-                # 默认 = 项目根,主程序可配置(将来让用户在 settings 里改)。
+                # 引擎层上下文对象
                 cwd=str(self.root),
-                # session_store:brain 上挂的持久化对象(降级时为 None)
+                # session_store: brain 上挂的持久化对象（降级时为 None）
                 session_store=getattr(self.brain, "session_store", None),
-                # skills_dir:brain.skills_dir(项目根/skills/),非空路径
+                # skills_dir: brain.skills_dir（非空路径）
                 skills_dir=str(getattr(self.brain, "skills_dir", "") or ""),
-                # v35 修: 主程序 (main.py:1016) 创建 ChatWindow 时有传
-                # state_provider=lambda: core.state, 但 UIController._show_chat_window
-                # 这条路径 (托盘菜单 / 双击唤起) 创建 ChatWindow 时**漏传**了, 主人
-                # 实际运行走这条路径 → self._state_provider 永远是 None →
-                # PostLLMStateGuard / RiskyToolConfirm 永远走无 state 路径,
-                # 状态差 LLM 仍 preemptive 问 "要确认一下" (实测 13:16 主人).
-                # 修法: 用 lambda 包 self.state_mgr.state (每次 _kickoff_llm 拉最新).
-                # 注意: 不能传 self.state (line 51 __init__ 时的快照引用,
-                # 主人 dev mode 改 state 不会反映到新 agent).
+                # state_provider: 每次拉最新 state，dev mode 改值能反映到新 agent
                 state_provider=lambda: self.state_mgr.state,
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)

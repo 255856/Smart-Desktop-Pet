@@ -1,17 +1,4 @@
-"""接线(a) Phase 2/3 → ChatWindow 上下文层回归测试。
-
-覆盖:
-- BrainController 创建 SessionStore + skills_dir 后,挂到 self.session_store / self.skills_dir
-- ChatWindow 接收新 kwargs(cwd / session_id / session_store / skills_dir / auto_load_skills /
-  extra_docs_paths),存到 self._*
-- ChatWindow 把这些 self._* 透传给 LangChainAgent(用 mock 验证 _lc_agent 收到正确 kwargs)
-- _PlanWorker 信号协议跟 _AgentWorker 一致(chunk / done / failed)
-- _quick_send_plan / _kickoff_llm_plan / _render_plan_card 在 standard / lightweight
-  backend 下都不会崩
-- LangChainAgent.plan_sync 是个可调用方法,签名跟 run_sync 平行
-
-不调 LLM、不连真实 Qt(用 QApplication.instance() 复用测试 fixture 已有的)。
-"""
+"""ChatWindow 上下文层回归测试：BrainController + ChatWindow 接线 + Plan worker 协议。"""
 from __future__ import annotations
 
 import os

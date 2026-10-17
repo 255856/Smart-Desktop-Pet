@@ -26,10 +26,7 @@ def _scale_pixmap_keep_alpha(pix: QPixmap, target_size) -> QPixmap:
 
 
 class PetAnimator(PetRenderer):
-    """Sprite 渲染器：高层语义 + 一次性特殊待机定时器 + 拖动动画链。
-
-    实现 PetRenderer 接口（sprite 版本）。Live2DRenderer 是另一份实现。
-    """
+    """Sprite 渲染器：高层语义 + 一次性特殊待机定时器 + 拖动动画链。"""
 
     # 特殊待机触发间隔：60 秒（每分钟随机触发一次）
     SPECIAL_IDLE_INTERVAL_S = 60
@@ -37,8 +34,6 @@ class PetAnimator(PetRenderer):
     def __init__(self, atlas: SpriteAtlas, player: AnimationPlayer,
                  display_widget: Optional["QLabel"] = None,
                  on_animation_changed: Optional[Callable] = None):
-        # PetRenderer.__init__ 不需要，但保持 isinstance(pet_renderer.PetRenderer) 可用
-        # 通过 metaclass 自动；这里不需要显式 super().__init__()（ABCMeta 不要求）
         self.atlas = atlas
         self.player = player
         self.display_widget = display_widget  # QLabel（PetWindow 传入）

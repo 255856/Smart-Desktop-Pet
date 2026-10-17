@@ -1,14 +1,4 @@
-"""v23-3 数值权重 yaml 化 + 好感维度进决策表 测试。
-
-覆盖:
-  1. apply_outcome 数值权重从 companion_config.yaml 读 (跟 日志.txt 一致)
-  2. apply_outcome 升级公式 100 * level^1.5 走 yaml leveling
-  3. apply_outcome trace_outcome 写盘
-  4. apply_feed / apply_interact 走 yaml 钩子
-  5. quantize 加 favor 维度 (likability 离散化)
-  6. lookup_decision 加 favor 维度, 老规则不动, 新 6 条 favor 规则生效
-  7. RULES_TABLE 总数 = 老 31 + 新 6 = 37 条
-"""
+"""数值权重 yaml 化 + 好感维度进决策表 测试。"""
 from __future__ import annotations
 
 import json

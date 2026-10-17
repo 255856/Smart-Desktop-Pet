@@ -263,7 +263,7 @@ class TestMiddlewareOnBlockedCallback:
         assert handler.calls == []
 
     def test_callback_returning_true_passes_through(self):
-        """2026-10-15:UI callback 返回 True → 立即放行(不再等模型重试 __confirmed)。"""
+        """UI callback 返回 True → 立即放行(不再等模型重试 __confirmed)。"""
         ctrl = RiskyToolConfirm()
 
         def approve(*a, **kw):

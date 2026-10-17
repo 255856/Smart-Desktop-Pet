@@ -1,29 +1,18 @@
-"""桌宠养成状态对 Agent 决策的耦合机制 (创新点 2 核心)。
+"""桌宠养成状态对 Agent 决策的耦合。
 
 把决策函数从 ``Action = f(intent, tools, context)`` 扩展为
-``Action = f(intent, tools, context, companion_state)``.
+``Action = f(intent, tools, context, companion_state)``。
 
-状态量化: 桌宠 PetState 的连续数值通过 PetState.quantize() (v21-3)
-离散成三档 (sat/mood/level ∈ {LOW, MID, HIGH})。
-
-风险等级: 工具风险从 TOOL_RISK_LEVEL (v21-1) 取 0..4 五档 (SAFE/LOW/
-MEDIUM/HIGH/IRREVERSIBLE)。
-
-27 条规则 (RULES_TABLE): 12 条 PDF 原文必备 + 15 条按"覆盖明显遗漏 / 反向 /
-边界"反推得到。每条规则的 4 个 state axis 都支持 '*' (= any)。
-
-lookup_decision(pet_state, tool_name) 主入口: 算 state 三档 + risk 五档,
-按 priority 顺序遍历 RULES_TABLE 返回决策 Decision.ALLOW / CONFIRM /
-REJECT / REFUSE。
+量化维度：PetState 通过 quantize() 离散成三档（sati/mood/level/favor ∈
+{LOW, MID, HIGH}），工具风险分五档（SAFE/LOW/MEDIUM/HIGH/IRREVERSIBLE）。
+RULES_TABLE 是 33 条状态-权限规则，主入口 lookup_decision 按 priority 顺序
+匹配，返回 Decision.{ALLOW, CONFIRM, REJECT, REFUSE}。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-# v21-3 给的 PetState.quantize() 行为只在本文件里以"返回值"形式消费,
-# 所以这里只 static import 必要类型 (避免循环: companion_policy 来自 brain,
-# PetState 来自 engine.state, 不会循环)。
 from app.engine.state import PetState
 from app.engine.tools._risk import (
     SAFE, LOW as RISK_LOW, MEDIUM, HIGH, IRREVERSIBLE,
@@ -35,10 +24,10 @@ from app.engine.tools._risk import (
 class Decision:
     """决策结果。
 
-    ALLOW    直接放行 (主人不被打扰, agent 自主)
-    CONFIRM  弹窗拦一道 (主人主动确认才执行)
-    REJECT   永久拦 (模型看到 sentinel 必须重新规划)
-    REFUSE   本轮拒绝 + 自然语言解释 (桌宠情绪表达, 不调用工具)
+    ALLOW    直接放行（主人不被打扰，agent 自主）
+    CONFIRM  弹窗拦一道（主人主动确认才执行）
+    REJECT   永久拦（模型看到 sentinel 必须重新规划）
+    REFUSE   本轮拒绝 + 自然语言解释（桌宠情绪表达，不调用工具）
     """
     ALLOW = "ALLOW"
     CONFIRM = "CONFIRM"
@@ -46,7 +35,7 @@ class Decision:
     REFUSE = "REFUSE"
 
 
-ANY = "*"  # 规则四轴 (sat/mood/level/risk) 任意值匹配
+ANY = "*"  # 规则四轴（sat/mood/level/risk）任意值匹配
 
 
 @dataclass(frozen=True)
@@ -54,13 +43,9 @@ class Rule:
     """单条状态-权限规则。
 
     sat/mood/level/favor: 'LOW' | 'MID' | 'HIGH' | ANY
-    risk:           'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'IRREVERSIBLE' | ANY
-    decision:       Decision.{ALLOW, CONFIRM, REJECT, REFUSE}
-    priority:       整数, 数字越小优先级越高 (遍历匹配时先匹配)
-    note:           注释 (论文 §4.3 引用)
-
-    v23-3 加 favor 维度 (主人 2026-10-16 用好感替换原 trust).
-    favor 默认 ANY → 27 条老规则不动自动 favor=ANY, 决策时只检 sat/mood/level.
+    risk:                 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'IRREVERSIBLE' | ANY
+    decision:             Decision.{ALLOW, CONFIRM, REJECT, REFUSE}
+    priority:             整数，越小越先匹配
     """
     sat: str
     mood: str
@@ -69,7 +54,7 @@ class Rule:
     decision: str
     priority: int
     note: str = ""
-    favor: str = ANY    # v23-3 加, 默认 ANY 兼容老规则
+    favor: str = ANY
 
     def matches(self, sat: str, mood: str, level: str, favor: str, risk: str) -> bool:
         return (
@@ -81,9 +66,7 @@ class Rule:
         )
 
 
-# PDF 原文 12 条 (v21 规划 §6.1)
-# priority 越小越先匹配; PDF starter 优先级集中在 100-200 区间,
-# 我们补的 15 条分配到 10-90 (更 specific 的优先级更高) 和 200-290。
+# priority 越小越先匹配
 _PDF_RULES = [
     Rule("ANY", "LOW",  "ANY", "IRREVERSIBLE", Decision.REJECT,  200,
          "PDF §6.1 #1: 心情低落 + 不可逆 → 拒绝 (桌宠情绪表达)"),
@@ -110,7 +93,6 @@ _PDF_RULES = [
 ]
 
 
-# 扩展 15 + 5 条 (v21 规划 §6.2 反推 + 拆分 PDF §6.1 #10 排除纯读/低风险)
 _EXTRA_RULES = [
     Rule("LOW", "LOW",  "ANY", "MEDIUM",      Decision.REFUSE,  16,
          "PDF §6.1 #10 variant: sat+mood 都 LOW + 中风险 → REFUSE (本轮拒绝)"),
@@ -157,11 +139,10 @@ _EXTRA_RULES = [
 
 
 def _anyfy(rule: Rule) -> Rule:
-    """把规则字面字符串 "ANY" 替换成 ANY 常量, 让 Rule.matches() 的 ``==`` 检查通过。
+    """把规则字面字符串 "ANY" 替换成 ANY 常量，让 Rule.matches() 的 ``==`` 检查通过。
 
-    Rule 用 'ANY' 作字段字面是因为人在编辑时易读 ('LOW', 'ANY', 'LOW' 比
-    'LOW', '*', 'LOW' 直观), 但运行时匹配要走 ANY 常量 ('*') 比较。
-    v23-3 也处理 favor 字段。
+    Rule 用 'ANY' 作字段字面是人编辑时易读（'LOW', 'ANY', 'LOW' 比
+    'LOW', '*', 'LOW' 直观），运行时匹配要走 ANY 常量（'*'）比较。
     """
     return Rule(
         sat=ANY if rule.sat == "ANY" else rule.sat,
@@ -175,11 +156,9 @@ def _anyfy(rule: Rule) -> Rule:
     )
 
 
-# ---- v23-3 favor 维度额外规则 (主人 2026-10-16 加, 替换原 trust) ----
-# favor 高 (≥ favor_rules.high_threshold) → 高风险额外 ALLOW (主人长期信任)
-# favor 低 (< favor_rules.low_threshold)  → 任意 MEDIUM+ 都额外 CONFIRM/REJECT
-# priority 都设在 5..9, 比具体业务规则低 (10+), 但高于 catch-all (290+),
-# 这样 catch-all 不会一上来就 ALLOW; favor 中性 (MID) 走默认 ALLOW.
+# favor 维度额外规则
+# favor 高 → 高风险额外 ALLOW（主人长期信任）
+# favor 低 → 任意 MEDIUM+ 都额外 CONFIRM/REJECT
 _FAVOR_RULES = [
     Rule("ANY", "ANY", "ANY", "IRREVERSIBLE", Decision.CONFIRM, 5,
          favor="HIGH",
@@ -214,7 +193,6 @@ _FAVOR_RULES = [
 ]
 
 
-# 全表 (27 + 6 favor 规则 = 33 条), 按 priority 升序匹配
 RULES_TABLE: list[Rule] = sorted(
     [_anyfy(r) for r in _EXTRA_RULES + _PDF_RULES + _FAVOR_RULES],
     key=lambda r: r.priority,
@@ -222,21 +200,17 @@ RULES_TABLE: list[Rule] = sorted(
 
 
 def quantize_state(pet_state: PetState) -> dict[str, str]:
-    """给 PetState 做四档离散化 (v23-3 加 favor), 给 RULES_TABLE 查表用。
+    """给 PetState 做四档离散化，给 RULES_TABLE 查表用。
 
-    返回 {"satiety": "LOW|MID|HIGH", "mood": "...", "level": "...",
-          "favor": "..."}。
-    直接调 PetState.quantize() (v23-3 加 favor 维度), 不在本文件里重复实现。
+    返回 {"satiety": "LOW|MID|HIGH", "mood": "...", "level": "...", "favor": "..."}。
     """
     return pet_state.quantize()
 
 
-# RISK 数字 → 字符串, 给 Rule.risk 用 ("RISK_LOW" 用名字免混淆)
+# RISK 数字 → 字符串，给 Rule.risk 用
 _RISK_NAMES = {
     SAFE: "SAFE",
-    RISK_LOW: "RISK_LOW",   # 不冲突: Rule.risk 字符串 "LOW" 来自 PDF, 但
-                            # 数字 1 在 TOOL_RISK_LEVEL 是 LOW(UI), 这里
-                            # 命名为 "RISK_LOW" 区分 (实际 PDF 也叫 LOW)
+    RISK_LOW: "RISK_LOW",
     MEDIUM: "MEDIUM",
     HIGH: "HIGH",
     IRREVERSIBLE: "IRREVERSIBLE",
@@ -244,24 +218,18 @@ _RISK_NAMES = {
 
 
 def lookup_decision(pet_state: PetState, tool_name: str) -> str:
-    """决策函数: 算 state + risk, 按 priority 顺序遍历 RULES_TABLE 匹配,
+    """决策函数：算 state + risk，按 priority 顺序遍历 RULES_TABLE 匹配，
     返回 Decision.{ALLOW, CONFIRM, REJECT, REFUSE}。
 
-    遍历策略:
-      1. RULES_TABLE 按 priority 升序遍历 (specific 先匹配)
-      2. 命中第一条规则 → 返回 rule.decision
-      3. 没命中 → 走默认:
-         - SAFE → ALLOW (纯读不挡)
-         - LOW → ALLOW (低风险不挡)
-         - MEDIUM → ALLOW (中风险, 跟旧 RiskyToolConfirm base 一致)
-         - HIGH → CONFIRM (高风险 confirm)
-         - IRREVERSIBLE → REJECT (不可逆默认拒绝, 让模型必须 confirm 重试)
+    命中规则 → 返回 rule.decision。
+    未命中 → 按 risk 走默认：
+      SAFE/LOW/MEDIUM → ALLOW，HIGH → CONFIRM，IRREVERSIBLE → REJECT。
     """
     state = quantize_state(pet_state)
     sat = state["satiety"]
     mood = state["mood"]
     level = state["level"]
-    favor = state.get("favor", "MID")    # v23-3 加 favor 维度 (老测试可能没传)
+    favor = state.get("favor", "MID")
 
     risk_int = risk_for_tool(tool_name, default=MEDIUM)
     risk_str = _RISK_NAMES.get(risk_int, "MEDIUM")
@@ -270,7 +238,7 @@ def lookup_decision(pet_state: PetState, tool_name: str) -> str:
         if rule.matches(sat, mood, level, favor, risk_str):
             return rule.decision
 
-    # default fallback (跟原 RiskyToolConfirm 兼容)
+    # default fallback
     if risk_int >= HIGH:
         return Decision.CONFIRM
     if risk_int >= IRREVERSIBLE:

@@ -1,13 +1,4 @@
-"""chat_window 子模块：常量与无状态工具函数。
-
-集中所有「不需要 ChatWindow 实例状态」的辅助代码：
-    - 危险工具中文标签（弹窗显示）
-    - 工具 UI 元数据（中文名 + 参数键）
-    - HTML 转义 / 时间格式化
-    - 工具结果状态判定
-
-被 chat_window 主类与 test_chat_rendering 共用。
-"""
+"""chat_window 常量与无状态工具函数。"""
 from __future__ import annotations
 
 import json
@@ -68,17 +59,9 @@ _TOOL_UI_META = {
 
 _CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
-# 工具结果失败标记 —— 必须以「错误:」开头(明确错误格式),不要任意包含
-# 「失败」「错误」字样 —— 否则 read_file 输出 PDF/Word 内容里如果出现这些
-# 汉字会被误判为工具失败(用户实测:明明 read_file 调成功了 chat 里
-# 标 ✗ 失败)。
-# 历史:之前用 ("失败", "错误", "无法", "未安装", "没有找到", "找不到") 任意
-# in 文本判断,误判严重。
+# 工具结果失败标记（必须以「错误:」开头，避免 read_file 内容里出现「错误」字样被误判）
 _TOOL_FAIL_MARKERS = ("错误：", "错误:", "失败：", "失败:", "未安装：", "未安装:")
-# v26: 主人 2026-10-17 反馈"状态影响决策 感觉没区别" — companion REJECT/REFUSE
-# 时 LLM 收到的是 {"status": "rejected", "rejected_by_companion": True, ...} JSON,
-# 工具卡片之前没识别这个状态, 默认显示 ✓ 完成. 显式识别后卡片显示"桌宠拒绝",
-# 主人能直接看见"决策被桌宠挡了".
+# companion REJECT/REFUSE 标记（让桌宠拒绝可视化）
 _COMPANION_REJECT_MARKERS = (
     "rejected_by_companion",
     '"status": "rejected"',
@@ -125,13 +108,7 @@ def _tool_label(name: str, args: str) -> Tuple[str, str]:
 
 
 def _tool_status(result: str) -> str:
-    """工具结果状态：'cancel' / 'rejected' / 'fail' / 'ok'.
-
-    v26: 加 'rejected' 分桶 — companion REJECT/REFUSE 时 result 里有
-    rejected_by_companion / "status": "rejected" / 桌宠当前状态拒绝执行,
-    单独走 'rejected' 而不是 'fail' (语义不同: 失败是工具自身问题,
-    拒绝是状态/政策不允许, 主人应该能区分).
-    """
+    """工具结果状态：'cancel' / 'rejected' / 'fail' / 'ok'."""
     r = result or ""
     if "取消" in r:
         return "cancel"
@@ -148,7 +125,7 @@ def _unpack_status_mark(result: str) -> str:
     if status == "cancel":
         return '<span style="color:#9ca3af;">⊘ 取消</span>'
     if status == "rejected":
-        # v26: 主人反馈"状态影响决策 感觉没区别" — 让桌宠拒绝可视化
+        # 桌宠拒绝（companion REJECT/REFUSE）可视化
         return '<span style="color:#a45b2e; font-weight:600;">桌宠拒绝</span>'
     if status == "fail":
         return '<span style="color:#dc2626;">✕ 失败</span>'
@@ -164,12 +141,7 @@ def _html_escape(text: str) -> str:
 
 
 def _img_open_key(url: str) -> str:
-    """v20: 给图片 src 算稳定 KEY, 用来作 <a href="img-open:KEY"> 的 id。
-
-    不用 URL 自身的原因: data:image/png;base64,... 会被 QUrl.toString()
-    截断/percent-encode, 不稳定。SHA1 截前 10 位够用且不会跟历史 key 冲突
-    (16^10 ≈ 1e12, 一张聊天图 < 10000 条不会撞)。
-    """
+    """给图片 src 算稳定 KEY（SHA1 前 10 位）。"""
     import hashlib
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
 

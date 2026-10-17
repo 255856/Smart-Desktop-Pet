@@ -1,11 +1,4 @@
-"""installed_apps 模块 + open_app 候选推荐 的回归测试。
-
-Bug 复盖：
-- 安装应用扫描能正确列出常见 Windows 应用
-- 相似度匹配能找到相似的中文 / 英文应用名
-- open_app 找不到时返回候选列表（之前是直接报错或硬开 notepad）
-- list_installed_apps 工具可用
-"""
+"""installed_apps 模块 + open_app 候选推荐 回归测试。"""
 import sys
 from pathlib import Path
 

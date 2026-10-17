@@ -1,12 +1,4 @@
-"""闹钟意图识别的覆盖度回归（2026-10-04）。
-
-现场：主人说「定一个1分钟闹钟」，`detect_action_intent` 返回 **None** ——
-意图正则里**根本没有「闹钟」这个词**。于是下发全量 52 个工具，模型在
-`add_reminder` / `countdown` 之间随机挑（实测带历史时调了
-`add_reminder` × 2 还外加一个 `countdown`）。
-
-漏词 = 路由不确定。所以这条锁的是**词表覆盖**，不是某一句话。
-"""
+"""闹钟意图识别的覆盖度回归。"""
 from __future__ import annotations
 
 import sys
@@ -49,11 +41,7 @@ def test_non_alarm_phrasings_not_misjudged(q):
 
 
 def test_alarm_word_itself_is_covered():
-    """回归主问题：原表没有「闹钟」二字。
-
-    「闹钟」是设闹钟最自然的说法，漏了它整个闹钟意图就退化成「识别不出 →
-    下发全量工具 → 模型随机挑」——现场正是如此。
-    """
+    """回归主问题：原表没有「闹钟」二字。"""
     for q in ("定一个1分钟闹钟", "定个闹钟", "设个闹钟", "帮我定个闹钟"):
         assert detect_action_intent(q) == "add_reminder", q
     # 覆盖到词表里了：多几句口语也得认

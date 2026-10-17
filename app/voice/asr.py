@@ -1,4 +1,4 @@
-"""语音识别（ASR）模块 —— 麦克风录音 + faster-whisper 转文字。"""
+"""语音识别（ASR）模块：麦克风录音 + faster-whisper 转文字。"""
 from __future__ import annotations
 
 import logging
@@ -12,8 +12,7 @@ from app.core.qt_compat import QObject, Signal
 
 log = logging.getLogger(__name__)
 
-# 必须在 import torch / faster_whisper / ctranslate2 之前设（这些库在 import 时加载 OpenMP/MKL）。
-# 解决 Windows 上 c10.dll "DLL 初始化失败" + faster-whisper 模型下载 SSL 失败两个常见坑。
+# 必须在 import torch / faster_whisper / ctranslate2 之前设
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("KMP_WARNINGS", "0")
@@ -22,7 +21,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SSL_VERIFICATION", "1")
 
 
 def asr_available() -> bool:
-    """sounddevice / faster-whisper 是否已安装（做 UI 降级判断）。
+    """sounddevice / faster-whisper 是否已安装（UI 降级判断）。
 
     用 find_spec 只查存在性、不执行模块——faster_whisper 的 import 会连带
     加载 ctranslate2 等重组件，在聊天窗口构造时执行会把 UI 卡住一两秒。

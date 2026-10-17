@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """小游戏「触发场景 → 动作」配置（所有小游戏共用一套；渲染器无关）。
 
-五子棋、狼人杀等所有小游戏在同一情形（开始 / 胜利 / 失败）时，共用这里的
-同一份配置；每个场景映射到一组候选动作，运行时由 ui_controller 按当前渲染器
-能力（jump / spin / stretch / swim 为通用动作，tongue / cheek 等视模型而定）
+每个场景映射到一组候选动作，运行时由 ui_controller 按当前渲染器能力
+（jump / spin / stretch / swim 为通用动作，tongue / cheek 等视模型而定）
 按顺序取第一个可用动作播放。配置持久化到 data/game_actions.json，
 配置入口在「设置 → Live2D」里。
 """
@@ -103,7 +102,7 @@ class GameActionStore:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.enabled = bool(data.get("enabled", True))
             raw = data.get("actions") or {}
-            # 只认当前通用场景；旧版细分场景（和棋 / 攻势等）键自动作废
+            # 只认当前通用场景；旧版细分场景键自动作废
             for eid, default in DEFAULT_ACTIONS.items():
                 vals = raw.get(eid, default)
                 if isinstance(vals, list):

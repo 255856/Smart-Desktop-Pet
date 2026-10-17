@@ -1,12 +1,4 @@
-"""v23-4 数值持久化 + v23-5 事件驱动钩子 + v23-6 时间驱动衰减 测试。
-
-覆盖:
-  - 升级公式 100 * level^1.5 走 yaml leveling
-  - 存档 SaveStore 走 yaml persistence.file (data/pet_state.json)
-  - write_on_update 立即写, 防抖 5s
-  - apply_feed / apply_interact 走 yaml 钩子
-  - 时间驱动衰减: 饱食度按小时 -0.833, 48h 不互动心情 -5
-"""
+"""数值持久化 + 事件驱动钩子 + 时间驱动衰减 测试。"""
 from __future__ import annotations
 
 import time
@@ -19,7 +11,7 @@ from app.core.companion_config import companion_config
 from app.core.save import SaveStore, _resolve_save_path
 
 
-# ---- v23-4 升级公式 ----
+# ---- 升级公式 ----
 
 def test_level_formula_uses_yaml():
     """升级公式 100 * level^1.5 走 yaml leveling. lv 2 需 282.8 EXP."""
@@ -53,7 +45,7 @@ def test_level_up_need_uses_yaml():
     assert s.level_up_need() == expected
 
 
-# ---- v23-4 存档路径 ----
+# ---- 存档路径 ----
 
 def test_resolve_save_path_relative(tmp_path, monkeypatch):
     """相对路径 data/pet_state.json → cwd 解析 (父目录要存在)."""
@@ -83,7 +75,7 @@ def test_savestore_uses_yaml_default_path(monkeypatch, tmp_path):
     assert store.write_min_interval == companion_config.persistence.write_min_interval_seconds
 
 
-# ---- v23-4 写盘 + reload ----
+# ---- 写盘 + reload ----
 
 def test_savestore_write_and_reload(tmp_path):
     """写盘 → 新 SaveStore 读盘: 数值完整恢复."""
@@ -155,7 +147,7 @@ def test_savestore_debounce_skips_rapid_writes(tmp_path):
     assert store._dirty is True, "但 dirty 标记还在, 兜底会写"
 
 
-# ---- v23-5 apply_feed / apply_interact ----
+# ---- apply_feed / apply_interact ----
 
 def test_apply_feed_uses_yaml():
     """apply_feed 走 yaml user_feed (satiety +15, mood +5)."""
@@ -175,7 +167,7 @@ def test_apply_interact_uses_yaml_and_records_ts():
     assert s._last_interact_ts > before_ts
 
 
-# ---- v23-6 时间驱动衰减 ----
+# ---- 时间驱动衰减 ----
 
 def test_time_decay_satiety_per_hour():
     """时间驱动: 饱食度按 -0.833/h 衰减."""

@@ -1,13 +1,4 @@
-"""幻觉检测 + 工具使用强化 prompt 的回归测试。
-
-Bug 背景：
-- 模型 MiniMax-M3 在工具调用时经常「幻觉」—— 在文本里写「已打开 XX」但
-  实际没调用工具（工具调用次数为 0）。这是 LLM Function Calling 的常见坑。
-- 修复：
-    1. 强化 system prompt（brain_controller.py）：硬规则 + 反向警示
-    2. 在 chat_window._on_done 检测幻觉：模型说「已打开」但本轮没调用工具
-       → 追加系统消息明确告知主人
-"""
+"""幻觉检测回归测试：模型说「已 XX」但未调用工具时给出告警。"""
 import sys
 import re
 from pathlib import Path
@@ -258,15 +249,7 @@ class TestOnDoneIntegration:
 # ============================================================
 
 class TestBuildCleanMessages:
-    """【核心修复】history 里有幻觉痕迹时，必须在幻觉点之前注入 system 提示。
-
-    背景：
-        LLM Function Calling 的弱点：模型看到自己之前的「幻觉回复」
-        （说「已打开 XX」但没调工具），就会**学着这样幻觉**。
-        实测：连续两次「帮我打开 QQ」，第二次会跟着幻觉（即使工具 schema 正确）。
-        修复：在 _kickoff_llm 时检查 history，发现幻觉消息就在它之前
-        插入一条 user 提示「上文是幻觉，请这次真调工具」。
-    """
+    """history 里有幻觉痕迹时，必须在幻觉点之前注入 system 提示。"""
 
     @pytest.fixture
     def chat(self):

@@ -1,4 +1,4 @@
-"""Live2D 模型映射配置（profile）—— 每个模型一份 YAML，渲染器按它动态生成能力。"""
+"""Live2D 模型映射配置（profile）：每个模型一份 YAML。"""
 from __future__ import annotations
 
 import json
@@ -15,8 +15,7 @@ log = logging.getLogger(__name__)
 # exp3 文件名分类格式："类别 名称.exp3.json"（超频猫猫官方热键包的命名规则）
 _PREFIX_SPLIT = re.compile(r"^(\S+)\s+(.+)$")
 
-# 默认通用情绪别名（模型 YAML 没写 triggers.emotions 时兜底；
-# 顺序即匹配优先级：具体的名字在前，见 live2d_renderer 的解析逻辑）
+# 默认通用情绪别名（模型 YAML 没写 triggers.emotions 时兜底）
 DEFAULT_EMOTION_ALIASES: dict[str, str] = {}
 
 

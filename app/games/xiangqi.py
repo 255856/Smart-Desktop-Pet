@@ -28,8 +28,7 @@ BOARD_SIZE = COLS * ROWS          # 90
 
 EMPTY = 0
 
-# 棋子编码:正数 = 红方,负数 = 黑方(取绝对值即类型)
-# 与项目其他模块(包括五子棋窗、xiangqi_window.py)保持一致。
+# 棋子编码：正数 = 红方，负数 = 黑方（取绝对值即类型）
 K, _A, B, N, R, C, P = 1, 2, 3, 4, 5, 6, 7     # 帅 仕 相 马 车 炮 兵
 A = _A                                          # 老代码 / 测试用别名
 
@@ -45,7 +44,7 @@ DIFFICULTIES = ("easy", "normal", "hard")
 # 难度 → 搜索深度
 DIFF_DEPTH = {"easy": 1, "normal": 3, "hard": 4}
 
-# cchess FEN 字符 → 我方编码。cchess 大写表示红方、小写表示黑方。
+# cchess FEN 字符 → 我方编码（cchess 大写红方、小写黑方）
 _FENCH_TO_INT = {
     "K": K, "A": A, "B": B, "N": N, "R": R, "C": C, "P": P,
     "k": -K, "a": -A, "b": -B, "n": -N, "r": -R, "c": -C, "p": -P,

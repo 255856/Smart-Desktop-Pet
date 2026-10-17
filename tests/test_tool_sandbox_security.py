@@ -1,14 +1,4 @@
-"""工具层安全边界回归测试：路径沙箱 + shell 元字符注入。
-
-背景：这些是真实漏洞的回归锁——
-1. 沙箱曾用 ``str(p).startswith(str(home))`` 做前缀比较，导致
-   ``C:\\Users\\alice-backup\\x.txt`` 通过 ``C:\\Users\\alice`` 的检查。
-   （_file / _runner / _filesearch 三处都有这个 bug）
-2. open_app 兜底分支曾用 ``subprocess.Popen([name], shell=True)``，
-   而守卫只挡非 ASCII，``&`` / ``"`` 等元字符可形成命令注入。
-3. search_files 曾无遍历上限，在大目录树上会跑好几分钟，
-   而工具是同步执行，会阻塞整轮 Agent 对话。
-"""
+"""工具层安全边界回归测试：路径沙箱 + shell 元字符注入。"""
 from __future__ import annotations
 
 import json

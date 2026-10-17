@@ -1,16 +1,4 @@
-"""v23-9: dashboard 把桌宠养成 trace 反馈嵌到会话详情顶部 (不是独立 tab).
-
-主人 2026-10-16 反馈: 「决策和数值变化要在会话记录中的每一条对话的顶部显示而不是在桌宠养成页面」.
-
-覆盖:
-  - create_app 仍能构造, /api/companion endpoint 注册
-  - /api/companion 返回 200 + 5 字段 (state/config/decisions/outcomes/persist_path)
-  - state 含 5 维 + quantize 4 维
-  - config 含 yaml 关键字段
-  - HTML 删了「桌宠养成」独立 tab, 改嵌到会话详情顶部 (桌宠养成反馈)
-  - 客户端函数 renderCompanionForRun 存在
-  - 决策/数值变化 trace 各返 list (按 ts 倒序)
-"""
+"""dashboard 把桌宠养成 trace 反馈嵌到会话详情顶部（不是独立 tab）。"""
 from __future__ import annotations
 
 import json
@@ -35,7 +23,7 @@ def test_create_app_has_companion_route():
 
 
 def test_html_embeds_companion_in_run_detail_not_tab():
-    """v23-9 改: 删独立 tab, 把桌宠养成反馈嵌到会话详情顶部."""
+    """删独立 tab, 把桌宠养成反馈嵌到会话详情顶部."""
     app = create_app(trace_db="data/traces.db", memory_file="data/memory.json")
     from fastapi.testclient import TestClient
     r = TestClient(app).get("/")

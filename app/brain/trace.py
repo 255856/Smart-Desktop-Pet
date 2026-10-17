@@ -63,10 +63,7 @@ class TraceRecorder:
 
     @contextmanager
     def _conn(self):
-        # 每次操作一个独立连接，退出时提交并关闭，不泄漏文件句柄。
-        # （`with sqlite3.connect() as c:` 只做事务提交、不会关闭连接；
-        # 在 Windows + coverage 插桩下连接延迟 GC，teardown 删临时 .db
-        # 报 WinError 32。）
+        # 每次操作一个独立连接，退出时关闭（避免文件句柄泄漏）
         c = sqlite3.connect(self.db_path)
         try:
             c.row_factory = sqlite3.Row
@@ -164,10 +161,7 @@ class TraceRecorder:
             out: list[dict] = []
             for r in rows:
                 run = _row_to_run(r)
-                # 2026-10-15:list_runs 也带 events —— 否则 dashboard 选 run 时
-                # 要多一次 /api/runs/{rid} 请求,且如果 detail 加载失败就会
-                # 误显示「这是一条普通对话,没有调用工具」。直接带 events 让
-                # UI 端一次渲染完整。
+                # list_runs 也带 events，让 UI 一次渲染完整
                 ev_rows = c.execute(
                     "SELECT * FROM events WHERE run_id=? ORDER BY seq",
                     (run["id"],),
@@ -255,7 +249,6 @@ class TraceRecorder:
 
     def memory_list(self, limit: int = 200) -> list[dict]:
         """从 memory.json 读出（仅用于 Dashboard）。"""
-        # 这里不直接读 memory，单独从 store 拿
         return []
 
     def trace(self, goal: str, mode: str = "react",

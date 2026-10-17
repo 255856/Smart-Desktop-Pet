@@ -1,12 +1,4 @@
-"""【真正的智能体】AgentLoop ReAct 循环的回归测试。
-
-测试重点：
-    1. 工具调用 + 模型给出 final answer（标准 ReAct）
-    2. 工具调完后 final answer 不为空（修复前 AgentLoopV2 的 bug）
-    3. 连续多轮纯调工具 → 强制 final 阶段
-    4. force_retry 注入 user prompt
-    5. 危险工具（open_app）走确认回调
-"""
+"""AgentLoop ReAct 循环回归测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -341,7 +333,7 @@ class TestAgentLoopReAct:
 # ============================================================================
 
 class TestAgentWorkerDoneFallback:
-    """测试 _AgentWorker.run() 的 done 兜底逻辑（防御性修复）。"""
+    """测试 _AgentWorker.run() 的 done 兜底逻辑。"""
 
     def test_worker_emits_done_with_text_fallback(self):
         """即使 agent 没 yield 任何 text，done 信号也应携带 fallback 文本。"""

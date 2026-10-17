@@ -12,7 +12,7 @@ class TestDashboard:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.trace_db = os.path.join(self.tmpdir, "traces.db")
-        # v23-10b: dashboard 读 sqlite memory.db, 改写 sqlite 而不是 json
+        # dashboard 读 sqlite memory.db, 改写 sqlite 而不是 json
         self.memory_file = os.path.join(self.tmpdir, "memory.db")
         # 准备一些 trace 数据
         from app.brain.trace import TraceRecorder
@@ -113,7 +113,6 @@ class TestDashboard:
         r = self.client.get("/api/memory")
         assert r.status_code == 200
         data = r.json()
-        # v23-10b: 读 sqlite memory.db (2 条 fake 用于测试)
         assert data["count"] == 2
         # 重要性高的排前
         items = data["items"]

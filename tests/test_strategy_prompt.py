@@ -1,11 +1,4 @@
-"""v22-3 策略层 prompt 注入单元测试。
-
-覆盖:
-  - _companion_registry 增删查
-  - _strategy_guidance: HIGH/HIGH/HIGH / LOW/LOW / 无 state / 字段缺失
-  - grounding_dynamic_prompt 按 request.config.thread_id 拿 state
-  - LangChainAgent.set_companion_state 注册 / 反注册
-"""
+"""策略层 prompt 注入单元测试。"""
 from app.engine.state import PetState
 from app.brain._companion_registry import (
     set_state_for_thread, get_state_for_thread, clear_state_for_thread, clear_all,

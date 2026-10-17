@@ -1,17 +1,4 @@
-"""提醒工具端到端测试：通过 ToolRegistry 调 add_reminder，看完整链路。
-
-覆盖：
-  - 工具注册正确
-  - 调 add_reminder(delay_minutes) 真的 add 到 ReminderStore
-  - ReminderStore 真的 schedule timer 并触发 reminder_triggered
-  - 调 add_reminder(at_time) 也工作
-  - 错误参数被拒绝
-
-背景：用户报告「桌面端不提醒」—— bug 可能藏在这条调用链上：
-  LLM → ToolRegistry.call("add_reminder") → add_reminder fn
-  → reminders.add() → ReminderStore._schedule_next → QTimer 触发
-  → reminder_triggered signal
-"""
+"""提醒工具端到端测试：通过 ToolRegistry 调 add_reminder，看完整链路。"""
 from __future__ import annotations
 
 import sys

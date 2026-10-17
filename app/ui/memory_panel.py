@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""长期记忆管理面板：搜索 / 类别筛选 / 新增 / 删除。
-
-从聊天窗标题栏「记忆」按钮或托盘菜单打开。直接操作 MemoryStore（增删实时落盘），
-增删后发出 changed 信号，让聊天窗刷新副标题的「N 记忆」计数。
-
-列表走 UI 层子串过滤 + 类别筛选（不调用 memory.search，避免浏览时 touch 改变
-记忆热度、也避免每次按键都重算语义检索）。
-"""
+"""长期记忆管理面板：搜索 / 类别筛选 / 新增 / 删除。"""
 from __future__ import annotations
 
 import logging
@@ -294,7 +287,7 @@ class MemoryDialog(QDialog):
 
     # -------------------------------------------------------------- 数据
     def _filtered_items(self):
-        """UI 层子串过滤 + 类别筛选，按时间倒序（不触发检索 touch）。"""
+        """UI 层子串过滤 + 类别筛选，按时间倒序。"""
         kw = self.search_edit.text().strip().lower()
         cat = self.cat_combo.currentData()
         items = self.memory.all()
@@ -307,7 +300,7 @@ class MemoryDialog(QDialog):
 
     def refresh(self) -> None:
         """重建列表。"""
-        # 清掉旧行（保留末尾 stretch）
+        # 清掉旧行，保留末尾 stretch
         while self.list_layout.count() > 1:
             it = self.list_layout.takeAt(0)
             w = it.widget()
@@ -378,7 +371,7 @@ class MemoryDialog(QDialog):
         before = self.memory.count()
         self.memory.add(text, category=cat, importance=imp)
         if self.memory.count() == before:
-            # 完全相同内容已存在 → 给出提示（不重复记）
+            # 完全相同内容已存在
             self.new_edit.setPlaceholderText("这条内容已经记住啦～")
         self.new_edit.clear()
         self.refresh()

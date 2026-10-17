@@ -18,14 +18,9 @@ class LLMConfig(BaseModel):
     temperature: float = 0.8
     max_tokens: int = 1024
     timeout: int = 60
-    # 推理强度:仅 OpenAI o1/o3 / 部分推理模型支持(DeepSeek-R1 / MiniMax 也可能)。
-    # "low" / "medium" / "high",None 表示不传(让后端用默认)。
-    # 主程序可让主人按场景调:闲聊低、复杂任务高。
+    # 推理强度:仅 OpenAI o1/o3 / 部分推理模型支持。"low" / "medium" / "high"，None 表示不传
     reasoning_effort: Optional[str] = None
-    # 项目目录白名单:沙箱工具(grep / glob / search / edit_file / multi_edit 等)
-    # 默认只能访问用户家目录;主程序可把项目目录加进去,允许跨目录搜索 / 修改。
-    # 列表里的每个路径会被 resolve 后跟 Path.home() 一起构成白名单。
-    # 任何不在白名单里的访问一律报「不在沙箱内」错误。
+    # 项目目录白名单：沙箱工具默认只能访问用户家目录；这里把项目目录加进去
     project_dirs: List[str] = []
 
 
@@ -55,15 +50,13 @@ class CharacterConfig(BaseModel):
     minimax_api_key: str = ""      # 留空则复用 llm.api_key（同账号）
     minimax_model: str = "speech-01-turbo"
     minimax_group_id: str = ""     # MiniMax 控制台里的 GroupId（部分账号需要）
-    # 克隆样本来源：目录（自动取其中音频文件）或逗号分隔的文件列表。
-    # 配置后启动时自动克隆（样本指纹未变则跳过，不会重复执行）
+    # 克隆样本来源：目录或逗号分隔的文件列表。样本指纹未变则跳过
     minimax_samples: str = ""
-    # GPT-SoVITS 本地引擎（免费自定义音色，方案 B）：需先启动本地 api_v2 服务
+    # GPT-SoVITS 本地引擎（方案 B）：需先启动本地 api_v2 服务
     gptsovits_url: str = "http://127.0.0.1:9880"
     gptsovits_ref_audio: str = ""    # 参考音频路径（服务端本地可访问）
     gptsovits_prompt_text: str = ""  # 参考音频对应的文本
-    # 多音色候选（GPT-SoVITS）：默认用第一个，可在设置面板切换默认；
-    # 狼人杀里可给每个角色单独指定音色。
+    # 多音色候选：默认用第一个，狼人杀里可给每个角色单独指定音色
     voices: List[VoiceProfile] = []
     current_voice: str = ""       # 当前默认音色 name；空 = voices[0]
 
@@ -107,7 +100,7 @@ class ASRConfig(BaseModel):
     language: str = "zh"
 
 
-AgentBackend = Literal["lightweight", "standard"]     # 后端选择
+AgentBackend = Literal["lightweight", "standard"]
 
 
 class LangChainConfig(BaseModel):
@@ -159,22 +152,14 @@ class ChatConfig(BaseModel):
 class ActivityWatchConfig(BaseModel):
     """ActivityWatch 集成。
 
-    AW 是开源本地时间追踪工具 (https://activitywatch.net/), 主人在桌机上装
-    aw-server (Rust 后台, 默认占 5600 端口) + aw-watcher-window 守护后,
-    桌宠可:
-      1) 通过 MCP 工具 (aw_get_*) 回答主人「我刚才在干嘛」类问题 (LLM 主动查)
+    AW 是开源本地时间追踪工具。主人装 aw-server + aw-watcher-window 后桌宠可：
+      1) 通过 MCP 工具 (aw_get_*) 回答主人「我刚才在干嘛」类问题
       2) 给 ProactiveBrain 注入最近活动 context → 主动搭话更贴切
-      3) (Phase 4 可选) Python daemon 增量缓存到本地 SQLite
 
-    enabled 默认 False — 主人先装 AW, 然后手动开, 否则:
-      - MCP server 也启不动工具 (aw_status 返「未运行」)
-      - ProactiveBrain 不查 AW (静默跳过)
-      - 不会让 ProactiveBrain 卡或失败
+    enabled 默认 False — 主人先装 AW 再手动开。未启用时静默跳过，不影响 ProactiveBrain。
     """
     enabled: bool = False
     server_url: str = "http://127.0.0.1:5600"
-    # ProactiveBrain 注入时查多少分钟内的窗口活动 (太长会拖 LLM prompt,
-    # 太短信息不够)
     proactive_lookback_minutes: int = 30
     proactive_max_events: int = 15
 
@@ -187,8 +172,7 @@ class BrainConfig(BaseModel):
     proactive_enabled: bool = True
     proactive_min_minutes: int = 25
     proactive_max_minutes: int = 45
-    # 网络搜索（web_search 工具）：主用 Tavily（需注册免费 key，访问 tavily.com）
-    # 留空则降级 DuckDuckGo（ddgs 包，零 key）。也可走环境变量 TAVILY_API_KEY。
+    # 网络搜索：主用 Tavily（需注册免费 key），留空降级 DuckDuckGo（零 key）
     tavily_api_key: str = ""
     agent: AgentConfig = AgentConfig()
     langchain: LangChainConfig = LangChainConfig()
@@ -197,18 +181,14 @@ class BrainConfig(BaseModel):
 class Live2DConfig(BaseModel):
     """Live2D 渲染器配置（v3.1+）。"""
     model_dir: str = ""      # Cubism 4 模型根目录（含 *.model3.json）
-    # 是否隐藏模型自带的水印（免费模型的版权/防盗声明：含 WaterMark 版权卡片，
-    # 以及伪装成 ArtMesh 叠加在角色身上的 FREE MODEL / 作者署名等文字层）。
-    # 实现上在渲染层 drawMesh 跳过这些 drawable，不改动模型文件与贴图。
-    # 仅建议个人桌面自用；公开使用或再分发请保留水印或联系模型作者授权。
+    # 是否隐藏模型自带的水印（WaterMark 版权卡片 / ArtMesh 装饰文字层）
+    # 仅建议个人桌面自用；公开使用或再分发请保留水印或联系模型作者授权
     hide_watermark: bool = True
-    # 挂机随机表情（空闲时从模型表情池随机切换，互动即暂停）。
-    # 表情池与默认节奏在模型目录的 *.model.yaml 里配置，这里只做开关与节奏覆盖。
+    # 挂机随机表情：空闲时从模型表情池随机切换，互动即暂停
     random_expression: bool = True
     random_expression_min_s: int = 25
     random_expression_max_s: int = 70
-    # 渲染帧率上限（性能）：24fps 为电影帧率，口型、动作与物理都足够顺滑，
-    # 比 30fps 更省电；隐藏到托盘时渲染会完全暂停（零开销）。
+    # 渲染帧率上限：隐藏到托盘时渲染会完全暂停（零开销）
     max_fps: int = 24
 
 
@@ -251,7 +231,6 @@ class Config(BaseSettings):
 
     def has_api_key(self) -> bool:
         """识别所有「占位符」（用户没填真 key）。"""
-        # 委托给 app.core.api_keys，避免每个调用点重复硬编码占位符字面值。
         from app.core.api_keys import is_placeholder_key
         return not is_placeholder_key(self.llm.api_key)
 
@@ -284,11 +263,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
 
 def save_chat_overrides(path: str | Path, cfg: Config) -> None:
-    """把 cfg.chat 的 3 个可改字段(user_avatar_path / bot_avatar_path / show_tool_steps /
-    request_timeout_s)写回 config.yaml 的 chat: 段(merge,不动其它段)。
+    """把 cfg.chat 的可改字段写回 config.yaml 的 chat: 段（merge，不动其它段）。
 
-    用途：用户从 UI 改了头像/工具步骤开关,需要持久化到磁盘。
-    不重写整个 yaml(避免覆盖用户手工改的 llm/character 段)。
+    用途：用户从 UI 改了头像/工具步骤开关，需要持久化到磁盘。
     """
     p = Path(path)
     raw: dict[str, Any] = {}
@@ -307,9 +284,9 @@ def save_chat_overrides(path: str | Path, cfg: Config) -> None:
 
 
 def save_aw_overrides(path: str | Path, cfg: Config) -> None:
-    """v24: 把 cfg.activitywatch 4 个字段写回 config.yaml 的 activitywatch: 段
-    (跟 save_chat_overrides 一样 merge, 不动其它段)。
-    用途：主人在设置面板改了活动感知开关 / aw-server URL 后持久化。
+    """把 cfg.activitywatch 4 个字段写回 config.yaml 的 activitywatch: 段。
+
+    跟 save_chat_overrides 一样 merge，不动其它段。
     """
     p = Path(path)
     raw: dict[str, Any] = {}

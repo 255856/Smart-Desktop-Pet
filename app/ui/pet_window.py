@@ -1,4 +1,4 @@
-"""桌宠主窗口（重写）—— VPet 风格"""
+"""桌宠主窗口：宠物渲染、拖动、菜单、触摸交互。"""
 from __future__ import annotations
 
 import logging
@@ -38,11 +38,7 @@ def _current_anim_ms(player) -> int:
 # 触摸热区（在 sprite 坐标系内的相对比例，0.0-1.0）
 @dataclass
 class TouchArea:
-    """VPet 同款触摸热区（src: GameCore.cs TouchArea）。
-
-    美术改 sprite 尺寸后，只要调整这里的比例即可，**不用改业务逻辑**。
-    locate 和 size 都是 0.0-1.0 的相对比例，基于 SPRITE_SIZE 转换。
-    """
+    """触摸热区：相对比例坐标，sprite 尺寸变化无需改业务逻辑。"""
     name: str                                  # 'head'/ 'body'/ 'raise'/ 自定义
     locate: tuple[float, float] = (0.0, 0.0)   # (x, y) 左上角，相对比例
     size: tuple[float, float] = (1.0, 1.0)     # (w, h) 矩形，相对比例
@@ -52,10 +48,8 @@ class TouchArea:
     priority: int = 0              # 同坐标命中时高 priority 优先
 
     def hit(self, sx: int, sy: int, sprite_size: tuple[int, int]) -> bool:
-        """(sx, sy) 是 SPRITE_SIZE 坐标系下的点。
-
-        把相对比例转为像素坐标后做矩形命中检测。
-        """
+        """矩形命中检测。"""
+        lx = self.locate[0] * sprite_size[0]
         lx = self.locate[0] * sprite_size[0]
         ly = self.locate[1] * sprite_size[1]
         lw = self.size[0] * sprite_size[0]
@@ -122,14 +116,14 @@ class PetWindow(QWidget):
                  live2d_scene_dir: str | Path | None = None,
                  foods_path: str | Path | None = None):
         super().__init__()
-        # 计算窗口尺寸（基于 sprite 设计尺寸 × 缩放）
+        # 计算窗口尺寸（sprite 设计尺寸 × 缩放）
         self._window_size = QSize(
             int(self.SPRITE_SIZE.width() * scale),
             int(self.SPRITE_SIZE.height() * scale),
         )
         self._scale = scale
 
-        # 创建渲染器（sprite / live2d 由 cfg 决定，live2d 失败 fallback sprite）
+        # 创建渲染器（live2d 失败 fallback sprite）
         from app.animation.renderer_factory import create_renderer
         self.renderer = create_renderer(
             renderer_type=renderer_type,
@@ -175,11 +169,7 @@ class PetWindow(QWidget):
         # live2d：头部/眼睛跟随鼠标（驱动物理链，角色才"活"）
         self._setup_look_at()
 
-        # live2d：透明区域点击穿透（按渲染 alpha 定时生成窗口遮罩）
-        # 注意：必须先声明再 setup。原先声明写在 _setup_click_mask() 之后，
-        # 那一行会把刚创建好的 QTimer 立刻覆盖成 None —— 定时器对象仍在跑，
-        # 但 self._mask_timer 已为 None，导致 _mask_adapt_interval 抛异常，
-        # 异常发生在 setMask() 之前，于是遮罩一次都没设上，整窗不透明、点不穿。
+        # live2d 透明区点击穿透：先声明再 setup
         self._mask_timer = None
         self._setup_click_mask()
 
@@ -240,9 +230,7 @@ class PetWindow(QWidget):
         self._bubble_until: float = 0.0
         self._streaming_bubble: bool = False
         self._bubble_stream_last: float = 0.0
-        # 自动隐藏定时器：独立于渲染模式（帧动画 / Live2D 都生效）。
-        # 以前隐藏逻辑写在帧计时器里，Live2D 模式下不执行，导致气泡一直停留。
-        # 性能：仅在有气泡（普通 / 流式）时启动，气泡隐藏后立即停止，避免无气泡时空转。
+        # 气泡自动隐藏定时器（独立于渲染模式，帧动画 / Live2D 都生效）
         self._bubble_timer = QTimer(self)
         self._bubble_timer.setInterval(250)
         self._bubble_timer.timeout.connect(self._check_bubble_timeout)
@@ -267,10 +255,7 @@ class PetWindow(QWidget):
 
         self._build_window(always_on_top)
         self._setup_scale_osd()
-        # wheel hook 默认不装：用户嫌"非激活桌宠被滚轮缩放"太敏感，
-        # 改由设置面板显式 opt-in（未来加 toggle）。方法 + 文件保留，需要时
-        # 调 self._setup_wheel_hook() 启用。
-        # self._setup_wheel_hook()
+        # wheel hook 默认不装（需要时调 self._setup_wheel_hook()）
         # 默认播放待机
         self.animator.set_idle()
         # 立即显示第一帧并启动帧计时器
@@ -281,12 +266,7 @@ class PetWindow(QWidget):
         if always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        # 在某些 Windows 系统（DWM 未启用 / 多显示器 / 远程桌面 / 高 DPI 缩放）下渲染成
-        # 100% 透明完全看不到。这里：
-        #   - 去掉 WA_NoSystemBackground（让 Qt 自己绘制窗口背景）
-        #   - 保留 WA_TranslucentBackground（让 PNG / WebView 的透明区域能透出桌面）
-        #   - 配合 setStyleSheet 设背景色：sprite 用 windowBackground role；live2d 用纯白
-        # 这样 PetWindow 永远有一层可见背景，绝不会再"看不见"。
+        # 保留 WA_TranslucentBackground，配合样式表让 PNG / WebView 透明区可透出桌面
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -294,15 +274,11 @@ class PetWindow(QWidget):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
 
-        # 每个区域带 on_click / on_press 回调，加 sprite 改尺寸不用改业务代码。
+        # 每个区域带 on_click / on_press 回调，加 sprite 改尺寸不用改业务代码
         self._init_touch_areas()
 
     def _init_touch_areas(self) -> None:
-        """配置触摸热区（VPet 同款 TouchArea 数据驱动）。
-
-        美术改了 sprite 尺寸后，只要调整这里的坐标 + size 即可——业务逻辑
-        （mouseReleaseEvent 等）不用动。
-        """
+        """配置触摸热区。"""
         self.touch_areas: list[TouchArea] = [
             TouchArea(
                 name=HitZone.HEAD,
@@ -393,7 +369,7 @@ class PetWindow(QWidget):
             return
         now = time.time()
         if self._streaming_bubble:
-            # 兜底：60s 没收到新流式内容（停止/异常路径漏发 done）时强制收尾
+            # 60s 没收到新流式内容则强制收尾
             if self._bubble_stream_last and now - self._bubble_stream_last > 60.0:
                 self.stop_streaming_bubble()
             return
@@ -513,9 +489,7 @@ class PetWindow(QWidget):
             self._refresh_status_bar()
 
     def _refresh_status_bar(self) -> None:
-        """刷新状态栏进度条 + 状态映射到 Live2D 表情 (v26 主人反馈
-        "状态影响决策 感觉没区别")。
-        """
+        """刷新状态栏进度条 + 状态映射到 Live2D 表情。"""
         if self._attached_state is None or not self._status_visible:
             return
         s = self._attached_state
@@ -523,15 +497,7 @@ class PetWindow(QWidget):
         self._status_bars["food"].setValue(int(s.strength_food))
         self._status_bars["drink"].setValue(int(s.strength_drink))
         self._status_bars["feeling"].setValue(int(s.feeling))
-        # v26: 状态量化 → Live2D 表情, 让主人肉眼看见 state 变化影响
-        # 桌宠行为。 4 维量化 (sat/mood/level/favor) → 表情优先级:
-        #   1. 全 LOW (sat=LOW + mood=LOW + favor=LOW) → tired (累垮)
-        #   2. sat=LOW 或 favor=LOW → sad (伤心)
-        #   3. mood=HIGH + favor=HIGH → happy (双好开心)
-        #   4. mood=HIGH → happy
-        #   5. mood=LOW → sad
-        #   6. 其他 (MID) → natural (走默认)
-        # 状态没变化时不切 (避免 idle 期间反复抖表情)。
+        # 状态量化 → Live2D 表情
         try:
             q = s.quantize()
         except Exception:  # noqa: BLE001
@@ -546,23 +512,23 @@ class PetWindow(QWidget):
 
     @staticmethod
     def _map_state_to_emotion(q: dict) -> str:
-        """v26: 状态量化 4 维 → Live2D 表情名. None 表示不切."""
+        """状态量化 4 维 → Live2D 表情名。None 表示不切。"""
         mood = q.get("mood", "MID")
         sat = q.get("satiety", "MID")
         favor = q.get("favor", "MID")
-        # 1) 三低 → 累垮
+        # 三低 → 累垮
         if mood == "LOW" and sat == "LOW" and favor == "LOW":
             return "tired"
-        # 2) 单 LOW → 伤心
+        # 单 LOW → 伤心
         if mood == "LOW" or sat == "LOW" or favor == "LOW":
             return "sad"
-        # 3) 双好 → 开心
+        # 双好 → 开心
         if mood == "HIGH" and favor == "HIGH":
             return "happy"
-        # 4) 心情好 → 开心
+        # 心情好 → 开心
         if mood == "HIGH":
             return "happy"
-        # 5) 默认走自然, 不强制切
+        # 默认走自然
         return "natural"
 
     def _build_chat_input(self) -> None:
@@ -597,19 +563,8 @@ class PetWindow(QWidget):
     _last_fps_report: float = 0.0
 
     def _start_frame_timer(self) -> None:
-        """显示当前帧 + 调度下一帧。
-
-        PR-bugfix：
-            1. advance 在 setPixmap 之后立即调，**第 0 帧永远只显示一帧**——已
-               把 advance 挪到 _on_frame_timeout 回调里。
-            2. **「每次点击加速」真因**：之前每次 set_idle/set_walk/... 都新建一个
-               QTimer 实例，**旧 timer 没被 stop**。多次点击 → 多个 timer
-               同时 pending → _on_frame_timeout 被多次触发 → advance 频率
-               倍增 → 动画加速 N 倍。
-               现在先 stop 旧 timer 再 start 新 timer，保证同时只有 1 个 timer。
-
-        Live2D 模式下不做任何事（由 JS 内部 requestAnimationFrame 驱动）。
-        """
+        """显示当前帧 + 调度下一帧。Live2D 模式下不做事。"""
+        player = getattr(self.renderer, 'player', None)
         player = getattr(self.renderer, 'player', None)
         if player is None:
             return
@@ -694,15 +649,14 @@ class PetWindow(QWidget):
     def mouseMoveEvent(self, evt: QMouseEvent) -> None:
         if self._dragging:
             self._last_user_interaction_ts = time.time()
-            # 真正移动时才开始播放拖动动画（移动距离 ≥5 像素才算拖动）
+            # 移动距离 ≥5 像素才算拖动
             if not self._drag_animation_started:
                 dist = (event_global_pos(evt) - self._press_pos).manhattanLength()
                 if dist >= 5:
                     self._drag_animation_started = True
                     self.animator.start_drag()
-                    # 交给系统拖动窗口：逐事件手动 move() 在带 WebGL 的透明窗口上
-                    # 会一卡一卡；startSystemMove 由 OS 完成窗口移动，全程平滑。
-                    # Qt 会在松开鼠标时结束系统拖动并回发 release 事件。
+                    # 交给系统拖动窗口：逐事件手动 move() 在带 WebGL 的透明窗口上会一卡一卡
+                    handle = self.windowHandle()
                     handle = self.windowHandle()
                     if handle is not None and hasattr(handle, "startSystemMove"):
                         try:
@@ -777,13 +731,7 @@ class PetWindow(QWidget):
         super().leaveEvent(evt)
 
     def _install_display_input_filters(self, widget: QWidget) -> None:
-        """给显示控件本身及其所有后代控件装上事件过滤器。
-
-        QWebEngineView 内有一个全屏覆盖的 Chromium delegate 子 QWidget，
-        真实鼠标/拖拽事件直接发给它且不冒泡；只给 view 装过滤器会漏掉。
-        配合 eventFilter 里的 ChildAdded 分支，delegate 在页面加载后才
-        创建也能被补上，sprite 的 QLabel 走同一条路径，无副作用。
-        """
+        """给显示控件及其所有后代装上事件过滤器（含 QWebEngineView 的 Chromium delegate）。"""
         widget.installEventFilter(self)
         if hasattr(widget, "setAcceptDrops"):
             widget.setAcceptDrops(True)
@@ -800,15 +748,7 @@ class PetWindow(QWidget):
         return obj is display or display.isAncestorOf(obj)
 
     def eventFilter(self, obj, evt):
-        """PR-fix-drag-menu (live2d): 把显示控件（含 QWebEngineView 内部 delegate）
-        的鼠标/拖拽事件转发给 PetWindow 自己处理。
-
-        默认 Qt 先把事件发给最内层 child，QWebEngineView 的内部 delegate 会吞掉
-        事件且不冒泡。安装过滤器后，press/move/release/dblclick 先到本方法，
-        我们用 mapToGlobal + self.mapFromGlobal 转成 PetWindow 坐标，再调自己的
-        handler；拖拽文件（dragEnter/dragMove/drop）也一并转发，否则拖到网页
-        上会被 Chromium 拦截而不是「喂文件」。
-        """
+        """把显示控件（含 QWebEngineView 内部 delegate）的鼠标/拖拽事件转发给 PetWindow。"""
         if not self._is_display_widget(obj):
             return super().eventFilter(obj, evt)
 
@@ -821,8 +761,7 @@ class PetWindow(QWidget):
                     sub.installEventFilter(self)
             return False
 
-        # 鼠标进入/离开：delegate 全屏覆盖，顶层 enterEvent/leaveEvent 收不到，
-        # 这里代为维护 _user_inside（自主运动据此暂停）。
+        # 鼠标进入/离开：delegate 全屏覆盖，顶层 enterEvent/leaveEvent 收不到
         if evt.type() == QEvent.Type.Enter:
             self._user_inside = True
             self._last_user_interaction_ts = time.time()
@@ -834,11 +773,7 @@ class PetWindow(QWidget):
             return False
 
         if isinstance(evt, QMouseEvent):
-            # 把 child 局部坐标转成 PetWindow 坐标（delegate/view/PetWindow 都从
-            # (0,0) 起、同尺寸，但保险起见统一走全局坐标转换）。
-            # 注意：必须同时带上全局坐标（QMouseEvent 只传局部坐标时 globalPos
-            # 会被 Qt 置成局部值），否则右键菜单的 event_global_pos() 拿到
-            # 窗口局部坐标 → 菜单永远弹在屏幕同一个固定位置。
+            # 注意：必须同时带上全局坐标（否则右键菜单会永远弹在屏幕同一个固定位置）
             local_pt = QPoint(evt.pos())
             global_pt = obj.mapToGlobal(local_pt)
             mapped = QMouseEvent(
@@ -868,8 +803,7 @@ class PetWindow(QWidget):
             self._handle_scale_wheel(evt)
             return True
 
-        # 文件拖拽：dragEnter/drop 只用 mimeData；dragMove 用坐标决定光标，
-        # delegate/view/PetWindow 坐标完全重合，可直接转发原事件。
+        # 文件拖拽：delegate/view/PetWindow 坐标完全重合，可直接转发原事件
         if isinstance(evt, QDragEnterEvent):
             self.dragEnterEvent(evt)
             return True
@@ -897,19 +831,17 @@ class PetWindow(QWidget):
                 self.animator.end_drag()
             else:
                 # 没拖动：算一次 click → 走 TouchArea.on_click 回调
-                # 注意：双击的第二次 release 也会进入这里，但不会触发双击（因为
-                # mouseDoubleClickEvent 已经处理了双击逻辑）
                 area = self._hit_zone(event_local_pos(evt))
                 if area is not None and area.on_click is not None:
                     area.on_click()
             evt.accept()
 
     def mouseDoubleClickEvent(self, evt: QMouseEvent) -> None:
-        # 双击：sprite 播转圈圈；live2d 模型无转圈 motion，改做模型原生吐舌表情
+        # 双击：sprite 播转圈圈；live2d 触发场景配置
         if evt.button() == Qt.MouseButton.LeftButton:
             rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
             if rtype == "live2d":
-                # 双击走「触发场景配置」的 double_click（默认=吐舌外观，可自定义）
+                # 双击走「触发场景配置」的 double_click
                 self.animator.trigger_scene('double_click')
             else:
                 self.animator.play_spin()
@@ -1039,19 +971,19 @@ class PetWindow(QWidget):
 
     def _on_feed_picked(self, item) -> None:
         """选中食物：播吃/喝动画；冷却内只提示，否则食物图贴纸 + desc 气泡 + 状态变化。"""
-        # 1) 吃/喝动画（无论是否冷却都播，作为点击反馈）
+        # 吃/喝动画
         try:
             self.animator.play_eat()
         except Exception:  # noqa: BLE001
             log.exception("喂食动画播放失败")
 
-        # 2) 喂食冷却：30 秒内连点只提示「吃不下」，不重复弹贴纸 / 加状态
+        # 喂食冷却
         now = time.time()
         if now - self._last_food_ts < self.FEED_COOLDOWN_S:
             left = int(self.FEED_COOLDOWN_S - (now - self._last_food_ts)) + 1
             self.show_bubble(f"刚刚才吃过啦，{left} 秒后再喂我嘛~", duration_ms=2500)
             return
-        # 2.5) 购买扣金币：余额不足直接拦截（不弹贴纸 / 不进冷却）；扣款由控制器 apply_food 完成
+        # 余额不足拦截
         price = float(getattr(item, "price", 0.0) or 0.0)
         money_fn = getattr(self, "food_money_fn", None)
         money = float(money_fn()) if callable(money_fn) else None
@@ -1062,7 +994,7 @@ class PetWindow(QWidget):
             return
         self._last_food_ts = now
 
-        # 3) 食物图片贴纸（右上角，正立）
+        # 食物图片贴纸
         try:
             img = None
             if self.food_store is not None:
@@ -1071,12 +1003,12 @@ class PetWindow(QWidget):
                 self.show_food_sticker(str(img))
         except Exception:  # noqa: BLE001
             log.exception("食物图片显示失败")
-        # 4) 气泡描述（无 desc 时给默认语）
+        # 气泡描述
         text = (getattr(item, "desc", "") or "").strip()
         if not text:
             text = f"谢谢主人的{item.name}~ 好开心！"
         self.show_bubble(text, duration_ms=4000)
-        # 5) 通知主程序按该食物数值变化状态（不发通用 eat_requested，避免双重加成）
+        # 通知主程序按食物数值变化状态
         self.food_selected.emit(item.name)
 
     def _on_swim_menu(self) -> None:
@@ -1128,18 +1060,12 @@ class PetWindow(QWidget):
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
             resize(self._window_size.width(), self._window_size.height())
-        # 尺寸变化后旧遮罩坐标失效，需要重建（模型重新 fit 需要一点时间）。
-        # 这里【不要】clearMask()：清掉之后整窗变成不透明，点击穿透直接失效，
-        # 而重建要等 800ms 后的 _sample_base_mask —— 那期间用户点不动后面的窗口，
-        # 万一那次采样又拿到空帧就再也回不来了。保留旧遮罩，等新的覆盖上去即可
-        # （遮罩只会变大不会缩小，旧的在视觉上无害）。
+        # 尺寸变化后旧遮罩坐标失效，需要重建
         self._mask_base = None
         self._mask_prev_region = None
         self._mask_sig = None
         self._mask_stable_count = 0
-        # 作废任何正在进行的异步 base 采样：缩放/连续缩放会触发多次延迟采样，
-        # 旧回调若继续把不同尺寸的帧塞进 _base_samples，最终 acc | s 会
-        # 因 shape 不一致而 broadcast 报错。用 epoch 令牌让过期回调直接作废。
+        # 作废任何正在进行的异步 base 采样
         self._mask_sample_epoch = getattr(self, "_mask_sample_epoch", 0) + 1
         self._base_samples = []
         self._base_poses = []
@@ -1151,12 +1077,7 @@ class PetWindow(QWidget):
 
     # ---------- 滚轮 / 菜单缩放 ----------
     def _setup_wheel_hook(self) -> None:
-        """非激活（前台是别的窗口）时也能滚轮缩放：挂 WH_MOUSE_LL 低级钩子。
-
-        桌宠永远不抢焦点，系统默认把滚轮发给前台窗口，前台是浏览器时滚轮
-        根本到不了桌宠；系统「悬停非活动窗口滚动」开关又因机器而异。
-        低级钩子自包含、不依赖系统设置，仅在窗口可见时挂载。
-        """
+        """非激活时也能滚轮缩放：挂 WH_MOUSE_LL 低级钩子。"""
         self._wheel_hook = None
         if sys.platform != "win32":
             return
@@ -1301,20 +1222,11 @@ class PetWindow(QWidget):
         """右键菜单：还原默认大小。"""
         self._zoom_preset(self.SCALE_DEFAULT)
 
-    # 点击穿透遮罩的降采样倍率。遮罩只需判断「这一块是不是透明」，
-    # 不需要逐像素精度；降到 1/4 后 numpy 运算量变 1/16，逐行构造 QRegion 的
-    # Python 循环次数也变 1/4。py-spy 实测该路径原本占进程 CPU 的 80%+。
+    # 点击穿透遮罩的降采样倍率（1/4 后 numpy 运算量变 1/16）
     MASK_DOWN = 4
 
     def _setup_click_mask(self) -> None:
-        """live2d 模式下窗口是方形画布，模型四周大量透明像素会挡住点击。
-        周期性从渲染帧的 alpha 通道生成窗口遮罩（setMask）：遮罩外既不显示
-        也不接收鼠标 → 透明处直接点到后面的窗口。
-
-        遮罩宁大勿小（偏大只是少一块穿透区，偏小会当场裁掉角色）：
-            * 就绪后采样「头转到左右极限」的剪影并集作为下限（头发甩出的范围）；
-            * 与上一帧遮罩求并（物理甩动是连续的，相邻两帧不会跳很远）。
-        """
+        """live2d 模式下周期性从渲染帧的 alpha 通道生成点击穿透遮罩。"""
         rtype = self.renderer.get_renderer_type() if self.renderer else "sprite"
         if rtype != "live2d":
             return
@@ -1324,20 +1236,13 @@ class PetWindow(QWidget):
         self._idle_mask_stopped = False  # JS 闲置时 mask_timer 是否已停
         self._mask_timer = QTimer(self)
         self._mask_timer.timeout.connect(self._update_click_mask)
-        # 遮罩仅用于「透明处点击穿透」。活跃期间 1.5s 采样跟上动作；
-        # JS 判定闲置后直接停止（静置剪影稳定，无需再 grab），见 on_renderer_idle。
+        # 活跃期间 1.5s 采样，JS 闲置后停止（见 on_renderer_idle）
         self._mask_timer.start(1500)
         # 模型 ready 后（约 2s）采样极限姿势
         QTimer.singleShot(2000, self._sample_base_mask)
 
     def _grab_opaque(self):
-        """抓当前显示帧的 alpha>16 布尔阵列（按 MASK_DOWN 降采样）；失败返回 None。
-
-        遮罩只用于「透明处点击穿透」，不需要逐像素精度；而整帧 grab +
-        asstring 拷贝 + 后续 numpy/QRegion 构建是整个进程最大的 CPU 开销
-        （py-spy 实测占 80%+），所以统一降到 1/4 分辨率再算。
-        返回的是降采样坐标系的阵列，消费方需自行乘回 MASK_DOWN。
-        """
+        """抓当前显示帧的 alpha>16 布尔阵列（按 MASK_DOWN 降采样）；失败返回 None。"""
         import numpy as np
         from PyQt5.QtGui import QImage
         w = self._sprite_label
@@ -1349,16 +1254,10 @@ class PetWindow(QWidget):
         buf = img.constBits().asstring(img.sizeInBytes())
         alpha = np.frombuffer(buf, dtype=np.uint8).reshape(h, line, 4)[:, :, 3]
         opaque = alpha > 16
-        # 每 MASK_DOWN 个像素取 1 个：后续 numpy 运算量降到 1/16，
-        # 逐行构造 QRegion 的 Python 循环次数也降到 1/MASK_DOWN
         return opaque[::self.MASK_DOWN, ::self.MASK_DOWN].copy()
 
     def _region_from_mask(self, m) -> QRegion:
-        """bool 剪影阵列（降采样坐标系）→ QRegion（窗口坐标系）。
-
-        膨胀半径换算：原实现是降采样前的 np.roll(4)×3 轮 ≈ 12px，
-        在 1/MASK_DOWN 分辨率下等价于 np.roll(1)×3 轮；坐标再乘回 MASK_DOWN。
-        """
+        """bool 剪影阵列（降采样坐标系）→ QRegion（窗口坐标系）。"""
         import numpy as np
         m = m.copy()
         for _ in range(3):
@@ -1414,7 +1313,7 @@ class PetWindow(QWidget):
                     cur = self._grab_opaque()
                     if cur is not None:
                         if self._base_samples and self._base_samples[0].shape != cur.shape:
-                            # 尺寸中途变了，丢弃本轮全部旧样本，等下一轮重新采样
+                            # 尺寸中途变了，丢弃旧样本，等下一轮重新采样
                             self._base_samples = []
                         self._base_samples.append(cur)
             except Exception:  # noqa: BLE001
@@ -1435,24 +1334,18 @@ class PetWindow(QWidget):
             if cur is None:
                 return
             if not cur.any() and self._mask_base is None:
-                # 抓到全透明帧：说明「这一帧没法作为剪影依据」，而不是「模型没了」。
-                # 绝不能在这里 clearMask() —— 闲置时遮罩定时器已停，清掉就再也
-                # 没人重建，整窗会永久变成不透明、点不穿。保留上一次的好遮罩。
+                # 抓到全透明帧：保留旧遮罩，绝不能 clearMask
                 return
             # 当前帧 ∪ 极限姿势下限
             if self._mask_base is not None and self._mask_base.shape != cur.shape:
-                # 缩放后旧 base 与新帧尺寸不一致，丢弃旧 base（下轮采样会重建）
+                # 缩放后旧 base 与新帧尺寸不一致，丢弃旧 base
                 self._mask_base = None
             m = cur if self._mask_base is None else (cur | self._mask_base)
-            # 签名短路：剪影没实质变化就不重建 QRegion、不调 setMask。
-            # setMask 会触发窗口管理器重算合成区域，是这条路径上最贵的一步；
-            # 桌宠静置时剪影几乎不变，1Hz 无条件重建纯属浪费。
-            # 签名 = 不透明像素总数 + 32 倍降采样后的字节指纹（后者能识别
-            # 「总数没变但位置挪了」的情况，避免遮罩跟不上甩头）。
+            # 签名短路：剪影没实质变化就不重建 QRegion、不调 setMask
             try:
                 sig = (int(m.sum()), hash(m[::32, ::32].tobytes()))
             except AttributeError:
-                sig = None      # 不是 numpy 数组就退回旧行为
+                sig = None
             if sig is not None and sig == getattr(self, "_mask_sig", None):
                 self._mask_adapt_interval(True)
                 return
@@ -1470,14 +1363,12 @@ class PetWindow(QWidget):
             self.setMask(region)
             self._mask_prev_region = QRegion(region)
         except Exception as _e:  # noqa: BLE001
-            # 这里绝不能静默 pass：异常会在 setMask 之前中断整个流程，
-            # 遮罩一次都设不上，整窗不透明、点不穿，而且没有任何症状提示。
+            # 这里绝不能静默 pass：setMask 之前异常会导致整窗不透明、点不穿
             log.warning("[mask] 点击穿透遮罩更新失败：%s", _e)
 
     def _mask_adapt_interval(self, stable: bool) -> None:
         """活跃期间：剪影连续无变化时拉长到 3s，一变就恢复 1.5s 跟上动作。"""
-        # 定时器还没建好（sprite 模式 / 初始化早退）就直接跳过，
-        # 绝不能在这里抛异常——异常会中断 _update_click_mask，遮罩就设不上了
+        # 定时器还没建好就直接跳过，绝不能抛异常（会中断 _update_click_mask）
         t = self._mask_timer
         if t is None:
             return
@@ -1491,21 +1382,16 @@ class PetWindow(QWidget):
                 t.start(1500)
 
     def on_renderer_idle(self, idle: bool) -> None:
-        """JS 闲置/活跃切换：闲置时只停 mask（静置剪影稳定无需再 grab），
-        look 持续跑（每 200ms 读当前光标位置几乎零成本，关了反而要等用户动鼠标才恢复）。
-        """
+        """JS 闲置/活跃切换：闲置时只停 mask，look 持续跑。"""
         if idle:
-            # 兑现注释：先做一次采样，确保静置剪影已纳入遮罩，再停。
-            # 少了这一步，模型会在「冻结的旧遮罩」和「真实姿态」之间错位，
-            # 点击穿透边界对不上。
+            # 停之前先做一次采样，确保静置剪影已纳入遮罩
             if self._mask_timer is not None and not self._idle_mask_stopped:
                 if self.isVisible():
-                    self._mask_sig = None      # 强制重算，别被签名短路挡掉
+                    self._mask_sig = None      # 强制重算
                     self._update_click_mask()
                 self._idle_mask_stopped = True
                 self._mask_timer.stop()
-            # 视线 timer 保持运行：闲置只是 Live2D 帧静止，但鼠标位置在变，
-            # 停下来会"上一帧固定姿势"而不是"鼠标去哪儿看哪儿"。
+            # 视线 timer 保持运行
         else:
             if self._mask_timer is not None and self._idle_mask_stopped:
                 self._idle_mask_stopped = False
@@ -1544,9 +1430,7 @@ class PetWindow(QWidget):
             # 灵敏度：1.2 倍窗口距离内从正中偏到边缘
             nx = (cur.x() - center.x()) / max(1.0, self.width() * 1.2)
             ny = (cur.y() - center.y()) / max(1.0, self.height() * 1.2)
-            # 每次 look_at 都是一次 runJavaScript 往返（Python → QtWebEngineProcess
-            # → 回传），这个定时器 120ms 一跳 = 每秒 8.3 次。鼠标静止时那些调用
-            # 纯粹在烧 CPU，这里加变化阈值，静止时直接不发 IPC。
+            # 鼠标静止时直接短路，省 IPC
             last = getattr(self, "_last_look", None)
             if last is not None and abs(nx - last[0]) < 0.01 and abs(ny - last[1]) < 0.01:
                 return
@@ -1556,12 +1440,8 @@ class PetWindow(QWidget):
             pass
 
     def _setup_sticker_overlay(self) -> None:
-        """初始化右上角贴纸层（随机表情包 + 喂食食物图共用）。
-
-        随机表情包仅在模型自带 stickers（cfg）时启用；但贴纸 label 始终创建，
-        这样 sprite 模式 / 无表情包模型也能在喂食时显示食物图片。
-        """
-        # 贴纸 label 无条件创建（食物图片在两种渲染模式下都要能弹）
+        """初始化右上角贴纸层（随机表情包 + 喂食食物图共用）。"""
+        # 贴纸 label 无条件创建
         self._sticker_label = QLabel(self)
         self._sticker_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -1690,13 +1570,15 @@ class PetWindow(QWidget):
         return True
 
     def show_food_sticker(self, path: str, *, duration_ms: int = 4200) -> bool:
-        """喂食时把食物图片弹到角色右上角（与表情包同款向右 45° 倾斜）。"""
+        """喂食时把食物图片弹到角色右上角。"""
         if not path:
             return False
         base = int(getattr(self, "_sticker_size", 180) or 180)
-        # 不超过窗口宽 42%，避免小窗口被食物图撑爆
+        # 不超过窗口宽 42%
         size = max(96, min(int(base * 1.05), int(self.width() * 0.42)))
         # 角度跟随表情包设置（默认向右 45°）
+        ov = getattr(self, "_sticker_overrides", {})
+        # 角度跟随表情包设置
         ov = getattr(self, "_sticker_overrides", {})
         rotation = int(ov.get("rotation", getattr(self, "_sticker_rotation", 45)))
         return self._present_sticker(
@@ -1825,7 +1707,7 @@ class PetWindow(QWidget):
                     a.triggered.connect(
                         lambda _=False, n=name: self.animator.set_hairstyle(n))
                     hair_menu.addAction(a)
-        # 表情/发型已由上面两个子菜单覆盖，这里渲染其余分类；sprite 无此部分。
+        # 表情/发型已由上面两个子菜单覆盖，这里渲染其余分类
         menu_groups: list[dict] = []
         try:
             menu_groups = self.renderer.get_menu_groups() if self.renderer else []
@@ -1852,8 +1734,7 @@ class PetWindow(QWidget):
             menu.addAction(act_wake)
         menu.addSeparator()
 
-        # sprite：转圈 / 伸懒腰 / 起跳 / 游泳（真帧动画）。
-        # Live2D：按模型 profile 的动作映射动态生成（引用模型手势/特殊条目）。
+        # sprite：转圈 / 伸懒腰 / 起跳 / 游泳；Live2D：按模型 profile 动态生成
         play_menu = menu.addMenu("玩一下")
         if rtype == "live2d":
             try:
@@ -1866,7 +1747,7 @@ class PetWindow(QWidget):
                 (label, lambda _=False, n=name: self.animator.play_animation(n))
                 for name, label in play_options
             ]
-            # 用户自定义动作（设置面板「触发场景配置」里新建，初始为空）
+            # 用户自定义动作
             try:
                 for _a in self.renderer.get_custom_actions():
                     _cid = _a.get("id")

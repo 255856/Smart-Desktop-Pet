@@ -1,17 +1,6 @@
 """Windows 原生系统通知（任务栏右下角的 toast）。
 
-这是「直接在电脑上设置闹钟」能落地的部分：它弹的是**系统级通知**，
-进 Windows 通知中心，桌宠窗口隐藏 / 最小化 / 被别的窗口盖住都照样看得到。
-
-依赖 `winsdk`（`pip install winsdk`）。装不上就返回 False，由调用方退回
-桌宠自己的置顶弹窗——**绝不假装通知已经发出**。
-
-API 说明（winsdk 1.0.0b10 实测）：
-    doc  = XmlDocument(); doc.load_xml(xml)
-    toast = ToastNotification(doc)                       # 构造时传入
-    ToastNotificationManager.create_toast_notifier(AUMID).show(toast)
-注意 `toast.set_xml(doc)` 在这个版本会抛 `TypeError: Invalid parameter count`，
-所以只能走构造函数。
+依赖 winsdk（pip install winsdk）。装不上返回 False，调用方退回桌宠自己的置顶弹窗。
 """
 from __future__ import annotations
 
@@ -19,8 +8,8 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# 用 PowerShell 的 AUMID：它一定注册过，省去给桌宠建带
-# System.AppUserModel.ID 的开始菜单快捷方式这一堆事。
+# 用 PowerShell 的 AUMID：它一定注册过，省去建带 System.AppUserModel.ID
+# 的开始菜单快捷方式这一堆事
 _APP_ID = "Microsoft.Windows.PowerShell"
 _TITLE = "桌宠小汐"
 
@@ -69,11 +58,10 @@ def _esc(s: str) -> str:
 
 
 def show(title: str, message: str, *, alarm: bool = True) -> bool:
-    """弹一条系统通知。返回是否成功**投递给了系统外壳**。
+    """弹一条系统通知。返回是否成功投递给了系统外壳。
 
-    注意：返回 True 只代表 Windows 接收了这条通知；专注助手（Focus Assist）
-    开着、或通知被设置成「仅横幅」时，主人在屏幕上仍可能只看到一闪。
-    所以调用方不要拿它当「主人一定看到了」的凭据。
+    返回 True 只代表 Windows 接收了这条通知；专注助手开着、或通知被设置成
+    「仅横幅」时，主人在屏幕上仍可能只看到一闪——不要拿它当「主人一定看到了」的凭据。
     """
     if not (message or "").strip():
         message = "（无内容）"

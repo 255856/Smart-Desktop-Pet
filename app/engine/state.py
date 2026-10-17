@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 class Mode(str, Enum):
     HAPPY = "Happy"
-    NORMAL = "Normal"        # 旧版拼写错误 NOMAL 已修正
+    NORMAL = "Normal"
     POOR = "PoorCondition"
     ILL = "Ill"
 
@@ -90,11 +90,8 @@ class PetState:
     def feeling_max(self) -> float:
         return 100.0
 
-    # ---- v21-3: 创新点 2 状态量化 ----
-    # 把连续的 strength_food / feeling / level 离散化成 LOW/MID/HIGH 三档,
-    # 用来驱动 companion_policy 27 条规则的查表。
-    # 阈值 33 / 67 是论文里定的 (经验覆盖), hysteresis 用 prev 防抖动,
-    # 让"刚喂完食物"等瞬时变更不立刻跳档。
+    # 状态量化：把连续数值离散化为 LOW/MID/HIGH 三档，给 companion_policy 查表用。
+    # 阈值 33 / 67，hysteresis 用 prev 防抖动，让"刚喂完食物"等瞬时变更不立刻跳档。
 
     @staticmethod
     def _quantize(value: float, hi: float = 100.0, prev: str = "MID") -> str:
@@ -142,14 +139,10 @@ class PetState:
         return "MID"
 
     def quantize(self, prev_state: "Optional[dict[str, str]]" = None) -> dict[str, str]:
-        """一次性返回 {mood, satiety, level, favor} 四档离散化结果 (v23-3 加 favor)。
+        """一次性返回 {mood, satiety, level, favor} 四档离散化结果。
 
-        prev_state 用来做 hysteresis 记忆, 比如上一轮 mood 是 HIGH,
-        这次注入后还是 60 → 不立刻掉到 MID。shape:
-            {"mood": "LOW|MID|HIGH", "satiety": "...", "level": "...", "favor": "..."}
-
-        v23-3 加 favor 维度: 主人 2026-10-16 决定用好感 (likability) 替换
-        原 trust, 决策查表需要这维度才能跟 4 维数据对齐.
+        prev_state 用来做 hysteresis 记忆，比如上一轮 mood 是 HIGH，
+        这次注入后还是 60 → 不立刻掉到 MID。
         """
         prev_state = prev_state or {}
         return {
@@ -160,20 +153,13 @@ class PetState:
         }
 
     def quantize_favor(self, prev: str = "MID") -> str:
-        """v23-3: likability 离散化 (主人 2026-10-16 加的好感维度)。
-
-        阈值走 companion_config.quantize.{low_below, mid_below, hysteresis_*}.
-        """
+        """likability 离散化，阈值走 companion_config.quantize。"""
         from app.core.companion_config import companion_config
         cfg = companion_config.quantize
         return self._quantize_with_cfg(self.likability, hi=100.0, prev=prev, cfg=cfg)
 
     def _quantize_with_cfg(self, value: float, hi: float, prev: str, cfg) -> str:
-        """走 yaml 配置的量化 (阈值 + hysteresis)。
-
-        阈值 low_below / mid_below 默认 33/67 (跟原 _quantize 一致),
-        hysteresis 默认 40 / 60, 主人可在 yaml 里调。
-        """
+        """走 yaml 配置的量化（阈值 + hysteresis）。"""
         lo = float(cfg.low_below)
         mid = float(cfg.mid_below)
         h_lo = float(cfg.hysteresis_low_to_mid)
@@ -190,36 +176,30 @@ class PetState:
             return "HIGH"
         return "MID"
 
-    # ---- v21-3: 反馈层闭环 ----
-    # 任务执行结果反作用于 PetState, 这是创新点 2 双向闭环的关键。
-    # v23-3: 数值权重改从 companion_config.event_hooks 读 (yaml 参数化),
-    # 主人 2026-10-16 反馈 "数值公式 + 范围 + 钩子权重走 yaml".
+    # 反馈层闭环：任务执行结果反作用于 PetState
 
     def apply_outcome(self, outcome_type: str, tool_name: str = "",
                       risk_level: int = 0) -> None:
-        """任务结果如何更新 PetState (创新点 2 反馈闭环, per-run 颗粒)。
+        """任务结果如何更新 PetState（per-run 颗粒）。
 
-        outcome_type (主人 2026-10-16 选 per-run, 一条 LLM run 结束才触发):
+        outcome_type：
           - "success":  任务跑通   → 心情 +, 经验 +, 好感 +
           - "failure":  任务失败   → 心情 -, 好感 -
           - "rejected": 主人拒绝   → 心情 -, 好感 -
           - "accepted": 主人采纳   → 心情 +, 好感 +
 
-        数值权重不再 hardcode, 走 companion_config.event_hooks.{outcome_type}.
-        未知 outcome_type 静默 (不让 LLM 侧随意字段破坏状态).
-        喂食 / 互动走 apply_feed / apply_interact (不走 outcome, 主人语义不同).
+        数值权重走 companion_config.event_hooks.{outcome_type}。
+        未知 outcome_type 静默。喂食 / 互动走 apply_feed / apply_interact。
 
-        升级: 经验值增加后, 自动调 _maybe_levelup(), 公式
+        升级：经验值增加后自动调 _maybe_levelup()，公式
             exp_to_next(level) = base * (level ** exp)
-        走 companion_config.leveling.{base, exp}.
-
-        on_change 回调由 StateManager / UI 层调用 (本方法只动 state)。
+        走 companion_config.leveling.{base, exp}。
         """
-        # 延迟导入避免循环: companion_config 在 app.core, state 在 app.engine
+        # 延迟导入避免循环：companion_config 在 app.core，state 在 app.engine
         from app.core.companion_config import companion_config
         cfg = companion_config
 
-        # outcome_type → yaml 钩子字段 (兼容旧字符串, 新 yaml 字段名)
+        # outcome_type → yaml 钩子字段（兼容旧字符串，新 yaml 字段名）
         key_map = {
             "success":  "task_success",
             "failure":  "task_failure",
@@ -288,9 +268,9 @@ class PetState:
             pass    # trace 失败不影响主流程
 
     def _level_for_exp(self, exp: float, leveling) -> int:
-        """升级公式: 反解 exp_to_next(level) = base * (level ** exp)。
+        """升级公式：反解 exp_to_next(level) = base * (level ** exp)。
 
-        输入 exp 算最大可能等级: 满足 base * (level ** exp) <= exp 的最大 level.
+        输入 exp 算最大可能等级：满足 base * (level ** exp) <= exp 的最大 level。
         """
         if exp <= 0:
             return 1
@@ -301,13 +281,12 @@ class PetState:
         max_by_exp = int(((exp / base) ** (1.0 / exp_pow)) + 0.0001)
         return max(1, min(max_level, max_by_exp))
 
-    # ---- v23-3: 喂食 / 互动钩子 (跟 outcome 分离, 主人 2026-10-16 设计) ----
+    # 喂食 / 互动钩子（跟 outcome 分离）
 
     def apply_feed(self, amount: float = 1.0) -> dict:
-        """主人喂食钩子: 走 yaml event_hooks.user_feed, 返回 Δ 字典 (trace 用)。
+        """主人喂食钩子：走 yaml event_hooks.user_feed，返回 Δ 字典（trace 用）。
 
-        默认走 yaml 权重 (satiety +15, mood +5), amount 是倍率 (1.0 = 默认).
-        amount < 0 = 减扣 (主人撤回食物 / 强迫喂药).
+        amount 是倍率（1.0 = 默认）。amount < 0 = 减扣。
         """
         from app.core.companion_config import companion_config
         cfg = companion_config
@@ -353,10 +332,10 @@ class PetState:
         self.level = max(1, int(self.level))
 
     def level_up_need(self) -> int:
-        """v23-4: 升级公式走 yaml leveling (主人 2026-10-16 要求 100 * level^1.5).
+        """升级公式走 yaml leveling。
 
         exp_to_next(level) = base * (level ** exp)
-        level_up_need 返回到下一级需要的 EXP 增量.
+        level_up_need 返回到下一级需要的 EXP 增量。
         """
         from app.core.companion_config import companion_config
         cfg = companion_config.leveling
@@ -367,9 +346,9 @@ class PetState:
         return max(0.0, self.level_up_need() - self.exp)
 
     def cal_level(self) -> int:
-        """v23-4: 升级公式 100 * level^1.5 走 yaml leveling.
+        """升级公式 100 * level^1.5 走 yaml leveling。
 
-        反解: 满足 base * level^exp <= self.exp 的最大 level, 钳到 [1, max_level].
+        反解：满足 base * level^exp <= self.exp 的最大 level，钳到 [1, max_level]。
         """
         from app.core.companion_config import companion_config
         cfg = companion_config.leveling

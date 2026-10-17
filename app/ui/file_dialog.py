@@ -14,7 +14,7 @@ from app.core.qt_compat import (
 
 log = logging.getLogger(__name__)
 
-# 支持的转换格式映射：{源后缀: {目标后缀: 转换函数}}
+# 格式转换映射：{源后缀: {目标后缀: 转换方式}}
 _SUPPORTED_CONVERSIONS: dict[str, dict[str, str]] = {
     ".png": {".jpg": "PIL:PNG->JPG", ".webp": "PIL:PNG->WEBP", ".bmp": "PIL:PNG->BMP", ".gif": "PIL:PNG->GIF"},
     ".jpg": {".png": "PIL:JPG->PNG", ".webp": "PIL:JPG->WEBP", ".bmp": "PIL:JPG->BMP", ".gif": "PIL:JPG->GIF"},
@@ -26,7 +26,7 @@ _SUPPORTED_CONVERSIONS: dict[str, dict[str, str]] = {
     ".md": {".txt": "TEXT:MD->TXT"},
 }
 
-# 可以"吃掉"的文件类型（常见文档和图片）
+# 可以"吃掉"的文件类型
 _EATABLE_SUFFIXES = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico",
     ".txt", ".md", ".py", ".pyc", ".pyo",
@@ -45,12 +45,12 @@ def is_eatable(path: Path) -> bool:
 
 
 def send_to_recycle_bin(path: Path) -> bool:
-    """把文件移到回收站（Windows 用 shell32 API，其他平台用 shutil.move 到 ~/.trash）。"""
+    """把文件移到回收站。"""
     try:
         import ctypes
         SHFileOperationW = ctypes.windll.shell32.SHFileOperationW
     except (AttributeError, OSError):
-        # 非 Windows 或无 shell32：退化为 move 到回收站目录
+        # 非 Windows：fallback 到 ~/.trash
         return _fallback_recycle(path)
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -83,7 +83,7 @@ def send_to_recycle_bin(path: Path) -> bool:
 
 
 def _fallback_recycle(path: Path) -> bool:
-    """非 Windows 平台：移动到用户回收站目录。"""
+    """非 Windows：移到 ~/.trash。"""
     trash_dir = Path.home() / ".trash"
     trash_dir.mkdir(parents=True, exist_ok=True)
     dest = trash_dir / path.name
@@ -109,7 +109,7 @@ def convert_file(src_path: Path, target_suffix: str) -> Optional[Path]:
         try:
             from PIL import Image
             img = Image.open(src_path)
-            # GIF 首帧 → 静态格式
+            # GIF 取首帧
             if src_suffix == ".gif" and target_suffix in (".png", ".jpg", ".webp", ".bmp"):
                 img = img.convert("RGBA" if target_suffix == ".png" else "RGB")
             # JPG 不支持 RGBA
@@ -161,7 +161,7 @@ def convert_file(src_path: Path, target_suffix: str) -> Optional[Path]:
 
 
 def get_available_conversions(path: Path) -> list[tuple[str, str]]:
-    """获取文件支持的转换格式列表。返回 [(显示名, 后缀), ...]"""
+    """返回支持的转换格式 [(显示名, 后缀), ...]。"""
     src_suffix = path.suffix.lower()
     conversions = _SUPPORTED_CONVERSIONS.get(src_suffix, {})
     display_names = {
@@ -178,7 +178,7 @@ class FileOperationDialog(QDialog):
     def __init__(self, file_path: Path, parent: QWidget = None):
         super().__init__(parent)
         self.file_path = file_path
-        self.result_action: str = ""  # "eat" | "convert" | ""
+        self.result_action: str = ""  # "eat" / "convert" / ""
         self.convert_suffix: str = ""
         self._build_ui()
 
@@ -257,10 +257,8 @@ class FileOperationDialog(QDialog):
             " → ".join(names),
         )
         if ok and chosen:
-            # 解析选择（默认值用 " → " 分隔，用户可能输入数字或选择）
             self.result_action = "convert"
             self.convert_suffix = ""
-            # 尝试匹配
             for name, ext in conversions:
                 if name.lower() in chosen.lower() or ext.lower() in chosen.lower():
                     self.convert_suffix = ext

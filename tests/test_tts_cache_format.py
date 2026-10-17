@@ -86,7 +86,7 @@ def test_tts_speak_queue_serialization():
 
 
 def test_chat_window_tts_drain_no_duplicate_queue():
-    """_tts_drain_sentences 多次调用同一段不应重复入队（修复前会重复 N 次）。
+    """_tts_drain_sentences 多次调用同一段不应重复入队。
 
     流式场景：_on_chunk 每收到一个 token 就调一次 _tts_drain_sentences(accumulated)，
     其中 accumulated 是「从开头到当前」的整段。如果每次从头扫描，已送过的整句
@@ -145,11 +145,7 @@ def test_chat_window_tts_drain_no_duplicate_queue():
 
 
 def test_prepare_worker_signal_arity_in_source():
-    """2026-10-15 Bug 6 修复源码守卫:
-    AST 解析 chat_window.__init__.py,确认 _launch_sentence_prepare 内部
-    嵌套类 _PrepareWorker 用的 done 信号 arity 是 2 (int + str),
-    匹配 _on_sentence_ready(seq, sentence)。信号退化成 Signal(str) 的话
-    真实 QThread 链路里会 TypeError。
+    """AST 解析 chat_window.__init__.py, 确认 _PrepareWorker.done 信号 arity 是 2 (int + str)。
 
     不构造 ChatWindow(不触发 ASR / TTS 实际链路),纯静态检查,
     避免受 faster-whisper / Qt worker thread 时序影响。
@@ -194,10 +190,7 @@ def test_prepare_worker_signal_arity_in_source():
 
 
 def test_prepare_worker_emit_passes_correct_arity():
-    """2026-10-15 Bug 6 修复源码守卫:
-    _PrepareWorker.run() 必须 emit 同样 2 个参数(seq_id, txt),跟
-    Signal(int, str) 严格匹配。emit 数量不对会导致 Python signal 报错。
-    """
+    """_PrepareWorker.run() 必须 emit 同样 2 个参数(seq_id, txt), 跟 Signal(int, str) 严格匹配。"""
     import ast
     from pathlib import Path
 
@@ -233,18 +226,15 @@ def test_prepare_worker_emit_passes_correct_arity():
 
 
 def test_prepare_worker_signal_signature_matches_slot():
-    """已迁到 test_prepare_worker_signal_arity_in_source (AST 静态守卫) ——
+    """已迁到 test_prepare_worker_signal_arity_in_source (AST 静态守卫)。
+
     不再构造 QApplication / QThread(测试环境跑会触发 faster_whisper 加载链
-    导致 Windows access violation crash,见 2026-10-15 复盘)。两个 AST 守卫
-    (上面两个) 已经覆盖:信号 arity + emit 实参数,等价静态证明。
+    导致 Windows access violation crash)。
     """
 
 
 def test_chat_window_drain_speak_queue_preserves_order():
-    """2026-10-15 Bug 6:并发 prepare 完成时,_drain_speak_queue 必须按 seq 升序
-    speak,不能颠倒。模拟 3 句 worker 不同顺序完成(seq 入队顺序是 0/1/2,
-    完成顺序故意打乱成 2/0/1),验证 speak 顺序还是 0/1/2。
-    """
+    """并发 prepare 完成时, _drain_speak_queue 必须按 seq 升序 speak, 不能颠倒。"""
     import sys, threading
     sys.path.insert(0, '.local-packages')
     from PyQt5.QtWidgets import QApplication

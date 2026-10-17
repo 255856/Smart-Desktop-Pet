@@ -1,22 +1,4 @@
-"""【抗幻觉】LLM 不调用工具 → 自动强制重试 + Planner/Reflector 兜底。
-
-Bug 背景（v3.1+）：
-    国产模型（MiniMax-M3 / abab6.5s-chat 等）在 OpenAI Function Calling
-    场景下常见问题：模型收到 tools schema 后**直接回文本**（「已打开 QQ」）
-    而不调用任何工具。主人看到「已打开」但实际什么都没发生 = 体验崩溃。
-
-修复策略（防御纵深）：
-    1. 【意图识别】detect_action_intent() —— 用正则判定用户意图
-       「打开 / 提醒 / 记住 / 查询」类，识别为工具动作。
-    2. 【force_tool_use】AgentLoop 第一轮请求传 True →
-       LLMClient 拼 tool_choice="required"，服务端不报错则强制调工具；
-       服务端不识别 tool_choice 时降级为 user-prompt 强制。
-    3. 【强制重试】AgentLoop.run() 检测「意图是工具 + 第一轮未调工具」→
-       注入强烈 user prompt 走第二轮，给模型第二次机会。
-    4. 【Plan/Reflect 兜底】Plan 跑完后用
-       detect_plan_hallucination() 跨步检查：
-       「意图是工具动作 + 整个 plan 没成功执行任何 tool」= 幻觉 → 触发 replan。
-"""
+"""抗幻觉测试：意图识别 + 强制工具调用 + Plan 兜底。"""
 from __future__ import annotations
 
 import asyncio

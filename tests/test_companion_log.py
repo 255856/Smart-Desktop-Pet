@@ -1,11 +1,4 @@
-"""v23-1 决策 trace 日志测试。
-
-覆盖:
-  - trace_decision 写一行到 data/companion_log.txt
-  - trace_outcome 写一行 (kind="outcome")
-  - read_recent 读尾部 N 行, kind 过滤
-  - 中间件 _get_companion_decision 调一次就调一次 trace_decision
-"""
+"""决策 trace 日志测试。"""
 import json
 from pathlib import Path
 
@@ -87,7 +80,7 @@ def test_middleware_call_writes_trace():
 
 
 def test_trace_json_has_required_fields():
-    """每条 trace_decision JSON 含 v23-7 trace 页要展示的所有字段."""
+    """每条 trace_decision JSON 含 trace 页要展示的所有字段。"""
     trace_decision(
         thread_id="t-field-test", tool="run_script", risk=3,
         decision="CONFIRM", sat="MID", mood="HIGH", level="MID",
@@ -107,12 +100,7 @@ def test_trace_json_has_required_fields():
 
 
 def test_trace_decision_accepts_favor_kwarg():
-    """v25 regression: chat_window._run_multimodal_action 调
-    trace_decision(favor=...) . v23-11 commit 加了 favor kwarg 但没改
-    函数签名, TypeError 被 try/except 吞, multimodal 整条路径 0 trace
-    落盘, dashboard 永远 '本会话没有桌宠 trace 记录'. 这里锁死 favor
-    必须能传进去且落盘.
-    """
+    """trace_decision 必须接受 favor kwarg 且能落盘。"""
     trace_decision(
         thread_id="t-favor-kwarg", tool="generate_image", risk=2,
         decision="ALLOW", sat="MID", mood="MID", level="MID",
@@ -129,7 +117,6 @@ def test_trace_decision_accepts_favor_kwarg():
         f"trace_decision(favor=HIGH) 应落 1 行 multimodal_path 的记录. "
         f"实际: {recs[:3]}..."
     )
-    # v23-3 加 favor 维度后, dashboard trace 页要把 favor 也展示出来.
     # 必须有 favor 字段 (默认 "MID" 也行, 必须是字符串不在 None).
     assert "favor" in target, (
         f"trace JSON 缺 favor 字段. 实际: {target}"

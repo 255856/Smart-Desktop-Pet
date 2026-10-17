@@ -1,22 +1,20 @@
-"""实验 1: 状态-决策一致性 (论文 §4.4.1, v22-5)
+"""实验 1：状态-决策一致性。
 
-目的: 验证桌宠状态真的影响了 Agent 决策, 且方向符合预期.
+目的：验证桌宠状态真的影响了 Agent 决策，且方向符合预期。
 
-方法:
-  - 构造 N=100 个 task scenario (覆盖 7 类意图 × 5 档风险)
-  - 对每条 scenario, 在 (sat, mood, level) 三档固定的 27 组合下分别跑
-    companion_policy.lookup_decision(state, tool_name), 收集决策分布
-  - 统计: 决策差异率 / 规则命中率 / 满意度 (这里只看决策差异率,
-    满意度需要主人评分不在实验脚本范围)
+方法：
+  - 构造 N=100 个 task scenario（覆盖 7 类意图 × 5 档风险）
+  - 对每条 scenario，在 (sat, mood, level) 三档固定的 27 组合下分别跑
+    companion_policy.lookup_decision(state, tool_name)，收集决策分布
+  - 统计：决策差异率 / 规则命中率（满意度需主人评分，不在实验脚本范围）
 
-指标 (跟论文 KPI 表 12 对齐):
-  - 决策差异率: 1 - (count(三档决策全等 scenario 数) / N), 应 >= 30%
-  - 规则命中率: 系统决策 == 主人标注金标的 scenario 占比, 应 >= 85%
-    (本实验无人工标注, 改用「规则矩阵理论预期」作金标: lookup_decision
-     输出应跟 RULES_TABLE 优先级一致 — 此处作为 sanity check)
+指标：
+  - 决策差异率：1 - (count(三档决策全等 scenario 数) / N)，应 >= 30%
+  - 规则命中率：系统决策 == 规则矩阵理论预期的 scenario 占比，应 >= 85%
+    （无人工标注，用 lookup_decision 输出应跟 RULES_TABLE 优先级一致作 sanity check）
 
-输出:
-  - 打印 KPI 摘要 (主人 / 论文 §4 表 5.2)
+输出：
+  - 打印 KPI 摘要
   - 写 experiments/results/state_decision_consistency.json 留 record
 """
 from __future__ import annotations
@@ -33,8 +31,7 @@ from app.engine.tools._risk import TOOL_RISK_LEVEL, risk_for_tool
 
 
 # ---- scenario 构造 ----
-# PDF 7 类意图 × 5 档风险 = 35 组合; 我们抽 100 个 scenario, 用 7 类 ×
-# 高频工具代表.
+# 7 类意图 × 高频工具代表，组合 100 个 scenario
 
 _INTENT_TOOL = {
     "app":       ["open_app"],                   # LOW
@@ -49,9 +46,8 @@ _INTENT_TOOL = {
 
 
 def _build_scenarios(n: int = 100, seed: int = 42) -> list[dict[str, Any]]:
-    """构造 N 个 scenario, 每个含 tool_name + 期望是「决策应随 state 改变」. """
+    """构造 N 个 scenario，每个含 tool_name + 期望「决策应随 state 改变」。"""
     rng = random.Random(seed)
-    # 维护 scenario 列表 + 工具全集 (不重复)
     pool: list[tuple[str, str]] = []
     for intent, tools in _INTENT_TOOL.items():
         for t in tools:

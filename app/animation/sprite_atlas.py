@@ -172,6 +172,7 @@ class SpriteAtlas:
                 if frame.pixmap and not frame.pixmap.isNull():
                     frame.pixmap = scale_func(frame.pixmap, target_size)
         # 其余已加载组预缩放**所有**动画（之前只缩放第一个，切换动画时卡顿）
+        # 其余已加载组预缩放所有动画
         for group_name in self.ANIMATION_GROUPS:
             if group_name in ('idle', 'idle_default', 'idle_special'):
                 continue
@@ -205,9 +206,8 @@ class SpriteAtlas:
                 frame.duration_ms = ms
 
 
-# 兼容：旧代码 `from app.animation.sprite_atlas import PetAnimator` 仍可用。
-# 不能直接 import（会触发 sprite_atlas → sprite_renderer → sprite_atlas 循环），
-# 用模块级 __getattr__ 懒加载。
+# 兼容：旧代码 `from app.animation.sprite_atlas import PetAnimator` 仍可用
+# 不能直接 import（会循环依赖），用模块级 __getattr__ 懒加载
 def __getattr__(name):
     if name == "PetAnimator":
         from app.animation.sprite_renderer import PetAnimator

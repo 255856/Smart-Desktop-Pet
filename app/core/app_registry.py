@@ -1,4 +1,4 @@
-"""应用程序路径映射注册表。"""  # noqa: W605
+"""应用程序路径映射注册表：内置常用应用 + 用户自定义 JSON 覆盖。"""
 from __future__ import annotations
 
 import json
@@ -10,8 +10,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-#  内置映射 —— 常见应用的可执行路径列表
-#  按顺序尝试，找到第一个存在的 exe 即返回
+#  内置映射：常见应用的可执行路径列表，按顺序尝试，找到第一个存在的 exe 即返回
 _BUILTIN_MAP: dict[str, list[str]] = {
     "notepad": ["notepad.exe"],
     "记事本": ["notepad.exe"],
@@ -158,10 +157,7 @@ _BUILTIN_MAP: dict[str, list[str]] = {
         r"%PROGRAMFILES% (x86)\BiliBili\BiliBili.exe",
     ],
 
-    # 注意：VS Code 默认装到 %LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe
-    # （即 C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code\Code.exe）
-    # C:\、%PROGRAMFILES%、%LOCALAPPDATA%，拼出来就成了 %LOCALAPPDATA%\AppData\...
-    # 用 %LOCALAPPDATA%\Programs\... 一步到位。
+    # VS Code 默认装到 %LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe
     "code": [
         r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
         r"%PROGRAMFILES%\Microsoft VS Code\Code.exe",
@@ -297,7 +293,6 @@ class AppRegistry:
         if self._user_file:
             self._load_user()
 
-    #  构建索引
     def _build_index(self) -> None:
         """从内置映射构建索引。"""
         self._all.clear()
@@ -363,10 +358,9 @@ class AppRegistry:
         """根据名称查找可执行文件路径。
 
         查找顺序：
-            1. 归一化 key 精确匹配 → 按列表顺序尝试每个路径，找到存在的就返回
+            1. 归一化 key 精确匹配
             2. 内置映射的模糊匹配（SequenceMatcher.ratio ≥ 0.7）
-            3. **已安装应用相似度搜索**（兜底）—— 扫描系统开始菜单 / 桌面 /
-               App Paths / Uninstall 注册表 / Program Files，按相似度排序
+            3. 已安装应用相似度搜索（兜底）
             4. 都找不到 → 返回 None
         """
         name = app_name.strip()
@@ -382,8 +376,7 @@ class AppRegistry:
                 full = _expand_path(p)
                 if full and Path(full).is_file():
                     return full
-            # 精确 key 存在但所有路径都失效 → 不再走内置模糊匹配
-            # 但仍走「已安装应用扫描」，说不定用户自己装了
+            # 精确 key 存在但所有路径都失效 → 不再走内置模糊匹配，仍走已安装应用扫描
             return self._resolve_from_installed_apps(name)
 
         # 2) 内置模糊匹配
@@ -427,9 +420,7 @@ class AppRegistry:
     def find_similar_in_registry(
         self, query: str, limit: int = 5,
     ) -> list[tuple[str, float]]:
-        """在**内置**映射（已安装 + 内置 key）里找相似候选。
-
-        用于上层工具列出「没找到时给你 top 5 推荐」。
+        """在内置映射里找相似候选。用于上层工具列出「没找到时给你 top 5 推荐」。
 
         Returns: [(候选显示名, 相似度), ...]
         """
@@ -454,8 +445,7 @@ class AppRegistry:
         return out[:limit]
 
     def _key_to_display(self, key: str) -> str:
-        """归一化 key → 用户能看懂的显示名（用内置映射里第一个匹配的）。"""
-        # 内置映射里找
+        """归一化 key → 用户能看懂的显示名。"""
         for original_name, paths in _BUILTIN_MAP.items():
             if _normalize_key(original_name) == key:
                 return original_name
@@ -491,12 +481,7 @@ class AppRegistry:
 def _expand_path(p: str) -> Optional[str]:
     """展开路径并返回存在的文件路径。
 
-    支持：
-        - 绝对路径 → 直接检查
-        - 环境变量路径（%PROGRAMFILES%\\...）→ 展开后检查
-        - 相对路径 → 依次在 C:\\、%PROGRAMFILES%、%PROGRAMFILES(X86)%、
-          %LOCALAPPDATA%、%APPDATA% 下尝试
-        - 裸文件名（notepad.exe）→ 原样返回（由调用方处理）
+    支持绝对路径 / 环境变量路径 / 相对路径（依次在常见基准目录尝试）/ 裸文件名。
     """
     expanded = os.path.expandvars(p)
     expanded = os.path.expanduser(expanded)

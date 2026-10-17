@@ -1,11 +1,4 @@
-"""倒计时 / 闹钟到点的提醒通道回归测试。
-
-背景：原先 `add_reminder` 到点只弹一个桌宠气泡，`countdown` 到点连气泡都可能
-没有（set_say_hook 从没被主程序注入）——主人设了提醒却常常「好像没响」。
-现在到点会走统一闹钟通道：置顶窗 + 循环提示音 + TTS 播报 + 系统通知。
-
-这些测试锁住「到点一定会惊动人」这件事，以及各条通道的接线。
-"""
+"""倒计时 / 闹钟到点的提醒通道回归测试。"""
 from __future__ import annotations
 
 import time
@@ -301,11 +294,7 @@ def test_alarm_hook_exception_does_not_swallow_countdown(clean_hooks):
 # =============================================================================
 
 def test_build_default_tools_wires_alarm_hook():
-    """build_default_tools 必须把 alarm hook 接到 countdown 上。
-
-    这正是 2026-10-04 审计里「set_say_hook 全仓只有 tests 调用过」那类
-    接线缺失的回归防线——主程序不注入，倒计时就永远是哑的。
-    """
+    """build_default_tools 必须把 alarm hook 接到 countdown 上。"""
     from app.engine.tools import build_default_tools
 
     class _S:

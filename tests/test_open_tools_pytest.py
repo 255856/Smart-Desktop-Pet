@@ -1,12 +1,4 @@
-"""open_app / open_website 工具的回归测试（防止之前的 bug 复现）。
-
-Bug 修复记录：
-- open_website('www.baidu.com') 之前会被严格校验拒绝 → 现在自动补 https://
-- open_app('') 之前会走 cmd /c start 闪 cmd 窗口 → 现在直接报错
-- open_app('C:/nonexistent/file.exe') 之前会走 cmd 兜底 → 现在检测路径不存在并明确报错
-- open_app('notepad++') 之前未装 Notepad++ 时会退到 notepad.exe（开错应用）→ 现在返回 None
-- VS Code 路径之前用相对路径找不到 → 改用 %LOCALAPPDATA% 绝对路径
-"""
+"""open_app / open_website 工具回归测试。"""
 import sys
 from pathlib import Path
 import unittest.mock as mock

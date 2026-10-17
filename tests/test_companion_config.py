@@ -1,11 +1,4 @@
-"""v23-2 桌宠数值配置 yaml 测试。
-
-验证:
-  1. 仓库默认 yaml 加载后 dataclass 字段对齐 日志.txt 数值
-  2. 用户本地覆盖 yaml 生效 (data/companion_config.yaml)
-  3. 缺字段走内置默认, 不抛
-  4. event_hooks 子字段 (_HookDeltas) 类型正确
-"""
+"""桌宠数值配置 yaml 单元测试。"""
 from __future__ import annotations
 
 import os

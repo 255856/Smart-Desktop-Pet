@@ -1,21 +1,15 @@
-"""桌宠养成数值配置 (v23-2 创新点 2 数值参数化)。
+"""桌宠养成数值配置：数值 + 范围 + 公式 + 钩子权重走 yaml。
 
-主人 2026-10-16 反馈: 数值 + 范围 + 公式 + 钩子权重都要走 yaml, 不要 hardcode.
+设计原则：
+  - 单源真相：`app/core/companion_config.yaml` 是默认表（仓库里提交）
+  - 用户覆盖：`data/companion_config.yaml` 存在时优先（不提交，本地调试用）
+  - dataclass 强类型：读 yaml 后用 dataclass 包，业务代码不要直接读 yaml
+  - 不会抛：文件不存在 / 字段缺失走默认值，log.warning 而不是 raise
 
-设计原则:
-  - 单源真相: `app/core/companion_config.yaml` 是默认表, 仓库里提交
-  - 用户覆盖: `data/companion_config.yaml` 存在时优先 (不提交, 用户本地调试用)
-  - dataclass 强类型: 读 yaml 后用 dataclass 包, 业务代码不要直接读 yaml
-  - 不会抛: 文件不存在 / 字段缺失走默认值, log.warning 而不是 raise
-
-加载顺序 (优先级 高 → 低):
-    1. `data/companion_config.yaml` (用户本地覆盖)
-    2. `app/core/companion_config.yaml` (仓库默认)
-    3. 内置 _DEFAULTS (兜底, 万一 yaml 都没了)
-
-用法:
-    from app.core.companion_config import companion_config
-    delta = companion_config.event_hooks.task_success.mood  # = 8.0
+加载顺序（优先级 高 → 低）：
+    1. `data/companion_config.yaml`（用户本地覆盖）
+    2. `app/core/companion_config.yaml`（仓库默认）
+    3. 内置 _DEFAULTS（兜底）
 """
 from __future__ import annotations
 
@@ -29,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 内置默认值 (兜底) — 跟主人 E:\study\日志.txt + 日志.txt 数值方案一致
+# 内置默认值（兜底）
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -57,7 +51,6 @@ class _LevelingCfg:
     """等级 + 经验公式。
 
     公式: exp_to_next(level) = base * (level ** exp)
-      主人方案: 100 * (level ** 1.5)
     """
     base: float = 100.0
     exp: float = 1.5
@@ -70,7 +63,7 @@ class _LevelingCfg:
 
 @dataclass(frozen=True)
 class _TimeDecayCfg:
-    """时间驱动衰减 (主人 2026-10-16 要求每小时减饱食度)。"""
+    """时间驱动衰减：每小时减饱食度等。"""
     satiety_per_hour: float = -0.833    # 24h -20 折算 per hour ≈ -0.833
     mood_no_interact_48h: float = -5.0
     mood_low_satiety_extra_per_24h: float = -5.0  # sat<30 时额外扣
@@ -79,7 +72,7 @@ class _TimeDecayCfg:
 
 @dataclass(frozen=True)
 class _HookDeltas:
-    """单条事件钩子的 4 维数值增量 (per-run 颗粒, 主人 2026-10-16 选)。"""
+    """单条事件钩子的 4 维数值增量。"""
     satiety: float = 0.0
     mood: float = 0.0
     favor: float = 0.0
@@ -88,16 +81,7 @@ class _HookDeltas:
 
 @dataclass(frozen=True)
 class _EventHooks:
-    """事件驱动钩子 — 主人 2026-10-16 确认 4 类 (含 task_success/fail + 用户 accept/reject + 喂食/互动)。
-
-    数值权重默认取 自 E:\\study\\日志.txt:
-      - 任务成功: 心情 +8, 经验 +20, 好感 +1
-      - 任务失败: 心情 -12, 好感 -3
-      - 用户拒绝: 心情 -10, 好感 -2
-      - 用户采纳: 心情 +6, 好感 +3
-      - 用户喂食: 饱食 +15, 心情 +5
-      - 用户互动: 心情 +3, 好感 +2
-    """
+    """事件驱动钩子：4 类（task_success/fail + 用户 accept/reject + 喂食/互动）。"""
     task_success: _HookDeltas = field(default_factory=lambda: _HookDeltas(mood=8.0, exp=20.0, favor=1.0))
     task_failure: _HookDeltas = field(default_factory=lambda: _HookDeltas(mood=-12.0, favor=-3.0))
     user_rejected: _HookDeltas = field(default_factory=lambda: _HookDeltas(mood=-10.0, favor=-2.0))
@@ -108,16 +92,16 @@ class _EventHooks:
 
 @dataclass(frozen=True)
 class _FavorRules:
-    """好感维度额外决策规则 (主人 2026-10-16 加, 替换原 trust 维度)。
+    """好感维度额外决策规则。
 
-    - high_favor (≥ high_threshold) → 高风险工具可额外 ALLOW (主人长期信任)
-    - low_favor  (< low_threshold)  → 任意 MEDIUM+ 工具都走 CONFIRM (桌宠
-                                       没建立信任关系, 不要放行)
+    - high_favor (≥ high_threshold) → 高风险工具可额外 ALLOW（主人长期信任）
+    - low_favor  (< low_threshold)  → 任意 MEDIUM+ 工具都走 CONFIRM（桌宠
+                                       没建立信任关系，不要放行）
     """
     high_threshold: float = 80.0
     low_threshold: float = 30.0
-    high_allows_irreversible: bool = False   # high_favor 即使 ≥80, 不可逆仍需 confirm
-    low_forces_confirm_medium: bool = True   # low_favor 时, MEDIUM 也要 confirm
+    high_allows_irreversible: bool = False
+    low_forces_confirm_medium: bool = True
 
 
 @dataclass(frozen=True)
@@ -125,12 +109,12 @@ class _PersistenceCfg:
     """持久化。"""
     file: str = "data/pet_state.json"
     write_on_update: bool = True
-    write_min_interval_seconds: int = 5      # 防抖: 短时间内多次更新只写一次
+    write_min_interval_seconds: int = 5      # 防抖：短时间内多次更新只写一次
 
 
 @dataclass(frozen=True)
 class _TraceCfg:
-    """trace 日志 (v23-1 接好, v23-7 加 UI)。"""
+    """trace 日志。"""
     enabled: bool = True
     log_file: str = "data/companion_log.txt"
     max_lines_in_memory: int = 500           # trace 页读盘后保留多少行
@@ -142,7 +126,7 @@ class CompanionConfig:
     satiety: _Range = field(default_factory=lambda: _Range(0, 100, 80))
     mood: _Range = field(default_factory=lambda: _Range(0, 100, 70))
     level: _Range = field(default_factory=lambda: _Range(1, 10, 1))
-    favor: _Range = field(default_factory=lambda: _Range(0, 100, 50))   # 好感 (替换 trust)
+    favor: _Range = field(default_factory=lambda: _Range(0, 100, 50))
     quantize: _QuantizeBand = field(default_factory=_QuantizeBand)
     leveling: _LevelingCfg = field(default_factory=_LevelingCfg)
     time_decay: _TimeDecayCfg = field(default_factory=_TimeDecayCfg)
@@ -207,11 +191,8 @@ def _merge(base: dict, override: dict) -> dict:
 def _build_from_dict(d: dict) -> CompanionConfig:
     """dict → CompanionConfig dataclass。
 
-    每个段都建独立 dataclass, 段内字段缺失走 dataclass 自己的 default.
-    字段名不匹配时静默忽略 (yaml 用户写错字段不抛, 走内置默认)。
-
-    嵌套 dataclass (e.g. _EventHooks.task_success 是 _HookDeltas) 走手工
-    构造, 不能光 _EventHooks(**sub), 不然子字段会落成 dict.
+    每个段都建独立 dataclass，段内字段缺失走 dataclass 自己的 default。
+    字段名不匹配时静默忽略（yaml 用户写错字段不抛，走内置默认）。
     """
     if not d:
         return CompanionConfig()

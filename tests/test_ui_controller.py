@@ -1,16 +1,4 @@
-"""回归测试：UIController 的关键信号路由 + 行为函数。
-
-设计原则（来自经验教训：测真实调用链，不只测辅助函数）：
-    - mock pet / brain / state / settings，**只测信号路由和副作用调用**
-    - 不构造真实 UI 窗口（避免 Qt 事件循环依赖）
-    - 用真实 signal emit 触发被测函数，避免直接 .method() 假阳
-
-覆盖目标（按业务价值排序）：
-    1. _fire_alarm    —— 闹钟到点统一处理（置顶窗 + 提示音 + 系统通知）
-    2. _on_eat_requested / _on_food_selected —— 投喂流程
-    3. _speak_alarm    —— 闹钟 TTS 播报（TTS 失败兜底）
-    4. 外部信号 → 内部处理  —— 真实信号接收路径（穿透测试）
-"""
+"""回归测试：UIController 的关键信号路由 + 行为函数。"""
 from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch

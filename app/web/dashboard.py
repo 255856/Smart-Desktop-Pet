@@ -673,7 +673,7 @@ async function refresh(){
   try{
     const [s,runs]=await Promise.all([api("/api/stats"),api("/api/runs?limit=100")]);
     state.stats=s; state.runs=runs;
-    await loadCompanionCache();    // v23-9: 每 5s 跟 /api/companion 同步
+    await loadCompanionCache();
     renderStats(); renderRunList(); renderTools();
     // 重渲染当前选中的 run (桌宠养成反馈可能时间窗内新数据)
     if(state.detail) renderDetail(state.detail);
@@ -769,13 +769,13 @@ def create_app(trace_db: str | Path,
 
     @app.get("/api/memory")
     async def memory():
-        """v23-10: 长期记忆读 sqlite memory.db (不是 memory.json).
+        """长期记忆读 sqlite memory.db（不是 memory.json）。
 
-        桌宠实际存的路径是 data/memory.db (MemoryStore v22 改用 sqlite),
-        旧 memory.json 已废弃. memory_file 参数是兼容旧 dashboard 配置.
+        桌宠实际存的路径是 data/memory.db（MemoryStore 改用 sqlite）。
+        memory_file 参数兼容旧 dashboard 配置。
         """
         import sqlite3
-        # 优先读 sqlite memory.db (MemoryStore 实际路径)
+        # 优先读 sqlite memory.db（MemoryStore 实际路径）
         # 1) 默认 cwd/data/memory.db
         # 2) 兼容 memory_file 路径 (用 .db 后缀替换 .json)
         candidates = []
@@ -822,12 +822,12 @@ def create_app(trace_db: str | Path,
 
     @app.get("/api/companion")
     async def companion(decision_limit: int = 30, outcome_limit: int = 30):
-        """v23: 桌宠养成面板 - 当前 PetState + yaml 配置 + trace 日志.
+        """桌宠养成面板：当前 PetState + yaml 配置 + trace 日志。
 
-        数据源:
-          - state: data/pet_state.json (yaml persistence.file 配置)
-          - trace: data/companion_log.txt (v23-1 接好的 JSON-line)
-          - config: app/core/companion_config.yaml (实时读)
+        数据源：
+          - state: data/pet_state.json（yaml persistence.file 配置）
+          - trace: data/companion_log.txt（JSON-line）
+          - config: app/core/companion_config.yaml（实时读）
         """
         from app.core.companion_config import companion_config
         cfg = companion_config

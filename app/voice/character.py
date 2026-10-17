@@ -50,22 +50,14 @@ class ParsedReply:
 
 
 def parse_reply(raw: str, default: Emotion = Emotion.HAPPY) -> ParsedReply:
-    """从模型回复文本**末尾**提取 [emotion] 标签，返回剩余文本与情绪。
-
-    实现要点：
-        - 只剥「整串末尾」一个标签（用 re.sub + 锚定）。
-        - 不在 raw 中间做任何「贴标签识别 / 剥离」，避免误伤正文里的同类词（如「I feel happy today」）。
-        - tag_found 字段让调用方区分「真的标了 HAPPY」和「没标，默认填 HAPPY」——
-          这两种情况过去在 chat_window 里靠「parse 后文本 == 流式累积文本」来判定，
-          容易因 sanitize_text 的多空清洗差异产生误判。
-    """
+    """从模型回复文本末尾提取 [emotion] 标签，返回剩余文本与情绪。"""
     if not raw:
         return ParsedReply(text="", emotion=default, tag_found=False)
     m = _EMOTION_TAG_RE.search(raw)
     if not m:
         return ParsedReply(text=raw.rstrip(), emotion=default, tag_found=False)
     emotion = TAG_TO_EMOTION.get(m.group(1).lower(), default)
-    # m.start() 即为标签起点；标签前的部分用切片取出（不会误剥文本中间的 [xxx]）
+    # m.start() 即为标签起点；切片取出标签前的部分（不会误剥文本中间的 [xxx]）
     text = raw[: m.start()].rstrip()
     return ParsedReply(text=text, emotion=emotion, tag_found=True)
 

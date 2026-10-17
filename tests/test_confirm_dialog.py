@@ -26,15 +26,14 @@ class TestConfirmDangerousTool:
         from app.brain.agent import DANGEROUS_TOOLS
         for k in _DANGEROUS_LABELS:
             if k in ("open_app", "open_website"):
-                continue  # 2026-10-04 起有意移出，见下方回归测试
+                continue  # 已有意移出，见下方回归测试
             assert k in DANGEROUS_TOOLS, (
                 f"危险工具 {k!r} 应在 DANGEROUS_TOOLS 里")
 
     def test_open_actions_are_not_dangerous(self):
         """回归：open_app / open_website 不得再要求确认。
 
-        这两个是桌宠最高频、零破坏性的操作，列为危险工具会导致每次都要过弹窗；
-        弹窗若不置前还会 60s 超时被拒（2026-10-04 日志两次「打开星穹铁道」失败）。
+        这两个是桌宠最高频、零破坏性的操作，列为危险工具会导致每次都要过弹窗。
         """
         from app.brain.agent import DANGEROUS_TOOLS
         assert "open_app" not in DANGEROUS_TOOLS
@@ -120,14 +119,7 @@ class TestDangerousToolsIntegration:
 # -------------------- Bug 7 旁路回归 --------------------
 
 class TestConfirmBypassRegression:
-    """2026-10-15:验证 _confirm_dangerous_tool 不再因 name not in DANGEROUS_TOOLS
-    而静默 return True。
-
-    之前 Bug 7 的修复只覆盖了 RiskyToolConfirm._fire_blocked 的 callback 路径,
-    但 _confirm_dangerous_tool 内部有一道「name not in DANGEROUS_TOOLS → 直接
-    return True」的旁路。这跟 RiskyToolConfirm 用的 _RISKY_TOOLS 列表不一致
-    (例如 send_email 在 _RISKY_TOOLS 但不在 DANGEROUS_TOOLS),导致中间件拦
-    下来 → callback 返回 True → 完全不弹窗。
+    """_confirm_dangerous_tool 不再因 name not in DANGEROUS_TOOLS 而静默 return True。
 
     修复:删除旁路。无论 RiskyToolConfirm 拦住时 tool 名字在不在 DANGEROUS_TOOLS,
     都进弹窗路径。
@@ -184,24 +176,11 @@ class TestConfirmBypassRegression:
 
 
 class TestConfirmCrossThreadDispatch:
-    """2026-10-15:用户实测「高危操作没弹窗」+ probe 复现 root cause:
-    _confirm_dangerous_tool 在 child thread 调 QTimer.singleShot(0, lambda: ...)
-    投递任务到主线程 —— PyQt5 5.x 的 QTimer.singleShot 在 child thread 调用时
-    内部创建的 QTimer 是 child thread-owned,child thread 没 event loop →
-    永远不 fire,弹窗代码根本不被主线程派发,变成 60s 静默超时。
-
-    修复:改用 QMetaObject.invokeMethod + Qt.QueuedConnection(官方保证跨线程)。
-    关键:被 invokeMethod 调的方法必须存在且是 @pyqtSlot 装饰的方法名,
-    callback 自身通过 self._pending_confirm_dispatch 间接调用(Q_ARG 传 callable
-    不被 Qt 5 接受)。
-
-    这个测试类做源码静态守卫:确保 _confirm_dangerous_tool 真的用 invokeMethod,
-    而不是又回退到 QTimer.singleShot(会让用户实测再次失败)。
-    """
+    """_confirm_dangerous_tool 必须用 QMetaObject.invokeMethod + Qt.QueuedConnection (避免跨线程 QTimer.singleShot 静默丢)。"""
 
     def test_confirm_uses_invokemethod_not_single_shot(self):
         """_confirm_dangerous_tool 里不能再用 QTimer.singleShot(0, lambda ...) 跨线程投递。
-        PyQt5 5.x 在 child thread 调 singleShot 会被静默丢(用户实测 bug 7 root cause)。
+
         但允许 singleShot(0, self._xxx) 这种主线程兜底调用(例如 _close_confirm_box)。
         """
         import ast

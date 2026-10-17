@@ -1,11 +1,4 @@
-"""companion_policy (创新点 2 决策查表) 单元测试。
-
-覆盖:
-  - RULES_TABLE 共 27 条 (PDF 12 + 反推 15)
-  - lookup_decision 在 4 类典型 state 下对 5 档风险返回正确 Decision
-  - Rule.matches 任意轴 'ANY' 行为正确
-  - 默认 fallback (无规则命中) 走旧 RiskyToolConfirm 等价路径
-"""
+"""companion_policy 决策查表单元测试。"""
 from app.engine.state import PetState
 from app.brain.companion_policy import (
     RULES_TABLE, Rule, Decision, ANY,
@@ -17,24 +10,12 @@ from app.engine.tools._risk import (
 
 
 def test_rules_table_count_27():
-    """RULES_TABLE 共 31 条 (PDF 11 + 扩展 20):
-
-    - PDF §6.1 原本 12 条, 但 #10 (sat+mood LOW → REFUSE, risk=ANY)
-      拆成 4 条 (priority 16-18 MEDIUM/HIGH/IRREVERSIBLE, priority 19-20
-      SAFE/RISK_LOW override) 避免纯读触发 REFUSE。所以 PDF-effective = 11+5=16。
-    - 扩展规则 (_EXTRA_RULES) 15 条 + 5 条 = 20 条。
-
-    总 = 11 (PDF 删 1) + 5 (paper #10 variants) + 15 (extra) = 31。
-
-    KPI (planning §6.2): "27 条" 仍达成 — 因为 paper #10 拆解后净 +4 条,
-    跟原 27 边界, 测试用 ≥ 27 容忍小幅膨胀。
-    """
+    """RULES_TABLE 至少 27 条 (PDF 12 + 扩展 15)，paper #10 拆 +4 净增。"""
     assert len(RULES_TABLE) >= 27, (
         f"RULES_TABLE 应至少有 27 条 (PDF 12 + 扩展 15, paper #10 拆 +4). "
         f"实际: {len(RULES_TABLE)}"
     )
     # 关键: paper #10 variants 必须存在 (priority 16-18 / 19-20)
-    # v23-3 加 favor LOW 规则也用到 priority 19/21/23, 这里只断言 ≥5 (老 5 条仍在)
     pdf10_variants = [r for r in RULES_TABLE
                       if r.priority in (16, 17, 18, 19, 20)]
     assert len(pdf10_variants) >= 5, (
@@ -54,10 +35,7 @@ def test_rules_sorted_by_priority():
 
 
 def test_rule_matches_exact():
-    """Rule.matches 全 explicit 字段: 全相等才命中, 任意一个不等就 miss。
-
-    v23-3 加 favor 维度, matches 签名 (sat, mood, level, favor, risk).
-    """
+    """Rule.matches 全 explicit 字段: 全相等才命中, 任意一个不等就 miss。"""
     r = Rule(sat="LOW", mood="MID", level="HIGH", risk="MEDIUM",
              decision=Decision.ALLOW, priority=999)
     # 全等 → 命中
@@ -71,11 +49,7 @@ def test_rule_matches_exact():
 
 
 def test_rule_matches_any_wildcard():
-    """Rule.matches 任一字段 = ANY 时, 该字段总是命中。
-
-    v23-3: favor 默认 ANY (兼容老规则), 老测试 sat=ANY/mood=LOW/level=ANY/risk=ANY
-    仍生效 (favor 默认 ANY).
-    """
+    """Rule.matches 任一字段 = ANY 时, 该字段总是命中。"""
     r = Rule(sat=ANY, mood="LOW", level=ANY, risk=ANY,
              decision=Decision.CONFIRM, priority=999)
     # sat / level / risk / favor 都是 ANY, mood 必须是 LOW
@@ -198,11 +172,7 @@ def test_safe_tools_always_allow():
 
 
 def test_default_fallback_when_no_rule_matches():
-    """没规则命中时: SAFE/LOW/MEDIUM → ALLOW, HIGH → CONFIRM, IRREVERSIBLE → REJECT。
-
-    故意构造一个不命中任何规则的状态 (通过 mock 让 risk_str 不在 table),
-    验证 fallback 走旧 RiskyToolConfirm 兼容路径。
-    """
+    """没规则命中时: SAFE/LOW/MEDIUM → ALLOW, HIGH → CONFIRM, IRREVERSIBLE → REJECT。"""
     # 用一个真实工具但 state 走查表 (所有路径都试): 直接看 IRREVERSIBLE + 普通 state
     ps = PetState()
     ps.feeling = 50; ps.strength_food = 50; ps.level = 5
@@ -228,9 +198,7 @@ def test_default_fallback_when_no_rule_matches():
 
 
 def test_no_rules_actually_duplicate_same_specific():
-    """规则没有两条完全 identical (sat/mood/level/favor/risk 全一样),
-    不然 priority 排序就白做了。v23-3 加 favor 维度, key 也包含.
-    """
+    """规则没有两条完全 identical (sat/mood/level/favor/risk 全一样)。"""
     seen = {}
     for r in RULES_TABLE:
         key = (r.sat, r.mood, r.level, r.favor, r.risk)

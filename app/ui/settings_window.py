@@ -1,4 +1,4 @@
-"""桌宠设置面板（重构版）。"""
+"""桌宠设置面板。"""
 from __future__ import annotations
 
 import logging
@@ -86,7 +86,7 @@ class SettingsWindow(QWidget):
     max_fps_changed = Signal(int)              # 渲染帧率上限
     tts_config_changed = Signal(dict)          # {tts_enabled, engine, minimax_voice_id, gptsovits_url, ref_audio, prompt_text}
     proactive_changed = Signal(dict)           # {enabled, min_minutes, max_minutes}
-    aw_config_changed = Signal(dict)           # v24: {enabled, server_url, lookback, max_events}
+    aw_config_changed = Signal(dict)           # {enabled, server_url, lookback, max_events}
     renderer_changed = Signal(str)             # sprite / live2d（重启生效）
     hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
     character_changed = Signal(dict)           # {name, persona}
@@ -120,7 +120,7 @@ class SettingsWindow(QWidget):
         self._sticker_enabled = bool(sticker_enabled)
         # 窗口置顶初始状态（来自 cfg.window.always_on_top）
         self._always_on_top = bool(always_on_top)
-        # v22-1: 开发者模式开关 (默认关闭, 控制 Tab 切换后才会显示 dev_panel sliders)
+        # 开发者模式开关（默认关闭，开启后状态 Tab 显示 dev_panel sliders）
         self.developer_mode = False
         # Live2D 参数初始值（贴纸/随机间隔/帧率；来自 ui_controller 合并 store 后）
         st = live2d_state or {}
@@ -225,7 +225,7 @@ class SettingsWindow(QWidget):
         tabs.addTab(self._build_tab_visual(),  "视觉")
         tabs.addTab(self._build_tab_control(), "控制")
         tabs.addTab(self._build_tab_model(),   "模型配置")
-        # v25: AW 配置挪到「控制 Tab → 主动关心」段里 (跟主动关心开关放一起)
+        # AW 配置放在「控制 Tab → 主动关心」段里
         # Live2D 专属 Tab：模型有分类外观（menu groups）时才显示
         if self._renderer is not None:
             try:
@@ -306,7 +306,7 @@ class SettingsWindow(QWidget):
         v.addStretch(1)
         v.addWidget(g)
 
-        # v22-1: 开发者模式 sliders (默认隐藏, _set_developer_mode 启可见)
+        # 开发者模式 sliders（默认隐藏，_set_developer_mode 启可见）
         self._dev_panel = self._build_tab_status_dev()
         self._dev_panel.setVisible(False)
         self._dev_panel.setObjectName("dev_panel")
@@ -316,14 +316,10 @@ class SettingsWindow(QWidget):
         return page
 
     def _build_dev_trace_block(self, parent_layout):
-        """v23-7: trace 页 3 段 UI (调前 S=量化 / 决策+命中 / 调后 Δ).
+        """trace 页 3 段 UI（调前量化 / 决策+命中 / 调后 Δ）。
 
-        从 data/companion_log.txt 读最近 N 条 (decision + outcome) JSON-line,
-        用不同色块区分两种记录, 主人可以直观看到每次工具调用的查表 + 反馈闭环.
-
-        v26: 主人 2026-10-17 反馈 "trace 日志应该在每条会话顶部显示对应条目,
-        不是全局滚动" — 加 thread_id 过滤下拉. 主人当前对话的 thread_id 自动
-        选中, 可切到 "全部" 看全局 / 选具体 thread 看单次会话的 trace.
+        从 data/companion_log.txt 读最近 N 条 (decision + outcome) JSON-line，
+        用不同色块区分两种记录。
         """
         # 标题 + thread 过滤 + 刷新按钮
         title_row = QHBoxLayout()
@@ -331,7 +327,7 @@ class SettingsWindow(QWidget):
         title.setStyleSheet("color:#5b5b6e; font-size:9pt; font-weight:600;")
         title_row.addWidget(title, 1)
 
-        # v26: thread_id 过滤下拉 (按主人要求 per-conversation 过滤)
+        # thread_id 过滤下拉（按会话过滤 trace）
         self._dev_trace_thread_combo = QComboBox()
         self._dev_trace_thread_combo.setStyleSheet(
             "padding:2px 6px; font-size:8pt; border-radius:3px;"
@@ -380,13 +376,10 @@ class SettingsWindow(QWidget):
             pass
 
     def _refresh_dev_trace(self) -> None:
-        """v23-7: 重读 companion_log.txt 渲染到 _dev_trace_view.
+        """重读 companion_log.txt 渲染到 _dev_trace_view。
 
-        决策行 (decision) 蓝边框, outcome 行绿边框, 区分清晰.
-
-        v26: 主人 2026-10-17 要求 per-conversation 过滤 — thread_id 下拉
-        选中具体 thread 后只显示该 thread 的 decision + outcome. combobox
-        列出 companion_log.txt 最近出现过的 thread_id (按最新出现倒序).
+        决策行 (decision) 蓝边框，outcome 行绿边框。
+        thread_id 下拉按会话过滤，combobox 列出最近出现过的 thread_id。
         """
         try:
             from app.brain._companion_log import read_recent
@@ -519,30 +512,29 @@ class SettingsWindow(QWidget):
         self._dev_trace_view.setText(html)
 
     def _build_tab_status_dev(self) -> QWidget:
-        """v22-1: 开发者调试面板, 主人手动调整 PetState 数值看决策变化。
+        """开发者调试面板：手动调整 PetState 数值看决策变化。
 
-        6 字段 slider + 1 决策预览:
+        6 字段 slider + 决策预览：
           - strength / strength_food / strength_drink / feeling / health / likability
           - level (1-30)
-          - 「当前量化: sat=mood=level=」标签
-          - 「决策预览: lock_screen → CONFIRM」等若干常见工具的当前决策
-          - 「加载预设状态」按钮加速测试 (HIGH/HIGH/HIGH, LOW/LOW/LOW 等)
+          - 当前量化标签
+          - 决策预览（若干常见工具）
+          - 加载预设状态按钮
 
-        slider 拖动 → emit dev_state_pushed(dict) 让主程序接管,
-        主程序用 set_companion_state 同步给 RiskyToolConfirm.
+        slider 拖动 → emit dev_state_pushed(dict) 让主程序接管。
         """
         page = QWidget()
         v = QVBoxLayout(page)
         v.setSpacing(4)
 
-        g = QGroupBox("开发者调试（v22-1：手动调整状态验决策）")
+        g = QGroupBox("开发者调试：手动调整状态验决策")
         gv = QVBoxLayout(g)
         gv.setSpacing(6)
 
         # 提示
         tip = QLabel(
-            "拖动滑块改 PetState 数值, 下方决策预览会实时更新; "
-            "主程序会同步注入到 RiskyToolConfirm, 主人可在 chat 里实测。"
+            "拖动滑块改 PetState 数值，下方决策预览会实时更新；"
+            "主程序会同步注入到 RiskyToolConfirm。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#5b5b6e; font-size:8pt;")
@@ -601,19 +593,17 @@ class SettingsWindow(QWidget):
             "background:#f4f4f8; padding:6px; border-radius:4px;")
         gv.addWidget(self.lbl_dev_decisions)
 
-        # v22-6: 策略层预览 — 跟 grounding_dynamic_prompt 实际拼出来的策略文本对齐。
-        # 给主人一个"我拖滑块时, 桌宠看到的 system_prompt 注入就是这样"的可视化。
+        # 策略层预览 — 跟 grounding_dynamic_prompt 实际拼出来的策略文本对齐
         self.lbl_dev_strategy = QLabel("策略预览: (无)")
         self.lbl_dev_strategy.setWordWrap(True)
         self.lbl_dev_strategy.setStyleSheet(
             "color:#5b5b6e; font-size:8pt;"
             "font-family:'Consolas','Monaco',monospace;"
             "background:#faf6ef; padding:6px; border-radius:4px;"
-            "border-left:3px solid #c08e35;")  # 暖色调, 跟 decisions 区分
+            "border-left:3px solid #c08e35;")  # 暖色调，跟 decisions 区分
         gv.addWidget(self.lbl_dev_strategy)
 
-        # v23-7: trace 页 - 调前/决策/调后 3 段最近记录 (读 data/companion_log.txt)
-        # 主人 2026-10-16 要求 trace 页明确记录桌宠工具权限 + 每次数值变化.
+        # trace 页 - 调前/决策/调后 3 段最近记录
         self._build_dev_trace_block(gv)
 
         # 预设按钮 (HIGH/HIGH/HIGH / LOW/LOW/LOW 等)
@@ -718,7 +708,7 @@ class SettingsWindow(QWidget):
             self.lbl_dev_decisions.setText(
                 "决策预览:\n" + "\n".join(parts)
             )
-            # v22-6: 策略层预览 — 调 _strategy_guidance 拿实际拼接文本
+            # 策略层预览 — 调 _strategy_guidance 拿实际拼接文本
             try:
                 from app.brain.hallucination_guard import _strategy_guidance
                 strat = _strategy_guidance(mock)
@@ -729,7 +719,7 @@ class SettingsWindow(QWidget):
                     "策略预览: (无 — 状态平稳无策略注入)"
                 )
             else:
-                # 截掉头部前缀 "本轮按此调整行为风格" 给主人在 UI 里更易读
+                # 截掉头部前缀 "本轮按此调整行为风格" 让 UI 更易读
                 self.lbl_dev_strategy.setText("策略预览:\n" + strat.strip())
         except Exception as e:  # noqa: BLE001
             self.lbl_dev_decisions.setText(f"决策预览失败: {e}")
@@ -986,7 +976,7 @@ class SettingsWindow(QWidget):
                 gv.addWidget(btn, r, c)
         v.addWidget(g_emo)
 
-        # v22-1: 开发者模式开关
+        # 开发者模式开关
         g_dev = QGroupBox("开发者模式")
         gvd = QVBoxLayout(g_dev)
         dev_row = QHBoxLayout()
@@ -999,7 +989,7 @@ class SettingsWindow(QWidget):
         self.chk_developer_mode.setStyleSheet("font-size:9pt;")
         gvd.addLayout(dev_row)
         hint = QLabel(
-            "v22-1 调整数值看决策变化. "
+            "调整数值看决策变化。"
             "修改会同步到 RiskyToolConfirm.set_companion_state, "
             "聊天下轮任务会按当前 state 走查表."
         )
@@ -1050,9 +1040,8 @@ class SettingsWindow(QWidget):
         gp.addWidget(self.spin_proactive_max, 2, 1)
         v.addWidget(g_pro)
 
-        # v25: ActivityWatch 活动感知配置嵌在「主动关心」段下面 — 主人
-        # 装了 AW + aw-server 跑着, 桌宠主动搭话会更贴切（写代码 / 刷视频 /
-        # 看文档 给不同场景）。跟主动关心开关放一起更直观。
+        # ActivityWatch 活动感知配置嵌在「主动关心」段下面
+        # 装了 AW + aw-server 跑着，桌宠主动搭话会更贴切
         v.addWidget(self._build_aw_inline_widgets())
 
         v.addStretch(1)
@@ -2278,18 +2267,17 @@ class SettingsWindow(QWidget):
     def is_crossfade_enabled(self) -> bool:
         return self.cb_crossfade.isChecked()
 
-    # ===== v25: ActivityWatch 配置 (嵌进「控制 Tab → 主动关心」, 不再独立 tab) =====
+    # ActivityWatch 配置（嵌进「控制 Tab → 主动关心」）
 
     def _build_aw_inline_widgets(self) -> QGroupBox:
-        """v25: 主人要求把 AW 配置跟「主动关心」放一起, 之前的独立「活动感知」
-        Tab 删掉。返回 QGroupBox, 让 _build_tab_control 加到主控 tab 里。
+        """AW 配置：返回 QGroupBox，让 _build_tab_control 加到主控 tab 里。
 
         内容:
-          - 短说明 (一行, 留 60% 空间给主人日后按需补)
+          - 短说明（一行）
           - 启用复选框
           - aw-server URL + 测试连接按钮 + 状态行
-          - 回看窗口 + 最多事件数 (ProactiveBrain 注入用)
-          - 一句话隐私说明: 数据存 AW 自己的 SQLite, 不入 pet 项目
+          - 回看窗口 + 最多事件数
+          - 隐私说明：数据存 AW 自己的 SQLite，不入 pet 项目
         """
         g_aw = QGroupBox("活动感知 (ActivityWatch)")
         gl = QVBoxLayout(g_aw)

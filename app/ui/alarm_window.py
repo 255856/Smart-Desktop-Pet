@@ -1,11 +1,4 @@
-"""闹钟 / 倒计时到点的置顶提醒窗。
-
-为什么需要它：桌宠本体只是屏幕角落一个小窗口，主人忙起来根本注意不到。
-到点时必须有一个**抢注意力**的东西——置顶 + 循环提示音 + 语音播报，
-并且在主人点「知道了」之前一直赖着不走。
-
-同一时刻只显示一个：新的到点会顶掉旧的（多个提醒同时响只会变成噪音）。
-"""
+"""闹钟 / 倒计时到点的置顶提醒窗。"""
 from __future__ import annotations
 
 import logging
@@ -22,10 +15,10 @@ log = logging.getLogger(__name__)
 # 稍后提醒的默认延后（毫秒）
 SNOOZE_MS = 5 * 60 * 1000
 
-# 报警窗开着、主人还没确认时的再响间隔（毫秒）
+# 再响间隔（毫秒）
 RERING_INTERVAL_MS = 30 * 1000
 
-# 主人一直不来点，自动收起前最多响多久（毫秒）
+# 自动收起前最多响多久（毫秒）
 AUTO_CLOSE_MS = 5 * 60 * 1000
 
 _QSS = f"""
@@ -95,8 +88,7 @@ class AlarmWindow(QWidget):
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._on_auto_close)
-        # 没被确认就每 30 秒再响一轮 —— 这才是闹钟该有的行为。
-        # 只响一次的话，主人刚好在敲键盘/戴耳机就会彻底错过。
+        # 每 30 秒再响一轮
         self._rering = QTimer(self)
         self._rering.setInterval(RERING_INTERVAL_MS)
         self._rering.timeout.connect(self._on_rering)
@@ -170,12 +162,11 @@ class AlarmWindow(QWidget):
         self.activateWindow()
         if sound:
             self._sound.start()
-            # 开着窗就周期性再响，直到主人点掉
+            # 开着窗就周期性再响
             self._rering.start()
         else:
             self._rering.stop()
-        # 主人一直不来点也不能永远赖着不走：5 分钟后自动收，
-        # 期间已经反复响过，不存在「完全没提醒到」的风险。
+        # 5 分钟后自动收
         self._close_timer.start(AUTO_CLOSE_MS)
 
     def _on_rering(self) -> None:
@@ -205,10 +196,7 @@ class AlarmWindow(QWidget):
 
 
 class AlarmPresenter(QObject):
-    """到点提醒的总入口：管窗口 + 提示音 + 语音播报。
-
-    放在 UI 层，只暴露一个 `fire(text, kind)`。同刻到点会顶掉上一个。
-    """
+    """到点提醒的总入口：管窗口 + 提示音 + 语音播报。"""
 
     def __init__(self, speak_fn=None, parent=None):
         super().__init__(parent)
@@ -231,20 +219,16 @@ class AlarmPresenter(QObject):
 
     def fire(self, text: str, kind: str = "提醒", *, sound: bool = True,
              speak: bool = True) -> None:
-        """到点：置顶窗 + 提示音 + TTS 播报。
-
-        speak 走注入的 `speak_fn`（UIController 里绑 VoiceManager），
-        这样本类不依赖语音模块，测试也能直接跑。
-        """
+        """到点：置顶窗 + 提示音 + TTS 播报。"""
         if not (text or "").strip():
             text = "时间到啦~"
-        # 新的到点顶掉旧的重响计划，别攒出一串连环提醒
+        # 新的到点顶掉旧的重响计划
         self._cancel_snooze()
         if self._win is None:
             self._win = AlarmWindow(parent=None)
             self._win.dismissed.connect(self._on_dismissed)
             self._win.snoozed.connect(self._on_snooze)
-        # 记下本次内容，「稍后提醒」才知道要重放什么
+        # 记下本次内容
         self._pending = (0, text, kind)
         self._win.show_alarm(text, kind, sound=sound)
         if speak and callable(self._speak):
@@ -254,10 +238,7 @@ class AlarmPresenter(QObject):
                 log.warning("闹钟 TTS 播报失败", exc_info=True)
 
     def _on_snooze(self, ms: int) -> None:
-        """稍后提醒：原样再响一次。
-
-        没有这一步的话，「稍后提醒」按钮就是个装饰——信号发出去没人收。
-        """
+        """稍后提醒：原样再响一次。"""
         if not self._pending:
             return
         self._schedule_snooze(ms, self._pending[1], self._pending[2])

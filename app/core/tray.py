@@ -62,8 +62,7 @@ class TrayController(QObject):
                 return QIcon(str(first_idle))
         except Exception:
             pass
-        # 退化 3：直接返回空 QIcon（PyQt5 没有 ThemeIcon 枚举；
-        # Qt6 路径都搞定后才会到这里）。托盘会显示一个空图标，不报错。
+        # 退化 3：直接返回空 QIcon。托盘显示一个空图标，不报错
         return QIcon()
 
     def notify(self, title: str, msg: str, duration_ms: int = 4000) -> None:

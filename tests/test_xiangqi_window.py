@@ -291,9 +291,6 @@ class TestBoardDrawMethods:
     def test_check_highlight_finds_cannon_attacker(self):
         """炮将的棋盘上，红点必须指到炮，不能是中间炮架。
 
-        回归之前 _find_attacker_square 把炮架当作敌方炮校验、第二个子未扫描
-        而漏报炮将的攻击子位置。
-
         局面:红帅 (9,4),黑炮 (0,4),黑将放在 (0,0) 不与帅同列——避免飞将干扰。
         红兵 (5,4) 当炮架,黑炮沿 col 4 跳过炮架打到红帅。
         """
@@ -327,8 +324,7 @@ class TestBoardDrawMethods:
         w.board.game = g
         assert g.in_check(RED)
         w._update_check_highlight()
-        # 飞将:红框仍在将帅格;攻击子位置不强求(可能指对将,也可能 None,
-        # 取决于实现——关键是不要画到莫名其妙的位置上)
+        # 飞将:红框仍在将帅格;攻击子位置不强求
         assert w.board._check_king_sq is not None
         # 实现上:第一个子就是对面将 → 返回对面将位置
         assert w.board._check_attacker_sq == 0 * 9 + 4

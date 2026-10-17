@@ -1,14 +1,11 @@
-"""聊天历史持久化：SQLite 主存 + JSON 自动迁移(首次启动时一次性)。
+"""聊天历史持久化：SQLite 主存 + JSON 自动迁移（首次启动一次性）。
 
-2026-10-14: 从 JSON 迁到 SQLite。理由:
-- 启动加速(整文件解析 → 索引查询)
-- 避免频繁写盘时原子性问题(JSON write_text 不原子,可能写一半进程被杀)
-- 支持 future: 模糊查询 / 按日期段切片 / 多设备同步
+从 JSON 迁到 SQLite：启动加速 + 写盘原子性 + 为后续查询/同步铺路。
 
-迁移策略:
-- 首次 load 时,若 *.json 存在且 *.db 不存在 → 读 JSON → 写 DB → 删 JSON
+迁移策略：
+- 首次 load 时，若 *.json 存在且 *.db 不存在 → 读 JSON → 写 DB → 删 JSON
 - 仅 SQLite 存在 → 直接读 DB
-- 公共 API(add / all / clear)保持不变 → 测试无需改动
+- 公共 API（add / all / clear）保持不变 → 测试无需改动
 """
 from __future__ import annotations
 
@@ -50,7 +47,7 @@ class ChatStore:
     def __init__(self, data_file: str | Path = "data/chat_history.db",
                  max_messages: int = 200,
                  legacy_json: str | Path | None = "data/chat_history.json"):
-        # 兼容旧的 `data_file` 指向 JSON —— 检测后缀,自动转成 .db
+        # 兼容旧的 `data_file` 指向 JSON —— 检测后缀自动转成 .db
         p = Path(data_file)
         if p.suffix.lower() == ".json":
             legacy_json = data_file
@@ -73,7 +70,7 @@ class ChatStore:
     def _migrate_from_json(self) -> int:
         """从 legacy JSON 文件读历史消息写入 SQLite。返回迁移条数。
 
-        成功 → 删除 JSON(避免下次再迁);失败 → 保留 JSON。
+        成功 → 删除 JSON（避免下次再迁）；失败 → 保留 JSON。
         """
         if not self.legacy_json or not self.legacy_json.is_file():
             return 0
@@ -102,7 +99,7 @@ class ChatStore:
         except Exception as e:  # noqa: BLE001
             log.warning("ChatStore: 写 DB 失败(%s),保留 JSON", e)
             return 0
-        # 迁移成功,删 JSON
+        # 迁移成功，删 JSON
         try:
             self.legacy_json.unlink(missing_ok=True)
             log.info("ChatStore: 已迁移 %d 条消息,删除 %s",
@@ -112,7 +109,7 @@ class ChatStore:
         return len(msgs)
 
     def _load(self) -> None:
-        # 0. 还在 JSON 时代 → 先迁
+        # 还在 JSON 时代 → 先迁
         if not self.data_file.is_file():
             migrated = self._migrate_from_json()
             if migrated:
@@ -122,7 +119,7 @@ class ChatStore:
         try:
             conn = self._connect()
             try:
-                # 按 ts 升序读(老 JSON 是 append 顺序,SQLite id 也是升序)
+                # 按 ts 升序读（老 JSON 是 append 顺序，SQLite id 也是升序）
                 cur = conn.execute(
                     "SELECT role, content, emotion, ts, tools_json FROM messages "
                     "ORDER BY id ASC"
@@ -182,10 +179,10 @@ class ChatStore:
         """添加一条消息并持久化。"""
         msg = StoredMessage(role=role, content=content, emotion=emotion, tools=tools or [])
         self._messages.append(msg)
-        # 写盘前先裁剪,避免 DB 越来越大
+        # 写盘前先裁剪，避免 DB 越来越大
         if len(self._messages) > self.max_messages:
             self._messages = self._messages[-self.max_messages:]
-        # 先 prune 再 add(避免 delete 影响新插的 id)
+        # 先 prune 再 add（避免 delete 影响新插的 id）
         self._prune_old()
         self._save_one(msg)
 
@@ -209,17 +206,14 @@ class ChatStore:
     def remove_empty_assistant(self) -> int:
         """删掉 assistant 角色且 content 空 + tools 空的「废消息」。
 
-        v19: v12 之前 1004 鉴权失败批量产生 content="" 的 assistant 消息,
-        历史 chat_store 一直保留, 重启后界面渲染成"空白文件图标",
-        主人反馈"信息就没了"。这里在 ChatWindow._load_history 启动时
-        一次性清掉, 不打扰主人。
+        早期鉴权失败批量产生 content="" 的 assistant 消息，
+        重启后界面渲染成"空白文件图标"。在 ChatWindow._load_history 启动时
+        一次性清掉，不打扰主人。
 
         返回删掉的条数。
 
-        实现策略：Python ``str.strip()`` 能去全部 unicode 空白（含 \\n \\t），
-        但 SQLite 默认 trim 只去 ASCII 32，不去 \\n \\t —— 用 SQL 判空会漏。
-        max_messages=200 条上限内，整库「DELETE + re-INSERT kept」比纠结
-        SQL unicode whitespace 鲁棒得多。
+        实现策略：SQLite 默认 trim 只去 ASCII 32，不去 \\n \\t，SQL 判空会漏。
+        max_messages=200 条上限内，整库「DELETE + re-INSERT kept」更鲁棒。
         """
         before = len(self._messages)
         kept = [
@@ -232,7 +226,7 @@ class ChatStore:
         self._messages = kept
         if not removed:
             return 0
-        # 整库 re-INSERT kept。max_messages=200 没问题。
+        # 整库 re-INSERT kept。max_messages=200 没问题
         try:
             conn = self._connect()
             try:

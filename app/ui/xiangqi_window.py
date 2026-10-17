@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""中国象棋小游戏窗口：玩家执红（先手）vs 桌宠 AI（黑）。
-
-- 无边框圆角紫色主题弹窗，与设置 / 聊天 / 五子棋同一套皮肤。
-- 自绘 9×10 棋盘（楚河漢界 + 九宫斜线）；先点己方棋子再点目标格落子，
-  走法合法性实时高亮（绿点 = 可走、红圈 = 可吃）；桌宠 AI 用 QTimer 延迟应招。
-- 三档难度（切换即重开一局）；胜负通过 game_finished 信号交控制器结算金币、
-  触发桌宠表情 / 气泡；窗口本身不直接改 PetState。
-"""
+"""中国象棋弹窗：玩家执红 vs 桌宠 AI。"""
 from __future__ import annotations
 
 import logging
@@ -27,7 +20,7 @@ from app.games.xiangqi import (
 
 log = logging.getLogger(__name__)
 
-# 难度 → 中文 / 金币奖励（赢 / 和 / 输；认输 0）
+# 难度 → 中文 / 金币奖励
 DIFF_LABEL = {"easy": "简单", "normal": "普通", "hard": "困难"}
 REWARDS = {
     "easy":   {"win": 10, "draw": 3, "lose": 0},
@@ -35,7 +28,7 @@ REWARDS = {
     "hard":   {"win": 40, "draw": 10, "lose": 2},
 }
 
-# 桌宠局势解说（被将军 / 困毙 / 落子闲谈 / 结算，由控制器朗读 TTS）
+# 局势解说（控制器朗读 TTS）
 COMMENTS = {
     "player_check": ["将！低级危险！", "哎呀，这下被将军了……"],
     "ai_check": ["将军！", "哼哼，你没看见我的杀招吧？", "将军！小心应对哦～"],

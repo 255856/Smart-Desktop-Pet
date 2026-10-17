@@ -1,10 +1,4 @@
-"""危险硬件工具的行为正确性回归（不真正改动系统：用 spy 拦截 subprocess）。
-
-重点回归两个真实 bug：
-1. set_wifi 无论 enable=True/False 都执行 Disable-NetAdapter（行为与承诺相反）
-2. set_bluetooth 早先同样无视 enable，且错误信息里泄漏完整 PowerShell 命令
-3. set_volume 在缺 pycaw 时静默降级为静音切换，却回报「已取消静音」像成功
-"""
+"""危险硬件工具的行为正确性回归（用 spy 拦截 subprocess，不真正改动系统）。"""
 from __future__ import annotations
 
 import json

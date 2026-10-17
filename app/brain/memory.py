@@ -1,11 +1,7 @@
-"""桌宠长期记忆库(增强版:向量检索 + 重要性 + 时间衰减 + 冲突检测)。
+"""桌宠长期记忆库：向量检索 + 重要性 + 时间衰减 + 冲突检测。
 
-2026-10-14: 持久化层从 JSON 迁到 SQLite + FTS5。
-  - SQLite 提供原子写盘(避免 JSON 全量替换被打断导致数据丢一半)
-  - FTS5 全文索引让 SQL LIKE/字串匹配速度从 O(N) 变 O(log N)
-  - 自动迁移:首次 load 时若 *.json 在 + *.db 不在,一次性导入并删 JSON
-  - 公共 API 不变 → 测试无需改
-  - 向量后端(TF-IDF/SBERT)仍驻内存——只持久化元数据(content/category/importance/...)
+持久化层使用 SQLite + FTS5（原子写盘、O(log N) 全文检索）。
+向量后端（TF-IDF/SBERT）仍驻内存，只持久化元数据。
 """
 from __future__ import annotations
 
@@ -27,10 +23,7 @@ log = logging.getLogger(__name__)
 CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "other")
 
 
-# SQLite schema — 一个 FTS5 虚拟表跟主表 1:1(用 trigger 同步),
-# 全文检索速度从 O(N) 提到 O(log N)。
-# 注意:trigger 里 INSERT/UPDATE/DELETE 用的是 'memories' 而非 'memories_fts',
-# 因为 FTS5 内容表本身是 'memories'(见下)。
+# SQLite schema：FTS5 虚拟表跟主表 1:1（trigger 同步），全文检索 O(log N)
 _MEMORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     id              TEXT PRIMARY KEY,
@@ -45,16 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_category    ON memories(category);
 """
 
-# Tokenize：英文整词 + CJK 单字与二元组（够用且零依赖）
-#
-# 为什么加二元组：只切单字会让中文检索产生大量伪命中。实测语料
-# 「孩子在读小学三年级」下，查询「量子力学」会因为共享单字「学」
-# 而命中（子/学 都在词表里），「量子力学」这种完全无关的词也能召回。
-# 中文没有空格，不引入分词器时「单字 + 相邻二元组」是标准折中：
-#   「量子力学」→ 量 子 力 学 / 量子 子力 力学
-#   「小学三年级」→ 小 学 三 年 级 / 小学 学年 三年 年级
-# 二元组不再共享，伪命中消失；真实词（「团子」「小学」）仍能精确命中。
-# 二元组在向量里出现 2 次，权重天然高于单字。
+# Tokenize：英文整词 + CJK 单字与相邻二元组（零依赖；中文不引入分词器时的折中）
 _TOKEN_RE = re.compile(
     r"[A-Za-z]+|[\u4e00-\u9fff]+",
 )
@@ -78,7 +62,7 @@ def _tokenize(text: str) -> list[str]:
                 continue
             out.append(chunk)
             continue
-        # CJK 连续串：单字 + 相邻二元组（二元组重复一次以提高权重）
+        # CJK 连续串：单字 + 相邻二元组
         chars = [c for c in chunk]
         for c in chars:
             if c not in _STOPWORDS:
@@ -146,8 +130,7 @@ class SubstringBackend:
         return [[1.0] for _ in texts]
 
     def similarity(self, query_vec: list[float], doc_vecs: list[list[float]]) -> list[float]:
-        # query_vec 在此协议里实际就是 query 文本（见 _search 实现）
-        # 这里返回 0 占位，真实相似度由 query 文本与文档计算
+        # query_vec 在此协议里实际就是 query 文本（见 _search 实现）；此处仅返回 0 占位
         return [0.0] * len(self._docs)
 
 
@@ -315,7 +298,7 @@ class MemoryStore:
             max_inject: 注入 system prompt 的最大条数。
             backend_name: "auto" / "tfidf" / "sbert" / "substring"。
         """
-        # 兼容旧的 .json 入参 —— 检测后缀转 .db
+        # 兼容旧的 .json 入参，检测后缀转 .db
         _p = Path(data_file)
         if _p.suffix.lower() == ".json":
             log.info("MemoryStore: 检测到 .json data_file, 自动迁向 %s", _p.with_suffix(".db"))
@@ -327,9 +310,7 @@ class MemoryStore:
         self._items: list[MemoryItem] = []
         self._lock = threading.RLock()
         self._dirty = False
-        # 最近一次落盘是否成功。工具层（remember_fact）读它来决定能不能对主人
-        # 说「已记住」——磁盘只读/写满时，内存里有、磁盘无，桌宠却报喜，
-        # 主人重启一开桌宠就发现「记性丢了」。
+        # 最近一次落盘是否成功（remember_fact 据此决定能不能报「已记住」）
         self.last_save_ok = True
         self._load()
         self._refit_backend()
@@ -567,12 +548,7 @@ class MemoryStore:
                 idx = i.content.lower().find(kw_l)
                 scores.append(1.0 if idx >= 0 else 0.0)
 
-        # 多字中文 query 必须共享至少一个二元组才算命中。
-        #
-        # 光靠相似度阈值区分不了「量子力学」和「孩子在读小学三年级」这种
-        # 伪命中：前者靠共享单字「子」「学」拿到 0.23 的相似度，
-        # 调阈值会连带误杀真实命中（「学校」只有 0.18）。
-        # 规则更可解释：两个词要算相关，至少得共享一个相邻字组合。
+        # 多字中文 query 必须共享至少一个二元组才算命中（避免「量子力学」与「小学三年级」共享单字的伪命中）
         q_bigrams = _bigrams(kw)
         if len(q_bigrams) >= 1:
             scores = [
@@ -580,18 +556,7 @@ class MemoryStore:
                 for s, i in zip(scores, items, strict=False)
             ]
 
-        # 命中阈值（按「原始语义分」过滤，不是综合分）
-        #
-        # 早先只对 SubstringBackend 过滤，向量后端完全不设阈值：
-        # 综合分 = 语义分 × 各类权重，语义分为 0 的记忆也会被
-        # importance/时新度顶进结果，于是查任何词都把全部记忆返回一遍。
-        # recall_memory 工具会照单全收塞进 prompt，LLM 可能因此
-        # 声称「我记得你说过…」，而主人从没说过。
-        #
-        # 0.10 是实测折中（见 docs/ 或 commit）：
-        #   真实命中（团子 .47 / 加班 .42 / 孩子 .39 / 猫 .22 / 学校 .18）都保留；
-        #   「股票 / 天气 / 12345」这类完全无关的词召回 0 条。
-        # 调高会漏召回（学校 .18 就没了），调低会把 0.05 量级的噪音放进来。
+        # 命中阈值（按原始语义分过滤，不是综合分）—— 实测 0.10 能保留真实命中并过滤无关召回
         _MIN_HIT = 0.0 if isinstance(self.backend, SubstringBackend) else 0.10
         scored = [(s, i) for s, i in zip(scores, items, strict=False) if s > _MIN_HIT]
         # 综合排序

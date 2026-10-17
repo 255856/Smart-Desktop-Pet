@@ -1,14 +1,4 @@
-"""SettingsWindow 开发者模式 (v22-1) 单元测试。
-
-覆盖:
-  - developer_mode_changed / dev_state_pushed 信号存在
-  - chk_developer_mode 控件 toggle 接 _set_developer_mode
-  - _set_developer_mode 切换 self.developer_mode + 调 _emit_dev_state
-  - _emit_dev_state 发 dev_state_pushed 含 6+1 个字段
-  - _refresh_dev_preview 显示 quantize + 决策
-  - _on_dev_slider_changed 更新 value label + emit
-  - _on_dev_preset_clicked 切换 sliders 后 emit + preview
-"""
+"""SettingsWindow 开发者模式单元测试。"""
 import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -191,7 +181,7 @@ def test_settings_update_state_view_keeps_dev_panel_in_sync(settings_window):
 
 
 def test_v226_strategy_preview_panel_exists(settings_window):
-    """v22-6: dev_panel 应有 strategy 预览 label."""
+    """dev_panel 应有 strategy 预览 label。"""
     sw = settings_window
     sw._set_developer_mode(True)
     assert hasattr(sw, "lbl_dev_strategy"), (
@@ -201,7 +191,7 @@ def test_v226_strategy_preview_panel_exists(settings_window):
 
 
 def test_v226_strategy_preview_updates_with_sliders(settings_window):
-    """v22-6: 拖 slider 时策略预览应跟上 (跟 _strategy_guidance 输出一致)."""
+    """拖 slider 时策略预览应跟上 (跟 _strategy_guidance 输出一致)。"""
     sw = settings_window
     sw._set_developer_mode(True)
     # HIGH sat+mid mood → "状态好" 探索段
@@ -229,10 +219,10 @@ def test_v226_strategy_preview_updates_with_sliders(settings_window):
     sw._dev_sliders["level"].setValue(8)
 
 
-# ---- v23-7: trace 页 3 段 UI ----
+# ---- trace 页 3 段 UI ----
 
 def test_v237_trace_panel_exists(settings_window):
-    """v23-7: dev_panel 应有 trace 视图 (调前/调后 2 段色块)."""
+    """dev_panel 应有 trace 视图 (调前/调后 2 段色块)。"""
     sw = settings_window
     sw._set_developer_mode(True)
     assert hasattr(sw, "_dev_trace_view"), "v23-7 应有 _dev_trace_view"
@@ -241,7 +231,7 @@ def test_v237_trace_panel_exists(settings_window):
 
 
 def test_v237_trace_panel_renders_decision_and_outcome(tmp_path, monkeypatch, settings_window):
-    """v23-7: trace 视图从 companion_log.txt 读 + 渲染 decision/outcome 块."""
+    """trace 视图从 companion_log.txt 读 + 渲染 decision/outcome 块。"""
     import json
     from app.brain._companion_log import trace_decision, trace_outcome
 

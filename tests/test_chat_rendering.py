@@ -1,4 +1,4 @@
-﻿"""Chat rendering 单元测试（气泡样式 + 头像 + 工具调用 + 流式提示）。"""
+"""Chat rendering 单元测试（气泡样式 + 头像 + 工具调用 + 流式提示）。"""
 import sys
 import shutil
 import tempfile
@@ -48,7 +48,7 @@ def test_format_time_short():
 
 
 def test_msg_html_user_alignment():
-    """用户消息：MiniMax Code 风格线性流，msg-user div + 浅灰底 + 'You' label。"""
+    """用户消息：msg-user div + 浅灰底 + 'You' label。"""
     char_cfg = CharacterConfig(name="鲸鱼娘")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -64,11 +64,11 @@ def test_msg_html_user_alignment():
     assert "avatar-col user" not in html
     assert "bubble user" not in html
     assert '<table width="100%"' not in html
-    print("[OK] User message uses new linear-flow structure (MiniMax Code style)")
+    print("[OK] User message uses new linear-flow structure")
 
 
 def test_msg_html_bot_alignment():
-    """桌宠消息：MiniMax Code 风格线性流, msg-assistant div + 紫 '桌宠' label。"""
+    """桌宠消息：msg-assistant div + 紫 '桌宠' label。"""
     char_cfg = CharacterConfig(name="鲸鱼娘")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -81,7 +81,7 @@ def test_msg_html_bot_alignment():
     assert "鲸鱼娘" in html
     assert "avatar-col bot" not in html
     assert "bubble bot" not in html
-    print("[OK] Bot message uses new linear-flow structure (MiniMax Code style)")
+    print("[OK] Bot message uses new linear-flow structure")
 
 
 def test_render_markdown_list():
@@ -118,7 +118,7 @@ def test_render_markdown_ordered_list():
 
 
 def test_render_markdown_headers():
-    """MiniMax Code 风格: ##/###/#### 标题应正确渲染成 <h2>/<h3>/<h4>。"""
+    """##/###/#### 标题应正确渲染成 <h2>/<h3>/<h4>。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -131,7 +131,7 @@ def test_render_markdown_headers():
 
 
 def test_render_markdown_blockquote():
-    """MiniMax Code 风格: > blockquote 应包成 <blockquote>。"""
+    """> blockquote 应包成 <blockquote>。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -143,7 +143,7 @@ def test_render_markdown_blockquote():
 
 
 def test_render_markdown_hr():
-    """MiniMax Code 风格: --- 应渲染为 <hr/>。"""
+    """--- 应渲染为 <hr/>。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -154,7 +154,7 @@ def test_render_markdown_hr():
 
 
 def test_render_markdown_table():
-    """MiniMax Code 风格: GFM 表格应渲染成 <table>。"""
+    """GFM 表格应渲染成 <table>。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -174,7 +174,7 @@ def test_render_markdown_table():
 
 
 def test_render_markdown_link_safe():
-    """MiniMax Code 风格: [text](url) 链接要渲染,但 javascript: 注入必须挡住。"""
+    """[text](url) 链接要渲染, 但 javascript: 注入必须挡住。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -190,7 +190,7 @@ def test_render_markdown_link_safe():
 
 
 def test_render_markdown_xss_protection():
-    """MiniMax Code 风格: 普通用户输入含 <script> 必须被转义掉, 不能执行。"""
+    """普通用户输入含 <script> 必须被转义掉, 不能执行。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -203,7 +203,7 @@ def test_render_markdown_xss_protection():
 
 
 def test_render_markdown_code_block_preserves_special_chars():
-    """MiniMax Code 风格: 代码块 ``` 内 < > & 不应被转义 (常见代码含 < >)。"""
+    """代码块 ``` 内 < > & 不应被转义 (常见代码含 < >)。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -218,7 +218,7 @@ def test_render_markdown_code_block_preserves_special_chars():
 
 
 def test_msg_html_markdown_e2e():
-    """MiniMax Code 风格 end-to-end: markdown 在 _msg_html 里真正串通渲染。"""
+    """markdown 在 _msg_html 里真正串通渲染。"""
     char_cfg = CharacterConfig(name="桌宠")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -242,7 +242,7 @@ def test_msg_html_markdown_e2e():
     assert "<blockquote>" in html
     # 没漏掉文字
     assert "小结" in html
-    print("[OK] MiniMax Code style: msg_html end-to-end renders full markdown")
+    print("[OK] msg_html end-to-end renders full markdown")
 
 
 def test_chat_md_css_registered():
@@ -295,7 +295,6 @@ def test_streaming_indicator():
     # 旧的沙漏 ⏳ 已替换为三个圆点
     assert "⏳" not in html
     assert html.count("●") == 3, f"应渲染 3 个等待圆点，实际 {html.count('●')}"
-    # 2026-10-15: MiniMax Code 风格改用 CSS class + active 标志, 不在 HTML 里硬编码颜色
     # 初始帧恰好一个 .typing-dot.active
     assert 'class="typing-dot active"' in html, (
         "初始帧应有且仅有一个 typing-dot.active, 实际: " + html
@@ -319,11 +318,7 @@ def test_system_message():
 
 
 def test_tool_calls_display():
-    """工具调用：Claude Code 风格步骤卡片（中文名 + 目标 + 成败状态）。
-
-    2026-10-15:Qt QTextBrowser 不支持 <details> 折叠,改用 <a href cmd:toggle_tools>
-    + anchorClicked 模拟。默认折叠态只显示 head + 第一条工具预览;展开态显示所有。
-    """
+    """工具调用：步骤卡片（中文名 + 目标 + 成败状态），默认折叠态显示 head + 第一条预览。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -350,10 +345,8 @@ def test_tool_calls_display():
     # 未知工具名兜底显示原名
     msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
     assert "my_custom_thing" in cw._msg_html(msg3)
-    # 折叠态用 anchor link 触发 toggle —— 2026-10-15 v3: head 文字
-    # 只显示「已执行操作 · N ▾」,不再出现"点击展开/点击收起"字样
-    # (用户实测指定), 但 cmd:toggle_tools 仍保留 (toggle 功能还要)
-    # v6: URL 升级为 `cmd:toggle_tools#N` (N=msg_id), 但 prefix 仍是 cmd:toggle_tools
+    # 折叠态用 anchor link 触发 toggle; head 只显示「已执行操作 · N ▾」,
+    # 不再出现"点击展开/点击收起"字样, 但 cmd:toggle_tools 仍保留
     assert 'href="cmd:toggle_tools' in html
     assert "▾" in html  # 折叠态箭头
     assert "点击展开" not in html, (
@@ -362,7 +355,6 @@ def test_tool_calls_display():
     assert "点击收起" not in html
 
     # === 展开态 ===
-    # v6: per-message 状态 —— 通过 dict 切, 不再设 self._tools_collapsed
     cw._tools_collapsed_by_msg[id(msg)] = False
     html2 = cw._msg_html(msg)
     # 全部工具都展示
@@ -564,7 +556,7 @@ if __name__ == "__main__":
 def test_custom_avatar_loaded_from_path():
     """chat_cfg.bot_avatar_path 有值时,_make_avatar_pixmap('bot') 真的去读这个图。
 
-    2026-10-15 v2:用户头像已移除,只验证 bot (桌宠) 头像流程。
+    用户头像已移除,只验证 bot (桌宠) 头像流程。
     """
     from app.core.config import LLMConfig, CharacterConfig, ChatConfig
     with tempfile.TemporaryDirectory() as tmp:
@@ -590,7 +582,7 @@ def test_custom_avatar_loaded_from_path():
 
 
 def test_user_avatar_removed_entirely():
-    """2026-10-15 v2:用户头像已彻底移除。_make_avatar_pixmap('user') 不再
+    """用户头像已彻底移除。_make_avatar_pixmap('user') 不再
     生成真图 (返回 null QPixmap), 也不应有 _user_avatar_path / _avatar_data_user
     这些字段。"""
     from app.core.config import LLMConfig
@@ -616,7 +608,7 @@ def test_user_avatar_removed_entirely():
 def test_set_custom_avatar_copies_and_persists():
     """_set_custom_avatar 复制源图到 data/avatars/bot.png, 更新 cfg 并写回 yaml。
 
-    2026-10-15 v2:用户头像已移除,只测 bot 角色。user 角色调用必须返回 False。
+    用户头像已移除,只测 bot 角色。user 角色调用必须返回 False。
     """
     from app.core.config import LLMConfig, CharacterConfig, ChatConfig, load_config
     with tempfile.TemporaryDirectory() as tmp:
@@ -758,7 +750,7 @@ def test_bug2_ast_guard_load_history_uses_helper():
 
 
 def test_bug1_ast_guard_anchor_click_uses_rebuild_not_refresh():
-    """Bug 1 AST 守卫 v5: 点 chat 上的 cmd:toggle_tools 链接时,
+    """AST 守卫: 点 chat 上的 cmd:toggle_tools 链接时,
     _on_chat_anchor_clicked 必须走 _rebuild_chat_view_from_history, 不能调
     _refresh_streaming_message。
 
@@ -789,13 +781,11 @@ def test_bug1_ast_guard_anchor_click_uses_rebuild_not_refresh():
                     and isinstance(body_nodes[0].value.value, str)):
                 body_nodes = body_nodes[1:]
             body_src = ' '.join(_ast.dump(s) for s in body_nodes)
-            # v5: 不能调 _refresh_streaming_message
             assert "_refresh_streaming_message" not in body_src, (
                 "_on_chat_anchor_clicked 不能调 _refresh_streaming_message — "
                 "v4 实测这个调用在某些状态下会清空 chat 区域。"
                 "必须改用 _rebuild_chat_view_from_history。"
             )
-            # v5: 必须调 _rebuild_chat_view_from_history
             assert "_rebuild_chat_view_from_history" in body_src, (
                 "_on_chat_anchor_clicked 必须调 _rebuild_chat_view_from_history"
             )
@@ -913,7 +903,6 @@ def test_v6_english_commands_with_plan_skills():
     # _handle_command 接受英文命令 (直接调, 不通过按钮)
     # /help 路径: 走 if cmd in ("/help", "/?") 分支, 调用 _render_message 输出到 chat_view
     cw._handle_command("/help")
-    # v7: 帮助文案改成中文, "常用命令" 是关键 marker
     text = cw.chat_view.toPlainText()
     assert "常用命令" in text, (
         f"/help 必须在 chat_view 里渲染「常用命令」列表. 实际: {text!r}"
@@ -987,9 +976,7 @@ def test_v7_ast_guard_command_literals_english():
 
 
 def test_msg_user_right_aligned():
-    """用户消息靠右 (主人实测指定 "我发出的消息应该要保持在右侧")。
-    CSS: .msg-user .msg-body { text-align: right; display:block; margin-left:auto; }
-    """
+    """用户消息靠右 (CSS .msg-user .msg-body text-align:right)。"""
     from app.ui import ui_style as _us
     qss = _us.CHAT_MD_CSS
     # msg-user body 应 text-align:right 且 margin-left:auto
@@ -1012,7 +999,6 @@ def test_tool_steps_no_click_text():
         ("add_reminder", '{"x":1}', "OK"),
         ("web_search", '{}', "找到"),
     ])
-    # v6: per-message 状态通过 dict 设
     cw._tools_collapsed_by_msg[id(msg)] = True
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert "点击展开" not in html, f"「点击展开」字样不应出现: {html}"
@@ -1049,7 +1035,7 @@ def test_input_box_style_matches_display():
 def test_window_controls_present():
     """调整 5 v3 验证: 标题栏右上角 3 个窗口控制按钮 (最小化/最大化/关闭)。
 
-    2026-10-15 v3: 主人实测 "只需要最小化最大化和关闭, 不需要多余的全屏",
+    主人实测 "只需要最小化最大化和关闭, 不需要多余的全屏",
     全屏按钮 + F11 快捷键已移除。"""
     from app.core.config import LLMConfig
     from app.core.qt_compat import QToolButton
@@ -1167,7 +1153,7 @@ def test_no_cmd_nav_subclass_ast_guard():
 
 
 def test_v5_rebuild_chat_view_from_history_preserves_content():
-    """v5: _on_chat_anchor_clicked(cmd:toggle_tools) 改用
+    """_on_chat_anchor_clicked(cmd:toggle_tools) 改用
     _rebuild_chat_view_from_history, 不再 _refresh_streaming_message。
     后者有「从 anchor 删到末尾再 insertHtml」的危险操作, 在某些
     状态下会让 chat 区域被擦白 (用户实测 v4 反馈「点击后
@@ -1279,7 +1265,7 @@ def test_v5_ast_guard_rebuild_method_exists():
 
 
 def test_anchor_click_handler_keeps_toggle_guard():
-    """v5: _on_chat_anchor_clicked 调 _rebuild_chat_view_from_history,
+    """_on_chat_anchor_clicked 调 _rebuild_chat_view_from_history,
     不再调 _refresh_streaming_message — 所以 _current_bot_msg /
     _streaming_anchor_pos 守卫也用不上了 (v1 那个守卫就是当时为了挡
     _refresh_streaming_message 加的, 现在那条路直接没了)。"""
@@ -1315,19 +1301,9 @@ def test_anchor_click_handler_keeps_toggle_guard():
     raise AssertionError("_on_chat_anchor_clicked 函数未找到")
 
 
-# ============================================================
-# v8 调整 (2026-10-15):
-#   1) 输入框去紫色线圈（_InputFocusWatcher 删除）
-#   2) /skills/<name> 二级深链
-#   3) 拖图 + 底部 + 上传按钮 + 多模态生成按钮
-#   4) _render_markdown 支持 ![alt](file://...) 转 <img>
-# ============================================================
-
-
 def test_v8_no_purple_focus_border():
-    """v8: 主人实测「每次点击输入框会有一个紫色线圈不需要」。
-    ui_style 删掉 input_container / chat_view 的 :focus-within / :focus
-    border-color 规则, 输入容器边框永远保持中性灰 (#e7e3f5)。
+    """输入框无紫色线圈 (ui_style 删 :focus-within / :focus border-color 规则)。
+
     chrome.py 应该不再含 _InputFocusWatcher。
     """
     from app.ui import ui_style as _us
@@ -1358,7 +1334,7 @@ def test_v8_no_purple_focus_border():
 
 
 def test_v8_skills_deep_link():
-    """v8: /skills/<name> 路径存在。v9 升级后该命令的语义变成"激活
+    """/skills/<name> 路径存在。v9 升级后该命令的语义变成"激活
     (注入到 system_prompt)" 而不是"内容预览" —— 跟主人最新设计一致。
     测试验证: 激活 + 找不到给提示。
     """
@@ -1395,7 +1371,7 @@ def test_v8_skills_deep_link():
 
 
 def test_v8_upload_and_media_buttons():
-    """v8: 底部新增 + 上传按钮和多模态下拉, 整窗接 drag&drop。"""
+    """底部新增 + 上传按钮和多模态下拉, 整窗接 drag&drop。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
 
@@ -1426,7 +1402,7 @@ def test_v8_upload_and_media_buttons():
 
 
 def test_v8_markdown_image_inline():
-    """v8: _render_markdown 处理 ![alt](url) → <img src=url>,
+    """_render_markdown 处理 ![alt](url) → <img src=url>,
     只放行 http/https/file scheme。这是上传图片走 markdown 渲染的关键。
     """
     from app.ui.chat_window import ChatWindow
@@ -1477,7 +1453,6 @@ def test_v8_handle_uploaded_files_saves_and_renders():
         pix.fill(QColor("#ff00ff"))  # 品红
         pix.save(str(tmp_path), "PNG")
 
-        # v10: history + chat_view 都没动 (待发送区收)
         before_h = len(cw.history)
         before_text = cw.chat_view.toPlainText()
         cw._handle_uploaded_files([tmp_path])
@@ -1509,16 +1484,10 @@ def test_v8_handle_uploaded_files_saves_and_renders():
 
 
 # ============================================================
-# v9 调整 (2026-10-15):
-#   1) 图片拖入只显示 file:// 文字 → 渲染前 inline 成 data: URL
-#   2) /skills/<name> 改为激活路径 (写聊天开头 / _handle_command 都走激活)
-#   3) 多模态生成 (图 / 视频) 调真实 tool, 拿 URL 嵌图
-# ============================================================
 
 
 def test_v9_inline_local_images_to_data_url():
-    """v9: 主人截图实测「图片拖进去是这样子」 — file:// 文字而不是图。
-    _msg_html 渲染前先扫 `![alt](file://...)`, 把 file:// 替换成
+    """_msg_html 渲染前先扫 `![alt](file://...)`, 把 file:// 替换成
     `data:image/...;base64,xxx`, QTextBrowser 自包含 base64 嵌图, 不会显示裸路径。
     """
     from app.ui.chat_window import ChatWindow
@@ -1554,15 +1523,13 @@ def test_v9_inline_local_images_to_data_url():
             f"inline 后不应再含 file:// 字样。 实际: {out[:200]!r}"
         )
 
-    # 文件不存在时, v14 改成清晰提示 (主人实测 2026-10-15: 「重启后图片
-    # 丢失变空白方块」, 给「图片已丢失」文字说明, 不再空白)。
+    # 文件不存在时, v14 改成清晰提示
     out2 = cw._inline_local_images_to_data_url("![alt](file:///C:/no/such/file.png)")
     assert "图片已丢失" in out2, (
         f"文件不存在时 v14 应给「图片已丢失」提示。 实际: {out2!r}"
     )
     assert "file.png" in out2, f"提示里应含文件名, 实际: {out2!r}"
 
-    # v14: 项目内相对路径也能 inline
     md_rel = f"![主人上传](assets/uploads/{png.name})"
     out3 = cw._inline_local_images_to_data_url(md_rel)
     # 由于 _uploads_dir() 是项目根下 assets/uploads/, 真实路径可能不匹配
@@ -1576,7 +1543,7 @@ def test_v9_inline_local_images_to_data_url():
 
 
 def test_v9_activate_skill_session_state():
-    """v9: _activate_skill 把 skill 内容加入 system_prompt (整段对话期间生效)。
+    """_activate_skill 把 skill 内容加入 system_prompt (整段对话期间生效)。
     _active_skill_prompt 非空时, 应返回包含 [Active Skill] 头尾 + skill 文本。
     """
     from app.ui.chat_window import ChatWindow
@@ -1620,7 +1587,7 @@ def test_v9_activate_skill_session_state():
 
 
 def test_v9_skills_list_marks_active():
-    """v9: /skills 列表里当前激活的 skill 后面要标 '← 当前激活', 没激活时给
+    """/skills 列表里当前激活的 skill 后面要标 '← 当前激活', 没激活时给
     '激活方式' 提示, 让主人知道怎么用。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -1656,7 +1623,7 @@ def test_v9_skills_list_marks_active():
 
 
 def test_v9_handle_command_skills_path_activates():
-    """v9: _handle_command 路径里 /skills/<name> 走激活, 不再 list 预览。
+    """_handle_command 路径里 /skills/<name> 走激活, 不再 list 预览。
     系统消息里含「已激活 skill: <name>」或类似。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -1712,17 +1679,10 @@ def test_v9_on_send_skills_prefix_in_chat():
 
 
 # ============================================================
-# v10 调整 (2026-10-15):
-#   1) 拖图 / 上传改为「待发送区」, 按发送才入 chat (iMessage 同款)
-#   2) / 命令补全动态拼 /skills/<name> 候选项
-#   3) 真接多模态工具: app/engine/tools/_multimodal.py
-#      - generate_image 调 OpenAI 兼容 endpoint (gpt-image-1)
-#      - generate_video 留接口 + 清晰接入指引
-# ============================================================
 
 
 def test_v10_pending_send_consumes_to_chat():
-    """v10: 拖入 / 上传 → 待发送区 (不进 chat); 主人按发送 → 走 _on_send
+    """拖入 / 上传 → 待发送区 (不进 chat); 按发送 → 走 _on_send
     把 pending + 当前 input 拼成 user message 渲染进 chat + 持久化 + 清空。
     """
     from app.ui.chat_window import ChatWindow
@@ -1769,7 +1729,7 @@ def test_v10_pending_send_consumes_to_chat():
 
 
 def test_v10_remove_pending_attachment():
-    """v10: 主人点缩略图 → 剔除该 attachment, 缩略图消失。"""
+    """主人点缩略图 → 剔除该 attachment, 缩略图消失。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
     import tempfile
@@ -1813,7 +1773,7 @@ def test_v10_remove_pending_attachment():
 
 
 def test_v10_skills_completer_dynamic():
-    """v10: / 命令补全在 chat_window 启动时动态拉 list_skills 拼 /skills/<name>。
+    """/ 命令补全在 chat_window 启动时动态拉 list_skills 拼 /skills/<name>。
     主人输入 /skills/ 时 popup 列出所有 skill 名 (含 /skills/poem 等)。
     """
     from app.ui.chat_window import ChatWindow
@@ -1864,20 +1824,10 @@ def test_v10_multimodal_tool_registered():
 
 
 # ============================================================
-# v12 调整 (2026-10-15):
-#   1) 多模态从 v11 router 多 provider 改回 config-driven:
-#      config.yaml 的 multimodal: 段填 base_url / api_key / image_model / ...
-#      _multimodal.setup_config() 注入, tool 直接发 HTTP
-#   2) 多模态按钮 (🎨 / 🎬 / 🎵) 改为「在输入框前面 insert /image /video /audio 」,
-#      跟 iMessage / 微信 / QQ 同款姿势, 不再弹 QInputDialog
-#   3) /image /video /audio 命令走 _handle_command, 跟按钮是同一姿势的键盘版
-#   4) /skills/<name> 改成 per-message: 当条 user msg 设 msg.skill, 下一条
-#      user msg 不传就不拼进 system_prompt (不再持久到 self._active_skill session)
-# ============================================================
 
 
 def test_v12_button_inserts_prefix():
-    """v12: 多模态按钮 (image / video / audio) 在 input_edit 前面 insert
+    """多模态按钮 (image / video / audio) 在 input_edit 前面 insert
     "/<kind> " 前缀, focus 回去, 让主人接着输 prompt 按发送走 /image 命令。
     不再弹 QInputDialog (那是 v9-v11 的姿势)。
     """
@@ -1925,7 +1875,7 @@ def test_v12_button_inserts_prefix():
 
 
 def test_v12_image_command_runs_tool():
-    """v12: 输入框直接打 /image <prompt> 走 _handle_command 调真 tool 拿 URL 嵌图。
+    """输入框直接打 /image <prompt> 走 _handle_command 调真 tool 拿 URL 嵌图。
     tool fn 返回 URL 后, _render_message 把 markdown image 渲染进 chat_view。
     """
     from app.ui.chat_window import ChatWindow
@@ -1960,7 +1910,6 @@ def test_v12_image_command_runs_tool():
     #    resource, 不会出现在 toPlainText() 里; 直接看 history 里的 msg.content。
     cw.chat_view.clear()
     cw._handle_command("/image 一只橘猫")
-    # v22: tool 异步, 等 _on_multimodal_result 跑完
     import time as _t
     from PyQt5.QtCore import QCoreApplication
     _deadline = _t.time() + 3.0
@@ -2016,7 +1965,7 @@ def test_v12_image_command_runs_tool():
 
 
 def test_v12_run_multimodal_no_tool_raises():
-    """v12: registry 有但缺 tool → _run_multimodal_action 给清晰接入指引。"""
+    """registry 有但缺 tool → _run_multimodal_action 给清晰接入指引。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
     from app.engine.tools._core import ToolRegistry
@@ -2038,7 +1987,7 @@ def test_v12_run_multimodal_no_tool_raises():
 
 
 def test_v12_run_multimodal_no_registry_raises():
-    """v12: registry=None 时, _run_multimodal_action 报清晰错。"""
+    """registry=None 时, _run_multimodal_action 报清晰错。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
 
@@ -2056,7 +2005,7 @@ def test_v12_run_multimodal_no_registry_raises():
 
 
 def test_v12_per_message_skill_only_affects_one_msg():
-    """v12: /skills/<name> ... 在聊天开头, skill 只对当条 user message 生效。
+    """/skills/<name> ... 在聊天开头, skill 只对当条 user message 生效。
     - 当条 msg.skill = "poem"
     - 下一条 user msg 不传 skill, msg.skill 应为 None, 不拼进 system_prompt
     """
@@ -2106,7 +2055,7 @@ def test_v12_per_message_skill_only_affects_one_msg():
 
 
 def test_v12_kickoff_uses_msg_skill_not_session_skill():
-    """v12: _kickoff_llm 优先读 history[-1].skill (per-message), 不读
+    """_kickoff_llm 优先读 history[-1].skill (per-message), 不读
     self._active_skill session 字段 (那是 v9 老路径)。
 
     用 _skill_prompt_for 跟 _active_skill_prompt 输出的格式相同 ([Active Skill: <name>])
@@ -2230,7 +2179,7 @@ def test_v12_no_api_command_in_handle_command():
 
 
 def test_v12_handle_command_supports_image_video_audio():
-    """v12: _handle_command 加 /image /video /audio 三个命令, 走 _run_multimodal_action。"""
+    """_handle_command 加 /image /video /audio 三个命令, 走 _run_multimodal_action。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
     from app.engine.tools._core import ToolRegistry
@@ -2248,7 +2197,6 @@ def test_v12_handle_command_supports_image_video_audio():
 
     cw.chat_view.clear()
     cw._handle_command("/image 猫")
-    # v22: _run_multimodal_action 走 worker thread 异步调 tool,
     # 切回主线程时 _on_multimodal_result 才把 result 写进 history。
     # 同步等异步完成 (tool.fn 是 lambda 同步返回, invokeMethod 跨线程
     # 调度到主线程的事件循环里执行)。
@@ -2301,7 +2249,6 @@ def test_v12_multimodal_setup_config_injected_from_cfg_path():
             cw = ChatWindow(LLMConfig(), CharacterConfig(name='test'),
                             'assets/sprites', asr_enabled=False,
                             cfg_path=str(cfg_path))
-            # v15: _multimodal._CONFIG 接收整个 yaml, 字段在 multimodal 段
             mm_cfg = _multimodal._CONFIG.get("multimodal") or {}
             assert mm_cfg.get("image_model") == "image-01", (
                 f"_CONFIG.multimodal 应含 image_model。 实际: {mm_cfg}"
@@ -2319,7 +2266,7 @@ def test_v12_multimodal_setup_config_injected_from_cfg_path():
 
 
 def test_v12_image_command_missing_config_raises():
-    """v12: 没 multimodal 段 / 没 api_key 时, _run_multimodal_action 报清晰错。"""
+    """没 multimodal 段 / 没 api_key 时, _run_multimodal_action 报清晰错。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
     from app.engine.tools._core import ToolRegistry
@@ -2354,15 +2301,6 @@ def test_v12_image_command_missing_config_raises():
 
 
 # ============================================================
-# v13 调整 (2026-10-15):
-#   1) multimodal 默认 endpoint 路径改 MiniMax 实际值
-#      (image=image_generation / video=video_generation / audio=t2a_v2),
-#      不是 OpenAI 兼容的 /images/generations (在 MiniMax 上 404)
-#   2) 适配 MiniMax 实际响应 schema
-#      (image: data.image_urls[] / data.image_base64[];
-#       video: {task_id} 异步 polling /v2/query/video_generation/{task_id})
-#   3) chat_window 不再有 emoji (主人实测反馈: 「以后项目中不要使用表情包」)
-# ============================================================
 
 
 def test_v13_endpoint_paths_default_to_minimax():
@@ -2371,7 +2309,6 @@ def test_v13_endpoint_paths_default_to_minimax():
     不是 OpenAI 兼容的 /images/generations (MiniMax 上 404)。
     """
     from app.engine.tools import _multimodal
-    # v15: 传 base_url 模拟主人 plan (含 minimax 域名)
     _multimodal.setup_config({
         "llm": {"base_url": "https://api.minimaxi.com/v1"},
     })
@@ -2390,7 +2327,6 @@ def test_v13_endpoint_paths_default_to_minimax():
     )
     _multimodal.setup_config({})
 
-    # v15: 非 minimax 域 (如 openai) 走 OpenAI 兼容 endpoint
     _multimodal.setup_config({
         "llm": {"base_url": "https://api.openai.com/v1"},
     })
@@ -2425,7 +2361,7 @@ def test_v13_endpoint_path_overridden_by_cfg():
 
 
 def test_v13_extract_first_url_minimax_official_schema():
-    """v13: MiniMax 官方 image-01 响应 {data: {image_urls: [url, ...]}}
+    """MiniMax 官方 image-01 响应 {data: {image_urls: [url, ...]}}
     / {data: {image_base64: [b64, ...]}} 都正确解析。"""
     from app.engine.tools import _multimodal
 
@@ -2470,7 +2406,7 @@ def test_v13_extract_first_url_minimax_official_schema():
 
 
 def test_v13_generate_image_uses_minimax_schema():
-    """v13: base_url 配 minimaxi.com 时, generate_image 走 MiniMax 官方 schema
+    """base_url 配 minimaxi.com 时, generate_image 走 MiniMax 官方 schema
     (aspect_ratio + response_format=url), 不是 OpenAI 的 size。
 
     v14 升级: generate_image 落盘到 assets/uploads/, 返回 file:// 路径。
@@ -2509,7 +2445,6 @@ def test_v13_generate_image_uses_minimax_schema():
             "aspect_ratio": "16:9",
         })
         url = _multimodal.generate_image("a cat in space")
-        # v14: 返回 file:// 路径 (落盘到项目 uploads)
         assert url.startswith("file:///"), (
             f"v14 应落盘返回 file://, 实际: {url!r}"
         )
@@ -2537,11 +2472,7 @@ def test_v13_generate_image_uses_minimax_schema():
 
 
 def test_v13_no_emoji_in_chat_window_ui_strings():
-    """v13 守卫: chat_window 里没有 emoji block / 装饰符号 (主人 2026-10-15
-    反馈: 「以后项目中不要使用表情包」)。
-
-    扫源码, 排除 docstring 跟注释 (注释里如果有 emoji 也算违规, 防止后续
-    grep 误判)。"""
+    """扫源码: chat_window 里没有 emoji block / 装饰符号。"""
     import re
     src = Path("app/ui/chat_window/__init__.py").read_text(encoding="utf-8-sig")
 
@@ -2567,18 +2498,10 @@ def test_v13_no_emoji_in_chat_window_ui_strings():
 
 
 # ============================================================
-# v14 调整 (2026-10-15):
-#   1) 多模态文件落盘 assets/uploads/: generate_image / video / audio 拿到 URL
-#      / base64 后下载到项目 uploads, 返回 file:// 绝对路径
-#   2) chat_store 持久化 file:// 路径, 重启后文件还在, 渲染不丢失
-#   3) _inline_local_images 失败时给「图片已丢失: <name>」清晰提示, 不再空白
-#   4) 同时支持项目内相对路径 (assets/uploads/xxx.png) — 按 chat_window
-#      _uploads_dir() 解析
-# ============================================================
 
 
 def test_v14_download_to_uploads_local_file_passthrough():
-    """v14: file:// 输入 (已经在本地) 直接返回, 不重复复制。"""
+    """file:// 输入 (已经在本地) 直接返回, 不重复复制。"""
     from app.engine.tools import _multimodal
     _multimodal.setup_config({})
     src = "file:///C:/tmp/v14_src.png"
@@ -2591,7 +2514,7 @@ def test_v14_download_to_uploads_local_file_passthrough():
 
 
 def test_v14_download_to_uploads_data_url_writes_to_uploads():
-    """v14: data:image/png;base64,XXX 输入解码落盘到 assets/uploads/。"""
+    """data:image/png;base64,XXX 输入解码落盘到 assets/uploads/。"""
     import base64 as _b64
     from app.engine.tools import _multimodal
     _multimodal.setup_config({})
@@ -2624,7 +2547,7 @@ def test_v14_download_to_uploads_data_url_writes_to_uploads():
 
 
 def test_v14_download_to_uploads_http_downloads_via_urlopen():
-    """v14: http(s):// 输入走 urlopen 下载到 uploads。"""
+    """http(s):// 输入走 urlopen 下载到 uploads。"""
     import io
     from app.engine.tools import _multimodal
     _multimodal.setup_config({})
@@ -2654,7 +2577,7 @@ def test_v14_download_to_uploads_http_downloads_via_urlopen():
 
 
 def test_v14_inline_local_images_missing_file_shows_placeholder():
-    """v14: 渲染时 file:// 找不到文件 → 给「图片已丢失: <name>」提示, 不空白。"""
+    """渲染时 file:// 找不到文件 → 给「图片已丢失: <name>」提示, 不空白。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
 
@@ -2678,7 +2601,7 @@ def test_v14_inline_local_images_missing_file_shows_placeholder():
 
 
 def test_v14_inline_local_images_resolves_assets_relative_path():
-    """v14: chat_window 渲染项目内相对路径 (assets/uploads/xxx.png) —
+    """chat_window 渲染项目内相对路径 (assets/uploads/xxx.png) —
     按 chat_window._uploads_dir() 解析为绝对路径, 存在则 inline。"""
     from app.ui.chat_window import ChatWindow
     from app.core.config import LLMConfig, CharacterConfig
@@ -2711,18 +2634,10 @@ def test_v14_inline_local_images_resolves_assets_relative_path():
 
 
 # ============================================================
-# v15 调整 (2026-10-15):
-#   1) config.yaml multimodal 段大幅简化 (主人反馈「config.yaml 复杂化」):
-#      跟 llm 段共享 base_url / api_key, 只配 3 个 model, 移除 endpoint_path 等
-#   2) _multimodal.setup_config 接受整个 yaml cfg, 字段在 cfg.multimodal 段
-#      兼容: _cfg 顺序 顶层 → multimodal → llm → env (老测试直接 setup_config({...}) 仍过)
-#   3) _endpoint_path 按 base_url 域名自动判断 (minimax / openai / other)
-#   4) 默认 model 改 MiniMax Plan 实际可用值 (image-01 / MiniMax-H3 / speech-2.8-hd)
-# ============================================================
 
 
 def test_v15_cfg_multimodal_section_simplified():
-    """v15: config.yaml 的 multimodal 段被简化, 只剩 enabled + 3 个 model 字段,
+    """config.yaml 的 multimodal 段被简化, 只剩 enabled + 3 个 model 字段,
     不再含 base_url / api_key / image_size / duration_seconds / endpoint_path。
     """
     import yaml
@@ -2757,7 +2672,7 @@ def test_v15_cfg_multimodal_section_simplified():
 
 
 def test_v15_cfg_multimodal_shares_llm_base_url_via_cfg():
-    """v15: _multimodal.setup_config(整个 cfg) 后, _cfg('base_url') 优先从
+    """_multimodal.setup_config(整个 cfg) 后, _cfg('base_url') 优先从
     llm 段读 (主人 plan 是统一 key), 跟 multimodal 段无关。"""
     from app.engine.tools import _multimodal
     _multimodal.setup_config({
@@ -2779,11 +2694,10 @@ def test_v15_cfg_multimodal_shares_llm_base_url_via_cfg():
 
 
 def test_v15_endpoint_path_auto_judges_by_domain():
-    """v15: endpoint 路径按 base_url 域名自动判断, 不再让用户配 endpoint_path。"""
+    """endpoint 路径按 base_url 域名自动判断, 不再让用户配 endpoint_path。"""
     from app.engine.tools import _multimodal
     cases = [
         # (base_url, image, video, audio)
-        # v17: MiniMax video 实际是 v2 端点 (/v2/video_generation)
         ("https://api.minimaxi.com/v1",
          "image_generation", "v2/video_generation", "t2a_v2"),
         ("https://api.minimaxi.cn/v1",
@@ -2811,7 +2725,7 @@ def test_v15_endpoint_path_auto_judges_by_domain():
 
 
 def test_v15_multimodal_segment_optional():
-    """v15: multimodal 段可以不写 (空), _multimodal 仍能从 llm 段共享
+    """multimodal 段可以不写 (空), _multimodal 仍能从 llm 段共享
     base_url / api_key, 不抛错。"""
     from app.engine.tools import _multimodal
     _multimodal.setup_config({
@@ -2832,15 +2746,10 @@ def test_v15_multimodal_segment_optional():
 
 
 # ============================================================
-# v16 调整 (2026-10-15):
-#   MiniMax 1004 错 (login fail) 通常是 key 跟 base_url 不匹配 (plan key
-#   走 plan 域, pay-as-you-go 走另一个域)。_post_json 抛错时给清晰中文提示,
-#   主人不用读 stack trace 就能知道去 MiniMax 后台「套餐详情」找 plan base_url。
-# ============================================================
 
 
 def test_v16_post_json_1004_login_fail_clear_hint():
-    """v16: MiniMax 1004 错 (login fail) 时, _post_json 抛的错应该含清晰
+    """MiniMax 1004 错 (login fail) 时, _post_json 抛的错应该含清晰
     提示告诉主人 key 跟 base_url 不匹配, 让主人去 MiniMax 后台「套餐详情」
     找 plan 专属 base_url。"""
     import io
@@ -2894,7 +2803,7 @@ def test_v16_post_json_1004_login_fail_clear_hint():
 
 
 def test_v16_post_json_other_http_error_unchanged():
-    """v16: 非 1004 错 (比如 500) 走原路径, 不被误判为 key/base_url 不匹配。"""
+    """非 1004 错 (比如 500) 走原路径, 不被误判为 key/base_url 不匹配。"""
     import io
     from app.engine.tools import _multimodal
     from urllib.error import HTTPError
@@ -2930,18 +2839,10 @@ def test_v16_post_json_other_http_error_unchanged():
 
 
 # ============================================================
-# v17 调整 (2026-10-15):
-#   1) chat 渲染 markdown image 缩略图限制 (主人实测 1024x1024 太大):
-#      width=240 height=auto + CSS max-width:240px max-height:240px
-#   2) 识图功能 (主人说「分析一下这张图片」):
-#      understand_image tool 调 MiniMax M3 chat completion 多模态
-#      (image_url data URL), 不需要装 winsdk / tesseract
-#      ocr_image 仍保留, 描述改成「只提文字, 理解用 understand_image」
-# ============================================================
 
 
 def test_v17_understand_image_tool_registered():
-    """v17: ocr 工具包 register 时同时注册 understand_image, 调 MiniMax M3
+    """ocr 工具包 register 时同时注册 understand_image, 调 MiniMax M3
     多模态 chat completion 理解图片内容。"""
     from app.engine.tools._ocr import register
     from app.engine.tools._core import ToolRegistry
@@ -2965,7 +2866,7 @@ def test_v17_understand_image_tool_registered():
 
 
 def test_v17_understand_image_missing_file_returns_clear_error():
-    """v17: understand_image(image_path) 文件不存在时给清晰错, 不抛。"""
+    """understand_image(image_path) 文件不存在时给清晰错, 不抛。"""
     from app.engine.tools._ocr import register
     from app.engine.tools._core import ToolRegistry
     reg = ToolRegistry()
@@ -2979,7 +2880,7 @@ def test_v17_understand_image_missing_file_returns_clear_error():
 
 
 def test_v17_understand_image_missing_config_returns_clear_error():
-    """v17: understand_image 缺 base_url / api_key 时给清晰错, 不抛。"""
+    """understand_image 缺 base_url / api_key 时给清晰错, 不抛。"""
     from app.engine.tools._ocr import register
     from app.engine.tools._core import ToolRegistry
     from app.engine.tools import _multimodal
@@ -3006,17 +2907,7 @@ def test_v17_understand_image_missing_config_returns_clear_error():
 
 
 def test_v19_msg_html_empty_content_shows_placeholder():
-    """v19: assistant / user 空 content + 无 tools 时, _msg_html 返灰色
-    占位提示, 不渲染成空白文件图标。
-
-    主人反馈 2026-10-15 "每次打开后信息就没了, 图片之类的":
-    v12 之前 1004 鉴权失败批量产生 content=empty 的 assistant 消息,
-    chat_store 一直保留, 重启后 _msg_html 渲染成「label + 空 body」
-    = 视觉上像「空白文件图标」, 主人以为信息丢了。
-
-    v19 给空 content + 无 tools 消息渲染一个灰色提示, 让主人知道哪条
-    是空的, 主人按"清空"一键删掉。
-    """
+    """assistant / user 空 content + 无 tools 时, _msg_html 返灰色占位提示。"""
     from app.ui.chat_window import ChatWindow
     from app.ui.chat_window.message import Message
     from app.core.config import LLMConfig, CharacterConfig
@@ -3071,7 +2962,7 @@ def test_v19_msg_html_empty_content_shows_placeholder():
 
 
 def test_v19_chat_store_remove_empty_assistant():
-    """v19: chat_store.remove_empty_assistant 删掉空 content 历史
+    """chat_store.remove_empty_assistant 删掉空 content 历史
     assistant 消息 (内存 + SQLite 双删), 让"打开桌宠看到空白文件图标"
     的历史 bug 不再复现。"""
     from app.engine.chat_store import ChatStore
@@ -3130,16 +3021,7 @@ def test_v19_chat_store_remove_empty_assistant():
 
 
 def test_v20_render_markdown_image_thumb_and_click_to_zoom():
-    """v20: chat 渲染 markdown image = 缩略图 + 点击放大 (主人 2026-10-16
-    实测反馈「图片撑满整个窗口, 小窗口下看不全」)。
-
-    实现路径:
-      - <img> 用 HTML width=N (PyQt5 5.x 100% 支持, 不会撑开) 而非 v18 的
-        CSS max-width:100% (PyQt5 5.x CSS subset 支持不全, 大图仍撑开)
-      - 缩略图 width = min(340, max(200, viewport_w * 0.85)), chat 软
-        件标准上限 340, 小窗口 fallback 200 保证能看清
-      - 用 <a href="img-open:KEY"> 包裹, KEY 是 sha1(url)[:10], 点击
-        走 _on_chat_anchor_clicked 路由到 _show_image_popup 弹原图
+    """chat 渲染 markdown image = 缩略图 + 点击放大。
       - cursor:zoom-in 视觉提示可点击
     """
     from app.ui.chat_window import ChatWindow
@@ -3210,7 +3092,7 @@ def test_v20_render_markdown_image_thumb_and_click_to_zoom():
 
 
 def test_v20_img_open_key_stable():
-    """v20: _img_open_key 同 URL 出同 KEY, 让 _img_open_map 重渲染可去重.
+    """_img_open_key 同 URL 出同 KEY, 让 _img_open_map 重渲染可去重.
 
     用 sha1(url)[:10] 截前 10 位: 16^10 ≈ 1e12, 同一聊天 < 10 万张图不会撞。
     """
@@ -3238,7 +3120,7 @@ def test_v20_img_open_key_stable():
 
 
 def test_v20_anchor_clicked_img_open_routes_to_popup():
-    """v20: 点击 <a href="img-open:KEY"> 走 _on_chat_anchor_clicked
+    """点击 <a href="img-open:KEY"> 走 _on_chat_anchor_clicked
     路由到 _show_image_popup, KEY 不在 map 里就静默不弹。
 
     不真弹 QDialog (PyQt5 modal 会卡测试), 用 mock 验证调用。
@@ -3286,11 +3168,7 @@ def test_v20_anchor_clicked_img_open_routes_to_popup():
     print("[OK] v20: _on_chat_anchor_clicked img-open 路由正确")
 
 def test_v25_ast_guard_multimodal_trace_decision_not_gated():
-    """v25 修复: chat_window._run_multimodal_action 里 trace_decision 调
-    用不能被 if state is not None 这种条件守住. 之前 (v23-11 留下回归):
-    主程序没启 PetWindow / _lc_agent 没接 companion_state 时 state=None,
-    整条 multimodal 路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠
-    trace 记录".
+    """chat_window._run_multimodal_action 里 trace_decision 调用不能被 if state is not None 守住。
 
     AST 守卫: 看 _run_multimodal_action 函数体里 trace_decision 调用是否
     被一个 if state is not None (或类似 condition) 直接包住.
@@ -3351,10 +3229,7 @@ def test_v25_ast_guard_multimodal_trace_decision_not_gated():
 
 
 def test_v25_ast_guard_trace_decision_signature_has_favor():
-    """v25 修复: _companion_log.trace_decision 函数签名必须有 favor 形参.
-    v23-11 commit 加了 favor kwarg 在 chat_window 调用方, 但函数没接,
-    TypeError 被 try/except 吞, multimodal 整条 0 trace. 这里锁死函数签名.
-    """
+    """_companion_log.trace_decision 函数签名必须有 favor 形参 (锁死)。"""
     import ast as _ast
     src_path = (Path(__file__).resolve().parent.parent
                 / "app" / "brain" / "_companion_log.py")
@@ -3375,9 +3250,7 @@ def test_v25_ast_guard_trace_decision_signature_has_favor():
 
 
 def test_v26_tool_status_recognizes_companion_rejected():
-    """v26: 主人反馈"状态影响决策 感觉没区别". 工具被桌宠 REJECT/REFUSE
-    时 result 里有 rejected_by_companion / '"status": "rejected"' /
-    "桌宠当前状态拒绝执行", 之前 _tool_status 全判成 'ok' (默认),
+    """工具被桌宠 REJECT/REFUSE 时 _tool_status 应判成 'rejected', 而不是 'ok' (默认),
     工具卡片显示 ✓ 完成. 主人从 chat 完全看不出来"决策被桌宠挡了".
 
     这里锁死 _tool_status 必须返回 'rejected' 分桶, _unpack_status_mark
@@ -3416,7 +3289,7 @@ def test_v26_tool_status_recognizes_companion_rejected():
 
 
 def test_v26_state_to_emotion_mapping():
-    """v26: 主人反馈"状态影响决策 感觉没区别". pet_window 状态量化 4 维
+    """主人反馈"状态影响决策 感觉没区别". pet_window 状态量化 4 维
     映射到 Live2D 表情 — 让主人肉眼看见 state 变化驱动桌宠行为.
     量化 LOW 至少应映射到 sad/tired (不是 'natural' 静默).
     """
@@ -3458,10 +3331,7 @@ def test_v26_state_to_emotion_mapping():
 
 
 def test_v26_ast_guard_settings_trace_has_thread_combo():
-    """v26: 主人 2026-10-17 反馈设置面板 trace 应 per-conversation 过滤.
-    AST 守卫: _build_dev_trace_block 必须有 _dev_trace_thread_combo 控件,
-    _refresh_dev_trace 必须读 selected_thread 并 filter decisions/outcomes.
-    """
+    """AST 守卫: 设置面板 trace 应 per-conversation 过滤 (_build_dev_trace_block + _refresh_dev_trace)。"""
     import ast as _ast
     src_path = (Path(__file__).resolve().parent.parent
                 / "app" / "ui" / "settings_window.py")
@@ -3501,14 +3371,7 @@ def test_v26_ast_guard_settings_trace_has_thread_combo():
 
 
 def test_v27_ast_guard_chat_window_has_state_provider_param():
-    """v27: 主人 2026-10-17 10:48 反馈 'state=0/0/0/0 后 lock_screen 还是
-    没拒绝'. 根因: chat_window._kickoff_llm 每次新建 LangChainAgent,
-    新 agent._companion_state 永远是 None, 工具调
-    _get_companion_decision 返 None, middleware bypass 查表走
-    '弹窗确认' fallback. 修法: ChatWindow.__init__ 必须有 state_provider
-    参数, _kickoff_llm 创建新 agent 后调 state_provider() 拉当前 state
-    注入. AST 守卫锁死这个 path 不能丢.
-    """
+    """AST 守卫: ChatWindow.__init__ 必须有 state_provider 参数, _kickoff_llm 必须调它注入 state。"""
     import ast as _ast
     src_path = (Path(__file__).resolve().parent.parent
                 / "app" / "ui" / "chat_window" / "__init__.py")
@@ -3594,15 +3457,7 @@ def test_v27_companion_state_None_in_middleware_means_no_state():
 
 
 def test_v28_langchain_agent_set_companion_state_propagates_to_confirm_ctrl():
-    """v28 修: 主人 2026-10-17 11:18 反馈 v27 没真正解决问题.
-    根因: LangChainAgent.set_companion_state(state) 之前只设了
-    self._companion_state, 没同步给 self._confirm_ctrl. 但 RiskyToolConfirm
-    middleware 读的是 _confirm_ctrl._companion_state, 所以查表路径
-    永远拿到 None → 工具被静默放行.
-
-    修法: set_companion_state 里同步给 _confirm_ctrl. 锁死这条
-    propagation 不能丢.
-    """
+    """LangChainAgent.set_companion_state 必须同步给 _confirm_ctrl。"""
     import sys
     # 用 mock 跑 (LangChainAgent 构造很重, 实际跑需要 LangChain 全套)
     from unittest.mock import MagicMock
@@ -3676,11 +3531,7 @@ def test_v28_ast_guard_langchain_set_companion_state_propagates():
 
 
 def test_v29_ast_guard_dev_state_pushed_force_write_sync():
-    """v29: 主人 2026-10-17 11:46 反馈 dev mode 改的数值没实时保存, 切
-    回 chat / dashboard 看的是 5s 前的旧值 (SaveStore 防抖 5s 还在窗
-    内). 修法: _on_dev_state_pushed 调 write_sync 立即落盘, 走 force
-    path 绕过防抖. AST 守卫锁死这条不能丢.
-    """
+    """_on_dev_state_pushed 必须调 write_sync 立即落盘, 绕过 SaveStore 防抖。"""
     import ast as _ast
     src_path = (Path(__file__).resolve().parent.parent
                 / "app" / "ui" / "ui_controller.py")
@@ -3708,13 +3559,7 @@ def test_v29_ast_guard_dev_state_pushed_force_write_sync():
 
 
 def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
-    """v30: 主人 2026-10-17 12:08 反馈 '状态低她还是会调 lock_screen'.
-    之前 _strategy_guidance 在 state 差时只让 LLM '简短回复', 没明确
-    '状态差时拒绝危险工具', LLM 仍按反幻觉基线 preemptive 问确认
-    ('要确认一下'). 修法: state 差时 (mood/sat/favor 任一 LOW),
-    _strategy_guidance 必须明确告诉 LLM 直接拒绝危险工具, 不走
-    confirm 流程.
-    """
+    """state 差时, _strategy_guidance 必须明确告诉 LLM 直接拒绝危险工具, 不走 confirm 流程。"""
     from app.brain.hallucination_guard import _strategy_guidance
     from app.engine.state import PetState
 
@@ -3761,13 +3606,7 @@ def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
 
 
 def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
-    """v31: 主人 2026-10-17 12:17 实测 LLM 仍 preemptive 问"要确认一下".
-    v30 把拒绝指令放在 strategy 块 (中间), 反幻觉基线 + 高风险工具
-    confirm 协议在 prompt 末尾, LLM 偏向读后段更具体的指令忽略前面
-    的拒绝. 修法: grounding_dynamic_prompt 把同一段拒绝指令**追加
-    到 prompt 末尾**, 作为 final override, 明确"忽略上面 confirm 协议,
-    以这段为准".
-    """
+    """grounding_dynamic_prompt 把拒绝指令追加到 prompt 末尾作为 final override。"""
     from app.engine.state import PetState
     from app.brain.hallucination_guard import grounding_dynamic_prompt
     from app.brain._companion_registry import (
@@ -3849,13 +3688,7 @@ def test_v31_grounding_dynamic_prompt_does_not_override_when_state_none():
 
 
 def test_v32_risky_prompt_fragment_no_longer_teaches_preemptive_ask():
-    """v32: 主人 2026-10-17 12:25 实测 LLM 仍 preemptive 问'要确认一下'.
-    之前 _RISKY_PROMPT_FRAGMENT 里有一行 '看到拦截提示后, 向主人复述
-    参数并询问:「要执行 X 吗?」', LLM 把这条**误读成**'调危险工具
-    前 preemptive 问'. 修法: 改成 '直接调 tool (不要 preemptive 问
-    「要执行 X 吗」「要确认一下」)', 把 preemptive 行为直接从 prompt
-    里删掉.
-    """
+    """_RISKY_PROMPT_FRAGMENT 不能教 LLM preemptive 问 '要执行 X 吗' / '要确认一下'。"""
     from app.brain.hallucination_guard import _RISKY_PROMPT_FRAGMENT
     # 1. 老的 '向主人复述参数并询问' 必须消失
     assert "向主人复述参数并询问" not in _RISKY_PROMPT_FRAGMENT, (
@@ -3913,12 +3746,7 @@ def test_v32_state_bad_prompt_has_no_preemptive_ask_instruction():
 
 
 def test_v33_state_bad_top_directive_in_prompt():
-    """v33: 主人 2026-10-17 12:37 反馈「不要移除工具, 想办法 prompt 让 LLM
-    拒绝. 提示词里最先的判断应该是对状态进行判断」. 修法: 把「状态差
-    时直接拒绝高危工具」提到 prompt **最顶部** (base persona 之前),
-    作为第一原则, 反复强调 '禁止 preemptive 问', '禁止走 confirm 流程'.
-    不删工具, 让 LLM 看到工具也能明确拒绝.
-    """
+    """把「状态差时直接拒绝高危工具」提到 prompt 最顶部, 作为第一原则。"""
     from app.engine.state import PetState
     from app.brain.hallucination_guard import grounding_dynamic_prompt
     from app.brain._companion_registry import set_state_for_thread, clear_all
@@ -3973,7 +3801,7 @@ def test_v33_state_bad_top_directive_in_prompt():
 
 
 def test_v33_langchain_agent_keeps_all_tools():
-    """v33 撤销工具过滤: 主人 12:37 反馈 '不要移除', 工具全保留,
+    """v33 撤销工具过滤: 工具全保留,
     让 LLM 看到 + prompt directive 强拒.
     """
     from app.brain.langchain_agent import LangChainAgent
@@ -4009,7 +3837,7 @@ def test_v33_langchain_agent_keeps_all_tools():
 
 
 def test_v34_post_llm_guard_refuses_preemptive_when_state_bad():
-    """v34: 主人实测 12:52 LLM 仍 preemptive 问 (v33 prompt 工程失败).
+    """主人实测 12:52 LLM 仍 preemptive 问 (v33 prompt 工程失败).
     切到 post-LLM 拦截: state=全 LOW + LLM 输出含 '要确认一下' →
     改写为 REFUSAL_TEXT, 清掉 tool_calls.
 
@@ -4215,7 +4043,7 @@ def test_v34_langchain_agent_wires_post_llm_guard():
 
 
 def test_v35_ui_controller_passes_state_provider():
-    """v35: UIController._show_chat_window 创建 ChatWindow 时**必须**传
+    """UIController._show_chat_window 创建 ChatWindow 时**必须**传
     state_provider=lambda: self.state_mgr.state.
 
     v27 修过 main.py:1016 传 state_provider, 但 UIController (托盘菜单 / 双击唤起

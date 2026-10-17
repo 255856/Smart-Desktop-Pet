@@ -1,17 +1,4 @@
-"""v23-8 真实 LangChain 端到端验证 (主人 2026-10-16 说 API 用量有了).
-
-跑一个 user message → 真实 LLM 决定调 get_current_time → 工具跑成功
-→ _finish_run_with_outcome(success=True) → apply_outcome yaml 公式生效
-→ trace_decision + trace_outcome 写盘 → 数值持久化.
-
-不 mock LLM, 走真实 MiniMax API (config.yaml 里主人的 key).
-
-跑这测试前需要:
-  1. config.yaml 配好 LLM api_key + base_url + model
-  2. 网络可达
-
-如果 LLM 调用失败, 整个 test 失败 (不要静默跳过). 这是 v23 端到端验证.
-"""
+"""真实 LangChain 端到端验证：不 mock LLM，走真实 API。"""
 from __future__ import annotations
 
 import json

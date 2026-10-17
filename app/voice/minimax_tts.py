@@ -1,4 +1,4 @@
-"""MiniMax TTS + 声音克隆（方案 A）——自定义音色，无需本地 GPU。"""
+"""MiniMax TTS + 声音克隆（方案 A）：自定义音色，无需本地 GPU。"""
 from __future__ import annotations
 
 import hashlib
@@ -15,11 +15,7 @@ SAMPLE_EXTS = {".wav", ".mp3", ".m4a", ".flac"}
 
 
 def collect_samples(src: str | Path, limit: int = 6) -> list[Path]:
-    """样本来源 → 音频文件列表（最多 limit 个）。
-
-    src 支持：目录（取其中音频文件，均匀抽样）或逗号分隔的文件列表。
-    均匀抽样覆盖数据集不同段落，避免只取同一批。
-    """
+    """样本来源 → 音频文件列表（最多 limit 个）。"""
     src = str(src or "").strip()
     if not src:
         return []

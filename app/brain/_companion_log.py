@@ -1,21 +1,12 @@
-"""桌宠决策 trace 日志 (v23-1)。
+"""桌宠决策 trace 日志：每次查表（lookup_decision）把结果写一行 JSON 到 data/companion_log.txt。
 
-中间件每次查表 (lookup_decision) 时, 把 (state_quantize, tool, risk, decision)
-append 到 `data/companion_log.txt` 一行 JSON. 主人 / trace 页 / debug 脚本
-可以直接 tail 这个文件看历史决策链.
+JSON-line 文件可 grep / jq，比字符串 log 易用。
+trace 页直接 tail 这个文件看历史决策链。
 
-为什么不用标准 logging: 主人的需求"trace 页要明确记录桌宠的工具权限状态,
-以及每次调用成功后的数值变化" (主人原话), 需要结构化每条 JSON 行.
-JSON-line 文件可 grep / jq, 比字符串 log 易用.
-
-JSON-line schema:
-    {"ts": float, "thread_id": str, "tool": str, "risk": int, "decision":
-    str, "sat": str, "mood": str, "level": str, "decision_source": str}
-
-设计原则:
-  - 同步落盘 (跟主流程串行, 锁文件 1ms 内)
-  - 不抛 (json.dumps 失败 / 写盘失败都吞, 不让中间件崩)
-  - 默认启用, 主人想关可在 config.yaml 设 `companion.trace_log: false`
+设计原则：
+  - 同步落盘（锁文件，毫秒级开销）
+  - 不抛（json.dumps / 写盘失败都吞，不让中间件崩）
+  - 默认启用，可在 config.yaml 设 `companion.trace_log: false` 关闭
 """
 from __future__ import annotations
 
@@ -32,11 +23,7 @@ log = logging.getLogger(__name__)
 
 
 def _default_log_path() -> Path:
-    """data/companion_log.txt 跟 chat_history.db 同目录.
-
-    不要 hard-code "data/", 因为 running from main.py 时 cwd 已经是项目根.
-    但 data/ 仍然存在 (chat_history.db 在) 所以相对可靠. 失败 fallback 到 /tmp.
-    """
+    """data/companion_log.txt，跟 chat_history.db 同目录。失败 fallback 到 /tmp。"""
     p = Path("data") / "companion_log.txt"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -46,16 +33,7 @@ def trace_decision(thread_id: str, tool: str, risk: int, decision: str,
                    sat: str, mood: str, level: str,
                    favor: str = "MID",
                    source: str = "lookup_decision") -> None:
-    """v23-1: 写一行 trace 到 log 文件。
-
-    调用方 (RiskyToolConfirm._get_companion_decision) 每查一次表就调一次,
-    锁住文件句柄 1 行, 失败静默.
-
-    v23-3: 加 favor 形参 (好感维度进决策表后, dashboard trace 页要展示).
-    v25: 修 v23-11 commit 留下的回归 —— chat_window._run_multimodal_action 调
-    trace_decision(favor=...) 但函数没接, TypeError 被 try/except 吞, 整条
-    multimodal 路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠 trace 记录".
-    """
+    """写一行 decision trace 到 log 文件。失败静默。"""
     rec = {
         "ts": time.time(),
         "thread_id": thread_id,
@@ -81,10 +59,9 @@ def trace_outcome(thread_id: str, outcome: str, tool: str,
                    favor_delta: float, exp_delta: float,
                    level_before: int, level_after: int,
                    success: bool) -> None:
-    """v23-1: 写一行 apply_outcome trace (主人 trace 页 "调用后数值变化" 用途).
+    """写一行 outcome trace，跟 trace_decision 同文件，schema 不同。
 
-    跟 trace_decision 同文件但 schema 不同; trace 页解析时按 'kind' 字段区分.
-    v23-3 加 favor_delta (好感变化), 主人 2026-10-16 加的 4 维数据需要这个字段.
+    trace 页解析时按 'kind' 字段区分。
     """
     rec = {
         "kind": "outcome",

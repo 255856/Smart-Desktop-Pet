@@ -1,17 +1,5 @@
 # -*- coding: utf-8 -*-
-"""中国象棋引擎回归测试。
-
-包装 cchess 库后,大部分规则的正确性由 cchess 保证(走法生成、合法性、
-将军、将死、困毙、飞将等)。本测试只验证:
-
-1. 我们的薄壳 wrapper 正确转译坐标、正确切轮、正确判胜负;
-2. AI 走出来的步都是合法步、走完不会出现「走不动」之类的错误;
-3. 历史 / 悔棋 / 认输等游戏流程 API 正常;
-4. is_attacked / in_check / legal_moves / is_legal 在特殊构造的局面下
-   行为正确(对比 cchess 自身结果)。
-
-构造任意局面走 cchess.put_fench(),免去手算 FEN。
-"""
+"""中国象棋引擎回归测试。"""
 from __future__ import annotations
 
 import os
@@ -323,9 +311,6 @@ class TestCheckAndMate:
         #   - (0,3): 红车 (5,3) 同 col 控制 → 落点被攻击,不能左
         #   - (0,5): 红车 (5,5) 同 col 控制 → 落点被攻击,不能右
         # 同时 (5,4) 红车同 col 将军。
-        # 注:之前用红车堵 (0,3)/(0,5) 是错的——黑将合法吃掉那辆车
-        # (帅/将可以吃任何对方子)。修复 is_attacked 同点不算攻击后,
-        # 必须改用「黑将走到该格落点被另一红子攻击」的方式堵。
         put(g, 5, 4, R)   # 红车 — 将军 + 攻击 (1,4)
         put(g, 5, 3, R)   # 红车 — 攻击 (0,3) 落点
         put(g, 5, 5, R)   # 红车 — 攻击 (0,5) 落点
@@ -386,12 +371,7 @@ class TestCheckAndMate:
         assert (7, 3) not in ds
 
     def test_king_can_capture_adjacent_enemy(self):
-        """回归:帅/将可以吃掉九宫内相邻的敌方子(包括敌方车)。
-
-        之前 is_attacked 把「黑车自己所在格」误判为被攻击(因 cchess 的
-        piece.is_valid_move(target) 不排除 target == piece 自己),导致
-        帅/将永远吃不到邻位的敌方子。
-        """
+        """回归:帅/将可以吃掉九宫内相邻的敌方子(包括敌方车)。"""
         g = blank()
         both_kings(g)
         # 黑车紧挨红帅左边 (9,3):帅 (9,4) 应能直接吃车

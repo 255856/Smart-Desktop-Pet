@@ -1,11 +1,6 @@
-"""项目功能验证脚本：逐项核对 README/ARCHITECTURE 列出的能力是否实装且可跑。
-
-用法：
-    cd E:\study\desktop-pet
-    python scripts/verify_features.py [--no-gui]
-
-不依赖 LLM API，纯本地检查。输出报告 + 退出码（0=全过，1=有失败）。
-"""
+"""verify_features.py: 端到端功能验证脚本。
+用法：python scripts/verify_features.py [--no-gui]
+输出报告 + 退出码（0=全过，1=有失败）。"""
 from __future__ import annotations
 
 import argparse
@@ -34,13 +29,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def note(name: str, detail: str = "") -> None:
-    """纯信息项：不计入 OK / FAIL，也不影响退出码。
-
-    用于「运行时数据存在哪」这类参考信息。data/ 与 settings.json 都是
-    .gitignore 的运行时产物，全新检出的机器上不存在才是正常状态 ——
-    早先把它们算成 FAIL，导致 verify_features 在 CI（干净检出）上
-    必然失败，而本地因为跑过应用有这些文件所以一直显示通过。
-    """
+    """信息项：不计入 OK / FAIL，不影响退出码。用于「运行时数据存在哪」等参考信息。"""
     results.append((name, "NOTE", detail))
 
 
@@ -64,10 +53,6 @@ def _parse_tool_markers(text):
 
 def _strip_tool_markers(text):
     return re.sub(r"<tool>[\w]*\|.*?</tool>", "", text, flags=re.DOTALL).strip()
-
-
-# _make_eval_factory removed: PlanExecutor-based factory was for the legacy
-# _legacy/ path; production now uses AgentLoop which is exercised by tests/.
 
 
 def main() -> int:
@@ -134,10 +119,10 @@ def main() -> int:
     check("SpeechRecognizer（faster-whisper）", True)
     check("asr_available() 检测函数", callable(asr_available))
 
-    # ===== 二、智能体方向（v3.1+ ReAct 抗幻觉） =====
+    # ===== 二、智能体方向 =====
     print("\n[二] 智能体方向")
 
-    # ---- v3.1+ 抗幻觉机制（强制调工具 + 跨步检测 + 重试）----
+    # ---- 抗幻觉机制（强制调工具 + 跨步检测 + 重试）----
     from app.brain.llm_client import (
         detect_action_intent, _is_tool_choice_unsupported,
     )
@@ -286,7 +271,6 @@ def main() -> int:
             size = path.stat().st_size
             note(f"  {path}", f"{desc} · {size} bytes")
         else:
-            # 未生成是全新机器的正常状态，不是失败
             note(f"  {path}", f"{desc} · 未生成（运行时产物，首次启动后出现）")
 
     # ===== 四、Eval 套件静态校验 =====

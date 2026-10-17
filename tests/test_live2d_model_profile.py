@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-# 项目根目录（按文件位置推导，不再硬编码本地绝对路径）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402
@@ -25,11 +24,7 @@ from app.animation.live2d_model_profile import (
 #   set PET_TEST_CHAOPIN_DIR=E:\path\to\chaopin
 # 不设置则这些用例自动 skip（CI 上恒 skip）。
 def _env_dir(name: str) -> Path:
-    """读环境变量目录；未设置时返回必定不存在的路径。
-
-    不能写 Path(os.environ.get(X, ""))：空串会被规范化成 Path(".")，
-    而 Path(".").is_dir() 是 True，守卫会失效，用例会拿项目根当模型目录去解析。
-    """
+    """读环境变量目录；未设置时返回必定不存在的路径。"""
     raw = (os.environ.get(name) or "").strip()
     return Path(raw) if raw else Path("<unset>") / name
 

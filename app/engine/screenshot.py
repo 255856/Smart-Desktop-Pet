@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 def take_screenshot() -> bytes | None:
     """截取当前屏幕，返回 PNG bytes。失败返回 None。"""
     try:
-        # 尝试用 pyautogui
+        # 优先 pyautogui
         import pyautogui
         img = pyautogui.screenshot()
         buf = io.BytesIO()
@@ -22,7 +22,7 @@ def take_screenshot() -> bytes | None:
         return None
 
     try:
-        # 备选：用 PIL
+        # 备选：PIL.ImageGrab
         from PIL import ImageGrab
         img = ImageGrab.grab()
         buf = io.BytesIO()

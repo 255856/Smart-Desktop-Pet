@@ -1,4 +1,4 @@
-"""PetRenderer 抽象基类 —— sprite / live2d 双渲染器共享接口。"""
+"""PetRenderer 抽象基类：sprite / live2d 双渲染器共享接口。"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

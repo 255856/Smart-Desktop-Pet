@@ -1,14 +1,4 @@
-"""2026-10-04 现场回归：反思回复被删空 + 重试刷屏 + tool_choice 空转。
-
-现场（用户截图 + pet.log）：
-  1) 主人问「你是不是在假装调用工具」，桌宠回
-     「哎呀，被主人发现了呢~以后小汐会注意的，做了什么就老老实实调用工具，
-     不再假装了啦~」——这句被清洗规则整句删光（"调用工具"命中工具独白），
-     最终变成空气泡 + 「唔……刚刚没想好怎么说」。
-  2) 一次「定一个1分钟闹钟」连出 5 张「自动重试 第N轮未调用工具」卡片，
-     主人干等 12 秒。
-  3) tool_choice='required' 服务端收下但模型不调，每轮先白等一次。
-"""
+"""现场回归：反思回复被删空 + 重试刷屏 + tool_choice 空转。"""
 from __future__ import annotations
 
 import sys
@@ -37,11 +27,7 @@ from app.brain.llm_client import (  # noqa: E402
     "以后我老老实实调用工具，主人看着就好~",
 ])
 def test_reflection_about_tools_survives(text):
-    """这条整句必须原样送到主人眼前。
-
-    修复前：`_META_TOOL_SENT_RE` 里的「调用…工具」命中 → 整句当工具独白删光
-    → AgentLoop 判「过度清洗」→ 空气泡 + 兜底话术。
-    """
+    """这条整句必须原样送到主人眼前。"""
     out = _sanitize_reply(text)
     assert out.strip(), f"反思回复被删空了：{text!r}"
     # 必须基本完整，不能只剩尾巴
@@ -70,10 +56,7 @@ def test_normal_reply_unaffected():
 # =============================================================================
 
 def test_retry_notice_is_shown_once_per_turn():
-    """连续 5 轮 force_retry 只能产生 1 张提示卡。
-
-    现场是每轮都 _append_system_msg，聊天区被 5 张「自动重试」刷满。
-    """
+    """连续 5 轮 force_retry 只能产生 1 张提示卡。"""
     from app.ui.chat_window import ChatWindow
 
     shown = []
@@ -135,8 +118,7 @@ def test_tool_choice_ignore_memory_is_per_model():
 
 
 def test_tool_choice_memory_survives_new_client_instance():
-    """记忆必须跨 LLMClient 实例——chat_window 每条消息都新建 client，
-    挂在实例上的话根本记不到。"""
+    """记忆必须跨 LLMClient 实例。"""
     from app.brain.llm_client import LLMClient, LLMConfig
     _note_tool_choice_ignored("fake-model-persist")
     try:
@@ -151,8 +133,7 @@ def test_tool_choice_memory_survives_new_client_instance():
 
 
 # =============================================================================
-# 4) 真实调用路径（回归：曾把模块级函数误写成 self._tool_choice_is_ignored，
-#    现场直接 AttributeError，主人只看到「[错误] 调用出错」）
+# 4) 真实调用路径
 # =============================================================================
 
 TOOLS = [{

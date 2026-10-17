@@ -44,14 +44,13 @@ log = logging.getLogger(__name__)
 def _internal_tool_to_langchain(tool: Tool) -> StructuredTool:
     """把桌宠的 Tool(name, description, parameters, fn) 包装为 LangChain StructuredTool。
 
-    StructuredTool.from_function 会从 fn 的 type hints + 默认值自动生成 args_schema，
-    这正好和我们 `app/engine/tools/*` 里 `def add_reminder(text, delay_minutes=None, ...)` 的写法对齐。
+    StructuredTool.from_function 会从 fn 的 type hints + 默认值自动生成 args_schema。
     """
     return StructuredTool.from_function(
         func=tool.fn,
         name=tool.name,
         description=tool.description,
-        parse_docstring=False,       # 我们用 desc 字段，不解析 docstring
+        parse_docstring=False,
     )
 
 
@@ -73,12 +72,10 @@ class LangChainAgentConfig:
 class _PersistentLoop:
     """管理一个专属后台线程 + 持久 event loop，专门跑 LangChain 的 astream。
 
-    关键：所有 LangChain 资源（httpx client、AsyncSqliteSaver）都在这个 loop 里创建，
+    所有 LangChain 资源（httpx client、AsyncSqliteSaver）都在这个 loop 里创建，
     永不切换 loop → 彻底避免 "Event loop is closed" 问题。
     """
-    # LangChain 1.0+ 第一次 import 慢（含 langchain / langgraph / openai 几个大包），
-    # 后台线程里 `_runner` 跑完才能 `self._ready.set()`。旧 5 秒经常不够，会让
-    # 后续 `run_coro` 拿到 `self.loop is None` 卡死。30 秒足够冷启动。
+    # 后台线程冷启动超时（LangChain 1.0+ 第一次 import 慢）
     _START_TIMEOUT_S = 30.0
 
     def __init__(self) -> None:
@@ -94,7 +91,7 @@ class _PersistentLoop:
         self._runner_exc = None
 
         def _runner():
-            try:
+            try:  # 记录 import 失败等异常，start() 收到 _ready 超时后能看到
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 self.loop = loop
@@ -118,14 +115,12 @@ class _PersistentLoop:
                 "LangChain 后台 loop 启动超时（>%.0fs）。可能 LangChain 包导入慢或线程卡死。",
                 self._START_TIMEOUT_S,
             )
-            # 释放 thread 引用(daemon 线程已泄漏,引用清掉避免下次误判已启动)
             self.thread = None
             raise RuntimeError(
                 f"LangChain 后台 loop 启动超时（>{self._START_TIMEOUT_S:.0f}s）"
             )
         if self._runner_exc is not None:
             log.error("LangChain 后台 loop 启动失败: %r", self._runner_exc)
-            # runner 已经 raise 出去,thread 会自然结束,但还是清引用保持一致
             self.thread = None
             raise RuntimeError(f"LangChain 后台 loop 启动失败: {self._runner_exc!r}")
 
@@ -152,9 +147,9 @@ class _PersistentLoop:
 class LangChainAgent:
     """LangChain 1.0+ create_agent 实现的桌宠 Agent。
 
-    关键：所有 LangChain 资源（ChatOpenAI、AsyncSqliteSaver、CompiledStateGraph）
+    所有 LangChain 资源（ChatOpenAI、AsyncSqliteSaver、CompiledStateGraph）
     都跑在一个**持久后台 loop** 里（_PersistentLoop），跨调用不重建。
-    这避免了 asyncio.run() 每次创建新 loop 导致的 "Event loop is closed" 问题。
+    避免 asyncio.run() 每次创建新 loop 导致的 "Event loop is closed" 问题。
     """
 
     # 类级别的持久 loop（懒初始化，避免循环引用）
@@ -188,11 +183,9 @@ class LangChainAgent:
         self.persona = persona
         self.cfg = cfg or LangChainAgentConfig()
         self.cancel_check = cancel_check
-        # 长期记忆(MemoryStore,可空);user-wide —— 跨 session 共享。
-        # system_prompt 注入时调 memory.system_block()。
+        # 长期记忆（MemoryStore），跨 session 共享；system_prompt 注入时调 memory.system_block()
         self.memory_store = memory_store
-        # 会话绑定:优先用 session_id 从 session_store 拿 thread_id。
-        # 这样会话列表 / 续接在 store 层管理,agent 内部只认 thread_id。
+        # 会话绑定：优先用 session_id 从 session_store 拿 thread_id
         self._session_id: Optional[str] = session_id
         self._session_store = session_store
         if session_id is not None:
@@ -206,27 +199,24 @@ class LangChainAgent:
             self.thread_id = info.thread_id
         else:
             self.thread_id = thread_id
-        # 项目级指令:从 cwd 向上找 AGENTS.md / CLAUDE.md,加上主程序注入的 extra_paths
+        # 项目级指令：从 cwd 向上找 AGENTS.md / CLAUDE.md + 主程序注入的 extra_paths
         self._cwd = cwd
         self._extra_docs_paths: list = list(extra_docs_paths or [])
-        # 缓存最近一次加载的项目指令(避免每次 _ensure_agent 重读)
+        # 缓存最近一次加载的项目指令（避免每次 _ensure_agent 重读）
         self._cached_project_docs: str = ""
-        # Skills:启动时加载的 skill 名字列表
         self._skills_dir = skills_dir
         self._auto_load_skills: list = list(auto_load_skills or [])
         self._cached_skills: str = ""
         self._agent: Optional[Any] = None
         self._middlewares: Optional[list] = None  # 给测试/调试用
-        # RiskyToolConfirm 控制器 —— 立刻建好,这样 confirm_tool_call /
-        # reject_tool_call / on_confirm_needed 在 _ensure_agent() 跑之前
-        # 也能用(UI 可能在 agent 第一次构建前就订阅回调)。
+        # RiskyToolConfirm 控制器：立刻建好，UI 在 agent 构建前可订阅回调
         try:
             from app.brain.hallucination_guard import RiskyToolConfirm
             self._confirm_ctrl: Optional[RiskyToolConfirm] = RiskyToolConfirm()
         except Exception as e:  # noqa: BLE001
             log.warning("RiskyToolConfirm 初始化失败: %s", e)
             self._confirm_ctrl = None
-        # v34: post-LLM 拦截器 (Prompt 工程走到极限, 切到 response-time 兜底)
+        # post-LLM 拦截器：状态差时改写 preemptive 问文案
         try:
             from app.brain.hallucination_guard import PostLLMStateGuard
             self._post_llm_guard: Optional[PostLLMStateGuard] = PostLLMStateGuard()
@@ -236,17 +226,14 @@ class LangChainAgent:
         self._checkpointer_cm: Optional[Any] = None
         self._checkpointer: Optional[Any] = None
         self._model: Optional[Any] = None
-        # 启动持久 loop（懒初始化）。失败时清掉类级 _LOOP,
-        # 避免一次启动失败后整个进程里所有 LangChainAgent 都跟着挂掉。
+        # 启动持久 loop（懒初始化）。失败时清掉类级 _LOOP
         try:
             self._get_loop()
         except Exception:
-            # 启动失败,把 _LOOP 重置,下次再 _get_loop() 重新尝试
             LangChainAgent._LOOP = None
             raise
 
-        # 装上 Task 工具的 subagent factory,让主 agent 能派生子 agent。
-        # 单例状态:同时只有一个 factory 生效(同一进程只跑一个主 agent)。
+        # 装上 Task 工具的 subagent factory，让主 agent 能派生子 agent
         try:
             from app.engine.tools import _subagent
             _subagent.set_subagent_factory(self._make_subagent_factory())
@@ -254,14 +241,9 @@ class LangChainAgent:
             log.warning("Task 工具 subagent factory 装失败: %s", e)
 
     def _build_subagent_registry(self) -> ToolRegistry:
-        """给子 agent 一个「安全」工具集:继承主 agent 的工具,但去掉
-        Task(防止无限递归)和高风险工具(子 agent 弹两次确认体验差)。
+        """给子 agent 一个「安全」工具集：继承主 agent 的工具，去掉 Task 和高风险工具。
 
-        工具白名单/黑名单策略:
-          - 黑名单:Task(self)、lock_screen / kill_process / send_email 等 _RISKY_TOOLS
-          - 其余全部继承(主程序注册的子系统工具都能用)
-
-        返回新的 ToolRegistry(不修改 self.registry)。
+        返回新的 ToolRegistry（不修改 self.registry）。
         """
         from app.brain.hallucination_guard import _RISKY_TOOLS
         sub_reg = ToolRegistry()
@@ -323,12 +305,11 @@ class LangChainAgent:
                         elif ev[0] == "error":
                             return f"[sub-agent error] {ev[1]}"
                         elif ev[0] == "done":
-                            # done 可能带完整 final,优先用;否则拼接
                             final = ev[1] if ev[1] else "".join(events)
                             return final
                     return "".join(events)
                 finally:
-                    # 释放 checkpointer 连接(避免 SQLite 句柄泄漏)
+                    # 释放 checkpointer 连接（避免 SQLite 句柄泄漏）
                     try:
                         await sub._release_checkpointer()
                     except Exception:
@@ -357,8 +338,7 @@ class LangChainAgent:
             timeout=self.llm_cfg.timeout,
             streaming=True,
         )
-        # 推理强度:OpenAI o1/o3、部分推理模型支持。
-        # 没设或为空就不传(避免给不支持的后端塞错字段报错)。
+        # 推理强度：OpenAI o1/o3、部分推理模型支持。没设或为空就不传
         effort = getattr(self.llm_cfg, "reasoning_effort", None)
         if effort:
             kwargs["reasoning_effort"] = effort
@@ -367,25 +347,19 @@ class LangChainAgent:
     async def _build_checkpointer(self):
         """构建 AsyncSqliteSaver 实例（已 aenter，可直接给 create_agent 用）。
 
-        关键：这个 await 必须在持久 loop 里跑，所以 _ensure_agent 整体必须通过 run_sync
-        在后台 loop 里执行。chat_window 的 _AgentWorker.run() 会调用 run_sync。
+        这个 await 必须在持久 loop 里跑，所以 _ensure_agent 整体必须通过 run_sync
+        在后台 loop 里执行。
         """
         if not self.cfg.enable_checkpointer:
             return None
         Path(self.cfg.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
-        # AsyncSqliteSaver.from_conn_string 是 @asynccontextmanager，
-        # 内部会 await aiosqlite.connect + yield saver；await __aenter__ 拿到 saver 实例
+        # AsyncSqliteSaver.from_conn_string 是 @asynccontextmanager
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.cfg.checkpoint_db)
         self._checkpointer = await self._checkpointer_cm.__aenter__()
         return self._checkpointer
 
     async def _release_checkpointer(self) -> None:
-        """关闭 AsyncSqliteSaver；httpx client 不主动关（让 GC 处理）。
-
-        之前实验过 await client.close() 会导致下次调用报 "client has been closed"
-        —— LangChain 内部可能缓存了 client 引用，关闭后下次重建仍报错的根因不明。
-        关掉这段后 "Event loop is closed" 还是会偶发（GC 时机），但频率大幅降低。
-        """
+        """关闭 AsyncSqliteSaver；httpx client 不主动关（让 GC 处理）。"""
         if self._checkpointer_cm is not None:
             try:
                 await self._checkpointer_cm.__aexit__(None, None, None)
@@ -394,7 +368,7 @@ class LangChainAgent:
             self._checkpointer_cm = None
             self._checkpointer = None
 
-        # 注意：保留 _model 不变（不再重建 → 后续 _ensure_agent 走 fast-path 复用）
+        # 保留 _model 不变（不再重建 → 后续 _ensure_agent 走 fast-path 复用）
         self._agent = None
 
     def close(self) -> None:
@@ -403,8 +377,6 @@ class LangChainAgent:
         Qt 信号回调在主线程、没有 event loop，所以这里只是清标志位；
         真正的关闭由 chat_window 的 _AgentWorker 在 drive() 协程里 await _release_checkpointer() 完成。
         """
-        # Qt 信号回调路径：仅做标记，真正释放由 worker 协程做
-        # 不抛异常以保证 _on_done / _on_failed 不会中断 UI
 
     # -------------------- 高风险工具 confirm(HITL) --------------------
     def confirm_tool_call(self, tool_call_id: str) -> None:
@@ -463,18 +435,12 @@ class LangChainAgent:
         PR: 不在 _release_checkpointer 里关 httpx client 了——关闭 client 会让 LangChain
         内部缓存的 client 引用下次报 "client has been closed"。保留 _model 让下次重建走
         fast-path（只重建 graph，httpx client 复用）。
-
-        2026-10-14: 接入 hallucination_guard middleware（动态 prompt 防幻觉 +
-        高风险工具执行前打 WARNING），对齐参考项目 graphs.py 的 middleware 模式。
         """
         if self._agent is not None:
             return
         if self._model is None:
             self._model = self._build_model()
         tools = convert_tools(self.registry)
-        # v33 撤销: 主人 12:37 反馈 "最好不要移除 [工具], 想 prompt 解决".
-        # 之前在 _ensure_agent 过滤 _RISKY_TOOLS 那一段, 还原 —— 工具
-        # 全给 LLM, 让 prompt 强 directive 让 LLM 自己拒绝.
         if self._checkpointer is None and self.cfg.enable_checkpointer:
             await self._build_checkpointer()
         checkpointer = self._checkpointer
@@ -483,21 +449,19 @@ class LangChainAgent:
         try:
             from app.brain.hallucination_guard import build_hallucination_middlewares
             std_mws, _new_ctrl = build_hallucination_middlewares()
-            # _new_ctrl 是 build 临时构造的,丢弃。confirm 中间件单独用
-            # self._confirm_ctrl.as_middleware() 生成,这样跨 astream 的
-            # confirm/reject 状态能持续生效。
+            # _new_ctrl 是 build 临时构造的，丢弃。confirm 中间件单独用
+            # self._confirm_ctrl.as_middleware() 生成，跨 astream 的 confirm/reject 状态持续生效
             middlewares = list(std_mws)
             if self._confirm_ctrl is not None:
                 middlewares.append(self._confirm_ctrl.as_middleware())
-            # v34: post-LLM 拦截器, 状态差时改写 preemptive 问文案
-            # 加在最后, 在 model response 出来后第一道拦截
+            # post-LLM 拦截器：状态差时改写 preemptive 问文案，加在最后
             if getattr(self, "_post_llm_guard", None) is not None:
                 middlewares.append(self._post_llm_guard.as_middleware())
         except Exception as e:  # noqa: BLE001
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
 
-        # system_prompt = persona + 项目级指令(AGENTS.md / CLAUDE.md) + skills
+        # system_prompt = persona + 项目级指令（AGENTS.md / CLAUDE.md） + skills
         # dynamic_prompt middleware 会在这个基础上再加反幻觉 / 时间 / confirm 协议
         try:
             from app.brain.project_docs import load_project_docs
@@ -560,10 +524,9 @@ class LangChainAgent:
         return out
 
     async def _prefetch_aw_results(self, user_text: str) -> list:
-        """v28: 同步调 AW 工具, 返 LangChain messages 序列 (AIMessage tool_call + ToolMessage),
-        模拟 LLM 自己调过的样子插入历史。
+        """同步调 AW 工具，返 LangChain messages 序列，插入历史模拟 LLM 自己调过。
 
-        只对能直接从文本推断的 intent 子集做预调 (aw_query 下的具体动作):
+        只对能直接从文本推断的 intent 子集做预调：
           - 「我刚才在干嘛 / 最近看了什么 / 过去X小时」→ aw_get_recent_activities
           - 「现在 / 当前 / 焦点窗口在哪个」→ aw_get_current_window
           - 「最近看了哪些网站」→ aw_get_browser_tabs
@@ -577,7 +540,7 @@ class LangChainAgent:
         wants_browser = any(kw in t for kw in ("网页", "网站", "浏览器 tab", "逛了哪些"))
 
         results: list = []
-        # 仅跑主程序一条, 不并行堆 — 简单优先, 出错不动 LLM 主流程
+        # 仅跑主程序一条，不并行堆——简单优先，出错不动 LLM 主流程
         if wants_activities:
             tool_msg = await self._call_aw("aw_get_recent_activities", {"minutes": 30, "limit": 15})
             if tool_msg:
@@ -593,9 +556,9 @@ class LangChainAgent:
         return results
 
     async def _call_aw(self, tool_name: str, args: dict) -> list:
-        """v28: 直接调 aw_* 工具, 同步返 LangChain message 序列 (AIMessage.tool_calls + ToolMessage.content)。
+        """直接调 aw_* 工具，同步返 LangChain message 序列。
 
-        用 app.integrations.activitywatch 调 (不走 MCP, 同步快), 失败返 [] 不影响流程。
+        用 app.integrations.activitywatch 调（不走 MCP，同步快），失败返 [] 不影响流程。
         """
         import uuid as _uuid
         try:
@@ -622,7 +585,7 @@ class LangChainAgent:
         if content is None:
             content = f"(aw-server 未运行或 watcher 没装)"
         tool_call_id = f"prefetch_{_uuid.uuid4().hex[:10]}"
-        # 创建对应 oai function name (我们 ToOpenAI 用的命名: mcp_<server>_<tool>)
+        # 创建对应 oai function name（ToOpenAI 用的命名: mcp_<server>_<tool>）
         oai_name = f"mcp_aw_{tool_name}"
         ai_msg = AIMessage(
             content="",
@@ -648,18 +611,12 @@ class LangChainAgent:
             3) yield done —— 全部结束
             4) finally —— await _release_checkpointer() 关闭 SQLite 连接
 
-        2026-10-14: 加「checkpoint 救援」—— MiniMax 报 2013 'tool call result
-        does not follow tool call' 时,怀疑是 checkpoint 里残留了
-        schema 失配的 ToolMessage;清掉本 thread 的 checkpoint 后重试一次。
+        含「checkpoint 救援」：报 2013 'tool call result does not follow tool call' 时，
+        清掉本 thread 的 checkpoint 后重试一次。
         """
-        # v28 (2026-10-17): 国产模型 (MiniMax-M3) 默认忽略 tool_choice 字段
-        # (实测 _tool_choice_is_ignored 表里有它, 而且 v27 bind tool_choice="any"
-        # 后日志确认发了, LLM 仍只回纯文本)。修复策略: 命中 aw_query / 类似
-        # 查询 intent 时, 我们直接走 `app.integrations.activitywatch` 的 HTTP
-        # client 同步调对应工具, 把 ToolMessage + AI tool_call 拼进 messages,
-        # 让 LLM 看到完整「问 → 调 → 结果」三段式, 必然基于结果回复。
-        # 副作用: 之前 LLM 自己 tool_call 的好处 (动态选工具) 没了, 但对于
-        # aw_query 这种专用 intent 是好事 —— 我们知道该调哪个工具。
+        # 国产模型默认忽略 tool_choice 字段。命中 aw_query 等专用 intent 时，
+        # 直接走 app.integrations.activitywatch 同步调工具，把 ToolMessage + AI tool_call
+        # 拼进 messages，让 LLM 看到完整「问 → 调 → 结果」三段式
         intent = None
         injected_tool_msgs: list = []
         if messages and messages[-1].get("role") == "user":
@@ -672,7 +629,7 @@ class LangChainAgent:
         except Exception:
             intent = None
 
-        # 命中 aw_query: 同步调工具, 把结果作为 AIMessage(tool_calls) + ToolMessage(content) 注入历史
+        # 命中 aw_query：同步调工具，把结果作为 AIMessage(tool_calls) + ToolMessage(content) 注入历史
         if intent == "aw_query" and last_user_for_intent:
             tool_results = await self._prefetch_aw_results(last_user_for_intent)
             if tool_results:
@@ -688,7 +645,7 @@ class LangChainAgent:
         if messages and messages[-1].get("role") == "user":
             last_user = messages[-1]["content"]
 
-        # 把注入的工具序列插在 user 消息前面, 模拟 LLM 之前调过工具
+        # 把注入的工具序列插在 user 消息前面，模拟 LLM 之前调过工具
         lc_msgs: list = [*history]
         lc_msgs.extend(injected_tool_msgs)
         lc_msgs.append(HumanMessage(content=last_user))
@@ -697,7 +654,7 @@ class LangChainAgent:
         config = {"configurable": {"thread_id": self.thread_id}}
 
         try:
-            # 最多重试一次:MiniMax 2013 → 清 ckpt → 重跑
+            # 最多重试一次：清 ckpt → 重跑
             recovered = False
             for attempt in range(2):
                 did_recover = False
@@ -706,52 +663,40 @@ class LangChainAgent:
                 ):
                     yield ev
                     if ev[0] == "_recovered_retry":
-                        # 清掉 ckpt 后请求再调一次;清在事件触发时已完成
+                        # 清掉 ckpt 后请求再调一次，清在事件触发时已完成
                         did_recover = True
                 if not did_recover:
                     break
-                # 已经因为 2013 触发重试:把 recovered 标 True,第二次还会再跑
-                # 一遍同样的逻辑(但这次如果再失败就不会再重试)
+                # 已经触发重试：把 recovered 标 True
                 recovered = True
-            # v22-2: 任务级 outcome. 走完所有 yield 没异常 → success
+            # 任务级 outcome：走完所有 yield 没异常 → success
             self._finish_run_with_outcome(success=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("LangChainAgent 失败")
             yield ("error", str(e))
-            # v22-2: 异常路径 outcome=failure
             self._finish_run_with_outcome(success=False)
 
-    # -------------------- v22-2: 桌宠状态反馈闭环接入 --------------------
-    # 任务结果 (success / failure / rejected) 反向更新 PetState.
-    # 应用方式: 主程序调 set_companion_state(state), 内部所有 task 调用都
-    # 走同一个 agent 实例, 所以 set 一次永久生效 (除非外部显式调用
-    # set_companion_state(None) 解除).
+    # -------------------- 桌宠状态反馈闭环接入 --------------------
+    # 任务结果（success / failure / rejected）反向更新 PetState。
+    # 应用方式：主程序调 set_companion_state(state)，内部所有 task 调用都
+    # 走同一个 agent 实例，set 一次永久生效（除非外部显式调用 set_companion_state(None) 解除）。
 
     def set_companion_state(self, pet_state: "Optional[Any]") -> None:
-        """v22-2 + v22-3: 注入 / 解除桌宠 PetState.
+        """注入 / 解除桌宠 PetState。
 
-        1) 写到 self._companion_state, 任务结束 _finish_run_with_outcome
-           写回 PetState 反馈 (v22-2)
-        2) 注册到 _companion_registry (按 thread_id), 让 grounding_dynamic_prompt
-           在策略层注入时拿到这个 state (v22-3)
-        3) v27: 同步给 self._confirm_ctrl —— 中间件用 _confirm_ctrl 的
-           _companion_state 做查表, 不然查表路径永远 state=None, 工具被
-           RiskyToolConfirm 静默放行 (实测 10-17 11:18 主人设 state=0 后
-           lock_screen 还是没拒绝).
-
-        pet_state=None 解除同步 (主线程关闭 / 测试 cleanup).
+        同步给 RiskyToolConfirm / PostLLMStateGuard 和 _companion_registry，
+        pet_state=None 解除同步（主线程关闭 / 测试 cleanup）。
         """
         self._companion_state = pet_state
-        # v27: 关键 — 同步给 RiskyToolConfirm, 不然 middleware 走查表时
-        # _get_companion_decision 返 None, 工具被弹窗确认后照样执行
+        # 同步给 RiskyToolConfirm（中间件查表路径）
         if getattr(self, "_confirm_ctrl", None) is not None:
             try:
                 self._confirm_ctrl.set_companion_state(pet_state)
             except Exception as e:  # noqa: BLE001
                 log.warning("LangChainAgent.set_companion_state 同步 _confirm_ctrl 失败: %s", e)
-        # v34: 同步给 PostLLMStateGuard, post-LLM 拦截器也读 state
+        # 同步给 PostLLMStateGuard
         if getattr(self, "_post_llm_guard", None) is not None:
             try:
                 self._post_llm_guard.set_companion_state(pet_state)
@@ -770,9 +715,9 @@ class LangChainAgent:
 
     def _fire_outcome(self, outcome: str, tool_name: str = "",
                       risk: int = 0) -> None:
-        """v22-2: 任务结果反向更新 PetState (如果注入了 state).
+        """任务结果反向更新 PetState（如果注入了 state）。
 
-        出错静默 (PetState 缺失字段, 数值越界等都不应炸 agent 主循环).
+        出错静默（PetState 缺失字段、数值越界等都不应炸 agent 主循环）。
         """
         state = getattr(self, "_companion_state", None)
         if state is None:
@@ -792,11 +737,9 @@ class LangChainAgent:
             )
 
     def _finish_run_with_outcome(self, success: bool) -> None:
-        """在 run() 结尾调, 通知 PetState 一次 outcome (整体任务结果).
+        """在 run() 结尾调，通知 PetState 一次 outcome（整体任务结果）。
 
-        成功 / 失败边界: 走完所有 yield 后没异常 → success; 走中抛异常 →
-        failure. 这个是 v22-2 反馈层的"任务级"结局, 不跟单个 tool 调用 outcome
-        (那是 paper #10 中 rejection 那种"中途拒截"分支, 走 RiskyToolConfirm 路径).
+        走完所有 yield 没异常 → success；走中抛异常 → failure。
         """
         outcome = "success" if success else "failure"
         try:
@@ -805,19 +748,15 @@ class LangChainAgent:
             pass
 
     # -------------------- Plan mode --------------------
-    # 当主程序接到 /plan <request> 时,调这个方法。语义:
-    #   - 跟 run() 用同一个 agent、同一个 thread(共享 checkpoint)
+    # /plan <request> 走这个方法。语义：
+    #   - 跟 run() 用同一个 agent、同一个 thread（共享 checkpoint）
     #   - 但追加「只能输出 markdown 计划、不能调任何工具」指令
-    #   - 不写 checkpoint 的 user/assistant(避免污染历史)
-    # 事件协议跟 run() 一致:("text", chunk), ("done", final), ("error", ...)。
+    #   - 不写 checkpoint 的 user/assistant（避免污染历史）
+    # 事件协议跟 run() 一致：("text", chunk), ("done", final), ("error", ...)。
     #
-    # 设计取舍:
-    #   - 不另建 agent / 不用不同 system_prompt —— 那样会引入「plan 上下文跟执行
-    #     上下文分裂」的麻烦(计划要参考运行时 anti-hallucination 等规则,
-    #     而执行要走同样的规则)。直接在最后一条 user 上挂 plan-mode 提示,
-    #     简洁、零额外配置。
-    #   - 计划输出走同 thread 的 checkpoint,但用 config["metadata"]
-    #     标记 plan-mode,方便调试时区分。
+    # 设计：直接在最后一条 user 上挂 plan-mode 提示，不另建 agent / 不用不同
+    # system_prompt，避免 plan 上下文跟执行上下文分裂。
+    # 计划输出走同 thread 的 checkpoint，用 config["metadata"] 标记 plan-mode。
 
     _PLAN_MODE_PROMPT = (
         "\n\n[系统:你现在处于 plan mode(规划模式)。请遵守:]\n"
@@ -850,7 +789,7 @@ class LangChainAgent:
         last_user = ""
         if messages and messages[-1].get("role") == "user":
             raw = messages[-1]["content"]
-            # multimodal(列表)时只往 text 部分追加,别破坏图片
+            # multimodal（列表）时只往 text 部分追加，别破坏图片
             if isinstance(raw, list):
                 new_parts = []
                 for p in raw:
@@ -870,9 +809,7 @@ class LangChainAgent:
             "metadata": {"plan_mode": "1"},
         }
 
-        # plan 模式简化流程:不跑 checkpoint 救援(救援是为工具结果-聊天失配设计的,
-        # plan 不调工具,不该出现 2013),不走 _astream_with_retry 的复杂协议,
-        # 只 stream 文本。
+        # plan 模式简化流程：不跑 checkpoint 救援，只 stream 文本
         final_text_parts: list[str] = []
         try:
             async for chunk, _meta in self._agent.astream(
@@ -891,13 +828,11 @@ class LangChainAgent:
                         final_text_parts.append(text)
                         yield ("text", text)
                 elif isinstance(chunk, ToolMessage):
-                    # plan 模式理论上不该走到这里 —— 万一模型还是调了工具,
-                    # 我们把工具调用结果直接当错误处理,不让它污染计划输出
+                    # plan 模式理论上不该走到这里——万一模型还是调了工具，忽略
                     log.warning(
                         "plan_mode: 模型在 plan 阶段调了工具 %r —— 忽略(plan 模式不允许)",
                         chunk.name,
                     )
-                    # 继续 stream,不 break(让模型能继续输出 markdown)
             yield ("done", "".join(final_text_parts))
         except asyncio.CancelledError:
             raise
@@ -977,8 +912,7 @@ class LangChainAgent:
     def _clear_thread_checkpoint(self) -> bool:
         """清掉 self.thread_id 在 checkpoint DB 里的所有记录。
 
-        2026-10-14: 当 MiniMax 2013 (tool call result does not follow tool call)
-        触发,怀疑 checkpoint 残留了 schema 失配的 ToolMessage,清掉再试。
+        当报 2013 (tool call result does not follow tool call) 时清掉再试。
         """
         try:
             if not self.cfg.enable_checkpointer or not self.cfg.checkpoint_db:

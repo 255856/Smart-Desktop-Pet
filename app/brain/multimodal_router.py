@@ -1,23 +1,11 @@
-"""多模态生成 API 路由 —— 解决「不同 model API 与对应多模态工具之间的适配」。
+"""多模态生成 API 路由：把不同 provider 的多模态能力统一暴露给 tool。
 
-2026-10-15 v11: 主人实测设计 ——
-有的 API 提生图 (OpenAI gpt-image-1), 有的提生视频 (MiniMax H3), 有的全有,
-有的都没有。主人 /api/<name> 选 API 后, 多模态 tool 走这个 router:
-  - 当前选用的 API 声明支持 image_generation → 调对应 provider 的 image handler
-  - 不支持 → 如实告诉主人 (包含 "切到 X 后重试" 的指引)
-  - 主人没选 → 同样给清晰提示 (让主人 /api/<name> 选一个)
+主人用 /api/<name> 选 API 后，多模态 tool 走这个 router：
+  - 当前 provider 声明支持该能力 → 调对应 handler
+  - 不支持 → 提示主人并给出可切换的备选 provider
+  - 主人没选 → 提示先选一个
 
-跟 chat_window 的 /skills/<name> 激活 (v9b) 平行:
-  - /skills/<name> 激活 "行为 skill" (system prompt 补丁) — v9 现有
-  - /api/<name>   激活 "API provider" (multimodal tool 路由目标) — v11 新加
-两者互不冲突, 同一 session 可以同时激活: 比如 /api/MiniMax 让 H3 走 MiniMax 视频,
-同时 /skills/poem 让桌宠用七言绝句回答。
-
-设计要点:
-  - ApiCapability 数据类描述该 provider 提哪些能力。
-  - 每个 provider 自己注册 handler (gen_image / gen_video / gen_audio callable)。
-  - router.route() 走: active provider → 查 capability → 调 handler → 抛清晰错。
-  - 全部 module-level 单例 (避免跟 Qt 实例化链路耦合)。
+跟 /skills/<name> 激活行为 skill 平行，两者互不冲突。
 """
 from __future__ import annotations
 
@@ -28,7 +16,7 @@ from typing import Callable, Optional
 log = logging.getLogger(__name__)
 
 
-# 三个 action 名, 跟 multimodal tool / provider handler 对齐
+# 三个 action 名，跟 multimodal tool / provider handler 对齐
 ACTION_IMAGE = "image"
 ACTION_VIDEO = "video"
 ACTION_AUDIO = "audio"
@@ -73,10 +61,10 @@ def register(
     gen_video: Optional[Callable[..., str]] = None,
     gen_audio: Optional[Callable[..., str]] = None,
 ) -> None:
-    """注册一个 provider。capability 跟 handler 解耦, handler 可选。
+    """注册一个 provider。capability 跟 handler 解耦，handler 可选。
 
-    注意: cap.supports_image=True 但 gen_image=None, 路由时会报
-    "声明支持但没接实现" 错, 引导主人去填实现。
+    注意：cap.supports_image=True 但 gen_image=None 时，路由时会报
+    "声明支持但没接实现"。
     """
     if not cap.name:
         raise ValueError("ApiCapability.name 不能为空")

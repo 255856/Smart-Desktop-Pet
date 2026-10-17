@@ -24,7 +24,6 @@ class InstalledApp:
     name: str          # 显示名（如 "Visual Studio Code"）
     path: str          # 完整 exe 路径
     source: str        # 来源："app_paths" / "start_menu" / "desktop" / "uninstall" / "program_files"
-    # 原始查询名（如 "Code.exe"，用于模糊匹配；大多数场景下等同 name）
 
     def __hash__(self) -> int:
         return hash(self.path.lower())
@@ -97,13 +96,7 @@ class InstalledAppsCache:
         self._maybe_start_scan()
 
     def get_all(self, wait: bool = False, timeout: float = 3.0) -> list[InstalledApp]:
-        """返回当前缓存的所有应用（可能为空——扫描还没完成）。
-
-        Args:
-            wait: True 时阻塞等扫描完成（最多 timeout 秒）；
-                   False 时直接返回当前缓存（可能空）
-            timeout: wait=True 时的最长等待时间
-        """
+        """返回当前缓存的所有应用（可能为空——扫描还没完成）。"""
         # 先尝试同步触发扫描（如果还没启动）
         with self._lock:
             if not self._result.apps and not self._scanning:
@@ -138,13 +131,6 @@ class InstalledAppsCache:
 
         排序键 = SequenceMatcher.ratio + 名字短串加成（短名更相关）。
         返回 [(app, score), ...]，按 score 降序。
-
-        Args:
-            query: 用户输入的应用名（中文/英文/pinyin 都行）
-            limit: 最多返回多少个候选
-            min_ratio: 最低相似度阈值，低于此值的候选不返回
-            wait: True 时若缓存为空会阻塞等扫描（最多 timeout 秒）
-            timeout: wait=True 时的最长等待时间
         """
         apps = self.get_all(wait=wait, timeout=timeout)
         q = _normalize_for_search(query).lower()
@@ -235,13 +221,6 @@ def _resolve_lnk(lnk_path: Path) -> Optional[str]:
         target = shortcut.Targetpath
         if target and Path(target).is_file():
             return target
-    except Exception:  # noqa: BLE001
-        pass
-
-    try:
-        # 次选：pyshortcuts（pip install pyshortcuts）
-        from win32com.shell import shell  # type: ignore
-        # 实际拿不到，纯占位避免误删
     except Exception:  # noqa: BLE001
         pass
 
@@ -493,11 +472,7 @@ def find_similar_apps(
 def list_installed_apps(
     wait: bool = False, timeout: float = 3.0,
 ) -> list[InstalledApp]:
-    """便捷函数：列出所有已缓存的已安装应用。
-
-    Args:
-        wait: True 时阻塞等扫描完成（最多 timeout 秒）
-    """
+    """便捷函数：列出所有已缓存的已安装应用。"""
     return get_installed_apps_cache().get_all(wait=wait, timeout=timeout)
 
 

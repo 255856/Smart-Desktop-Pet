@@ -47,19 +47,7 @@ class Animation:
 
 
 class AnimationPlayer:
-    """帧序列播放器。
-
-    用法：
-        player = AnimationPlayer()
-        player.play(animation)         # 切到新动画
-        player.play_one_shot(reaction) # 播一次性动画，播完回到 last_loop
-        player.tick()                  # 由 QTimer.timeout 调用，推进一帧
-        player.current_pixmap()        # 当前帧 QPixmap
-
-    cross-fade：
-        set_crossfade_ms(200) 开启——切换 animation 时把"上一帧"叠合过渡。
-        get_pending_crossfade() 返回 (pixmap, alpha)，paintEvent 据此叠合。
-    """
+    """帧序列播放器，支持 cross-fade 切换。"""
 
     def __init__(self):
         self._current: Optional[Animation] = None
@@ -78,7 +66,7 @@ class AnimationPlayer:
              on_finished: Optional[Callable] = None) -> None:
         if not anim or not anim.is_valid():
             return
-        # 同一 anim 不重设 prev（避免同一动画内帧间都做 crossfade——只有切换时做）。
+        # 同一 anim 不重设 prev（只有切换时才做 crossfade）
         prev_anim = self._current
         prev_pix = self.current_pixmap()
         is_same = (prev_anim is anim)
@@ -87,8 +75,7 @@ class AnimationPlayer:
             self._crossfade_start_t = time.monotonic()
             self._prev_alpha = 1.0
         self._current = anim
-        # 否则 set_idle() 每 30-75 s 调一次 play(idle[0]) 都会把动画从第 0 帧
-        # 重启，看起来像"动画循环加速"。
+        # 切换时不重置帧索引，避免 set_idle 周期调用时动画循环加速
         if not is_same:
             self._frame_idx = 0
             self._frame_elapsed = 0
@@ -196,12 +183,8 @@ def load_animation_from_dir(directory: str | Path,
         xxx_000_125.png → frame_idx=0, duration=125ms (VPet 格式，3 位序号)
         rmbg-1.png      → 按文件名排序，duration=frame_duration_ms
         rmbg-001.png    → 提取序号 001，duration=frame_duration_ms
-
-    VPet 同款帧率：默认 50ms/帧 (20 FPS)，配合每动作 ~81 张的密集动画。
-    最小帧率限制：30ms (≈33 FPS)，避免动画过快导致"跳帧"感，但不强制 12 FPS。
-    此前设的 83ms（12 FPS）会让 retune-ms 50 的 20 fps 被强制降回 12 fps，已改为 30。
     """
-    MIN_FRAME_DURATION_MS = 30  # 最小 30ms = 33 FPS 上限（不强制 12 FPS）
+    MIN_FRAME_DURATION_MS = 30  # 最小 30ms = 33 FPS 上限
 
     p = Path(directory)
     if not p.is_dir():

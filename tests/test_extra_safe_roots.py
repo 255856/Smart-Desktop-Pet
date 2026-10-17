@@ -150,13 +150,7 @@ class TestChatWindowIntegration:
 # -------------------- ChatWindow 启动期自动注入 cwd --------------------
 
 def test_chat_window_includes_cwd_in_extra_safe_roots():
-    """2026-10-15:Bug 5/沙箱接线 — 即使用户没在 config.yaml 写 project_dirs,
-    ChatWindow.__init__ 收到 cwd 时也应把 cwd 加进 _filesearch 沙箱。
-    之前只看 llm_cfg.project_dirs(默认 []),导致项目目录下的搜索被沙箱拒。
-
-    回归:Bug 5 之前 _filesearch 只看 llm_cfg.project_dirs,如果用户没在 config.yaml
-    手动配,沙箱就只有家目录,`E:\\study\\desktop-pet` 这种项目根路径被沙箱拒。
-    """
+    """ChatWindow.__init__ 收到 cwd 时也应把 cwd 加进 _filesearch 沙箱。"""
     import sys
     sys.path.insert(0, '.local-packages')
     from PyQt5.QtWidgets import QApplication

@@ -1,22 +1,21 @@
 """ActivityWatch MCP server。
 
-通过 aw-server (https://activitywatch.net/) 的 HTTP API 暴露用户活动数据
-(窗口标题 / 浏览器标签 / AFK 状态) 给桌宠 LLM, 让 LLM 能回答"我刚才在
+通过 aw-server（https://activitywatch.net/）的 HTTP API 暴露用户活动数据
+（窗口标题 / 浏览器标签 / AFK 状态）给桌宠 LLM，让 LLM 能回答"我刚才在
 干嘛"以及为 ProactiveBrain 提供主动搭话的 context。
 
-设计原则:
-  - 不依赖 aw-client Python SDK, 仅用 stdlib (urllib) → 不引入新依赖,
-    pip install 即可使用
-  - aw-server 未运行时优雅降级 (返"未运行"消息, 不抛致命错)
-  - timeout 短, 不阻塞主程序太久
+设计原则：
+  - 不依赖 aw-client Python SDK，仅用 stdlib（urllib），pip install 即可用
+  - aw-server 未运行时优雅降级（返"未运行"消息，不抛致命错）
+  - timeout 短，不阻塞主程序太久
 
-工具:
-  aw_get_current_window() → 当前活动窗口 (app + title)
+工具：
+  aw_get_current_window() → 当前活动窗口（app + title）
   aw_get_recent_activities(minutes=30, limit=20) → 最近窗口事件摘要
   aw_get_browser_tabs(minutes=30, limit=10) → 最近浏览器标签页
-  aw_status() → aw-server 是否在跑 (健康检查)
+  aw_status() → aw-server 是否在跑（健康检查）
 
-环境变量 (可选):
+环境变量（可选）：
   AW_SERVER_URL  默认 http://127.0.0.1:5600
   AW_HOSTNAME    默认 socket.gethostname()
 """
@@ -59,7 +58,7 @@ def _hostname() -> str:
 
 
 def _http_get_json(url: str, timeout: float = 4.0) -> Any:
-    """GET 一个 URL, 返 JSON。失败 / 超时返 None, 不抛异常 (mcp 层不让挂)。"""
+    """GET 一个 URL，返 JSON。失败 / 超时返 None，不抛异常（mcp 层不让挂）。"""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "desktop-pet-aw/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -72,7 +71,7 @@ def _http_get_json(url: str, timeout: float = 4.0) -> Any:
 
 
 def _aw_status() -> dict:
-    """查 aw-server 是否在跑 (heartbeat 端点). 失败返 {ok: False, ...}."""
+    """查 aw-server 是否在跑（heartbeat 端点）。失败返 {ok: False, ...}。"""
     info = _http_get_json(_aw_url("/api/0/info"), timeout=2.0)
     if not isinstance(info, dict):
         return {

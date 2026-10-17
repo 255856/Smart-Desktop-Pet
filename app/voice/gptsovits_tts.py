@@ -1,4 +1,4 @@
-"""GPT-SoVITS 本地 TTS 引擎（方案 B）——完全免费的自定义音色。"""
+"""GPT-SoVITS 本地 TTS 引擎（方案 B）：完全免费的自定义音色。"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 class GPTSoVITSTTS(TTS):
     """调用本地 GPT-SoVITS api_v2 的 /tts 接口，返回 wav 音频。"""
 
-    # api_v2 默认返回 wav；缓存后缀必须为 .wav，否则 pygame mixer 当 mp3 解析会报 bad stream
+    # api_v2 默认返回 wav；缓存后缀必须为 .wav（pygame mixer 不会按 mp3 解析）
     cache_ext: str = ".wav"
 
     def __init__(self, url: str = "http://127.0.0.1:9880",

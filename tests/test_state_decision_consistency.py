@@ -1,11 +1,4 @@
-"""v22-5 实验 1 跑数脚本测试。
-
-覆盖:
-  - run_experiment 返回字典 schema 正确
-  - 决策差异率 ≥ 30% (论文 §4.4.1 主指标)
-  - 规则命中率 ≥ 85% (lookup_decision 不跟 RULES_TABLE 优先级漂移)
-  - 实验 1 写盘 results/state_decision_consistency.json
-"""
+"""实验 1 跑数脚本测试。"""
 import json
 import os
 import re

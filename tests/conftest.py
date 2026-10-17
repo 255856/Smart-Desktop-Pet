@@ -1,11 +1,4 @@
-"""pytest 配置：项目根目录 + 本地依赖包进 sys.path，并提供 Qt 单例 fixture。
-
-另含平台守卫：本项目是 Windows 桌面应用（Live2D/Qt 窗口、锁屏、Wi-Fi/蓝牙开关、
-剪贴板、ASR 唤醒词等都依赖 Windows 专有 API）。在没有这些 API 的平台上，
-这些测试模块导入即失败，会让整个收集阶段崩掉（pytest exit code 2），
-把真正的问题淹没。CI 主跑 Windows（见 .github/workflows/test.yml），
-这里只是让非 Windows 平台也能跑完其余部分。
-"""
+"""pytest 配置：项目根目录 + 本地依赖包进 sys.path；Windows 平台守卫；Qt 单例 fixture。"""
 import os
 import sys
 from pathlib import Path
@@ -55,16 +48,7 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    """默认 deselect 所有 slow tests，除非 --run-slow 被显式打开。
-
-    原因：覆盖率插桩（pytest-cov 的 sys.settrace）会显著放大耗时 + 干扰
-    `threading.Event.wait` 的睡眠精度，导致下面两个用例在带 --cov 的
-    CI 里假阳性：
-        - test_xiangqi.py::TestAI::test_ai_is_reasonably_fast
-          （AI 走完 3.02s，撞破 2.0s 阈值）
-        - test_audit_fixes_2026_10.py::test_cancel_countdown_actually_stops_thread
-          （settrace 干扰后台线程的 Event 唤醒，本地单独跑全过）
-    """
+    """默认 deselect 所有 slow tests，除非 --run-slow 被显式打开。"""
     if config.getoption("--run-slow"):
         return
     skip_slow = pytest.mark.skip(reason="slow（默认跳过，加 --run-slow 才跑）")
@@ -75,19 +59,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(autouse=True)
 def _isolate_tool_choice_denylist(tmp_path):
-    """把 tool_choice 黑名单**整体**隔离到临时目录（落盘路径 + 内存态），逐用例重置。
-
-    llm_client._TOOL_CHOICE_IGNORED 是模块级集合，且会落盘到
-    data/tool_choice_unsupported.json。测试里大量用例用 model="test" /
-    "fake-model-*" 这些假模型名去触发「运行时探测到该模型忽略 tool_choice」，
-    于是它们会：
-
-      1. 写脏用户的 data/tool_choice_unsupported.json（把 test 也存进去）；
-      2. 留在内存里，让**后面**的用例莫名其妙走 prompt 强制而失败
-         （现场：test_force_tool_use_required_in_payload 拿到 None 而不是 required）。
-
-    必须是**函数级**且逐用例还原——只还原一次（session 级）挡不住用例之间的污染。
-    """
+    """把 tool_choice 黑名单（落盘路径 + 内存态）整体隔离到临时目录，逐用例重置。"""
     from app.brain import llm_client as lc
 
     lc._TOOL_CHOICE_CACHE = tmp_path / "denylist.json"
@@ -103,11 +75,7 @@ def qapp():
     """提供 QApplication 单例（Qt 测试需要）。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from app.core.qt_compat import QApplication
-    # 只传程序名，不把 pytest 自己的 argv 喂给 Qt：Qt 会解析命令行参数，
-    # --cov-report / --tb 之类它不认识的参数在不同 PyQt5/Python 组合下
-    # 行为不一致（轻则打 usage，重则直接 abort），会让用到本 fixture 的用例
-    # 在 setup 阶段整片 error。应用自身 main.py 传 sys.argv 是对的，
-    # 那里 argv 本来就是桌宠自己的参数。
+    # 只传程序名，不把 pytest 自己的 argv 喂给 Qt，避免 --cov-report 等参数被 Qt 误解析
     app = QApplication.instance() or QApplication(sys.argv[:1])
     yield app
     # 不退出 app，让 pytest 收尾

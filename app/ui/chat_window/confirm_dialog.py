@@ -1,16 +1,4 @@
-"""危险工具确认弹窗 —— 自定义 QDialog。
-
-为什么不用 QMessageBox:
-- 2026-10-15 用户实测:chat_window 是 FramelessWindowHint + WA_TranslucentBackground
-  (为了做悬浮桌宠效果),用 QMessageBox(self) 继承父窗口的 window flags
-  → Qt 把它当 transient child → 在某些时序下被父窗口的 frame dismiss
-  → 用户看到「只闪一下」就消失。
-- 用 QMessageBox(None) 改成独立 top-level 也不稳:headless / no-desktop
-  session 下 Qt 内部逻辑会立即 close box。
-
-修法:写自定义 QDialog,显式控制所有 window flags,不依赖父窗口的 flags,
-  保证弹窗在 frameless 父窗口下也能稳定显示。
-"""
+"""危险工具确认弹窗：自定义 QDialog，避免 QMessageBox 在 frameless 父窗口下被 dismiss。"""
 from __future__ import annotations
 
 import logging
@@ -25,19 +13,18 @@ log = logging.getLogger(__name__)
 
 
 class _DangerConfirmDialog(QDialog):
-    """危险工具确认弹窗 —— 独立 top-level QDialog,Yes/No 按钮。
+    """危险工具确认弹窗：独立 top-level QDialog，Yes/No 按钮。
 
     协议:
       - exec() 返回 int: 1 = Yes (Accepted), 0 = No (Rejected)
-      - 超时(通过 _close_confirm_box 调 reject())返回 0
+      - 超时（通过 _close_confirm_box 调 reject()）返回 0
       - WA_DeleteOnClose 防止内存泄漏
     """
 
     def __init__(self, name: str, args_pretty: str, parent=None):
-        # 关键:parent=None 让 QDialog 完全独立,不继承 chat_window 的
-        # FramelessWindowHint / WA_TranslucentBackground。
+        # parent=None 让 QDialog 完全独立，不继承 chat_window 的 flags
         super().__init__(parent)
-        # 显式控制所有 window flags,不让 Qt 帮我们猜
+        # 显式控制所有 window flags，不让 Qt 帮我们猜
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowStaysOnTopHint
@@ -46,7 +33,7 @@ class _DangerConfirmDialog(QDialog):
         )
         # 关掉后自动释放
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        # 模态性:ApplicationModal 阻塞整个 app 的输入直到用户点按钮
+        # ApplicationModal 阻塞整个 app 的输入直到用户点按钮
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         # 工具名 + 参数展示
         self._name = name
@@ -100,7 +87,7 @@ class _DangerConfirmDialog(QDialog):
             "QPushButton:pressed{background:#9ca3af;}"
         )
         self._no_btn.clicked.connect(self._on_no)
-        # Tab order 第一(No 是默认,跟 QMessageBox 一致)
+        # Tab order 第一（No 是默认，跟 QMessageBox 一致）
         btn_row.addWidget(self._no_btn)
 
         self._yes_btn = QPushButton("✓  允许执行")
@@ -115,12 +102,11 @@ class _DangerConfirmDialog(QDialog):
         btn_row.addWidget(self._yes_btn)
 
         layout.addLayout(btn_row)
-        # 默认焦点在 No 上(防误点)
+        # 默认焦点在 No 上（防误点）
         self._no_btn.setDefault(True)
         self._no_btn.setAutoDefault(True)
-        # Esc 键 = 拒绝
+        # Esc = 拒绝，Enter = 允许
         self._no_btn.setShortcut("Esc")
-        # Enter 键 = 允许(明确让 Enter 是 Yes,跟 QMessageBox 一致)
         self._yes_btn.setShortcut("Return")
 
     @pyqtSlot()
@@ -134,7 +120,7 @@ class _DangerConfirmDialog(QDialog):
         self.reject()
 
     def reject(self) -> None:
-        """让超时路径 _close_confirm_box 也能干净关掉,统一走 Rejected(0)。"""
+        """让超时路径 _close_confirm_box 也能干净关掉，统一走 Rejected(0)。"""
         log.info("danger confirm: rejected (timeout or close) for tool=%r", self._name)
         super().reject()
 

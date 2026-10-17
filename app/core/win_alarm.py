@@ -1,19 +1,15 @@
 """系统级闹钟兜底：把提醒注册成 Windows 计划任务，桌宠崩了/关了也照样响。
 
-为什么需要：桌宠自己的定时器在进程里。桌宠崩了、被关掉、机器休眠醒来、
-或那条「QTimer 在工作线程里 start 无效」的老 bug 复发——闹钟就哑了。
-注册一个 **Windows 计划任务**（schtasks，一次性，当前用户，免管理员），
-由 Windows 内核负责在到点那一刻拉起提示，和桌宠进程完全无关。
+注册 schtasks 一次性任务，由 Windows 内核负责在到点那一刻拉起提示，
+和桌宠进程完全无关。
 
 约束（实测 schtasks 行为）：
-  - `/st HH:mm` 只有**分钟**粒度，且必须是将来时间；
-  - 剩不到 2 分钟的倒计时不值得注册（1 分钟粒度会不准），直接不注册；
+  - `/st HH:mm` 只有分钟粒度，且必须是将来时间；
+  - 剩不到 2 分钟的倒计时不值得注册（分钟粒度会不准），直接不注册；
   - 创建需要当前用户权限，实测不必管理员；
-  - 任务会留在「任务计划程序」里，必须能被我们找回来清掉——
-    启动时 `cleanup_stale()` 会扫掉上次崩溃残留的。
+  - 启动时 cleanup_stale() 扫掉上次崩溃残留的任务。
 
-所有函数都返回**如实**的结果，调用方据此告诉主人「有没有装上兜底」，
-绝不假装已经注册。
+所有函数都返回如实的结果，绝不假装已经注册。
 """
 from __future__ import annotations
 
@@ -83,9 +79,9 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
 
 def task_name_for(key: str) -> str:
-    """由业务 key（提醒 id / 倒计时 id）**确定性地**推出任务名。
+    """由业务 key（提醒 id / 倒计时 id）确定性地推出任务名。
 
-    确定性很关键：删除提醒、倒计时到点、崩溃后清理，都不需要额外存一份映射，
+    删除提醒、倒计时到点、崩溃后清理，都不需要额外存一份映射，
     拿 key 重新算一遍就是同一个名字。
     """
     import hashlib
@@ -108,7 +104,7 @@ def arm(fire_ts: float, text: str, *, key: str,
         return ""
     lead = fire_ts - time.time()
     if lead < MIN_LEAD_SECONDS:
-        # 1 分钟粒度装不下，留给桌宠自己的定时器
+        # 分钟粒度装不下，留给桌宠自己的定时器
         return ""
 
     # 向上取整到下一个整分，并保证落在将来
@@ -182,8 +178,7 @@ def cleanup_stale() -> int:
         return 0
     n = 0
     for line in out.splitlines():
-        # `schtasks /query /fo CSV /nh` 没有表头，每行是
-        #   "任务名","下次运行时间","状态"
+        # `schtasks /query /fo CSV /nh` 没有表头，每行是 "任务名","下次运行时间","状态"
         # 任务名自带一层引号，且本机查询会前缀一个反斜杠（"\任务名"）。
         if TASK_PREFIX not in line:
             continue

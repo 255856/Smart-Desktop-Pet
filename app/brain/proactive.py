@@ -21,9 +21,7 @@ class _ChatOnceWorker(QThread):
     def __init__(self, llm_cfg, system_prompt, messages,
                  request_timeout_s: int | None = None):
         super().__init__()
-        # 只携带配置与消息（不在主线程共享 httpx 客户端）——
-        # ProactiveBrain 复用共享 LLMClient 会让 httpx 连接绑在已关闭的子 loop 上，
-        # 触发 "Event loop is closed"。这里每次新建 LLMClient + httpx.AsyncClient。
+        # 每次独立构造 LLMClient + httpx.AsyncClient，避免连接绑在已 close 的子 loop 上
         self.llm_cfg = llm_cfg
         self.system_prompt = system_prompt
         self.messages = messages
@@ -109,13 +107,12 @@ class ProactiveBrain(QObject):
         self._request_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
-        # ActivityWatch: 默认禁, 装 AW + 启动 aw-server + 开 enabled 才有数据。
-        # 拿不到 / 没装 / 主机名错 — _fire 内优雅降级, 不让主动发言挂。
+        # ActivityWatch 配置：未启用 / aw-server 未跑 / 无 watcher 时 _fire 内优雅降级
         self._aw_cfg = aw_cfg
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
         self._last_remarks: list[str] = []
-        # 注：worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
+        # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     def apply_aw_config(self, aw_cfg) -> None:
         """设置面板 / 热重载改了 AW 配置 — 下一次 _fire 用新配置。无副作用。"""
@@ -149,9 +146,7 @@ class ProactiveBrain(QObject):
         log.info("ProactiveBrain: LLM 配置已更新 → %s @ %s", new_cfg.model, new_cfg.base_url)
 
     def _build_aw_context(self) -> str:
-        """v24: 拿 AW 活动数据, 没开 / aw-server 没跑 / 没 watcher 都安全返
-        空字符串, 不让 _fire 挂在 AW 上。返非空时内容已 ready 给 LLM 直接吃。
-        """
+        """拿 AW 活动数据；未启用 / aw-server 未跑 / 无 watcher 时返回空字符串。"""
         aw_cfg = self._aw_cfg
         if aw_cfg is None or not getattr(aw_cfg, "enabled", False):
             return ""
@@ -207,7 +202,7 @@ class ProactiveBrain(QObject):
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
         mem = self.memory.recent(10)
-        # v24: ActivityWatch 活动 context (主人开了才查, aw-server 不在就跳过)
+        # ActivityWatch 活动 context（主人开了才查，aw-server 不在就跳过）
         aw_context = self._build_aw_context()
         context = {
             "now": now.strftime(f"%Y-%m-%d %H:%M 星期{wd}"),
@@ -216,9 +211,9 @@ class ProactiveBrain(QObject):
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
             "recent_remarks": self._last_remarks[-3:],
-            "aw_context": aw_context,  # 空字符串 / "aw-server 未运行" / 实际活动摘要
+            "aw_context": aw_context,
         }
-        # 第 6 条规则只在 AW 实际有数据时挂上, 避免 prompt 噪声
+        # 第 6 条规则只在 AW 实际有数据时挂上，避免 prompt 噪声
         aw_rule = ""
         if aw_context and "未运行" not in aw_context and "无数据" not in aw_context:
             aw_rule = (
@@ -263,7 +258,7 @@ class ProactiveBrain(QObject):
         from app.voice.character import parse_reply
         from app.brain.llm_client import sanitize_text
         parsed = parse_reply(text)
-        # 最终输出规范：剥掉推理模型漏到正文的 CoT / 规则复读 / 英文思考
+        # 剥掉推理模型漏到正文的 CoT / 规则复读 / 英文思考
         remark = sanitize_text(parsed.text).strip()
         if not remark:
             return

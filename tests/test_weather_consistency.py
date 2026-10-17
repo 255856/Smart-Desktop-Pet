@@ -1,19 +1,5 @@
 # -*- coding: utf-8 -*-
-"""get_weather 的天气正确性回归（2026-10-14 现场）。
-
-现场：主人问广州天气，工具输出里同时有
-
-    当前：晴，33.0°C                      <- current，15:15 实况
-    2026-10-14: 毛毛雨，降水概率 31%      <- daily，全天 24 小时汇总
-
-两行说的是**同一天**却互相矛盾。open-meteo 的 daily 是全天汇总，凌晨下过
-毛毛雨就把整天标成毛毛雨，哪怕此刻是大太阳。模型采信了 daily 那行，于是
-对主人说「广州今天有毛毛雨，31%的降水概率」——窗外是晴天。
-
-所以这里锁死两条：
-  1. 当天那行**不能**再出现天气现象 / 降水概率（它们和「当前」冲突）；
-  2. 未来几天的行不受影响，仍要完整。
-"""
+"""get_weather 的天气正确性回归。"""
 from __future__ import annotations
 
 import json
@@ -23,7 +9,7 @@ import pytest
 from app.engine.tools import _weather
 from app.engine.tools._core import ToolRegistry
 
-# 复刻现场那份矛盾数据（真实抓的，2026-10-14 15:15 广州）
+# 复刻那份矛盾数据（真实抓的，2026-10-14 15:15 广州）
 _CONTRADICTORY = {
     "current": {
         "time": "2026-10-14T15:15", "interval": 900,
@@ -127,11 +113,7 @@ def test_days_one_still_shows_today(patched):
 
 
 def test_schema_tells_model_to_request_enough_days_for_future_dates():
-    """主人问「明天」时 days 必须传够，否则查不到那一天。
-
-    现场：主人说「提醒我明天带伞」，模型传了 days=1，只查了今天，
-    结果压根没有明天的数据，模型只能拿今天的天气去回答。
-    """
+    """主人问「明天」时 days 必须传够，否则查不到那一天。"""
     reg = ToolRegistry()
     _weather.register(reg)
     tool = reg.get("get_weather")

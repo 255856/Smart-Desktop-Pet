@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""开发态启动器：避免 PyInstaller 打包 + 子系统 / 双击运行 / Windows 控制台窗口等坑。"""
+"""run.py: 开发态启动器。"""
 from __future__ import annotations
 
 import sys

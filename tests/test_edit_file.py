@@ -88,7 +88,7 @@ class TestMultiEdit:
         assert p.read_text() == "hi\nFOO BAR\nhi\n"
 
     def test_per_edit_summary_lists_every_step(self, sandbox):
-        """2026-10-15:每条 edit 必须显式出现在 per-edit 摘要里(防止模型总结时漏)。"""
+        """每条 edit 必须显式出现在 per-edit 摘要里。"""
         p = sandbox / "test.txt"
         result = multi_edit(str(p), [
             {"old_string": "hello world", "new_string": "hi", "replace_all": True},

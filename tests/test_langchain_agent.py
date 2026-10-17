@@ -264,7 +264,7 @@ def test_close_is_idempotent_without_checkpointer():
     agent.close()  # 多次调用也安全
 
 
-# ---------- 2026-10-14 race condition 修复 ----------
+# ---------- race condition 修复 ----------
 def test_persistent_loop_start_timeout_raises():
     """_PersistentLoop.start() 在 _ready 超时后必须 raise,不能沉默返回。
     旧实现 5s timeout,LangChain 1.0+ import 慢时会让后续 run_coro 卡死。
@@ -375,9 +375,8 @@ class TestHallucinationGuard:
     def test_build_middlewares_returns_tuple(self):
         """build 返回 (3 个标准中间件, RiskyToolConfirm controller)。
 
-        2026-10-15:从只返回 list 改为返回 tuple;并把 confirm 中间件拆出去,
-        让 caller 自己用 ctrl.as_middleware() 生成(保证 state 挂在同一个
-        agent 上,跨 astream 持续生效)。
+        从只返回 list 改为返回 tuple;并把 confirm 中间件拆出去,
+        让 caller 自己用 ctrl.as_middleware() 生成。
         """
         from app.brain.hallucination_guard import (
             RiskyToolConfirm,

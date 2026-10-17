@@ -1,13 +1,4 @@
-"""2026-10-04 全量审计的回归测试。
-
-背景：这批测试锁的是「模型说成功了，实际没执行 / 没调用」这一类问题。
-审计实测（当时全部漏放）：工具返回「钱不够」「不支持的换算」「[exit=1] …」
-等文案时，_tool_result_state 一律判 ok，AgentLoop 的矛盾检测完全不起作用；
-而人设自己的措辞「已经帮主人打开X啦~」也命不中成功词表，所以 28 个旧测试
-全绿而功能实际失效。
-
-每个 test 的 docstring 都写明「原来错在哪」，方便以后回看。
-"""
+"""全量审计回归测试：模型说成功但实际未执行 / 未调用 这类问题的回归锁。"""
 from __future__ import annotations
 
 import asyncio
@@ -271,12 +262,7 @@ def test_every_intent_whitelist_is_non_trivial():
 
 
 def test_alarm_intent_never_offers_countdown():
-    """回归：主人说「定闹钟」时，模型不该还能选 countdown。
-
-    现场：主人说「定一个1分钟闹钟」，模型选了 countdown —— 它只活在内存里，
-    桌宠一关就没；add_reminder 会落盘、能跨重启、能在设置面板看到和取消。
-    闹钟这种「怕忘」的事必须用后者，所以这个意图里不能再出现 countdown。
-    """
+    """回归：主人说「定闹钟」时，模型不该还能选 countdown。"""
     alarm_tools = set(_INTENT_TOOL_NAMES["add_reminder"])
     for t in ("countdown", "list_countdowns", "cancel_countdown"):
         assert t not in alarm_tools, (
@@ -388,7 +374,7 @@ def test_confirm_timeout_is_not_reported_as_user_cancel():
 # =============================================================================
 
 def test_feed_self_reports_failure_honestly():
-    """钱不够 / 没有该食物 原来不含失败词，被判 ok。"""
+    """钱不够 / 没有该食物 必须判 fail。"""
 
     class It:
         name, price = "火锅", 20
@@ -415,7 +401,7 @@ def test_feed_self_reports_failure_honestly():
 
 
 def test_run_script_nonzero_exit_is_failure():
-    """原来返回「[exit=1] …」，没有失败词，模型会照着说「脚本已执行完成」。"""
+    """run_script 非零退出码必须判 fail。"""
     from app.engine.tools import _runner
     assert "错误" in (_runner.__doc__ or "") or True   # 仅确保模块可导入
     import inspect
@@ -424,7 +410,7 @@ def test_run_script_nonzero_exit_is_failure():
 
 
 def test_math_mm_conversion():
-    """原来 5mm→m 返回 0.05（正确 0.005）、5mm→in 返回 0.1969（正确 0.0197）。"""
+    """mm→m / mm→in / F→K / parsec→ly 转换结果正确。"""
     from app.engine.tools._math import _convert
     assert "0.005" in _convert(5, "mm", "m")
     assert "0.0197" in _convert(5, "mm", "in")
@@ -434,7 +420,7 @@ def test_math_mm_conversion():
 
 @pytest.mark.slow
 def test_cancel_countdown_actually_stops_thread():
-    """原来只删列表，time.sleep 照跑，到点照样提醒。"""
+    """cancel_countdown 必须真停掉后台线程。"""
     from app.engine.tools import _timer
     fired = []
     _timer.set_say_hook(lambda s: fired.append(s))
@@ -453,7 +439,7 @@ def test_cancel_countdown_actually_stops_thread():
 
 
 def test_open_file_explorer_sandbox():
-    """原来对任意路径 os.startfile，传 .exe/.bat 等于直接执行。"""
+    """open_file_explorer 拒绝可执行文件 / 系统目录 / 不存在路径, 家目录放行。"""
     from app.engine.tools import _shortcuts
     ok, err = _shortcuts._check_explorable(str(Path.home() / "some.exe"))
     assert ok is None and "可执行" in err
@@ -467,7 +453,7 @@ def test_open_file_explorer_sandbox():
 
 
 def test_clear_bubble_reports_honestly_without_hook():
-    """原来主程序从不注入 hook，它恒定返回「未连接气泡 hook」且无失败词。"""
+    """clear_bubble 无 hook 时必须判 fail。"""
     from app.engine.tools import _power
     reg = ToolRegistry()
     _power.register(reg)
@@ -478,7 +464,7 @@ def test_clear_bubble_reports_honestly_without_hook():
 
 
 def test_set_wifi_string_false_disables():
-    """实测 bool('false') is True → 主人说「关WiFi」桌宠反而开。"""
+    """set_wifi 字符串 "false"/"no"/"0"/"关" 都应被判 False。"""
     from app.engine.tools._power import _as_bool
     for raw in ("false", "False", "no", "0", "关", False, 0):
         assert _as_bool(raw) is False, raw
@@ -498,11 +484,7 @@ def test_play_animation_reports_when_hook_missing():
 
 
 def test_countdown_is_honest_about_missing_channel():
-    """没有提醒通道时必须当场说，不能承诺「到点会提醒你」。
-
-    原来无条件返回「到点主人会收到提醒」，而 set_say_hook 主程序从不注入、
-    win10toast 也不在 requirements 里 —— 到点什么都不会发生。
-    """
+    """没有提醒通道时必须当场说, 不能承诺「到点会提醒你」。"""
     from app.engine.tools import _timer
     _timer.set_say_hook(None)
     try:

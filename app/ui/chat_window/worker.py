@@ -1,10 +1,4 @@
-"""chat_window 子模块：QThread worker。
-
-把 async 流式调用包装到 QThread 里跑，避免阻塞主线程 / 处理 Python 事件。
-
-_AgentWorker：包装 ReAct / LangChain agent 循环，吐 (text/tool/done/meta) 事件。
-_StreamWorker：包装纯流式 LLM 调用（无工具），吐 (text/done/failed) 事件。
-"""
+"""chat_window QThread worker：把 async 流式调用包装到 QThread 里跑。"""
 from __future__ import annotations
 
 import asyncio
@@ -21,8 +15,7 @@ from app.brain.agent import AgentLoop
 log = logging.getLogger(__name__)
 
 
-# httpx 抛出的网络异常族：连接断 / 超时 / DNS 失败 / 远程协议错。
-# 收到这些时只把 USER_FRIENDLY_NETWORK_ERROR 暴露给主人，原始异常进 log。
+# httpx 网络异常族（连接断 / 超时 / DNS 失败 / 远程协议错）
 _NETWORK_EXC = (
     httpx.RemoteProtocolError,
     httpx.ConnectError,
@@ -36,11 +29,7 @@ _NETWORK_EXC = (
 
 
 def _failure_message(exc: BaseException) -> str:
-    """worker 抛异常时，给主人看的文案。
-
-    网络异常统一改成 USER_FRIENDLY_NETWORK_ERROR，原始异常打 log。
-    其他异常保留 repr（LLMError 的 message 一般已友好；`{e!r}` 是最后兜底）。
-    """
+    """worker 抛异常时给主人看的文案（网络异常统一转友好文案）。"""
     if isinstance(exc, _NETWORK_EXC):
         log.warning("worker 网络异常转友好文案：%r", exc)
         return USER_FRIENDLY_NETWORK_ERROR
@@ -48,20 +37,11 @@ def _failure_message(exc: BaseException) -> str:
 
 
 class _AgentWorker(QThread):
-    """Agent 循环 worker：流式正文 + 工具调用（Function Calling）。
-
-    agent.run 产出 ("text"|"tool"|"done"|"meta"|"reflection"|"plan", ...) 事件，
-    这里转成 Qt 信号：
-        chunk     —— 正文增量
-        tool_used —— 一次工具执行完成 (name, args, result)
-        meta      —— 内部事件（force_retry / replan 等），仅 trace + 状态显示
-        done      —— 完整文本（所有正文段拼接）
-        failed    —— 出错
-    """
+    """Agent 循环 worker：流式正文 + 工具调用（Function Calling）。"""
 
     chunk = Signal(str)
     tool_used = Signal(str, str, str)
-    meta = Signal(str, dict)       # (kind, payload) —— 内部事件，给 Trace 用
+    meta = Signal(str, dict)       # (kind, payload) — 内部事件，给 Trace 用
     done = Signal(str)
     failed = Signal(str)
 
@@ -75,21 +55,10 @@ class _AgentWorker(QThread):
         self.cancel_event.set()
 
     def run(self) -> None:
-        """在 QThread 里跑 agent 循环。
-
-        LangChainAgent 自带持久 loop（run_sync）；其他 agent 仍走 asyncio.run()。
-
-        修复：把 `done` 事件的 payload 也作为 final 文本的兜底（防御性）。
-        历史上某些 AgentLoop 变体（如 AgentLoopV2 的 Planner+Executor 模式）
-        不一定 yield text 事件就 yield done，导致 `chat reply ready: ''`。
-
-        处理推理模型：text 事件里**不再**含 reasoning_content / reasoning 字段
-        （由 LLMClient._do_stream_request 区分）。reasoning 通过 meta 事件
-        {"event": "reasoning", "content": "..."} 转发给 Trace，UI 不显示。
-        """
+        """在 QThread 里跑 agent 循环。"""
         try:
             full: list[str] = []
-            done_fallback: str = ""   # 防御：done 事件 payload 作为 last-resort
+            done_fallback: str = ""   # done 事件 payload 作为 last-resort 兜底
             reasoning_parts: list[str] = []   # 收集推理模型的思考内容（Trace 用）
             # LangChainAgent 提供 run_sync（在持久 loop 里跑，跨调用不切换）
             if hasattr(self.agent, "run_sync"):
@@ -119,11 +88,7 @@ class _AgentWorker(QThread):
             else:
                 async def drive(done_box: list[str],
                                 reasoning_box: list[str]) -> None:
-                    """驱动 agent.run 异步迭代。
-
-                    done_box: 用于回传 done 兜底文本（防御性）
-                    reasoning_box: 用于回传推理模型思考内容（Trace 用，不给 UI）
-                    """
+                    """驱动 agent.run 异步迭代。"""
                     async for ev in self.agent.run(
                             self.messages, cancel_check=self.cancel_event.is_set):
                         kind = ev[0]
@@ -135,11 +100,10 @@ class _AgentWorker(QThread):
                         elif kind == "meta":
                             # ev = ("meta", dict)
                             meta_payload = ev[1] if len(ev) > 1 else {}
-                            # 特殊：reasoning meta 累积到 reasoning_box（一次性 trace）
+                            # reasoning meta 累积到 reasoning_box（一次性 trace）
                             if isinstance(meta_payload, dict) and \
                                     meta_payload.get("event") == "reasoning_delta":
                                 reasoning_box.append(meta_payload.get("content", ""))
-                                # 不 emit 给 UI（meta 仍然 emit 给 Trace 记录）
                             self.meta.emit("meta", meta_payload)
                         elif kind in ("plan", "reflection"):
                             self.meta.emit(kind, ev[1] if len(ev) > 1 else {})
@@ -159,7 +123,7 @@ class _AgentWorker(QThread):
                         "event": "reasoning",
                         "content": "".join(reasoning_box),
                     })
-            # 拼接最终文本：如果累积的 full 为空且 done 有 payload，用 done 的
+            # 拼接最终文本：full 为空时用 done 的 payload 兜底
             final_text = "".join(full) or done_fallback
             self.done.emit(final_text)
         except LLMError as e:
@@ -169,14 +133,7 @@ class _AgentWorker(QThread):
 
 
 class _StreamWorker(QThread):
-    """把 async 流式调用包装到 QThread 里跑。
-
-    PR1 修复：
-        - 新增 cancel_event（threading.Event），「停止」按钮只需 set()，无需走 Qt 中断
-          协议 —— httpx stream 端每行会检查 cancel_check()，触发后立即断开连接。
-        - run() 内现在 asyncio.set_event_loop(loop) 先于 run_until_complete，
-          避免「loop 还没在主线程注册」导致的潜在 ResourceWarning。
-    """
+    """把 async 流式调用包装到 QThread 里跑。"""
     chunk = Signal(str)
     done = Signal(str)             # 完整文本
     failed = Signal(str)
@@ -220,11 +177,10 @@ class _StreamWorker(QThread):
 
 
 class _PlanWorker(QThread):
-    """Plan-mode worker:调用 LangChainAgent.plan_sync(),只产 markdown 计划。
+    """Plan-mode worker：调用 LangChainAgent.plan_sync()，只产 markdown 计划。
 
-    复用 _AgentWorker 的 chunk / done / failed 信号协议,因此 chat_window
-    既存的 _on_chunk / _on_done 不用改。但不挂 tool_used / meta —— plan 不调工具,
-    也不需要工具步骤卡片,免得给主人错觉说「会执行这些」。
+    复用 _AgentWorker 的 chunk / done / failed 信号协议。
+    不挂 tool_used / meta — plan 不调工具。
     """
 
     chunk = Signal(str)
@@ -250,7 +206,7 @@ class _PlanWorker(QThread):
             ) if hasattr(self.agent, "plan_sync") else None
             if plan_events is None:
                 self.failed.emit(
-                    "当前 Agent 后端不支持 plan 模式(仅 standard / LangChain 后端可用)"
+                    "当前 Agent 后端不支持 plan 模式（仅 standard / LangChain 后端可用）"
                 )
                 return
             for ev in plan_events:
@@ -259,7 +215,7 @@ class _PlanWorker(QThread):
                     full.append(ev[1])
                     self.chunk.emit(ev[1])
                 elif kind == "done":
-                    # 防御:plan 没 yield text 但给了 done payload,用 payload 兜底
+                    # 防御：plan 没 yield text 但给了 done payload，用 payload 兜底
                     if len(ev) > 1 and ev[1]:
                         done_fallback = str(ev[1])
                 elif kind == "error":

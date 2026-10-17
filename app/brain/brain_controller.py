@@ -26,11 +26,10 @@ _SKILL_PATH_CANDIDATES = [
 
 
 def _read_skill_md(root: Path) -> str | None:
-    """从 root 下读 SKILL.md 文件，找不到返回 None。
+    """从 root 下读 SKILL.md 的 Markdown body，找不到返回 None。
 
-    SKILL.md 格式：YAML frontmatter (`---\\n...\\n---\\n`) + Markdown body。
-    我们的工具 schema 是 OpenAI Function Calling 格式——把 SKILL 的 body
-    拼到系统 prompt 里就够了，frontmatter 是给 harness 看的元数据。
+    SKILL.md 格式：YAML frontmatter (`---\\n...\\n---\\n`) + Markdown body，
+    只取 body 拼到系统 prompt 里。
     """
     for rel in _SKILL_PATH_CANDIDATES:
         path = root / rel
@@ -49,8 +48,7 @@ def _read_skill_md(root: Path) -> str | None:
     return None
 
 
-# 兜底：找不到 SKILL.md 时用这个内嵌版本（不依赖文件系统）
-# 注意：保持精简，SKILL.md 文件版更完整（有 examples 表）
+# SKILL.md 找不到时的内嵌兜底版
 _FALLBACK_SKILL = """\
 # Tool Usage — 31 tools, 你必须**真的调**它们才能「做」事
 
@@ -101,8 +99,7 @@ class BrainController(QObject):
     bubble_cleared = Signal()
     # 信号：工具触发的动画请求（动画名）
     animation_requested = Signal(str)
-    # 信号：倒计时 / 提醒到点（文本, 类型标题）。UI 层接它弹置顶闹钟窗 +
-    # 提示音 + 播报 + 系统通知。原先 countdown 到点只冒一个气泡，主人常听不到。
+    # 信号：倒计时 / 提醒到点（文本, 类型标题），UI 层弹置顶闹钟窗 + 提示音 + 播报 + 系统通知
     alarm_fired = Signal(str, str)
 
     def __init__(self, root: Path, cfg, state, reminders,
@@ -127,11 +124,8 @@ class BrainController(QObject):
             mem_path = root / mem_path
         self.memory = MemoryStore(mem_path)
 
-        # 接线(a):会话(SessionStore)和 Skill 加载目录 —— 让 ChatWindow
-        # 能拿一份持久化的 SessionStore / skills_dir,挂到 LangChainAgent。
-        # SessionStore:对齐 IDE agent 的「会话列表 / 切换 / 续接」能力
-        # Skills:从项目根的 skills/ 目录按需加载行为说明 markdown
-        # 两份对象都做 try/except:失败不阻断桌宠启动(降级到无会话/无 skill)。
+        # 接线 SessionStore + skills_dir，让 ChatWindow 能挂到 LangChainAgent
+        # 两份对象都做 try/except，失败不阻断桌宠启动
         try:
             from app.brain.sessions import SessionStore
             sessions_path = root / "data" / "pet_sessions.db"
@@ -149,8 +143,7 @@ class BrainController(QObject):
         foods_path = root / "data" / "foods.json"
         self.items = ItemStore.load(foods_path) if foods_path.is_file() else None
 
-        # 清掉上次运行残留的系统级闹钟任务（桌宠崩了/被强杀会留下）。
-        # 不清的话任务计划程序里会越攒越多，而且那些提醒主人已经不需要了。
+        # 清掉上次运行残留的系统级闹钟任务（桌宠崩了 / 被强杀会留下）
         try:
             from app.core import win_alarm
             if win_alarm.is_available():
@@ -199,9 +192,6 @@ class BrainController(QObject):
                 max_minutes=cfg.brain.proactive_max_minutes,
                 is_sleeping=self._check_sleeping,
                 chat_cfg=cfg.chat,
-                # v24: AW 活动 context — 主人装 AW + 启动 aw-server + 设
-                # activitywatch.enabled=true 后, _fire 会自动把最近窗口
-                # 活动 / 当前窗口塞进 prompt, 没开就安全跳过。
                 aw_cfg=getattr(cfg, "activitywatch", None),
             )
             self.proactive.remark_ready.connect(self._on_proactive_remark)
@@ -211,10 +201,7 @@ class BrainController(QObject):
             self.proactive = None
 
     # ---- 给工具用的安全信号出口 ------------------------------------------------
-    # 工具在 asyncio.to_thread 的工作线程里跑，倒计时提醒更是在自己的后台
-    # 线程里跑。它们随时可能在 QObject 析构之后才回来 emit 信号——直接
-    # `self.bubble_requested.emit` 会在 Windows 上 access violation 打崩进程
-    # （测试里必现）。这里统一过一道存活性检查。
+    # 工具在后台线程里跑，emit 前要确保 QObject 还活着（已析构则丢弃回调）
     def _alive(self) -> bool:
         if not is_qobject_alive(self):
             log.debug("BrainController 已析构，丢弃迟到的工具回调")
@@ -234,11 +221,7 @@ class BrainController(QObject):
             self.bubble_cleared.emit()
 
     def _fire_alarm(self, text: str, kind: str = "⏰ 倒计时结束") -> None:
-        """倒计时到点：走闹钟通道（置顶窗 + 提示音 + 播报 + 系统通知）。
-
-        在后台线程里被调用，所以必须先过 _alive()——QObject 析构后 emit
-        会直接 access violation。
-        """
+        """倒计时到点：走闹钟通道（置顶窗 + 提示音 + 播报 + 系统通知）。"""
         if self._alive():
             self.alarm_fired.emit(text, kind)
 
@@ -258,14 +241,9 @@ class BrainController(QObject):
             return False
 
     def chat_context(self) -> str:
-        """每次发消息前生成动态 system 上下文：时间 / 状态 / 记忆 / SKILL。
+        """生成动态 system 上下文：SKILL + 时间 / 状态 / 记忆 + 工具列表。
 
-        系统提示分三块：
-            1. **SKILL**（来自 .agents/skills/.../SKILL.md）—— 何时调哪个工具的明确规则
-            2. 当前时间 / 桌宠状态 / 长期记忆
-            3. **工具列表**（供 LLM 知道有哪些 tool 名可用）
-
-        顺序关键：SKILL 在最前，模型第一眼就看到「何时调哪个工具」。
+        SKILL 放在最前。
         """
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
@@ -284,12 +262,7 @@ class BrainController(QObject):
 
     @staticmethod
     def _tool_usage_instruction(tool_names: str) -> str:
-        """列出可用工具名（SKILL.md 已经在 chat_context 前面讲了何时调哪个工具，
-        这里只是让模型知道有哪些 tool_name 可以用）。
-
-        注意：核心的「何时调 / 怎么调」规则都在 SKILL.md 里（前面已经注入），
-        这里只是工具清单。
-        """
+        """列出可用工具名；「何时调 / 怎么调」规则见上方 SKILL 文档。"""
         return (
             "【可用工具列表】\n"
             f"你**真正可调用**的工具名（共 {len(tool_names.split('、'))} 个）：{tool_names}。\n"
@@ -342,9 +315,7 @@ class BrainController(QObject):
     def _setup_mcp(self, root: Path, cfg) -> None:
         """后台加载 MCP servers 并把它们的工具桥接进 tool_registry。
 
-        MCP server 是独立子进程，启动 + initialize 握手可能秒级；
-        放后台线程避免卡启动。桥接完成后 AgentLoop 下一条消息就能用
-        （chat_window 每轮实时取 registry.names() / to_openai()）。
+        MCP server 是独立子进程，握手可能秒级，放后台线程避免卡启动。
         """
         from app.mcp.protocol import MCPClientRegistry
         servers_file = Path(cfg.mcp.servers_file)

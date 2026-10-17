@@ -24,7 +24,6 @@ class Banner:
             try:
                 import ctypes
                 kernel32 = ctypes.windll.kernel32
-                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4
                 kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
             except (OSError, AttributeError):
                 self.enabled = False

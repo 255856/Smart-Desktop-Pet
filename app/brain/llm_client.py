@@ -16,31 +16,13 @@ from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
 
-# 瞬时故障重试：这些状态码是「服务端现在不行、过会儿行」，
-# 不是「请求本身有问题」。429 限流、5xx 网关/过载、529 MiniMax 集群繁忙。
-# 4xx（400 参数错 / 401 key 错 / 404 模型名错）重试没有意义，不在其中。
+# 瞬时故障重试：429 限流、5xx 网关/过载、529 集群繁忙
 _TRANSIENT_STATUS = (408, 409, 425, 429, 500, 502, 503, 504, 529)
 _TRANSIENT_MAX_ATTEMPTS = 3      # 含首次，共最多 3 次
 _TRANSIENT_BACKOFF_S = 1.5       # 线性退避：1.5s / 3.0s
 
-# 【已实测「发了 tool_choice 反而更糟」的模型】
-#
-# 这不是「模型忽略 tool_choice」那么简单。2026-10-14 用真实失败输入
-# （113 条真实聊天历史 + 7 个提醒类工具 + 「查一下广州天气，提醒我明天带伞」）
-# 在 MiniMax-M3 上各跑 10~12 次，测出来的是**带 tool_choice 命中率反而崩掉**：
-#
-#   tool_choice="required"                 → 调工具 1/12
-#   tool_choice={"type":"function",...}     → 调工具 1/12   （官方文档支持的写法）
-#   完全不带 tool_choice                    → 调工具 4/12
-#   不带 tool_choice + 末尾追加一条强制 user 提示 → 调工具 8/12
-#
-# 官方 API 文档对 tool_choice 的取值说明只有 "auto" / "none" / 指定具体工具，
-# **"required" 不在其中**：服务端不报错、直接吞掉，但会让这一轮几乎必挂。
-#
-# 所以这里必须**预置**，不能等运行时探测——运行时探测要白等一次注定失败的
-# 请求，而且那次恰好占掉「第 1 轮」这个命中率最高的轮次。
-# 出厂预置：**不发** tool_choice 的模型（小写，比较前先 norm）。
-# 与运行期学到的条目分开存，测试才能把「出厂态」和「学到的」拆开还原。
+# 不发 tool_choice 的模型（实测发出去命中率反而崩掉）
+# 出厂预置（小写，比较前先 norm）；运行期学到的条目分开存
 _TOOL_CHOICE_SEED: frozenset[str] = frozenset({"minimax-m3"})
 _TOOL_CHOICE_IGNORED: set[str] = set(_TOOL_CHOICE_SEED)
 
@@ -49,8 +31,7 @@ _TOOL_CHOICE_CACHE = Path("data/tool_choice_unsupported.json")
 
 
 def _norm_model(model: str) -> str:
-    """模型名归一化：config 里是 'MiniMax-M3'，预置表里是小写。
-    不归一化的话预置表永远命中不了（现场就踩过这个坑）。"""
+    """模型名归一化（比较前先 norm）。"""
     return (model or "").strip().lower()
 
 
@@ -60,7 +41,7 @@ def _load_tool_choice_ignored() -> None:
             for name in json.loads(_TOOL_CHOICE_CACHE.read_text(encoding="utf-8")) or []:
                 if isinstance(name, str) and name.strip():
                     _TOOL_CHOICE_IGNORED.add(_norm_model(name))
-    except Exception:  # noqa: BLE001 —— 缓存坏掉不该拖垮启动
+    except Exception:  # noqa: BLE001
         log.debug("读取 tool_choice 黑名单失败，忽略", exc_info=True)
 
 
@@ -71,7 +52,7 @@ def _note_tool_choice_ignored(model: str) -> None:
     _TOOL_CHOICE_IGNORED.add(key)
     log.info("LLMClient: 记录 %s 会忽略 tool_choice=required，"
              "后续请求直接用 prompt 强制", model)
-    try:  # 落盘：这是模型的行为特征，同一份配置不必每次重启都重新踩一遍
+    try:
         _TOOL_CHOICE_CACHE.parent.mkdir(parents=True, exist_ok=True)
         _TOOL_CHOICE_CACHE.write_text(
             json.dumps(sorted(_TOOL_CHOICE_IGNORED), ensure_ascii=False, indent=1),
@@ -90,9 +71,7 @@ _load_tool_choice_ignored()
 THINK_TAG_START = "<think>"
 THINK_TAG_END = "</think>"
 
-# 中文约束片段：以对话示例形式给出（模型复读示例不会污染 UI 反而让风格更一致）
-# 关键：不列编号、不写规则清单——这些格式会被模型当成"待输出文本"复述。
-# 用「像这样说话」+「不要这样说话」对比，强化但避免复读。
+# 中文约束片段：以对话示例形式给出，强化但避免被模型当成"待输出文本"复述
 CHINESE_SYSTEM_SUFFIX = (
     "\n\n你是用简体中文聊天的桌宠，像跟主人面对面说话一样。回答只用最终内容，"
     "不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、"
@@ -125,7 +104,6 @@ _EMOJI_PATTERN = re.compile(
 
 
 # 去掉 LLM 在 content 里夹带的"思考痕迹"（中文模型常见括号式自言自语）
-# 触发条件：括号里以这些开头（最长 500 字）
 _META_NARRATION_RE = re.compile(
     r"[（(]"
     r"(我们刚才|刚才|现在|让我|我要|嗯|好的|作为|毕竟|事实上|好了|由于|因为|)"
@@ -136,12 +114,9 @@ _META_NARRATION_RE = re.compile(
 # 兜底：任何长得像「（中文思考 200+ 字）」的整段括号
 _LONG_PAREN_RE = re.compile(r"[（(][^)（）\n]{50,}[)）]")
 
-# 兜底：模型把"我要做什么工具"类元描述裸句塞进 final answer（即使本轮真的调了工具）
-# 整句（句号内）包含「工具」一词，且必须以主语（让/我/主人/LLM）+ 动作开头才剥。
-# 避免误伤正文中恰好出现"工具"一词但不是元描述的情况。
-# 例：「让我调用工具。」 「我应该用 open_website 工具。」 「让我调用工具查天气。」
+# 兜底：模型把"我要做什么工具"类元描述裸句塞进 final answer
 _META_TOOL_TALK_RE = re.compile(
-    r"(让我|我要|我来|我应该|我会|我将|先来|接下来|现在|"
+    r"(让我|我要|我来|我应该|我会|我将|接下来|"
     r"我\s*(需要|想要|打算|准备)?)"
     r"[^。.!?\n]*?"
     r"(调用|使用|借助|执行|运行)?"
@@ -151,7 +126,7 @@ _META_TOOL_TALK_RE = re.compile(
     r"[。.!?]?",
     flags=re.UNICODE,
 )
-# 兜底：「这应该用XX工具来YY」类建议句（前一句结尾是句号/感叹号/问号或行首）
+# 兜底：「这应该用XX工具来YY」类建议句
 _META_SHOULD_USE_TOOL_RE = re.compile(
     r"(?<=[。.!?\n])这\s*(应该|需要|可以)?\s*"
     r"(用|通过|借助|使用)\s*"
@@ -163,7 +138,6 @@ _META_SHOULD_USE_TOOL_RE = re.compile(
 )
 
 # 兜底：「根据角色设定 / 根据人设 / 用户说 / 主人想要」类规划/复述元描述句
-# （prompt 已明令禁止，sanitize 兜底防止 prompt 失效时污染 UI）
 _META_PLAN_NARRATION_RE = re.compile(
     r"((?:^|(?<=[。.!?\n]))(?:但是\s*)?(?:然而\s*)?(?:所以\s*)?(?:因此\s*)?)"
     r"(根据|按照|依据)"                             # 引导词
@@ -180,7 +154,7 @@ _META_USER_REPEAT_RE = re.compile(
     r"[。.!?]?",
     flags=re.UNICODE,
 )
-# 「我需要/我应该/我要/我来/我会 + 任意动作 + 句号」类内心独白（不带工具字也算）
+# 「我需要/我应该/我要/我来/我会 + 任意动作 + 句号」类内心独白
 _META_SELF_PLAN_RE = re.compile(
     r"(^|(?<=[。.!?\n]))"
     r"(想让我|想我要|让我|需要我|应当我|要求我|"
@@ -189,10 +163,7 @@ _META_SELF_PLAN_RE = re.compile(
     r"[。.!?]?",
     flags=re.UNICODE,
 )
-# 兜底：模型把 system prompt 原文复读出来（推理模型 reasoning 段漏到 content 的常见漏网）
-# 识别标志：句子里出现「唯一允许」「禁止使用」「禁止出现」「不要复述」「简短自然」
-# 「保持角色」「回复风格」「输出规范」「输出语言」等 system 提示词关键词，
-# 或者「1. xxx\n2. yyy」/「1） xxx」这种编号列表样式（明显是规则清单）
+# 兜底：模型把 system prompt 原文复读出来
 _META_PROMPT_ECHO_RE = re.compile(
     r"(^|(?<=[。.!?\n]))"
     r"(?:"                                                 # 整段匹配下列任一标志
@@ -207,27 +178,25 @@ _META_PROMPT_ECHO_RE = re.compile(
     r"(?=[。.!?\n]|$)",                                    # 终止条件：句末标点 / 换行 / 字符串末尾
     flags=re.UNICODE,
 )
-# 注：早先这里还有一个 _META_NUMBERED_LIST_RE（「1. xxx」整段剥除），
-# 但从未被 sanitize 管线调用过（死代码），且放宽它会误删正常编号列表
+# 注：早先还有一个 _META_NUMBERED_LIST_RE（死代码），放宽会误删正常编号列表
 # （"1. 北京 2. 上海"）。编号规则项统一由 _NUMBERED_RULE_RE 保守处理。
 
 
-#  句子级「规划 / 元描述 / 规则复读」识别（更精细，避免旧贪婪正则吞掉同段真回答）
+#  句子级「规划 / 元描述 / 规则复读」识别
 # 情绪标签词（系统铁律：模型不应输出，出现即剥，无论在句尾还是句中）
 _EMOTION_WORDS = (
     "happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip"
 )
-# 任意位置的完整情绪标签（"好的主人 [happy] 马上" 也剥）
+# 任意位置的完整情绪标签
 _EMOTION_TAG_ANY_RE = re.compile(
     r"\s*\[(?:" + _EMOTION_WORDS + r")\]\s*", re.IGNORECASE)
-# 未闭合的情绪标签（流式截断 / 模型漏写右括号），如句尾「……[happy」
+# 未闭合的情绪标签（流式截断 / 模型漏写右括号）
 _EMOTION_TAG_OPEN_RE = re.compile(
     r"\s*\[(?:" + _EMOTION_WORDS + r")\s*$", re.IGNORECASE)
-# 孤立的 think 结束标签（起始标签在更早的 chunk 已被剥离，残留 </think>）
+# 孤立的 think 结束标签（起始标签已在更早 chunk 剥离）
 _THINK_CLOSE_TAG_RE = re.compile(r"</think\s*>", re.IGNORECASE)
 
-# 角色「真正开口」的发语锚点：推理模型常把「规划前缀 + 锚点 + 真正回答」塞进同一句，
-# 一旦该句被判为污染，从最后一个锚点处截断，只保留锚点之后的回答。
+# 角色「真正开口」的发语锚点：从最后一个锚点处截断，只保留锚点之后的回答
 _ANSWER_ANCHOR_RE = re.compile(
     r"(嘿嘿+|哈哈+|嘻嘻+|诶嘿|嗯哼|唔嗯|好嘞|好哒|好啦|好呀|"
     r"好的?[，,~～\s]?主人|主人[~～，,、呀呢啦嘛哦哟看]|"
@@ -253,9 +222,8 @@ _META_CHAR_SHEET_RE = re.compile(
     r"(?:^|[\s\-、，,：:；;])(?:外貌|性格|擅长|角色设定|人物设定|说话风格|常用语气词)\s*[:：]",
     flags=re.UNICODE,
 )
-# 句首对用户的复述（"用户说 / 主人想要 / 主人在问…"）。
-# 注意"主人想玩 / 主人想看 / 主人想吃"是角色对主人的正常回应语气（"主人想玩X呢，我去启动"），
-# 不算复述——只有"主人想要 / 想问 / 说"这类复述需求才剥离；"用户"开头几乎必是复述。
+# 句首对用户的复述（"用户说 / 主人想要 / 主人在问…"）
+# 注意"主人想玩 / 想看 / 想吃"是角色对主人的正常回应语气，不算复述
 _META_USER_REPEAT_SENT_RE = re.compile(
     r"^\s*(?:用户\s*(?:在?说|想问|想要|想|希望|问的是|说的是|是说)|"
     r"主人\s*(?:在?说|想问|想要|希望|问的是|说的是|是说))"
@@ -281,16 +249,14 @@ _META_TOOL_SENT_RE = re.compile(
     r"说\s*[\"“「『\'][^。！？!?\n]{0,24}?[\"”」』]?\s*[,，]?\s*这是(?:要|一|在|个|应用|网页|链接|动作)",
     flags=re.IGNORECASE,
 )
-# 工具过程废话子句：模型解释「动作有很多种方式」，常与真回答同句（用 ~ 连接），
-# 只删该子句本身（从分隔符起），不吞前面的真正动作。
+# 工具过程废话子句：模型解释「动作有很多种方式」，常与真回答同句
 _META_PROCESS_CLAUSE_RE = re.compile(
     r"[，,~～\s]*(?:打开|启动|搜索|查询|使用|调用|运行|执行)"
     r"[^。！？!?\n，,~～]{0,10}的方式有很多种[呢呀啊~～。！？!?]*",
     flags=re.UNICODE,
 )
 # 编号规则项（"1. 禁止使用 emoji"、"4.不要复述"）
-# 刻意只认「编号 + 规则关键词」的组合：裸编号清单（"1. 先打招呼 2. 再回答"）
-# 可能是正常答案（"1. 北京 2. 上海"），放宽会误删用户真正需要的列表内容。
+# 只认「编号 + 规则关键词」组合，避免误删正常编号列表
 _NUMBERED_RULE_RE = re.compile(
     r"^\s*[0-9]+\s*[.、)）]\s*"
     r"(?:禁止|保持|不要|输出|使用|用|回复|简短|角色|人设|复述|emoji|表情|自然|中文|句)"
@@ -311,14 +277,11 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     """
     if not text:
         return text
-    # 1) 推理段 <think>...</think>（DeepSeek-r1 / MiniMax-M3 等原生标签），
-    #    含未闭合的起始标签（流式截断）和孤立的结束标签（起始标签已在更早 chunk 剥掉）
+    # 1) 推理段 <think>...</think>（含未闭合 / 孤立结束标签）
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
     text = _THINK_CLOSE_TAG_RE.sub("", text)
-    # 2) 情绪标签（仅最终阶段；任意位置都剥，系统铁律不允许出现）。
-    #    流式 chunk 不剥：单个 chunk 可能是被拆开的 " [hap" / "py]"，逐 chunk 剥会
-    #    把合法 chunk 变空、跳过 yield，导致文字丢失（最终阶段还会再剥一次）。
+    # 2) 情绪标签（仅最终阶段；流式 chunk 不剥，单 chunk 可能是被拆开的）
     if is_final:
         text = _EMOTION_TAG_ANY_RE.sub(" ", text)
         text = _EMOTION_TAG_OPEN_RE.sub("", text)
@@ -326,14 +289,13 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     text = _EMOJI_PATTERN.sub("", text)
     for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫"]:
         text = text.replace(sym, "")
-    # 4) 括号式自言自语（"（让我想想…）"）与超长括号思考段
+    # 4) 括号式自言自语与超长括号思考段
     text = _META_NARRATION_RE.sub("", text)
     text = _LONG_PAREN_RE.sub("", text)
-    # 5) 先收紧空白，让后续按句切分 / 占比判定更准确
+    # 5) 收紧空白
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
-    # 6) 最终阶段：逐句剥离 CoT 规划 / 元描述 / 规则复读（保留角色回答句）。
-    #    循环到不再变化，处理"污染句被删后又暴露出新污染句"的嵌套情况。
+    # 6) 最终阶段：逐句剥离 CoT 规划 / 元描述 / 规则复读（循环处理嵌套）
     if is_final:
         text = _strip_internal_checklist(text)
         prev_text = None
@@ -342,11 +304,10 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
             text = _strip_meta_by_sentence(text)
     # 7) 多余空行收紧
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # 8) 低中文占比段落剥离（推理模型英文 CoT 以纯文本漏进正文的段落级兜底）
+    # 8) 低中文占比段落剥离
     text = _drop_leading_low_cjk_paragraphs(text)
     text = _drop_low_cjk_paragraphs(text)
-    # 9) 终极兜底（仅最终回复）：清洗后整段中文占比 < 15% → 模型完全没走中文铁律，
-    #    整体丢弃，交给上层走"空回复兜底"。情绪标签第 2 步已剥，这里再剔一次再判占比。
+    # 9) 终极兜底：清洗后整段中文占比 < 15% → 整体丢弃
     cleaned = text.strip()
     if is_final and cleaned:
         body_for_ratio = _EMOTION_TAG_ANY_RE.sub("", cleaned).strip()
@@ -358,24 +319,11 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
 def _strip_internal_checklist(text: str) -> str:
     """剥掉「编号 + 内部核对话术」的清单行。
 
-    2026-10-14 压测抓到模型把 AgentLoop 的核对清单原样复述给主人：
+    模型常把 AgentLoop 的核对清单原样复述给主人（如「1. 工具都成功执行了
+    2. 主人要求：…」），或回显 `工具名（成功/失败）` 这种 schema 结果。
 
-        要查火星天气。1. 工具都成功执行了
-        2. 主人要求：查火星天气 - 我已经搜到了相关数据
-        3. 数据来源确认：
-        - 火星表面平均温度约-60°C
-
-    以及更常见的「工具结果回显」：
-
-        1. get_weather（成功）：广州 晴 33度
-        2. add_reminder（成功）：已设置提醒
-
-    这两类都不是「句子里混进工具名」那种形态（`_strip_meta_by_sentence`
-    逐句判污染，盖不住），得按**行**删：行首是序号，且行内出现内部过程词
-    或 `工具名（成功/失败/已取消）` 这种 schema 回显格式，就整行去掉。
-
-    只在最终阶段生效，且要求「序号 + 内部词」同时成立——
-    「第一步带伞、第二步关窗」这类主人自己的分步说明不会被误删。
+    按行删：行首是序号，且行内出现内部过程词或 schema 回显格式就整行去掉。
+    要求「序号 + 内部词」同时成立，避免误删主人的分步说明。
     """
     if not text:
         return text
@@ -387,11 +335,10 @@ def _strip_internal_checklist(text: str) -> str:
             continue
         keep.append(line)
     text = "\n".join(keep)
-    # 行内序号：句号后面才开始清单（「要查火星天气。1. 工具都成功执行了」），
-    # 这种行首判定盖不住，把序号之前的引导句一起去掉。
+    # 行内序号（句号后面开始的清单）
     text = re.sub(rf"[^。！？\n]*?{_LINE_INDEX_RE_BODY}[^\n]*?_INTERNAL_VOCAB_END",
                   "", text)
-    # 无序号的单句叙述：「让我查广州天气。从最后一次抓取中央气象台的页面…」
+    # 无序号的单句叙述
     text = _NARRATION_SENT_RE.sub("", text)
     return text
 
@@ -403,8 +350,7 @@ _INTERNAL_VOCAB_END = r"[^\n]*?(?:工具都成功执行了|数据来源确认|�
 
 # 只在**句级**使用的收窄词表。
 # 不能复用 _INTERNAL_VOCAB_RE：那里有「我查」「我搜」，
-# 而「我查到的天气是晴」是完全可以对主人说的话，按宽表删会把正文清空。
-# 真正只属于内部叙述的是「抓取/爬取页面」「调用了 schema」这类**动作来源**描述。
+# 按宽表删会把正文清空。真正只属于内部叙述的是「抓取/爬取页面」「调用了 schema」类描述。
 _NARRATION_SENT_RE = re.compile(
     r"[^。！？\n]*?(?:"
     r"(?:让我|我来|我先)\s*(?:查|搜索|搜|看|打开|抓)[^。！？\n]{0,20}?"
@@ -480,11 +426,8 @@ def _drop_low_cjk_paragraphs(text: str, threshold: float = 0.3) -> str:
     return "\n\n".join(kept).strip()
 
 
-# 「反思 / 否认工具行为」语境。主人问「你是不是在假装调用工具」时，桌宠回
-# 「以后小汐会注意的…老老实实调用工具，不再假装了啦~」是**正常回答**，
-# 但 _META_TOOL_SENT_RE 里的「调用…工具」会命中，把整句当工具独白删光，
-# 最终变成空气泡（2026-10-04 现场实况）。这类句子讲的是「对工具的态度」，
-# 不是「我正在调工具」的动作叙述，必须放行。
+# 「反思 / 否认工具行为」语境（如「以后小汐会注意的…老老实实调用工具」）
+# _META_TOOL_SENT_RE 里的「调用…工具」会命中，这种句子讲的是对工具的态度，必须放行
 _REFLECTION_RE = re.compile(
     r"(?:不再|别再|没再|不会再|不该|不应该|没有(?:再)?(?:调用|使用)?工具|"
     r"假装|骗|糊弄|老老实实|以后.{0,8}注意|下次(?:会|不)|改掉|改正|"
@@ -501,18 +444,15 @@ def _is_pollution_sentence(core: str) -> bool:
     if _META_USER_REPEAT_SENT_RE.search(core):
         return True
     if _META_TOOL_SENT_RE.search(core):
-        # 工具独白判定前先让「反思语境」过关：否则主人问起工具行为时，
-        # 桌宠的正常回答会被整句删掉（实测会把回复清成空串）。
+        # 工具独白判定前先让「反思语境」过关
         if not _REFLECTION_RE.search(core):
             return True
     if _NUMBERED_RULE_RE.search(core):
         return True
-    # 句首自我规划 + 规划语境（两者同时满足才判污染，避免误伤「让我帮你」类回答）
+    # 句首自我规划 + 规划语境（两者同时满足才判污染）
     if _META_SELF_PLAN_SENT_RE.search(core) and _META_PLAN_CONTEXT_RE.search(core):
         return True
-    # 英文为主的句子（推理模型英文 CoT；即使夹带少量中文引用 / 语气词也判污染）。
-    # 用字母占比（不含标点 / 空格）：正常中文回答 CJK 占比通常远高于 0.15，
-    # 这里取低阈值并要求足够多英文字母，避免误删「打开 VS Code 和 Chrome」这类中英混排。
+    # 英文为主的句子（推理模型英文 CoT）
     cjk = sum(1 for ch in core if "\u4e00" <= ch <= "\u9fff")
     ascii_letters = sum(1 for ch in core if ch.isascii() and ch.isalpha())
     if ascii_letters > 10 and cjk / max(1, ascii_letters + cjk) < 0.15:
@@ -561,12 +501,9 @@ def _strip_leading_english_prefix(core: str) -> str:
 def _strip_meta_by_sentence(text: str) -> str:
     """逐句剥离规划 / 元描述 / 规则复读，保留角色回答句。
 
-    旧版用「命中引导词就替换到段尾」的贪婪正则，当模型把 CoT 和真正回答塞进
-    同一段（中间缺少句号/换行）时会连真回答一起删掉。这里改为按句末标点切句：
     - 非污染句原样保留；
-    - 污染句若含角色发语锚点（嘿嘿~ / 主人… / 好的主人…），只保留锚点之后；
+    - 污染句若含角色发语锚点，只保留锚点之后；
     - 否则整句丢弃。
-    另外对每句先剥工具过程废话子句与句首英文 CoT 前缀。
     """
     parts = _SENT_SPLIT_RE.split(text)
     out: list[str] = []
@@ -576,8 +513,7 @@ def _strip_meta_by_sentence(text: str) -> str:
         core = body.strip()
         if not core:
             continue
-        # 工具过程废话子句（"~打开抖音的方式有很多种呢"）按短语剥掉；
-        # 仅在确实删除时才 strip 残留标点，避免误删正常句尾的语气词 ~
+        # 工具过程废话子句按短语剥掉；仅在确实删除时才 strip 残留标点
         core_before = core
         core = _META_PROCESS_CLAUSE_RE.sub("", core)
         if core != core_before:
@@ -595,8 +531,7 @@ def _strip_meta_by_sentence(text: str) -> str:
     return "".join(out)
 
 
-# LLMError 已迁移到 app.core.errors —— 这里 re-export 以保持向后兼容。
-# 新代码请 `from app.core.errors import LLMError`。
+# LLMError 已迁移到 app.core.errors —— 这里 re-export 以保持向后兼容
 from app.core.errors import LLMError  # noqa: E402, F401
 
 
@@ -670,7 +605,7 @@ class LLMClient:
             "max_tokens": self.cfg.max_tokens,
             "stream": self.cfg.stream,
         }
-        # 推理强度:仅推理模型支持;非空才带,免得给不支持的后端传错字段
+        # 推理强度：仅推理模型支持，非空才带
         effort = getattr(self.cfg, "reasoning_effort", None)
         if effort:
             payload["reasoning_effort"] = effort
@@ -868,12 +803,8 @@ class LLMClient:
 
         # 如果开了强制：先尝试 tool_choice="required"，失败则降级（带 user 提示）
         if want_force:
-            # 这个模型已经「确认过会忽略 tool_choice」时，直接走 prompt 强制，
-            # 省掉那次注定落空的请求（现场：带历史时第 0 轮要多花 1.4s+，
-            # 连 5 轮就是主人干等十几秒）。
-            # 记忆放在**模块级**并按模型名区分：这是模型的行为，不是单次请求的，
-            # 而且 LLMClient 每条消息都会新建（chat_window._send），
-            # 挂在实例上的话根本记不到。
+            # 这个模型已经「确认过会忽略 tool_choice」时，直接走 prompt 强制
+        # 记忆放在模块级并按模型名区分：这是模型的行为，不是单次请求的
             if _tool_choice_is_ignored(self.cfg.model):
                 log.debug("LLMClient: %s 已确认忽略 tool_choice，本轮直接 prompt 强制",
                           self.cfg.model)
@@ -961,9 +892,7 @@ class LLMClient:
         if (tool_choice and tools and not saw_tool_calls
                 and not (cancel_check and cancel_check())
                 and allow_prompt_fallback):
-            # 服务端不报错但模型就是��调工具（国产模型常见）。记下来，
-            # 同一进程后续请求直接走 prompt 强制——否则每一轮都要先浪费一次
-            # 注定落空的 required 请求，等待时间直接翻倍。
+            # 服务端不报错但模型就是没调工具。记下来，下次直接走 prompt 强制
             _note_tool_choice_ignored(self.cfg.model)
             log.warning(
                 "LLMClient: tool_choice=%r 服务端接受，但模型仍然没调工具，"
@@ -994,13 +923,8 @@ class LLMClient:
         saw_content = False
         reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
 
-        # 【瞬时故障重试】压测抓到：MiniMax 返回 HTTP 529
-        # {"type":"overloaded_error","message":"当前服务集群负载较高"}
-        # 时，旧实现直接把 LLMError 抛上去，主人看到的是一个**空气泡**。
-        # 529/429/5xx 都是临时性的（过几秒就好），不该让主人为集群负载买单。
-        #
-        # 重试只包住「还没吐出任何字节」的阶段：_stream_once 一旦 yield 过
-        # text 事件就整体成功返回，不会重放，所以不会出现内容重复。
+        # 瞬时故障重试：429 / 5xx / 529 等临时错误重试几次，避免主人看到空气泡
+        # 重试只包住「还没吐出任何字节」的阶段，避免内容重复
         last_err: Exception | None = None
         for attempt in range(_TRANSIENT_MAX_ATTEMPTS):
             if attempt:
@@ -1018,7 +942,7 @@ class LLMClient:
                 log.warning("LLMClient: 瞬时故障（第 %d/%d 次）%s，%.1fs 后重试",
                             attempt + 1, _TRANSIENT_MAX_ATTEMPTS,
                             str(e)[:80], _TRANSIENT_BACKOFF_S * attempt)
-        if last_err is not None:   # 理论上到不了这行，兜底防止静默返回空流
+        if last_err is not None:
             raise last_err
 
     async def _stream_once(self, url, payload, headers, cancel_check=None):
@@ -1050,8 +974,7 @@ class LLMClient:
                         continue
                     delta = choices[0].get("delta") or {}
 
-                    # 1) 思考内容（reasoning_content / reasoning）——
-                    #    不 yield 给 UI，但 yield 一个 meta 事件供 Trace 收集
+                    # 1) 思考内容（reasoning_content / reasoning）—— 不给 UI，给 Trace
                     reasoning_chunk = (
                         delta.get("reasoning_content")
                         or delta.get("reasoning")
@@ -1059,16 +982,14 @@ class LLMClient:
                     )
                     if reasoning_chunk:
                         reasoning_parts.append(reasoning_chunk)
-                        # 透传给 Trace（AgentLoopV2 / 上层收集）；UI 不会显示
                         yield ("meta", {"event": "reasoning_delta",
                                         "content": reasoning_chunk})
 
-                    # 2) 最终回复（content）—— 只 yield 给 UI
+                    # 2) 最终回复（content）—— 给 UI
                     content_chunk = delta.get("content") or ""
                     if content_chunk:
                         saw_content = True
-                        # chunk 只做流式安全清洗（不做句级剥离 / CJK 兜底，避免误删）；
-                        # 完整文本的最终规范在 finish.content 与上层 _on_done 完成。
+                        # chunk 只做流式安全清洗；完整文本的最终规范在 finish.content
                         clean = sanitize_text(content_chunk, is_final=False)
                         content_parts.append(clean)
                         yield ("text", clean)
@@ -1148,14 +1069,9 @@ class LLMClient:
 
 
 #  工具调用意图识别（轻量级正则判定，用于自动开启 force_tool_use）
-
-# 这些模式一旦命中，说明用户就是要工具做事 —— 第一轮强制调工具
+# 命中后第一轮强制调工具
 _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # 提醒类（多种常见说法）—— 放在最前，避免被 open_app 的「开」误匹配
-    # （「开会」单独出现时不应该误判为 open_app）
-    # 「闹钟」是设闹钟最自然的说法，原表**漏了这个词**——现场「定一个1分钟闹钟」
-    # 意图判成 None，于是下发全量 52 个工具，模型在 add_reminder / countdown
-    # 之间随机挑。漏词 = 路由不确定。
     ("add_reminder", re.compile(
         r"(?:(?:帮?我)?(?:设置|设个|设一下|加个|定个|定)?(?:提醒|闹钟)|"
         r"提醒我|叫我|到点叫我|"
@@ -1163,25 +1079,24 @@ _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?:之后?|后)\s*(?:提醒|叫我|告诉我))"
         r"[^.。!！?？\n]*",
         re.UNICODE)),
-    # 备用：纯「XX 分钟后」类（不需要显式「提醒」二字）
+    # 备用：纯「XX 分钟后」类
     ("add_reminder", re.compile(
         r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)\s*(?:之后?|后)\s*"
         r"(?:提醒|叫我|告诉我)",
         re.UNICODE)),
-    # 「10 秒后叫我」「5 分钟后告诉我要」—— 「叫我」「告诉我」也算
+    # 「10 秒后叫我」「5 分钟后告诉我要」
     ("add_reminder", re.compile(
         r"\d+\s*(?:分钟|秒钟|秒|小时|天|个钟头?)"
         r"\s*(?:之后?|后)\s*(?:叫我|告诉我|喊我)",
         re.UNICODE)),
     # 记住类（也在 open_app 前，避免「记住 QQ」之类被误判）
-    # 「记住」+ 可选分隔符 + 内容（允许「记住X」「记住：X」「记住，X」）
     ("remember_fact", re.compile(
         r"(?:请|帮我)?(?:记住|记一下|别忘了|记着|记下)"
         r"(?:[：:，,。\s]*)"
         r"([\u4e00-\u9fffA-Za-z0-9].{1,80})",
         re.UNICODE)),
     # 中文动作：打开 / 启动 / 拉起 / 调出 / 运行 / 打开 XX 吧
-    # 注意：「开」单独使用时必须后接空白 / 引号 / 数字 / 字母，避免「开会」误匹配
+    # 「开」单独使用时必须后接空白 / 引号 / 数字 / 字母，避免「开会」误匹配
     ("open_app", re.compile(
         r"(?:帮我|请)?(?:打开|启动|拉起|调出|运行|调用|跑)"
         r"\s*[\"「『]?([^\s\"」』。,，.!！?？]{1,30})",
@@ -1191,7 +1106,7 @@ _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?:帮我|请)?开\s+[\"「『]?([^\s\"」』。,，.!！?？]{1,30})",
         re.UNICODE)),
     # 查询类（计算/时间/状态/单位换算/农历/截图/系统信息）
-    # 注意：「今天」必须后接 (几号|周几|星期几|几)，避免「今天心情不错」误匹配
+    # 「今天」必须后接 (几号|周几|星期几|几)，避免「今天心情不错」误匹配
     ("query", re.compile(
         r"(?:(?:现在)?几[点号]了?|今天(?:几号|周几|星期几)|现在时间|"
         r"你(?:怎么?样|状态如何|心情如何|饿不饿))",
@@ -1203,34 +1118,15 @@ _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"查(?:一下)?\s*(?:cpu|内存|CPU|占用|天气|温度)|"
         r"(?:帮我)?(?:查|看看|了解)(?:一下)?\s*(?:系统|电脑|机器|配置|状态))",
         re.UNICODE)),
-    # 天气查询意图。
-    #
-    # 【2026-10-14 压测发现】原来的天气词只藏在 query / web_search 两条正则里，
-    # 而且两边都写错了：
-    #   「查一下天气」  → 命中 query，但 query 白名单里**没有** get_weather
-    #   「查一下广州天气」→ query 的 `查(?:一下)?\s*(?:...|天气|...)` 中间夹了
-    #                     城市名匹配不上，落到 web_search，而 web_search 白名单
-    #                     里**也没有** get_weather
-    # 结果就是模型只能去 web_search + fetch_url_text 爬中央气象台：实测单次
-    # 58.9s / 4 个请求，回复里还漏出「让我查广州天气。从最后一次抓取…��这类
-    # 工具爬取独白。内置的 get_weather 一次就够。
-    #
-    # 所以这里单独给天气一个意图，并且容忍「查…天气」中间夹城市名。
+    # 天气查询意图，容忍「查…天气」中间夹城市名
     ("get_weather", re.compile(
         r"(?:天气|气温|温度|降雨|降水概率|冷不冷|热不热|要不要带伞|该带伞)"
         r"|查(?:一下|一查|查)?\s*[^，。！？\n]{0,8}?(?:天气|气温|温度)"
         r"|[^，。！？\n]{0,8}?天气(?:怎么样|如何|如何呀|咋样|好吗)",
         re.UNICODE)),
-    # 【v25】ActivityWatch 活动查询意图 — 触发 force_tool_use 让国产模型
-    # (MiniMax-M3 这种「看到 tools 但仍然回文本」的) 乖乖发出 tool_calls。
-    #
-    # 不命中 → intent=None → force_tool_use=False → 模型默认回文本答复,
-    # 实测主人问「我刚才在干嘛」LLM 只说「小汐不知道」,工具一动不动
-    # (commit `52 实跑LLM看为什么不调aw` 调试脚本测出来的)。
-    #
-    # 触发关键词:刚才/最近/过去/在干嘛/在做什么/看了什么/用过什么/
-    #             当前窗口/焦点窗口/打开什么/哪些网站 — 命中时
-    #             `_INTENT_TOOL_NAMES[aw_query]` 下发 mcp_aw_* 4 工具。
+    # ActivityWatch 活动查询意图：触发 force_tool_use 让国产模型乖乖发出 tool_calls
+    # 触发关键词：刚才/最近/过去/在干嘛/在做什么/看了什么/用过什么/
+    #             当前窗口/焦点窗口/打开什么/哪些网站
     ("aw_query", re.compile(
         r"(?:"
         # 「我刚才在干嘛/做什么/看了什么/用了什么」
@@ -1258,10 +1154,10 @@ _INTENT_TOOL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.UNICODE | re.IGNORECASE)),
     # 搜索类（实时信息/时效性内容/未知答案）—— web_search 工具
     # 触发 force_tool_use 的关键词：
-    # - 「最新一集/最近一期/最新剧情」类时效性词
-    # - 「搜一下/搜索/查查」+ 「XX 是什么/怎么样」类求知欲
-    # - 「讲了什么/说了什么/演了什么」类内容查询
-    # - 「XX 是不是 / XX 真的吗」类事实核查
+    # - 时效性词（最新一集/最近一期等）
+    # - 求知欲（搜一下/搜索/查查 + XX 是什么）
+    # - 内容查询（讲了什么/说了什么/演了什么）
+    # - 事实核查（XX 是不是 / XX 真的吗）
     ("web_search", re.compile(
         r"(?:最新[一]?(?:集|期|话|话集|章节|章|话剧情|消息|动态|进展|进展如何)|"
         r"最近[一]?(?:集|期|话|章|更新|发布)|"
@@ -1291,9 +1187,7 @@ def detect_action_intent(text: str) -> Optional[str]:
         m = pat.search(text)
         if not m:
             continue
-        # 【否定要认】压测抓到：「不要提醒我任何东西」照样命中「提醒我」，
-        # 于是桌宠去查了提醒列表，还回了一句「已经帮主人搞定啦~」——
-        # 主人说的是**别做**，它做完了还报喜。触发词前面带否定词的一律不算。
+        # 否定要认：触发词前面带否定词的一律不算（主人说「别做」桌宠不能做完还报喜）
         if _NEGATION_RE.search(text[max(0, m.start() - 8):m.start()]):
             log.debug("detect_action_intent: %s 命中但前面有否定，跳过", intent)
             continue
@@ -1301,37 +1195,22 @@ def detect_action_intent(text: str) -> Optional[str]:
     return None
 
 
-# 否定词。只要出现在动作词**之前**的一个小窗口里就算数。
-#
-# 为什么不是紧邻匹配：「不用设提醒」的触发词实际落在「提醒」上，匹配点前面是
-# 「不用设」，紧邻判断会漏掉；「取消刚才的提醒」同理。
-#
-# 放在动作词**后面**的不算否定这个动作——「提醒我别忘了带伞」里的「别忘了」
-# 是在说提醒的内容，仍然该设提醒。
+# 否定词：出现在动作词之前的一个小窗口里就算数
+# 紧邻匹配会漏掉「不用设提醒」（触发词在「提醒」上，前面是「不用设」）
+# 放在动作词后面的不算否定——「提醒我别忘了带伞」是提醒的内容，仍要设提醒
 _NEGATION_RE = re.compile(r"(?:不要|别|不用|不需要|无需|没必要|禁止|甭|勿|取消)")
 
 
 def count_request_actions(text: str) -> int:
-    """数出主人这句话里**并列了几件要做的事**（0 / 1 / 2 / 3+）。
+    """数出主人这句话里并列了几件要做的事（0 / 1 / 2 / 3+）。
 
-    为什么需要它：多步任务只做一半是这个项目最顽固的失败模式——
-    主人说「查一下广州天气，提醒我明天带伞」，模型调了 get_weather 拿到
-    结果就转头做总结，提醒那一半被静默吞掉，主人只看到一句天气播报。
-
-    为什么不用「意图名 / 工具名」来判：实测行不通。意图名不等于实际会用的
-    工具名——「帮我搜一下十月新番，并打开B站」意图判成 open_app，模型实际调
-    的是 web_search + open_website，拿 open_app 去比对就成了「一件都没做」，
-    白刷 3 轮重试。
-
-    所以这里只做**纯语言层面的分句计数**，不碰工具注册表：
+    用纯语言分句计数，不碰工具注册表（意图名不等于实际工具名，按名字比会误判）。
+    调用方拿它跟「实际执行了几个不同工具」比大小，判断是不是只做了一半。
 
         「查一下广州天气，提醒我明天带伞」   → 2
         「帮我搜一下十月新番，并打开B站」     → 2
         「打开QQ」                            → 1
         「今天天气怎么样」                    → 0（没有动作动词）
-        「你好呀」                            → 0
-
-    调用方拿它跟「实际执行了几个不同工具」比大小，来判断是不是只做了一半。
     """
     if not text:
         return 0
@@ -1347,8 +1226,7 @@ def count_request_actions(text: str) -> int:
     return n
 
 
-# 「要做一件事」的动词信号。刻意保守：宁可少算（漏判 = 保持现状），
-# 也不要多数（误判 = 白刷一轮重试）。
+# 「要做一件事」的动词信号（保守，宁可少算也不要多数）
 _ACTION_VERB_RE = re.compile(
     r"(?:查|搜|搜一|寻找|找一|打开|启动|运行|拉起|设置|设个|设一下|定个|定一个|加个|添加|"
     r"记住|记一下|记下|提醒|叫我|到点|翻译|算一下|计算|下载|发送|发一下|安排|"
@@ -1359,12 +1237,8 @@ _ACTION_VERB_RE = re.compile(
 def _is_transient_llm_error(err: Exception) -> bool:
     """这个 LLMError 是「等一下就好」还是「再试也没用」。
 
-    压测实测踩到：MiniMax 集群繁忙时返回 HTTP 529
-    （{"type":"overloaded_error"}）。这种必须重试——旧实现直接抛上去，
-    主人等了半天收到一个空气泡。
-
-    反过来，400（参数错）、401（key 错）、404（模型名错）重试多少次都一样，
-    白白让主人多等，所以不重试。
+    MiniMax 集群繁忙时返回 HTTP 529（{"type":"overloaded_error"}），必须重试。
+    400/401/404 等重试多少次都一样，不重试。
     """
     msg = str(err) if err else ""
     for code in _TRANSIENT_STATUS:
