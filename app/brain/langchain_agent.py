@@ -471,6 +471,19 @@ class LangChainAgent:
             return
         if self._model is None:
             self._model = self._build_model()
+        # v27: 命中 intent (尤其 aw_query) 时, bind 模型加 tool_choice="any",
+        # 跟 lightweight backend 的 force_tool_use 对齐 — 让国产模型
+        # 在该调工具时一定出 tool_calls, 而不是默认回文本。
+        try:
+            if getattr(self, "_force_tool_choice_intent", ""):
+                oai_tools = self.registry.to_openai() or []
+                self._model = self._model.bind(
+                    tools=oai_tools, tool_choice="any")
+                log.info(
+                    "LangChainAgent: intent=%s → bind tool_choice=any (tools=%d)",
+                    self._force_tool_choice_intent, len(oai_tools))
+        except Exception as e:
+            log.warning("v27 bind tool_choice=any 失败 (%s), 继续", e)
         tools = convert_tools(self.registry)
         # v33 撤销: 主人 12:37 反馈 "最好不要移除 [工具], 想 prompt 解决".
         # 之前在 _ensure_agent 过滤 _RISKY_TOOLS 那一段, 还原 —— 工具
@@ -559,6 +572,82 @@ class LangChainAgent:
             # system / tool: 跳过
         return out
 
+    async def _prefetch_aw_results(self, user_text: str) -> list:
+        """v28: 同步调 AW 工具, 返 LangChain messages 序列 (AIMessage tool_call + ToolMessage),
+        模拟 LLM 自己调过的样子插入历史。
+
+        只对能直接从文本推断的 intent 子集做预调 (aw_query 下的具体动作):
+          - 「我刚才在干嘛 / 最近看了什么 / 过去X小时」→ aw_get_recent_activities
+          - 「现在 / 当前 / 焦点窗口在哪个」→ aw_get_current_window
+          - 「最近看了哪些网站」→ aw_get_browser_tabs
+        """
+        t = user_text or ""
+        wants_activities = any(kw in t for kw in (
+            "刚才在干嘛", "刚才看了什么", "刚才用了什么", "刚才浏览",
+            "刚才做什么", "过去", "最近", "一小时", "半小时", "我做了什么"))
+        wants_current = any(kw in t for kw in (
+            "当前", "现在", "正在用", "焦点"))
+        wants_browser = any(kw in t for kw in ("网页", "网站", "浏览器 tab", "逛了哪些"))
+
+        results: list = []
+        # 仅跑主程序一条, 不并行堆 — 简单优先, 出错不动 LLM 主流程
+        if wants_activities:
+            tool_msg = await self._call_aw("aw_get_recent_activities", {"minutes": 30, "limit": 15})
+            if tool_msg:
+                results.extend(tool_msg)
+        if wants_current:
+            tool_msg = await self._call_aw("aw_get_current_window", {})
+            if tool_msg:
+                results.extend(tool_msg)
+        if wants_browser:
+            tool_msg = await self._call_aw("aw_get_browser_tabs", {"minutes": 60, "limit": 10})
+            if tool_msg:
+                results.extend(tool_msg)
+        return results
+
+    async def _call_aw(self, tool_name: str, args: dict) -> list:
+        """v28: 直接调 aw_* 工具, 同步返 LangChain message 序列 (AIMessage.tool_calls + ToolMessage.content)。
+
+        用 app.integrations.activitywatch 调 (不走 MCP, 同步快), 失败返 [] 不影响流程。
+        """
+        import uuid as _uuid
+        try:
+            from app.integrations.activitywatch import (
+                get_recent_activities_summary,
+                get_current_window_one_liner,
+            )
+        except Exception as e:
+            log.debug("_call_aw import failed: %s", e)
+            return []
+        try:
+            if tool_name == "aw_get_recent_activities":
+                content = get_recent_activities_summary(
+                    minutes=int(args.get("minutes", 30)),
+                    limit=int(args.get("limit", 15)),
+                )
+            elif tool_name == "aw_get_current_window":
+                content = get_current_window_one_liner()
+            else:
+                return []
+        except Exception as e:
+            log.debug("_call_aw call failed for %s: %s", tool_name, e)
+            return []
+        if content is None:
+            content = f"(aw-server 未运行或 watcher 没装)"
+        tool_call_id = f"prefetch_{_uuid.uuid4().hex[:10]}"
+        # 创建对应 oai function name (我们 ToOpenAI 用的命名: mcp_<server>_<tool>)
+        oai_name = f"mcp_aw_{tool_name}"
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "id": tool_call_id,
+                "name": oai_name,
+                "args": args,
+            }],
+        )
+        tool_msg = ToolMessage(content=content, tool_call_id=tool_call_id)
+        return [ai_msg, tool_msg]
+
     async def run(
         self,
         messages: list[dict],
@@ -576,17 +665,16 @@ class LangChainAgent:
         does not follow tool call' 时,怀疑是 checkpoint 里残留了
         schema 失配的 ToolMessage;清掉本 thread 的 checkpoint 后重试一次。
         """
-        # v27 (2026-10-17): LangChain 这条路径之前完全忽略 _INTENT_TOOL_PATTERNS,
-        # 主人问"我刚才在干嘛" LLM 只凭印象回"小汐看不到", 工具一动不动。
-        # 跟 lightweight backend (AgentLoop) 一致: 命中 aw_query 等 intent 时,
-        # bind 模型加 tool_choice="any" 让 LLM 第一轮必须调工具。
-        #
-        # 关键时序: bind 必须在 _ensure_agent() 之前,否则 agent
-        # 已经用旧 self._model 构造, 后续 bind 不生效。
-        # 现在改架构: 检测 intent 后,**重置** _model 强制 _ensure_agent 重 build。
-        # 但重 build 会重建 ChatOpenAI (httpx client), 频繁检测会慢。
-        # 折中: 改 _build_model() 一次, 把 bind 留在 _build 之后, 然后
-        # _ensure_agent 用 bound self._model 构造 agent。
+        # v28 (2026-10-17): 国产模型 (MiniMax-M3) 默认忽略 tool_choice 字段
+        # (实测 _tool_choice_is_ignored 表里有它, 而且 v27 bind tool_choice="any"
+        # 后日志确认发了, LLM 仍只回纯文本)。修复策略: 命中 aw_query / 类似
+        # 查询 intent 时, 我们直接走 `app.integrations.activitywatch` 的 HTTP
+        # client 同步调对应工具, 把 ToolMessage + AI tool_call 拼进 messages,
+        # 让 LLM 看到完整「问 → 调 → 结果」三段式, 必然基于结果回复。
+        # 副作用: 之前 LLM 自己 tool_call 的好处 (动态选工具) 没了, 但对于
+        # aw_query 这种专用 intent 是好事 —— 我们知道该调哪个工具。
+        intent = None
+        injected_tool_msgs: list = []
         if messages and messages[-1].get("role") == "user":
             last_user_for_intent = messages[-1].get("content", "") or ""
         else:
@@ -596,8 +684,16 @@ class LangChainAgent:
             intent = detect_action_intent(last_user_for_intent) if last_user_for_intent else None
         except Exception:
             intent = None
+
+        # 命中 aw_query: 同步调工具, 把结果作为 AIMessage(tool_calls) + ToolMessage(content) 注入历史
+        if intent == "aw_query" and last_user_for_intent:
+            tool_results = await self._prefetch_aw_results(last_user_for_intent)
+            if tool_results:
+                injected_tool_msgs = tool_results
+                log.info("LangChainAgent.run: aw_query 预调工具, 注入 %d 条 tool_call+tool_msg",
+                         len(injected_tool_msgs) // 2)
+
         self._force_tool_choice_intent = intent or ""
-        # _ensure_agent 内部会读这个字段, 决定 bind 不 bind
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
 
@@ -606,7 +702,12 @@ class LangChainAgent:
         if messages and messages[-1].get("role") == "user":
             last_user = messages[-1]["content"]
 
-        input_payload: dict[str, Any] = {"messages": [*history, HumanMessage(content=last_user)]}
+        # 把注入的工具序列插在 user 消息前面, 模拟 LLM 之前调过工具
+        lc_msgs: list = [*history]
+        lc_msgs.extend(injected_tool_msgs)
+        lc_msgs.append(HumanMessage(content=last_user))
+
+        input_payload: dict[str, Any] = {"messages": lc_msgs}
         config = {"configurable": {"thread_id": self.thread_id}}
 
         try:
