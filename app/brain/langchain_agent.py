@@ -471,19 +471,6 @@ class LangChainAgent:
             return
         if self._model is None:
             self._model = self._build_model()
-        # v27: 命中 intent (尤其 aw_query) 时, bind 模型加 tool_choice="any",
-        # 跟 lightweight backend 的 force_tool_use 对齐 — 让国产模型
-        # 在该调工具时一定出 tool_calls, 而不是默认回文本。
-        try:
-            if getattr(self, "_force_tool_choice_intent", ""):
-                oai_tools = self.registry.to_openai() or []
-                self._model = self._model.bind(
-                    tools=oai_tools, tool_choice="any")
-                log.info(
-                    "LangChainAgent: intent=%s → bind tool_choice=any (tools=%d)",
-                    self._force_tool_choice_intent, len(oai_tools))
-        except Exception as e:
-            log.warning("v27 bind tool_choice=any 失败 (%s), 继续", e)
         tools = convert_tools(self.registry)
         # v33 撤销: 主人 12:37 反馈 "最好不要移除 [工具], 想 prompt 解决".
         # 之前在 _ensure_agent 过滤 _RISKY_TOOLS 那一段, 还原 —— 工具
@@ -693,7 +680,6 @@ class LangChainAgent:
                 log.info("LangChainAgent.run: aw_query 预调工具, 注入 %d 条 tool_call+tool_msg",
                          len(injected_tool_msgs) // 2)
 
-        self._force_tool_choice_intent = intent or ""
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
 
