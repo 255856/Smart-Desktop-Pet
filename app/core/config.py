@@ -156,6 +156,29 @@ class ChatConfig(BaseModel):
     bot_avatar_path: str = ""
 
 
+class ActivityWatchConfig(BaseModel):
+    """ActivityWatch 集成。
+
+    AW 是开源本地时间追踪工具 (https://activitywatch.net/), 主人在桌机上装
+    aw-server (Rust 后台, 默认占 5600 端口) + aw-watcher-window 守护后,
+    桌宠可:
+      1) 通过 MCP 工具 (aw_get_*) 回答主人「我刚才在干嘛」类问题 (LLM 主动查)
+      2) 给 ProactiveBrain 注入最近活动 context → 主动搭话更贴切
+      3) (Phase 4 可选) Python daemon 增量缓存到本地 SQLite
+
+    enabled 默认 False — 主人先装 AW, 然后手动开, 否则:
+      - MCP server 也启不动工具 (aw_status 返「未运行」)
+      - ProactiveBrain 不查 AW (静默跳过)
+      - 不会让 ProactiveBrain 卡或失败
+    """
+    enabled: bool = False
+    server_url: str = "http://127.0.0.1:5600"
+    # ProactiveBrain 注入时查多少分钟内的窗口活动 (太长会拖 LLM prompt,
+    # 太短信息不够)
+    proactive_lookback_minutes: int = 30
+    proactive_max_events: int = 15
+
+
 class BrainConfig(BaseModel):
     """智能中枢：工具调用 + 长期记忆 + 主动行为 + Agent 后端选择。"""
     backend: AgentBackend = "lightweight"           # "lightweight"=手写 ReAct；"standard"=LangChain
@@ -220,6 +243,7 @@ class Config(BaseSettings):
     pet: PetConfig = PetConfig()
     mcp: MCPConfig = MCPConfig()
     chat: ChatConfig = ChatConfig()
+    activitywatch: ActivityWatchConfig = ActivityWatchConfig()
 
     @property
     def name(self) -> str:
@@ -282,9 +306,32 @@ def save_chat_overrides(path: str | Path, cfg: Config) -> None:
         yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
 
 
+def save_aw_overrides(path: str | Path, cfg: Config) -> None:
+    """v24: 把 cfg.activitywatch 4 个字段写回 config.yaml 的 activitywatch: 段
+    (跟 save_chat_overrides 一样 merge, 不动其它段)。
+    用途：主人在设置面板改了活动感知开关 / aw-server URL 后持久化。
+    """
+    p = Path(path)
+    raw: dict[str, Any] = {}
+    if p.is_file():
+        with p.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    raw.setdefault("activitywatch", {})
+    aw = cfg.activitywatch
+    raw["activitywatch"]["enabled"] = bool(aw.enabled)
+    raw["activitywatch"]["server_url"] = aw.server_url
+    raw["activitywatch"]["proactive_lookback_minutes"] = int(
+        aw.proactive_lookback_minutes)
+    raw["activitywatch"]["proactive_max_events"] = int(aw.proactive_max_events)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
+
+
 __all__ = [
-    "Config", "load_config", "save_chat_overrides",
+    "Config", "load_config", "save_chat_overrides", "save_aw_overrides",
     "LLMConfig", "CharacterConfig", "WindowConfig", "ReminderConfig",
     "AppConfig", "SpriteConfig", "ASRConfig", "BrainConfig",
     "AgentConfig", "LangChainConfig", "MCPConfig", "ChatConfig",
+    "ActivityWatchConfig",
 ]

@@ -86,6 +86,7 @@ class SettingsWindow(QWidget):
     max_fps_changed = Signal(int)              # 渲染帧率上限
     tts_config_changed = Signal(dict)          # {tts_enabled, engine, minimax_voice_id, gptsovits_url, ref_audio, prompt_text}
     proactive_changed = Signal(dict)           # {enabled, min_minutes, max_minutes}
+    aw_config_changed = Signal(dict)           # v24: {enabled, server_url, lookback, max_events}
     renderer_changed = Signal(str)             # sprite / live2d（重启生效）
     hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
     character_changed = Signal(dict)           # {name, persona}
@@ -224,6 +225,9 @@ class SettingsWindow(QWidget):
         tabs.addTab(self._build_tab_visual(),  "视觉")
         tabs.addTab(self._build_tab_control(), "控制")
         tabs.addTab(self._build_tab_model(),   "模型配置")
+        # v24: ActivityWatch 配置 tab (主人装 AW + 设 enabled=true 后,
+        # ProactiveBrain 拿窗口活动 context 来更贴切地主动搭话)。
+        tabs.addTab(self._build_tab_activitywatch(), "活动感知")
         # Live2D 专属 Tab：模型有分类外观（menu groups）时才显示
         if self._renderer is not None:
             try:
@@ -2186,6 +2190,149 @@ class SettingsWindow(QWidget):
 
     def is_crossfade_enabled(self) -> bool:
         return self.cb_crossfade.isChecked()
+
+    # ===== v24: ActivityWatch 配置 =====
+
+    def _build_tab_activitywatch(self) -> QWidget:
+        """活动感知 Tab：是否启用 AW、aw-server 地址、回看窗口、最大事件数。
+
+        隐私: 主人可一眼看到「窗口标题会被读」说明, 默认 enabled=False,
+        主人主动开 + 启 aw-server + 装 watcher 才会真去拉数据。
+        ProactiveBrain 在 enabled=False / aw-server 不可达时都安全跳过,
+        不会让主动发言挂。
+        """
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(10)
+
+        # 说明卡 (放在最上, 让主人先看到自己在开什么)
+        intro = QGroupBox("这是什么？")
+        gl = QVBoxLayout(intro)
+        intro_text = QLabel(
+            "ActivityWatch (AW) 是一个开源本地时间追踪工具, "
+            "通过 aw-watcher-window 后台守护 → aw-server (Rust, 默认 5600 端口) "
+            "→ 本桌宠可读:<br/>"
+            "&nbsp;&nbsp;• 当前焦点窗口 (应用 + 标题) — 让 LLM 答「我刚在干嘛」<br/>"
+            "&nbsp;&nbsp;• 最近活动摘要 — ProactiveBrain 主动搭话时用 (如「盯了半天 VSCode, 该歇了」)<br/>"
+            "<b>窗口标题是敏感数据</b> (私人聊天/银行/邮箱都会进 log)。"
+            "<br/>启用前确认你已安装 AW 且想清楚要不要记录。"
+        )
+        intro_text.setWordWrap(True)
+        intro_text.setTextFormat(Qt.TextFormat.RichText)
+        intro_text.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+        gl.addWidget(intro_text)
+        outer.addWidget(intro)
+
+        # 启用
+        g_on = QGroupBox("启用")
+        gv = QFormLayout(g_on)
+        self.cb_aw_enabled = QCheckBox("启用活动感知 (ProactiveBrain + chat 中可用)")
+        self.cb_aw_enabled.toggled.connect(self._on_aw_toggle_changed)
+        gv.addRow(self.cb_aw_enabled)
+        outer.addWidget(g_on)
+
+        # 服务器连接
+        g_conn = QGroupBox("aw-server 连接")
+        gv = QFormLayout(g_conn)
+        self.edt_aw_url = QLineEdit()
+        self.edt_aw_url.setPlaceholderText("http://127.0.0.1:5600")
+        self.edt_aw_url.setToolTip(
+            "aw-server REST API 根地址。\n"
+            "本机默认 http://127.0.0.1:5600 ；\n"
+            "装到另一台机可通过 LAN 访问, 记得防火墙放行。"
+        )
+        gv.addRow("服务器 URL：", self.edt_aw_url)
+
+        self.btn_aw_test = QPushButton("测试连接")
+        self.btn_aw_test.clicked.connect(self._on_aw_test_clicked)
+        gv.addRow("", self.btn_aw_test)
+
+        self.lbl_aw_status = QLabel("")
+        self.lbl_aw_status.setWordWrap(True)
+        self.lbl_aw_status.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+        gv.addRow("状态：", self.lbl_aw_status)
+        outer.addWidget(g_conn)
+
+        # ProactiveBrain 上下文
+        g_proactive = QGroupBox("主动搭话注入 (ProactiveBrain)")
+        glp = QFormLayout(g_proactive)
+        self.spn_aw_lookback = QSpinBox()
+        self.spn_aw_lookback.setRange(5, 240)
+        self.spn_aw_lookback.setSuffix(" 分钟")
+        self.spn_aw_lookback.setValue(30)
+        self.spn_aw_lookback.setToolTip(
+            "ProactiveBrain 主动发言时, 把多久内的窗口活动塞进 prompt。"
+            "太长会拖 LLM, 太短信息不够。30 分钟是个不错起点。"
+        )
+        glp.addRow("回看窗口：", self.spn_aw_lookback)
+
+        self.spn_aw_max = QSpinBox()
+        self.spn_aw_max.setRange(1, 100)
+        self.spn_aw_max.setValue(15)
+        self.spn_aw_max.setToolTip("一次塞进 prompt 的最多事件数 (按时间倒序)。")
+        glp.addRow("最多事件数：", self.spn_aw_max)
+        outer.addWidget(g_proactive)
+
+        self._emit_aw_changed()  # 给上层 (ui_controller) 第一次机会同步当前值
+        return page
+
+    def _on_aw_toggle_changed(self, _on: bool) -> None:
+        self._emit_aw_changed()
+
+    def _on_aw_test_clicked(self) -> None:
+        """同步 HTTP GET /api/0/info: 不可达时立刻反馈, 不让主人干等 LLM。"""
+        from urllib.error import URLError
+        from urllib.request import Request, urlopen
+        url = (self.edt_aw_url.text() or "http://127.0.0.1:5600").rstrip("/")
+        try:
+            with urlopen(Request(url + "/api/0/info",
+                                 headers={"User-Agent": "desktop-pet/aw-test"}),
+                         timeout=3) as r:
+                raw = r.read().decode("utf-8", errors="replace")[:300]
+            self.lbl_aw_status.setStyleSheet(
+                f"color: {ui_style.ACCENT_DK}; font-size: 11px;"
+            )
+            self.lbl_aw_status.setText(f"✓ aw-server 可达: {raw[:180]}")
+        except (URLError, TimeoutError, OSError) as e:
+            self.lbl_aw_status.setStyleSheet(
+                f"color: {ui_style.DANGER}; font-size: 11px;"
+            )
+            self.lbl_aw_status.setText(
+                f"✗ 连接失败: {e}\n"
+                "确认 aw-server 在跑 (终端 `aw-server` 或自启), "
+                "且端口没被防火墙挡。"
+            )
+
+    def get_aw_config(self) -> dict:
+        """当前 UI 值打包成 dict, 给 ProactiveBrain.apply_aw_config 用。"""
+        return {
+            "enabled": self.cb_aw_enabled.isChecked(),
+            "server_url": (self.edt_aw_url.text()
+                           or "http://127.0.0.1:5600").strip(),
+            "proactive_lookback_minutes": self.spn_aw_lookback.value(),
+            "proactive_max_events": self.spn_aw_max.value(),
+        }
+
+    def set_aw_config(self, cfg) -> None:
+        """从 cfg 初始化 UI — 打开设置窗时调用, 让默认值/上次值反映出来。"""
+        if cfg is None:
+            return
+        self.cb_aw_enabled.setChecked(bool(getattr(cfg, "enabled", False)))
+        self.edt_aw_url.setText(str(getattr(cfg, "server_url",
+                                            "http://127.0.0.1:5600")))
+        self.spn_aw_lookback.setValue(int(getattr(cfg,
+                                                  "proactive_lookback_minutes",
+                                                  30) or 30))
+        self.spn_aw_max.setValue(int(getattr(cfg,
+                                            "proactive_max_events",
+                                            15) or 15))
+
+    def _emit_aw_changed(self) -> None:
+        try:
+            self.aw_config_changed.emit(self.get_aw_config())
+        except Exception:
+            pass
 
     def get_crossfade_ms(self) -> int:
         return self.crossfade_ms_slider.value()

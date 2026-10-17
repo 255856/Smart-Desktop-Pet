@@ -199,6 +199,10 @@ class BrainController(QObject):
                 max_minutes=cfg.brain.proactive_max_minutes,
                 is_sleeping=self._check_sleeping,
                 chat_cfg=cfg.chat,
+                # v24: AW 活动 context — 主人装 AW + 启动 aw-server + 设
+                # activitywatch.enabled=true 后, _fire 会自动把最近窗口
+                # 活动 / 当前窗口塞进 prompt, 没开就安全跳过。
+                aw_cfg=getattr(cfg, "activitywatch", None),
             )
             self.proactive.remark_ready.connect(self._on_proactive_remark)
             self.proactive.emotion_hint.connect(self.emotion_hint)

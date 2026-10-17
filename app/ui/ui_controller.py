@@ -84,6 +84,24 @@ class UIController(QObject):
                               getattr(_r0, "max_fps", 30) if _r0 else 30))
         _renderer_cfg = getattr(self.cfg.pet, "renderer", "sprite")
         _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
+        # v24: 启动时用 settings.json 里的 activitywatch 值覆盖 cfg (跟 _apply_stored
+# 模式一致 — 用户在 UI 改过, 重启后仍是 UI 设的值, 而不是 yaml 默认值)。
+        # 注意: 必须在 SettingsWindow 之前, 这样 SettingsWindow 通过 set_aw_config
+        # 拿到的就是用户最近的值。
+        _store_pre = None
+        try:
+            from app.core.settings_store import SettingsStore
+            _store_pre = SettingsStore()
+            for _key, _attr, _cast in (
+                    ("activitywatch_enabled", "enabled", bool),
+                    ("activitywatch_server_url", "server_url", str),
+                    ("activitywatch_lookback", "proactive_lookback_minutes", int),
+                    ("activitywatch_max_events", "proactive_max_events", int)):
+                if _store_pre.get(_key) is not None:
+                    setattr(cfg.activitywatch, _attr,
+                            _cast(_store_pre.get(_key)))
+        except Exception:
+            log.exception("apply stored aw cfg")
         self.settings_window = SettingsWindow(
             char_cfg=self.cfg.character,
             renderer=getattr(_pet, "renderer", None),
@@ -113,6 +131,12 @@ class UIController(QObject):
                 },
             },
         )
+        # v24: 启动时把 cfg.activitywatch 灌进 settings_window, 让「活动感知」
+        # Tab 反映当前 cfg (主人重启后看到的状态跟在 yaml 存的一致)。
+        try:
+            self.settings_window.set_aw_config(getattr(self.cfg, "activitywatch", None))
+        except Exception:
+            log.exception("init aw settings ui")
         self.settings_window.attach_state(self.state)
         self.pet.food_money_fn = lambda: self.state.money
         self.pet.pet_name_fn = lambda: self.cfg.character.name
@@ -177,6 +201,7 @@ class UIController(QObject):
         sw.max_fps_changed.connect(self._on_max_fps_changed)
         sw.tts_config_changed.connect(self._on_tts_config_changed)
         sw.proactive_changed.connect(self._on_proactive_changed)
+        sw.aw_config_changed.connect(self._on_aw_config_changed)
         sw.renderer_changed.connect(self._on_renderer_changed)
         sw.hide_watermark_changed.connect(self._on_hide_watermark_changed)
         sw.character_changed.connect(self._on_character_changed)
@@ -1211,6 +1236,56 @@ class UIController(QObject):
         else:
             self.settings_window._set_status("主动关心将在重启后生效（当前未启用）")
         log.info("主动关心：%s", cfgd)
+
+    def _on_aw_config_changed(self, cfgd: dict) -> None:
+        """v24: 活动感知 Tab — 主人改了 enabled / server URL / 回看 / 数量, 立刻
+        同步给 ProactiveBrain.apply_aw_config (下次 _fire 就生效)。也持久化
+        到 settings_store + config.yaml (跟 chat_overrides 一样, 不重写全 yaml)。
+        """
+        enabled = bool(cfgd.get("enabled", False))
+        server_url = str(cfgd.get("server_url", "http://127.0.0.1:5600"))
+        lookback = max(1, int(cfgd.get("proactive_lookback_minutes", 30) or 30))
+        max_events = max(1, int(cfgd.get("proactive_max_events", 15) or 15))
+
+        # 1) 持久化: settings_store + config.yaml
+        try:
+            store = self.settings_window.settings_store
+            store.set("activitywatch_enabled", enabled)
+            store.set("activitywatch_server_url", server_url)
+            store.set("activitywatch_lookback", lookback)
+            store.set("activitywatch_max_events", max_events)
+            # 同步到 cfg (内存) — 不落 yaml, 避免每次热改就改配置文件
+            if hasattr(self, "cfg") and self.cfg is not None:
+                self.cfg.activitywatch.enabled = enabled
+                self.cfg.activitywatch.server_url = server_url
+                self.cfg.activitywatch.proactive_lookback_minutes = lookback
+                self.cfg.activitywatch.proactive_max_events = max_events
+        except Exception:
+            log.exception("persist aw config")
+
+        # 2) 推给 ProactiveBrain
+        p = getattr(self.brain, "proactive", None)
+        if p is None:
+            self.settings_window._set_status(
+                "主动关心未启用, AW 配置已存, 重启后生效")
+            return
+        # 构造一个轻量 cfg-like 对象给 proactive (避免新增模型类)
+        from types import SimpleNamespace
+        aw_cfg = SimpleNamespace(
+            enabled=enabled,
+            server_url=server_url,
+            proactive_lookback_minutes=lookback,
+            proactive_max_events=max_events,
+        )
+        if hasattr(p, "apply_aw_config"):
+            p.apply_aw_config(aw_cfg)
+        else:
+            p._aw_cfg = aw_cfg
+        self.settings_window._set_status(
+            "活动感知: " + ("启用" if enabled else "关闭") +
+            f" (回看 {lookback} 分钟, 最多 {max_events} 条)"
+        )
+        log.info("aw cfg 更新: %s", cfgd)
 
     def _on_renderer_changed(self, renderer: str) -> None:
         """视觉 Tab：渲染器切换（持久化，重启生效）。"""

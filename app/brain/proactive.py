@@ -94,6 +94,7 @@ class ProactiveBrain(QObject):
         max_minutes: int = 45,
         is_sleeping: Optional[Callable[[], bool]] = None,
         chat_cfg=None,            # app.core.config.ChatConfig, 可选
+        aw_cfg=None,              # app.core.config.ActivityWatchConfig, 可选
     ):
         super().__init__()
         self.llm_cfg = llm_cfg
@@ -108,10 +109,20 @@ class ProactiveBrain(QObject):
         self._request_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
+        # ActivityWatch: 默认禁, 装 AW + 启动 aw-server + 开 enabled 才有数据。
+        # 拿不到 / 没装 / 主机名错 — _fire 内优雅降级, 不让主动发言挂。
+        self._aw_cfg = aw_cfg
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
         self._last_remarks: list[str] = []
         # 注：worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
+
+    def apply_aw_config(self, aw_cfg) -> None:
+        """设置面板 / 热重载改了 AW 配置 — 下一次 _fire 用新配置。无副作用。"""
+        self._aw_cfg = aw_cfg
+        log.info("ProactiveBrain: AW 配置更新 enabled=%s server=%s",
+                 getattr(aw_cfg, "enabled", False),
+                 getattr(aw_cfg, "server_url", ""))
 
     def start(self) -> None:
         self._schedule()
@@ -136,6 +147,40 @@ class ProactiveBrain(QObject):
         """用户修改了模型配置，下一次 _fire 自动用新配置。"""
         self.llm_cfg = new_cfg
         log.info("ProactiveBrain: LLM 配置已更新 → %s @ %s", new_cfg.model, new_cfg.base_url)
+
+    def _build_aw_context(self) -> str:
+        """v24: 拿 AW 活动数据, 没开 / aw-server 没跑 / 没 watcher 都安全返
+        空字符串, 不让 _fire 挂在 AW 上。返非空时内容已 ready 给 LLM 直接吃。
+        """
+        aw_cfg = self._aw_cfg
+        if aw_cfg is None or not getattr(aw_cfg, "enabled", False):
+            return ""
+        try:
+            from app.integrations.activitywatch import (
+                get_current_window_one_liner,
+                get_recent_activities_summary,
+            )
+        except Exception:
+            return ""
+        server_url = getattr(aw_cfg, "server_url", None) or None
+        lookback = max(1, int(getattr(aw_cfg, "proactive_lookback_minutes", 30) or 30))
+        n_max = max(1, int(getattr(aw_cfg, "proactive_max_events", 15) or 15))
+        try:
+            current = get_current_window_one_liner(server_url=server_url)
+            recent = get_recent_activities_summary(
+                minutes=lookback, limit=n_max, server_url=server_url,
+            )
+        except Exception as e:
+            log.debug("AW context fetch failed: %s", e)
+            return ""
+        parts = []
+        if current:
+            parts.append(current)
+        if recent:
+            parts.append(recent)
+        if not parts:
+            return ""
+        return "\n".join(parts)
 
     def _schedule(self) -> None:
         from app.core.qt_compat import QTimer
@@ -162,6 +207,8 @@ class ProactiveBrain(QObject):
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
         mem = self.memory.recent(10)
+        # v24: ActivityWatch 活动 context (主人开了才查, aw-server 不在就跳过)
+        aw_context = self._build_aw_context()
         context = {
             "now": now.strftime(f"%Y-%m-%d %H:%M 星期{wd}"),
             "is_night": is_night(now.timestamp()),
@@ -169,7 +216,17 @@ class ProactiveBrain(QObject):
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
             "recent_remarks": self._last_remarks[-3:],
+            "aw_context": aw_context,  # 空字符串 / "aw-server 未运行" / 实际活动摘要
         }
+        # 第 6 条规则只在 AW 实际有数据时挂上, 避免 prompt 噪声
+        aw_rule = ""
+        if aw_context and "未运行" not in aw_context and "无数据" not in aw_context:
+            aw_rule = (
+                "\n6. 若 `aw_context` 里有数据, 可以结合主人当下在做的事"
+                "（写代码 / 刷视频 / 看文档 等）挑更贴切的切入口, "
+                "比如「看了半天 VSCode, 休息一下吧」; "
+                "对敏感标题（私人聊天/银行）只概括类别不复读标题。"
+            )
         system = (
             self.persona
             + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
@@ -179,7 +236,9 @@ class ProactiveBrain(QObject):
               f"2. 时间段提示：{context['time_hint']}\n"
               "3. 不要重复 recent_remarks 里说过的内容；\n"
               "4. 如果此刻真的没什么好说的，只输出 [skip]；\n"
-              "5. 结尾保留一个情绪标签，如 [happy]。"
+              "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
+              "情绪由语气自然表达即可。"
+              + aw_rule
         )
         user = json.dumps(context, ensure_ascii=False)
 
