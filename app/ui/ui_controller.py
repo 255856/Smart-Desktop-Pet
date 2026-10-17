@@ -307,6 +307,11 @@ class UIController(QObject):
           5. 触发 state.on_change 让 pet_window / live2d 表情同步 (loop
              衰减会让 next tick 覆盖这个值, 所以 on_change 调一次即可,
              但开发者模式开启时衰减停下来避免视觉抖动)
+          6. v29: 立即 write_sync (不走 5s 防抖) —— 主人 2026-10-17 11:46
+             反馈 "dev mode 改的数值没实时保存, 聊天时状态与我设置的不
+             一致". 防抖在 dev mode 是反模式, 主人期望滑块每次拖动
+             立刻落盘, 不然切回 chat / 关程序重开 / dashboard 看就是
+             5s 前的旧值.
         """
         try:
             for attr, val in (snapshot or {}).items():
@@ -338,12 +343,23 @@ class UIController(QObject):
                 self.settings_window._update_state_view(self.state)
             except Exception:  # noqa: BLE001
                 pass
-            # 触发 on_change 让 pet/Live2D 同步 (但不强制保存, 调试期间)
+            # 触发 on_change 让 pet/Live2D 同步 (走 _combined → mark_dirty)
             try:
                 if self.state.on_change:
                     self.state.on_change()
             except Exception:  # noqa: BLE001
                 pass
+            # v29: 立即写盘 (不走 5s 防抖) —— 主人 2026-10-17 11:46 反馈
+            # "dev mode 改的数值没实时保存, 聊天时状态与我设置的不一致".
+            # mark_dirty 上面 on_change 链已经走过, 但 5s 防抖可能不写,
+            # 主人滑完滑块立刻切回 chat, 内存里有新值, 但 SaveStore 还没
+            # 落盘. 走 write_sync 强制落盘, 主程序重启 / dashboard 都能
+            # 看到最新值.
+            try:
+                if self.state_mgr is not None and self.state_mgr.save_store is not None:
+                    self.state_mgr.save_store.write_sync(self.state)
+            except Exception as e:  # noqa: BLE001
+                log.warning("dev_state_pushed 立即写盘失败: %s", e)
             log.debug("dev_state_pushed applied: %s", snapshot)
         except Exception as e:  # noqa: BLE001
             log.warning("_on_dev_state_pushed 失败: %s", e)

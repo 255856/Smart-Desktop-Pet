@@ -3673,3 +3673,35 @@ def test_v28_ast_guard_langchain_set_companion_state_propagates():
         print("[OK] v28 AST 守卫: LangChainAgent.set_companion_state propagation 存在")
         return
     raise AssertionError("LangChainAgent.set_companion_state 函数未找到")
+
+
+def test_v29_ast_guard_dev_state_pushed_force_write_sync():
+    """v29: 主人 2026-10-17 11:46 反馈 dev mode 改的数值没实时保存, 切
+    回 chat / dashboard 看的是 5s 前的旧值 (SaveStore 防抖 5s 还在窗
+    内). 修法: _on_dev_state_pushed 调 write_sync 立即落盘, 走 force
+    path 绕过防抖. AST 守卫锁死这条不能丢.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "ui_controller.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.FunctionDef):
+            continue
+        if node.name != "_on_dev_state_pushed":
+            continue
+        body_src = ' '.join(_ast.dump(s) for s in node.body)
+        # 必须有 write_sync 调用 (强制落盘, 不走防抖)
+        assert "write_sync" in body_src, (
+            "v29 regression: _on_dev_state_pushed 必须调 write_sync 强制落盘. "
+            f"实际函数体: {body_src[:400]}"
+        )
+        # 必须引用 state_mgr.save_store (force-write 的对象)
+        assert "save_store" in body_src, (
+            "v29 regression: _on_dev_state_pushed 必须调 state_mgr.save_store. "
+            f"实际函数体: {body_src[:400]}"
+        )
+        print("[OK] v29 AST 守卫: dev_state_pushed 立即 write_sync 落盘")
+        return
+    raise AssertionError("_on_dev_state_pushed 函数未找到")
