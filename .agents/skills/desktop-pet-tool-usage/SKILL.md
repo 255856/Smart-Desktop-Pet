@@ -1,12 +1,12 @@
 ---
 name: desktop-pet-tool-usage
-description: When and how to call each of the 52 available tools — open_app / open_website / add_reminder / remember_fact / system_info etc. Model MUST consult this before responding to action requests.
+description: When and how to call each of the 56 available tools (52 builtin + 4 ActivityWatch via MCP) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
 user-invocable: false
 ---
 
 # Tool Usage Skill — desktop-pet
 
-You have **52 tools** available. **The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
+You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
 
 > 本文件由 `app/brain/brain_controller.py` 直接注入到 system prompt 最前面。清单必须与
 > `app/engine/tools/` 的实际注册保持一致：2026-10-04 审计发现旧版写着 31 个工具，
@@ -25,6 +25,27 @@ You have **52 tools** available. **The user can ONLY see what tools you actually
 ---
 
 ## 📚 When to call each tool (IF-THEN rules)
+
+### 🔍 ActivityWatch 活动查询（v25：mcp_aw_* 系列）
+
+主人只要问类似"在干什么/在看什么/用过什么"，就调这些工具，**不要凭印象编**。
+
+| 主人说 | 调用 |
+|---|---|
+| "我刚才在干嘛" / "过去半小时在干啥" / "最近看了什么应用" | `mcp_aw_aw_get_recent_activities(minutes=30)` |
+| "现在在用什么窗口" / "我现在在做什么" | `mcp_aw_aw_get_current_window()` |
+| "最近看了什么网页" / "我刚逛过哪些网站" | `mcp_aw_aw_get_browser_tabs(minutes=30)` |
+| AW 工具没跑起来 / 全返 "未运行" | 先 `mcp_aw_aw_status()` 确认后端状态，再告诉主人"aw-server 没运行"让他启 |
+
+> **这些工具通过 MCP (Model Context Protocol) 加载** — 名字前缀是 `mcp_aw_`。
+> 像 `mcp_aw_aw_get_recent_activities` (是的, `mcp_<server>_<tool>` 双重前缀)。
+> 这些工具存 AW 自己的 SQLite (`%LOCALAPPDATA%\activitywatch\…\aw-server\*.db`),
+> 不存到桌宠项目里。
+
+> **场景优先级**:
+> 1. 主人问题指向"窗口 / 应用 / 网页" → **必调**，不要凭记忆或"我看不到主人屏幕"推脱
+> 2. 主人说"我刚在 XXX" 然后问你 — LLM 已经知道答案，**不用再查**
+> 3. AW server 未运行时如实告诉主人, 不要假装查不到
 
 ### 🔧 打开类
 
@@ -150,7 +171,7 @@ You have **52 tools** available. **The user can ONLY see what tools you actually
 
 ---
 
-## 📋 Quick reference (52 tools)
+## 📋 Quick reference (56 tools: 52 内置 + 4 aw)
 
 | 工具 | 必填参数 |
 |---|---|
@@ -206,6 +227,10 @@ You have **52 tools** available. **The user can ONLY see what tools you actually
 | `set_wifi` | (无) |
 | `set_bluetooth` | (无) |
 | `run_script` | `script_path` |
+| `mcp_aw_aw_status` | (无) |
+| `mcp_aw_aw_get_current_window` | (无) |
+| `mcp_aw_aw_get_recent_activities` | `minutes` (默认 30) |
+| `mcp_aw_aw_get_browser_tabs` | `minutes` (默认 30) |
 
 ---
 
