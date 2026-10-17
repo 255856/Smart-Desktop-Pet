@@ -757,23 +757,6 @@ class LangChainAgent:
 
         pet_state=None 解除同步 (主线程关闭 / 测试 cleanup).
         """
-        # v34-debug: 看 setter 是否真被调用
-        if pet_state is not None:
-            try:
-                q = pet_state.quantize()
-                mood_v = q.get("mood", "MID")
-                sat_v = q.get("satiety", "MID")
-                favor_v = q.get("favor", "MID")
-                bad = (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW")
-                log.info(
-                    "LangChainAgent.set_companion_state: pet_state 设入, "
-                    "mood=%s, sat=%s, favor=%s, bad=%s",
-                    mood_v, sat_v, favor_v, bad,
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("LangChainAgent.set_companion_state 量化失败: %s", e)
-        else:
-            log.info("LangChainAgent.set_companion_state: pet_state=None (解除)")
         self._companion_state = pet_state
         # v27: 关键 — 同步给 RiskyToolConfirm, 不然 middleware 走查表时
         # _get_companion_decision 返 None, 工具被弹窗确认后照样执行

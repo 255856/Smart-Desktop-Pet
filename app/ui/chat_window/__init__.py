@@ -2500,10 +2500,6 @@ class ChatWindow(QWidget):
                 if self._state_provider is not None:
                     try:
                         _state_now = self._state_provider()
-                        log.info(
-                            "_kickoff_llm: state_provider() 返 %s, 调 set_companion_state",
-                            "None" if _state_now is None else "PetState"
-                        )
                         if _state_now is not None:
                             lc_agent.set_companion_state(_state_now)
                     except Exception:  # noqa: BLE001
@@ -2512,7 +2508,6 @@ class ChatWindow(QWidget):
                 else:
                     log.warning(
                         "_kickoff_llm: self._state_provider is None, "
-                        "新 LangChainAgent._companion_state 永远是 None, "
                         "PostLLMStateGuard / RiskyToolConfirm 走无 state 路径"
                     )
                 self._worker = _AgentWorker(
