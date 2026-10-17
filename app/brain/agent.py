@@ -446,6 +446,16 @@ _INTENT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         # 好过逼模型去 web_search + fetch_url_text 爬气象台页面。
         "get_weather",
     ),
+    # 【v25】活动查询 — 加了 aw_query 意图,白名单里塞 mcp_aw_* 4 工具,
+    # 让 force_tool_use=True 时 LLM 真发 tool_calls 而不是只说不做
+    # (MiniMax-M3 默认如此, 不强制会「我应该调…然后啥也没调」)。
+    # aw_status 让 LLM 顺手查后端可达性;最近活动/当前窗口/浏览器 tab 三件套。
+    "aw_query": (
+        "mcp_aw_aw_status",
+        "mcp_aw_aw_get_recent_activities",
+        "mcp_aw_aw_get_current_window",
+        "mcp_aw_aw_get_browser_tabs",
+    ),
 }
 
 # 白名单是**软约束**——ToolRegistry 按名字执行，模型硬调一个没下发的工具照样会跑。
