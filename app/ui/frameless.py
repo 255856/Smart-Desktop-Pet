@@ -181,7 +181,10 @@ class FramelessResizer(QObject):
                 self._last_apply_ms = now_ms
                 self._manual_move(event_global_pos(ev), press0, geo0)
                 return True
-            # 非拖拽：节流更新光标
+            # 鼠标按键空闲时才更新光标:拖标题栏期间(LeftButton 按下但没走 manual)
+            # 不应把光标切到缩放图标,否则拖完窗口光标还是缩放图标。
+            if ev.buttons() & Qt.MouseButton.LeftButton:
+                return False
             now_ms = getattr(ev, "timestamp", lambda: 0)()
             if now_ms - self._last_move_ms < 30:
                 return False
@@ -195,6 +198,12 @@ class FramelessResizer(QObject):
             self._thaw_heavy_paint()
             self._win.update()
             return True
+
+        if t == QEvent.Type.MouseButtonRelease:
+            # 任意左键 release 后重置光标：标题栏拖完、菜单关闭等场景
+            # 都可能让缩放光标残留在窗口内（Leave 不触发因为鼠标还在 win 内）
+            self._set_cursor(self._edge_at(event_global_pos(ev)))
+            return False
 
         if t == QEvent.Type.Leave:
             self._set_cursor(None)
