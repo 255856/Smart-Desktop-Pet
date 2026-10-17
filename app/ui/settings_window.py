@@ -225,9 +225,7 @@ class SettingsWindow(QWidget):
         tabs.addTab(self._build_tab_visual(),  "视觉")
         tabs.addTab(self._build_tab_control(), "控制")
         tabs.addTab(self._build_tab_model(),   "模型配置")
-        # v24: ActivityWatch 配置 tab (主人装 AW + 设 enabled=true 后,
-        # ProactiveBrain 拿窗口活动 context 来更贴切地主动搭话)。
-        tabs.addTab(self._build_tab_activitywatch(), "活动感知")
+        # v25: AW 配置挪到「控制 Tab → 主动关心」段里 (跟主动关心开关放一起)
         # Live2D 专属 Tab：模型有分类外观（menu groups）时才显示
         if self._renderer is not None:
             try:
@@ -1051,6 +1049,11 @@ class SettingsWindow(QWidget):
         self.spin_proactive_max.valueChanged.connect(self._emit_proactive)
         gp.addWidget(self.spin_proactive_max, 2, 1)
         v.addWidget(g_pro)
+
+        # v25: ActivityWatch 活动感知配置嵌在「主动关心」段下面 — 主人
+        # 装了 AW + aw-server 跑着, 桌宠主动搭话会更贴切（写代码 / 刷视频 /
+        # 看文档 给不同场景）。跟主动关心开关放一起更直观。
+        v.addWidget(self._build_aw_inline_widgets())
 
         v.addStretch(1)
         return page
@@ -2275,91 +2278,95 @@ class SettingsWindow(QWidget):
     def is_crossfade_enabled(self) -> bool:
         return self.cb_crossfade.isChecked()
 
-    # ===== v24: ActivityWatch 配置 =====
+    # ===== v25: ActivityWatch 配置 (嵌进「控制 Tab → 主动关心」, 不再独立 tab) =====
 
-    def _build_tab_activitywatch(self) -> QWidget:
-        """活动感知 Tab：是否启用 AW、aw-server 地址、回看窗口、最大事件数。
+    def _build_aw_inline_widgets(self) -> QGroupBox:
+        """v25: 主人要求把 AW 配置跟「主动关心」放一起, 之前的独立「活动感知」
+        Tab 删掉。返回 QGroupBox, 让 _build_tab_control 加到主控 tab 里。
 
-        隐私: 主人可一眼看到「窗口标题会被读」说明, 默认 enabled=False,
-        主人主动开 + 启 aw-server + 装 watcher 才会真去拉数据。
-        ProactiveBrain 在 enabled=False / aw-server 不可达时都安全跳过,
-        不会让主动发言挂。
+        内容:
+          - 短说明 (一行, 留 60% 空间给主人日后按需补)
+          - 启用复选框
+          - aw-server URL + 测试连接按钮 + 状态行
+          - 回看窗口 + 最多事件数 (ProactiveBrain 注入用)
+          - 一句话隐私说明: 数据存 AW 自己的 SQLite, 不入 pet 项目
         """
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(10)
+        g_aw = QGroupBox("活动感知 (ActivityWatch)")
+        gl = QVBoxLayout(g_aw)
+        gl.setSpacing(8)
 
-        # 说明卡 (放在最上, 让主人先看到自己在开什么)
-        intro = QGroupBox("这是什么？")
-        gl = QVBoxLayout(intro)
-        intro_text = QLabel(
-            "ActivityWatch (AW) 是一个开源本地时间追踪工具, "
-            "通过 aw-watcher-window 后台守护 → aw-server (Rust, 默认 5600 端口) "
-            "→ 本桌宠可读:<br/>"
-            "&nbsp;&nbsp;• 当前焦点窗口 (应用 + 标题) — 让 LLM 答「我刚在干嘛」<br/>"
-            "&nbsp;&nbsp;• 最近活动摘要 — ProactiveBrain 主动搭话时用 (如「盯了半天 VSCode, 该歇了」)<br/>"
-            "<b>窗口标题是敏感数据</b> (私人聊天/银行/邮箱都会进 log)。"
-            "<br/>启用前确认你已安装 AW 且想清楚要不要记录。"
+        tip = QLabel(
+            "装了 ActivityWatch + aw-server 在 5600 端口 → ProactiveBrain 主动搭话会参考"
+            "主人当下窗口活动 (写代码/刷视频/看文档 给不同场景话术)。"
+            "<b>窗口标题 = 敏感数据</b> (聊天/银行/邮箱), 启用前想清楚。"
         )
-        intro_text.setWordWrap(True)
-        intro_text.setTextFormat(Qt.TextFormat.RichText)
-        intro_text.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
-        gl.addWidget(intro_text)
-        outer.addWidget(intro)
+        tip.setWordWrap(True)
+        tip.setTextFormat(Qt.TextFormat.RichText)
+        tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+        gl.addWidget(tip)
 
-        # 启用
-        g_on = QGroupBox("启用")
-        gv = QFormLayout(g_on)
-        self.cb_aw_enabled = QCheckBox("启用活动感知 (ProactiveBrain + chat 中可用)")
-        self.cb_aw_enabled.toggled.connect(self._on_aw_toggle_changed)
-        gv.addRow(self.cb_aw_enabled)
-        outer.addWidget(g_on)
+        self.cb_aw_enabled = QCheckBox("启用活动感知 (ProactiveBrain 注入 + chat 中可查)")
+        self.cb_aw_enabled.toggled.connect(self._emit_aw_changed)
+        gl.addWidget(self.cb_aw_enabled)
 
-        # 服务器连接
-        g_conn = QGroupBox("aw-server 连接")
-        gv = QFormLayout(g_conn)
+        # URL + 测试连接 — 一行紧凑布局
+        row = QHBoxLayout()
         self.edt_aw_url = QLineEdit()
         self.edt_aw_url.setPlaceholderText("http://127.0.0.1:5600")
         self.edt_aw_url.setToolTip(
-            "aw-server REST API 根地址。\n"
-            "本机默认 http://127.0.0.1:5600 ；\n"
-            "装到另一台机可通过 LAN 访问, 记得防火墙放行。"
+            "aw-server REST API 根地址。本机默认；装另一台机走 LAN 记得防火墙放行。"
         )
-        gv.addRow("服务器 URL：", self.edt_aw_url)
-
+        self.edt_aw_url.editingFinished.connect(self._emit_aw_changed)
         self.btn_aw_test = QPushButton("测试连接")
+        self.btn_aw_test.setFixedWidth(96)
         self.btn_aw_test.clicked.connect(self._on_aw_test_clicked)
-        gv.addRow("", self.btn_aw_test)
+        row.addWidget(QLabel("AW 服务器："))
+        row.addWidget(self.edt_aw_url, 1)
+        row.addWidget(self.btn_aw_test)
+        gl.addLayout(row)
 
         self.lbl_aw_status = QLabel("")
         self.lbl_aw_status.setWordWrap(True)
         self.lbl_aw_status.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
-        gv.addRow("状态：", self.lbl_aw_status)
-        outer.addWidget(g_conn)
+        gl.addWidget(self.lbl_aw_status)
 
-        # ProactiveBrain 上下文
-        g_proactive = QGroupBox("主动搭话注入 (ProactiveBrain)")
-        glp = QFormLayout(g_proactive)
+        # ProactiveBrain 注入 — 二个 spinbox 并排
+        row2 = QHBoxLayout()
         self.spn_aw_lookback = QSpinBox()
         self.spn_aw_lookback.setRange(5, 240)
         self.spn_aw_lookback.setSuffix(" 分钟")
         self.spn_aw_lookback.setValue(30)
         self.spn_aw_lookback.setToolTip(
             "ProactiveBrain 主动发言时, 把多久内的窗口活动塞进 prompt。"
-            "太长会拖 LLM, 太短信息不够。30 分钟是个不错起点。"
+            "30 分钟是个不错起点。"
         )
-        glp.addRow("回看窗口：", self.spn_aw_lookback)
-
         self.spn_aw_max = QSpinBox()
         self.spn_aw_max.setRange(1, 100)
         self.spn_aw_max.setValue(15)
         self.spn_aw_max.setToolTip("一次塞进 prompt 的最多事件数 (按时间倒序)。")
-        glp.addRow("最多事件数：", self.spn_aw_max)
-        outer.addWidget(g_proactive)
+        self.spn_aw_lookback.valueChanged.connect(self._emit_aw_changed)
+        self.spn_aw_max.valueChanged.connect(self._emit_aw_changed)
+        row2.addWidget(QLabel("回看窗口："))
+        row2.addWidget(self.spn_aw_lookback)
+        row2.addSpacing(12)
+        row2.addWidget(QLabel("最多事件数："))
+        row2.addWidget(self.spn_aw_max)
+        row2.addStretch(1)
+        gl.addLayout(row2)
 
-        self._emit_aw_changed()  # 给上层 (ui_controller) 第一次机会同步当前值
-        return page
+        # 落盘提示: AW 数据不在 pet 项目里, 主人放心
+        self.lbl_aw_storage = QLabel(
+            "📁 活动数据存在 AW 自己的 SQLite "
+            "(C:\\Users\\<主人>\\AppData\\Local\\activitywatch\\…\\aw-server\\*.db), "
+            "不入 pet 项目。"
+        )
+        self.lbl_aw_storage.setWordWrap(True)
+        self.lbl_aw_storage.setStyleSheet(
+            f"color: {ui_style.TEXT_SUB}; font-size: 10.5px;"
+        )
+        gl.addWidget(self.lbl_aw_storage)
+
+        return g_aw
 
     def _on_aw_toggle_changed(self, _on: bool) -> None:
         self._emit_aw_changed()
