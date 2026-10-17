@@ -51,7 +51,7 @@ try:
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
-        QSpinBox, QSplitter, QSystemTrayIcon, QTabWidget, QTextBrowser,
+        QSpinBox, QSplitter, QStatusBar, QSystemTrayIcon, QTabWidget, QTextBrowser,
         QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     if not hasattr(QtCore, "QMimeData"):
@@ -76,7 +76,7 @@ except ImportError:
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
-        QSpinBox, QSplitter, QStringListModel, QSystemTrayIcon, QTabWidget, QTextBrowser,
+        QSpinBox, QSplitter, QStatusBar, QStringListModel, QSystemTrayIcon, QTabWidget, QTextBrowser,
         QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     _BACKEND = "PySide6"

@@ -465,6 +465,9 @@ class LangChainAgent:
         if self._model is None:
             self._model = self._build_model()
         tools = convert_tools(self.registry)
+        # v33 撤销: 主人 12:37 反馈 "最好不要移除 [工具], 想 prompt 解决".
+        # 之前在 _ensure_agent 过滤 _RISKY_TOOLS 那一段, 还原 —— 工具
+        # 全给 LLM, 让 prompt 强 directive 让 LLM 自己拒绝.
         if self._checkpointer is None and self.cfg.enable_checkpointer:
             await self._build_checkpointer()
         checkpointer = self._checkpointer

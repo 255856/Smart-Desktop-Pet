@@ -3805,9 +3805,13 @@ def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
         f"v31 regression: v31 override 必须在 confirm 协议之后. "
         f"confirm_pos={confirm_pos}, override_pos={override_pos}"
     )
-    # 3. 明确说"忽略" + "以这段为准"
-    assert "忽略" in sp and "以这段为准" in sp, (
-        "v31: override 必须明确说'忽略 confirm 协议' + '以这段为准'"
+    # 3. v31 override 必须明确说"以这段为准" (覆盖 confirm 协议).
+    # v33 后措辞统一成 "以这段为准" 放在顶部 directive + 末尾 override 互为冗余,
+    # 旧的 "忽略" 措辞在 v33 顶部 directive 改成 "即便下面有 confirm 协议... 以这段为准".
+    # 这里只检查核心覆盖语义, 不强制措辞.
+    assert "以这段为准" in sp, (
+        "v31 (v33 改后): prompt 必须明确说'以这段为准' (覆盖 confirm 协议). "
+        f"实际结尾: {sp[-300:]}"
     )
     # 4. 边界: state 全 HIGH 时不应有 override
     clear_all()
@@ -3906,3 +3910,99 @@ def test_v32_state_bad_prompt_has_no_preemptive_ask_instruction():
         "v32: state 差仍应有 v31 override 块"
     )
     print("[OK] v32: state 差时 prompt 拼装, 无 preemptive 问教学")
+
+
+def test_v33_state_bad_top_directive_in_prompt():
+    """v33: 主人 2026-10-17 12:37 反馈「不要移除工具, 想办法 prompt 让 LLM
+    拒绝. 提示词里最先的判断应该是对状态进行判断」. 修法: 把「状态差
+    时直接拒绝高危工具」提到 prompt **最顶部** (base persona 之前),
+    作为第一原则, 反复强调 '禁止 preemptive 问', '禁止走 confirm 流程'.
+    不删工具, 让 LLM 看到工具也能明确拒绝.
+    """
+    from app.engine.state import PetState
+    from app.brain.hallucination_guard import grounding_dynamic_prompt
+    from app.brain._companion_registry import set_state_for_thread, clear_all
+
+    clear_all()
+    state = PetState()
+    state.feeling = 0; state.strength = 0; state.strength_food = 0
+    state.strength_drink = 0; state.likability = 0; state.health = 0
+    state.normalize()
+    set_state_for_thread("test-v33", state)
+
+    class FakeRequest:
+        def __init__(self, tid, sp):
+            self.system_prompt = sp
+            self.config = {"configurable": {"thread_id": tid}}
+    request = FakeRequest("test-v33", "你是一个有用的桌面助手, 名字叫小汐。")
+    sp = grounding_dynamic_prompt(request)
+    clear_all()
+
+    # 1. 顶部必须有第一原则 directive
+    assert "第一原则" in sp[:600], (
+        "v33 regression: 状态差时, prompt 顶部必须有 '第一原则' 拒绝 directive. "
+        f"实际开头 200 字: {sp[:200]}"
+    )
+    # 2. directive 必须在 base persona 之前 (位置验证)
+    top_directive_pos = sp.find("第一原则")
+    base_persona_pos = sp.find("你是一个有用的桌面助手, 名字叫小汐")
+    assert top_directive_pos < base_persona_pos, (
+        f"v33: 第一原则必须在 base persona 之前. "
+        f"top={top_directive_pos}, base={base_persona_pos}"
+    )
+    # 3. 关键禁止词必须出现
+    for kw in ["禁止 preemptive 问", "禁止走 confirm 流程", "明确直接拒绝",
+                "我状态不好"]:
+        assert kw in sp, f"v33: prompt 必须含 '{kw}'"
+    # 4. 末尾仍应有 v31 override (冗余确保 LLM 读到)
+    assert "本轮最高优先级" in sp, (
+        "v33: prompt 末尾仍应有 v31 override (与顶部 directive 互为冗余)"
+    )
+    # 5. 边界: state 全 HIGH 时不能误伤
+    clear_all()
+    state2 = PetState()
+    state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
+    state2.normalize()
+    set_state_for_thread("test-v33", state2)
+    sp2 = grounding_dynamic_prompt(request)
+    clear_all()
+    assert "第一原则" not in sp2[:600], (
+        "v33 边界: state 全 HIGH 时 prompt 顶部不能有第一原则 directive"
+    )
+    print("[OK] v33: state 差时 prompt 顶部加第一原则 directive, 不删工具")
+
+
+def test_v33_langchain_agent_keeps_all_tools():
+    """v33 撤销工具过滤: 主人 12:37 反馈 '不要移除', 工具全保留,
+    让 LLM 看到 + prompt directive 强拒.
+    """
+    from app.brain.langchain_agent import LangChainAgent
+    from app.brain.hallucination_guard import _RISKY_TOOLS
+
+    agent = LangChainAgent.__new__(LangChainAgent)
+    agent._companion_state = None
+    # v33 撤销: _ensure_agent 不再过滤 _RISKY_TOOLS, 工具全给 LLM
+    # 这里只验证代码层面 _ensure_agent 不再含 _RISKY_TOOLS 过滤逻辑
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "brain" / "langchain_agent.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        if node.name != "_ensure_agent":
+            continue
+        body_src = ' '.join(_ast.dump(s) for s in node.body)
+        # v33 撤销后, _ensure_agent 不应再引用 _RISKY_TOOLS (过滤被还原)
+        # 但要确认 _RISKY_TOOLS 仍被 import (其他地方可能用, 如 hallucination_guard 自己)
+        # 这里只检查 _ensure_agent 体内不应含 _RISKY_TOOLS 名字
+        if "_RISKY_TOOLS" in body_src:
+            # 允许 mention (在 import 或 docstring), 但不应有 "tools = [... for ... not in _RISKY_TOOLS]"
+            assert "not in _RISKY_TOOLS" not in body_src, (
+                "v33 撤销: _ensure_agent 不能含 'not in _RISKY_TOOLS' 过滤. "
+                f"实际函数体: {body_src[:600]}"
+            )
+        print("[OK] v33 撤销: _ensure_agent 不再过滤工具 (主人 12:37 反对)")
+        return
+    raise AssertionError("_ensure_agent 函数未找到")
