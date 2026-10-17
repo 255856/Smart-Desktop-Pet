@@ -98,29 +98,36 @@ def _list_buckets() -> list[dict]:
 
 
 def _find_window_bucket(buckets: list[dict]) -> Optional[str]:
-    """找当前 host 的窗口 bucket。aw-watcher-window-{hostname}."""
+    """找当前 host 的窗口 bucket。
+
+    aw 0.14+ bucket 命名是 `aw-watcher-<type>_<hostname>` (下划线)。
+    早期版本用 `-`, 仍兼容。
+    """
     host = _hostname().lower()
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith(f"aw-watcher-window-{host}"):
+        if bid.startswith(("aw-watcher-window-" + host,
+                           "aw-watcher-window_" + host)):
             return bid
     # fallback: 任意 window bucket (单设备场景)
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith("aw-watcher-window-"):
+        if bid.startswith(("aw-watcher-window-", "aw-watcher-window_")):
             return bid
     return None
 
 
 def _find_web_bucket(buckets: list[dict]) -> Optional[str]:
+    """找当前 host 的浏览器 bucket — 命名同 _find_window_bucket, 兼容 - / _."""
     host = _hostname().lower()
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith(f"aw-watcher-web-{host}"):
+        if bid.startswith(("aw-watcher-web-" + host,
+                           "aw-watcher-web_" + host)):
             return bid
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith("aw-watcher-web-"):
+        if bid.startswith(("aw-watcher-web-", "aw-watcher-web_")):
             return bid
     return None
 

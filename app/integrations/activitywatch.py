@@ -57,15 +57,18 @@ def is_available(server_url: Optional[str] = None) -> bool:
 
 
 def _find_bucket(buckets, prefix: str, hostname: str):
+    """aw 0.14+ bucket 命名是 `aw-watcher-<type>_<hostname>` (下划线).
+    早期版本用 -, 兼容两种。
+    """
     host = hostname.lower()
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith(f"{prefix}-{host}"):
+        if bid.startswith((f"{prefix}-{host}", f"{prefix}_{host}")):
             return bid
     # fallback: 任意同 prefix bucket (单设备/老 hostname 时也能用)
     for b in buckets:
         bid = b.get("id", "")
-        if bid.startswith(prefix):
+        if bid.startswith((prefix, prefix)):
             return bid
     return None
 
