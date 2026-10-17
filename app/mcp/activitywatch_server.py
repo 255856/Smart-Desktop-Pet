@@ -273,18 +273,28 @@ def handle_call(name: str, arguments: dict) -> dict:
         )
 
     if name == "aw_get_current_window":
+        # v25: 错误分清楚 (1) aw-server 没跑 (2) 装了 server 但没装 watcher
+        # (3) watcher 装了但没记录事件。LLM 看到这些能告诉主人怎么修
+        status = _aw_status()
+        if not status["ok"]:
+            return _err_text(status.get("hint") or "aw-server 不可达。")
         buckets = _list_buckets()
-        if not buckets:
-            return _err_text("aw-server 未运行或返回空 (请 aw_status 检查)。")
         bid = _find_window_bucket(buckets)
         if not bid:
             return _err_text(
-                f"未找到窗口 bucket (hostname={_hostname()})。"
-                "可能是 aw-watcher-window 没启动, 或未在配置内启用。"
+                f"aw-server 跑着, 但没找到窗口 bucket (hostname={_hostname()})。"
+                "可能是 aw-watcher-window 没启, 或 Process Explorer/WMI 没权限。"
+                "Windows 上 aw-qt 托盘右键 → 'Modules' 能看 watcher 状态。"
             )
         events = _query_events(bid, minutes=2, limit=1)
         if not events:
-            return _ok_text("最近 2 分钟无窗口事件 (aw-server 还没采集到数据)。")
+            return _err_text(
+                f"aw-watcher-window 装着但最近 2 分钟一条事件都没记录。"
+                "常见原因: watcher 进程抽风 (Win32 GetForegroundWindow "
+                "在某些 Windows 会话里返回 NULL), 需要从 aw-qt 托盘重启 watcher。"
+                f"bucket last_updated={datetime.now(timezone.utc).isoformat()[:19]}Z "
+                "(检查 aw-qt 是否仍提示 'watchers running')。"
+            )
         latest = events[0]
         text = f"当前窗口: {_format_event_zh(latest)}"
         # 顺便给最近 5 分钟的活动数量
@@ -296,17 +306,23 @@ def handle_call(name: str, arguments: dict) -> dict:
     if name == "aw_get_recent_activities":
         minutes = int(arguments.get("minutes") or 30)
         limit = int(arguments.get("limit") or 20)
+        # v25: 区分空数据的三种原因 — 后端没跑 / watcher 没装 / watcher 没记录
+        status = _aw_status()
+        if not status["ok"]:
+            return _err_text(status.get("hint") or "aw-server 不可达。")
         buckets = _list_buckets()
-        if not buckets:
-            return _err_text("aw-server 未运行或返回空。")
         bid = _find_window_bucket(buckets)
         if not bid:
             return _err_text(
-                f"未找到窗口 bucket (hostname={_hostname()})。"
+                f"aw-server 跑着但没找到窗口 bucket (hostname={_hostname()})。"
+                "请确认 aw-watcher-window 在 AW 托盘里启用。"
             )
         events = _query_events(bid, minutes=minutes, limit=limit)
         if not events:
-            return _ok_text(f"过去 {minutes} 分钟没有窗口活动记录。")
+            return _ok_text(
+                f"过去 {minutes} 分钟没有窗口活动记录(aw-watcher-window 可能挂着,"
+                f"从 aw-qt 托盘重启 watcher 试试)。"
+            )
         lines = [f"过去 {minutes} 分钟的窗口活动 (最新 → 最早, 最多 {limit} 条):"]
         for ev in events:
             lines.append("- " + _format_event_zh(ev))
