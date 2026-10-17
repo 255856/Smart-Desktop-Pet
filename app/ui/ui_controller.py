@@ -121,10 +121,6 @@ class UIController(QObject):
                 },
                 "renderer": _store0.get("renderer", _renderer_cfg),
                 "hide_watermark": _store0.get("hide_watermark", _hw_cfg),
-                "character": {
-                    "name": _store0.get("character_name", self.cfg.character.name),
-                    "persona": _store0.get("persona", self.cfg.character.persona),
-                },
             },
         )
         # 启动时把 cfg.activitywatch 灌进 settings_window

@@ -2415,7 +2415,7 @@ class ChatWindow(QWidget):
                 log.warning("打开外部链接失败: %s", url)
 
     def _show_image_popup(self, url: str) -> None:
-        """v20: 点击 chat 缩略图弹原图 QDialog, Esc / 点击空白关闭。
+        """点击 chat 缩略图弹原图 QDialog, Esc / 点 × 关闭。
 
         支持三种 src:
           - file:/// 绝对路径 (本机落盘的 multimodal 文件)
@@ -2423,16 +2423,17 @@ class ChatWindow(QWidget):
           - http(s):// (网络图, 不下载, 提示"在线图无法放大")
 
         对应不上 / 加载失败 / 空 QPixmap → 静默 return, 不弹错误框打扰主人。
+
+        v20 改为非模态 (show + 自管关闭)：旧版 exec_() 阻塞主事件循环,
+        关 × 时触发 chat_view 文档资源释放, 偶现整个 chat 区域擦白。
         """
         try:
-            from PyQt5.QtGui import QPixmap, QDesktopServices
-            from PyQt5.QtCore import QUrl as _QUrl
+            from PyQt5.QtGui import QPixmap
             from PyQt5.QtWidgets import (
                 QDialog, QVBoxLayout, QLabel, QScrollArea, QMessageBox,
             )
         except Exception:  # noqa: BLE001
             return
-        # 1. 网络图 → 不下载, 提示主人
         if url.startswith(("http://", "https://")):
             try:
                 QMessageBox.information(
@@ -2443,7 +2444,6 @@ class ChatWindow(QWidget):
             except Exception:
                 pass
             return
-        # 2. 准备 QPixmap
         pix = QPixmap()
         try:
             if url.startswith("data:"):
@@ -2452,7 +2452,6 @@ class ChatWindow(QWidget):
                 if m:
                     pix.loadFromData(base64.b64decode(m.group(1)))
             elif url.startswith("file:///"):
-                # Windows: file:///C:/path → 本地 "C:/path"
                 local = url[len("file:///"):]
                 if (local.startswith("/")
                         and len(local) > 2
@@ -2466,15 +2465,14 @@ class ChatWindow(QWidget):
             return
         if pix.isNull():
             return
-        # 3. 弹 QDialog 显示原图
-        # parent 设 None (top-level):之前传 self 当 parent 关闭 × 时会触发
-        # chat_view 重绘走白屏路径。top-level 跟 chat_window 互不影响。
+        # top-level + 非模态:跟 chat_window 互不阻塞,关闭时由 _on_image_popup_closed
+        # 强制 chat_view 重绘,避免文档资源释放导致 chat 区域擦白。
         dlg = QDialog(None)
         dlg.setWindowTitle("图片预览")
-        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         try:
             dlg.setWindowFlags(
-                dlg.windowFlags() | Qt.WindowMaximizeButtonHint
+                dlg.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint
             )
         except Exception:
             pass
@@ -2483,11 +2481,10 @@ class ChatWindow(QWidget):
         scroll = QScrollArea(dlg)
         scroll.setWidgetResizable(True)
         label = QLabel()
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setPixmap(pix)
         scroll.setWidget(label)
         layout.addWidget(scroll)
-        # 4. 大小: 不超过屏幕 85%, 但不小于 320, 看原图大小自动适配
         try:
             screen = (
                 QApplication.primaryScreen().availableGeometry()
@@ -2504,11 +2501,17 @@ class ChatWindow(QWidget):
             dlg.resize(target_w, target_h)
         except Exception:
             dlg.resize(640, 480)
-        # 5. Esc 关闭 + 鼠标点关闭 (PyQt5 默认 QDialog Esc 关闭)
+        dlg.destroyed.connect(self._on_image_popup_closed)
+        dlg.show()
+
+    def _on_image_popup_closed(self, *_args) -> None:
+        """图片预览关闭后强制 chat_view 重绘,避免文档资源释放导致空白。"""
         try:
-            dlg.exec_()
-        except Exception:
-            dlg.show()
+            if hasattr(self, "chat_view") and self.chat_view is not None:
+                self.chat_view.viewport().update()
+                self.chat_view.document().setHtml(self.chat_view.toHtml())
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_tool(self, name: str, args: str, result: str) -> None:
         """一次工具调用完成：在当前气泡里追加一行工具记录。"""

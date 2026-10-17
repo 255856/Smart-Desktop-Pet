@@ -14,7 +14,7 @@ from app.core.qt_compat import (
     QDragMoveEvent, QDropEvent, QEvent, QHBoxLayout, QLabel, QMenu,
     QMouseEvent, QPainter, QPainterPath, QPixmap, QPoint, QProgressBar,
     QRegion, QSize, Qt, QTimer, QWidget, QVBoxLayout, Signal, QLineEdit,
-    QGraphicsDropShadowEffect, QTransform, QWheelEvent, QFrame,
+    QGraphicsDropShadowEffect, QTransform, QFrame,
     event_global_pos, event_local_pos,
 )
 from app.animation.animations import Animation, Frame
@@ -254,8 +254,6 @@ class PetWindow(QWidget):
         self._frame_timer: Optional[QTimer] = None
 
         self._build_window(always_on_top)
-        self._setup_scale_osd()
-        # wheel hook 默认不装（需要时调 self._setup_wheel_hook()）
         # 默认播放待机
         self.animator.set_idle()
         # 立即显示第一帧并启动帧计时器
@@ -673,8 +671,6 @@ class PetWindow(QWidget):
 
     def hideEvent(self, evt) -> None:
         """隐藏（托盘）时暂停 live2d 渲染循环 + 所有常驻定时器：零 GPU/CPU 开销。"""
-        if getattr(self, "_wheel_hook", None) is not None:
-            self._wheel_hook.uninstall()
         pause = getattr(self.renderer, "pause", None)
         if callable(pause):
             pause()
@@ -683,8 +679,6 @@ class PetWindow(QWidget):
 
     def showEvent(self, evt) -> None:
         """重新显示时恢复渲染循环 + 常驻定时器。"""
-        if getattr(self, "_wheel_hook", None) is not None:
-            self._wheel_hook.install()
         resume = getattr(self.renderer, "resume", None)
         if callable(resume):
             resume()
@@ -797,11 +791,6 @@ class PetWindow(QWidget):
                 self.mouseDoubleClickEvent(mapped)
                 return True
             return False
-
-        # 滚轮缩放：delegate 全屏覆盖，顶层 wheelEvent 收不到，这里代为处理
-        if isinstance(evt, QWheelEvent):
-            self._handle_scale_wheel(evt)
-            return True
 
         # 文件拖拽：delegate/view/PetWindow 坐标完全重合，可直接转发原事件
         if isinstance(evt, QDragEnterEvent):
@@ -1075,152 +1064,9 @@ class PetWindow(QWidget):
             self._idle_mask_stopped = False
             self._mask_timer.start(1500)
 
-    # ---------- 滚轮 / 菜单缩放 ----------
-    def _setup_wheel_hook(self) -> None:
-        """非激活时也能滚轮缩放：挂 WH_MOUSE_LL 低级钩子。"""
-        self._wheel_hook = None
-        if sys.platform != "win32":
-            return
-        try:
-            from app.ui.wheel_hook import WheelHook
-            self._wheel_hook = WheelHook(self._on_global_wheel)
-        except Exception:  # noqa: BLE001
-            log.exception("滚轮钩子初始化失败")
-            self._wheel_hook = None
-
-    def _on_global_wheel(self, x: int, y: int, dy: int, dx: int) -> bool:
-        """低级钩子回调：鼠标在角色上（透明区由 WindowFromPoint 返回下层窗口、
-        天然不命中）时消费滚轮做缩放，返回 True 吞掉；否则放行给前台窗口。"""
-        if not self.isVisible() or dy == 0:
-            return False
-        try:
-            import ctypes
-            from ctypes import wintypes
-            u = ctypes.windll.user32
-            hwnd_under = u.WindowFromPoint(wintypes.POINT(x, y))
-            if not hwnd_under:
-                return False
-            own = int(self.winId())
-            if hwnd_under != own and not u.IsChild(own, hwnd_under):
-                return False
-            target = self._scale + (dy / 120.0) * self.SCALE_STEP
-            anchor = QPoint(x, y)
-            # 投递到事件循环，避免在钩子回调里直接 resize（低级钩子要求快速返回）
-            QTimer.singleShot(0, lambda: self._zoom_to(target, anchor_global=anchor))
-            return True
-        except Exception:  # noqa: BLE001
-            log.exception("滚轮缩放钩子处理失败")
-            return False
-
-    def _setup_scale_osd(self) -> None:
-        """缩放时的 OSD（深色圆角卡片：百分比 + 进度条），停在角色头顶上方。"""
-        self._scale_osd = QFrame(self)
-        self._scale_osd.setObjectName("scale_osd")
-        self._scale_osd.setStyleSheet("""
-            QFrame#scale_osd {
-                background: rgba(47, 43, 69, 0.92);
-                border: 1px solid rgba(255,255,255,0.20);
-                border-radius: 14px;
-            }
-            QLabel#scale_osd_pct {
-                color: #ffffff; font-size: 15px; font-weight: 700;
-                background: transparent;
-            }
-            QProgressBar#scale_osd_bar {
-                background: rgba(255,255,255,0.18);
-                border: none; border-radius: 4px; height: 6px;
-            }
-            QProgressBar#scale_osd_bar::chunk {
-                border-radius: 4px;
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #a78bfa, stop:1 #7c6cf0);
-            }
-        """)
-        lay = QVBoxLayout(self._scale_osd)
-        lay.setContentsMargins(16, 10, 16, 12)
-        lay.setSpacing(6)
-        self._scale_osd_pct = QLabel("100%")
-        self._scale_osd_pct.setObjectName("scale_osd_pct")
-        self._scale_osd_pct.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._scale_osd_pct)
-        self._scale_osd_bar = QProgressBar()
-        self._scale_osd_bar.setObjectName("scale_osd_bar")
-        self._scale_osd_bar.setRange(int(self.SCALE_MIN * 100),
-                                    int(self.SCALE_MAX * 100))
-        self._scale_osd_bar.setTextVisible(False)
-        self._scale_osd_bar.setFixedHeight(6)
-        self._scale_osd_bar.setFixedWidth(120)
-        lay.addWidget(self._scale_osd_bar)
-        self._scale_osd.hide()
-        self._scale_osd_timer = QTimer(self)
-        self._scale_osd_timer.setSingleShot(True)
-        self._scale_osd_timer.timeout.connect(self._scale_osd.hide)
-
-    def wheelEvent(self, evt: QWheelEvent) -> None:
-        """sprite 模式滚轮直接到顶层；live2d 模式由 eventFilter 转发到这里。"""
-        self._handle_scale_wheel(evt)
-        evt.accept()
-
-    def _handle_scale_wheel(self, evt: QWheelEvent) -> None:
-        delta = evt.angleDelta().y()
-        if delta == 0:
-            return
-        # 兼容 Qt5(globalPos) / Qt6(globalPosition)
-        if hasattr(evt, "globalPosition"):
-            gp = evt.globalPosition().toPoint()
-        else:
-            gp = evt.globalPos()
-        steps = delta / 120.0
-        self._zoom_to(self._scale + steps * self.SCALE_STEP, anchor_global=gp)
-
-    def _zoom_to(self, scale: float, anchor_global: Optional[QPoint] = None) -> None:
-        """缩放到指定值。anchor_global 为鼠标全局位置：缩放后该点保持在原地
-        （即「缩放在我指的地方」），不提供锚点时窗口左上角不动。
-
-        即使已到边界（尺寸没变化）也弹 OSD，给出「到极限了」的反馈。
-        """
-        new_scale = max(self.SCALE_MIN,
-                        min(self.SCALE_MAX, round(float(scale) / self.SCALE_STEP) * self.SCALE_STEP))
-        if abs(new_scale - self._scale) >= 0.001:
-            old_w, old_h = max(1, self.width()), max(1, self.height())
-            ax = ay = None
-            if anchor_global is not None:
-                tl = self.frameGeometry().topLeft()
-                ax = (anchor_global.x() - tl.x()) / old_w
-                ay = (anchor_global.y() - tl.y()) / old_h
-            self.apply_display_size(new_scale)
-            if anchor_global is not None and ax is not None and ay is not None:
-                self.move(int(anchor_global.x() - ax * self.width()),
-                          int(anchor_global.y() - ay * self.height()))
-            self.scale_changed.emit(new_scale)
-        # 必须在 resize 之后定位，否则会用旧窗口宽度算居中，OSD 跑到边缘
-        self._show_scale_osd(new_scale)
-
-    def _show_scale_osd(self, scale: Optional[float] = None) -> None:
-        sc = self._scale if scale is None else scale
-        pct = int(round(sc * 100))
-        self._scale_osd_pct.setText(f"{pct}%")
-        self._scale_osd_bar.setValue(pct)
-        self._scale_osd.adjustSize()
-        x = (self.width() - self._scale_osd.width()) // 2
-        y = int(self.height() * 0.14)
-        self._scale_osd.move(max(0, x), max(0, y))
-        self._scale_osd.raise_()
-        self._scale_osd.show()
-        self._scale_osd_timer.start(800)
-
-    def _zoom_step(self, direction: int) -> None:
-        """右键菜单：direction=+1 放大 / -1 缩小（以窗口中心为锚点）。"""
-        gp = self.frameGeometry().center()
-        self._zoom_to(self._scale + direction * self.SCALE_STEP, anchor_global=gp)
-
-    def _zoom_preset(self, scale: float) -> None:
-        """右键菜单：直接跳到预设比例（以窗口中心为锚点）。"""
-        self._zoom_to(scale, anchor_global=self.frameGeometry().center())
-
-    def _zoom_reset(self) -> None:
-        """右键菜单：还原默认大小。"""
-        self._zoom_preset(self.SCALE_DEFAULT)
+    # ---------- 缩放入口 ----------
+    # 桌宠本体不再做滚轮 / 右键缩放，缩放只能通过设置面板调整。
+    # 实际缩放走 apply_display_size + scale_changed 信号 → ui_controller 持久化。
 
     # 点击穿透遮罩的降采样倍率（1/4 后 numpy 运算量变 1/16）
     MASK_DOWN = 4
@@ -1658,29 +1504,6 @@ class PetWindow(QWidget):
         act_settings.triggered.connect(self._emit_open_settings)
         menu.addAction(act_settings)
 
-        # 大小：滚轮缩放之外，给不会用滚轮的用户一个可见入口（与滑块同范围）
-        size_menu = menu.addMenu("大小")
-        cur = QAction(f"当前 {int(round(self._scale * 100))}%（滚轮也可缩放）", self)
-        cur.setEnabled(False)
-        size_menu.addAction(cur)
-        size_menu.addSeparator()
-        a_zoom_in = QAction("放大", self)
-        a_zoom_in.triggered.connect(lambda: self._zoom_step(1))
-        size_menu.addAction(a_zoom_in)
-        a_zoom_out = QAction("缩小", self)
-        a_zoom_out.triggered.connect(lambda: self._zoom_step(-1))
-        size_menu.addAction(a_zoom_out)
-        a_zoom_reset = QAction("还原默认", self)
-        a_zoom_reset.triggered.connect(self._zoom_reset)
-        size_menu.addAction(a_zoom_reset)
-        size_menu.addSeparator()
-        for pct in (30, 50, 75, 100):
-            sc = pct / 100.0
-            a = QAction(f"{pct}%", self)
-            a.setCheckable(True)
-            a.setChecked(abs(sc - self._scale) < 0.001)
-            a.triggered.connect(lambda _=False, s=sc: self._zoom_preset(s))
-            size_menu.addAction(a)
         menu.addSeparator()
 
         emo_menu = menu.addMenu("切换表情")

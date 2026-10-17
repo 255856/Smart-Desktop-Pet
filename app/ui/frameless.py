@@ -25,37 +25,40 @@ def _cursor_for_edge(edges: "Qt.Edges"):
 
 
 class FramelessResizer(QObject):
-    """给无边框 QWidget 加上 8 方向边缘缩放。"""
+    """给无边框 QWidget 加上 8 方向边缘缩放。
 
-    def __init__(self, win: QWidget, edge: int = 7):
+    只在 root 窗口装一次事件过滤器，不再递归到子控件；
+    MouseMove 用 30ms 节流，光标状态走 cache 避免重复 setOverrideCursor；
+    manual 缩放期间临时禁用 shadow effect / 透明背景以避免每帧重绘阴影。
+    """
+
+    EDGE = 10  # 边缘感应宽度（像素）
+
+    def __init__(self, win: QWidget):
         super().__init__(win)
         self._win = win
-        self._edge = edge
         self._attached = False
         # 手动缩放兜底状态：(edges, 初始几何, 按下全局点)；None 表示走系统缩放
         self._manual = None
-        self._cursor_key = -1  # 当前 override 光标对应的 edges 位
+        self._cursor_key = -1
+        self._last_move_ms = 0
+        # 手动缩放节流：~33ms 最多 setGeometry 一次（30fps，肉眼跟手）
+        self._last_apply_ms = 0
+        # manual 缩放期间被临时禁用的 effect / flags
+        self._saved_effects: list[tuple] = []
 
-    # ---- 安装 ----
     def attach(self) -> "FramelessResizer":
         if self._attached:
             return self
         self._attached = True
-        self._install(self._win)
+        self._win.setMouseTracking(True)
         self._win.installEventFilter(self)
         return self
-
-    def _install(self, w: QWidget) -> None:
-        w.setMouseTracking(True)
-        w.installEventFilter(self)
-        for child in w.findChildren(QWidget):
-            child.setMouseTracking(True)
-            child.installEventFilter(self)
 
     # ---- 边缘命中 ----
     def _edge_at(self, gpos: QPoint):
         r = self._win.frameGeometry()
-        m = self._edge
+        m = self.EDGE
         x, y = gpos.x(), gpos.y()
         edges = Qt.Edges()
         if x <= r.left() + m:
@@ -80,6 +83,41 @@ class FramelessResizer(QObject):
         if shape is not None:
             QApplication.setOverrideCursor(shape)
 
+    # ---- 缩放期视觉优化 ----
+    def _freeze_heavy_paint(self) -> None:
+        """缩放期间临时禁用 shadow effect + 透明背景。
+
+        QGraphicsDropShadowEffect(blurRadius=48) 每次 resize 都重绘模糊阴影，
+        是 frameless 窗口拖动卡顿的主要开销。缩放结束（release）时 _thaw 恢复。
+        """
+        if self._saved_effects:
+            return
+        # 禁用所有子控件的 GraphicsEffect
+        for w in self._win.findChildren(QWidget):
+            fx = w.graphicsEffect()
+            if fx is not None:
+                self._saved_effects.append((w, fx))
+                w.setGraphicsEffect(None)
+        # 临时关掉透明背景 —— 缩放期间不需要 alpha 通道，重绘路径更短
+        if self._win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            self._saved_effects.append(
+                ("translucent", Qt.WidgetAttribute.WA_TranslucentBackground))
+            self._win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+    def _thaw_heavy_paint(self) -> None:
+        if not self._saved_effects:
+            return
+        for item in self._saved_effects:
+            if isinstance(item, tuple) and item[0] == "translucent":
+                self._win.setAttribute(item[1], True)
+            else:
+                w, fx = item
+                try:
+                    w.setGraphicsEffect(fx)
+                except RuntimeError:
+                    pass  # widget 已销毁
+        self._saved_effects.clear()
+
     # ---- 手动缩放兜底 ----
     def _manual_move(self, gpos: QPoint, press0: QPoint, geo0) -> None:
         dx = gpos.x() - press0.x()
@@ -89,7 +127,6 @@ class FramelessResizer(QObject):
         width, height = geo0.width(), geo0.height()
         min_w = self._win.minimumWidth()
         min_h = self._win.minimumHeight()
-        # 左/上边缘：移动 origin 并反向改宽高，缩到最小时锁定 origin
         if edges & Qt.LeftEdge:
             width = width - dx
             if width < min_w:
@@ -104,7 +141,6 @@ class FramelessResizer(QObject):
                 height = min_h
             else:
                 top = geo0.top() + dy
-        # 右/下边缘：只改宽高
         if edges & Qt.RightEdge:
             width = width + dx
             if width < min_w:
@@ -117,41 +153,50 @@ class FramelessResizer(QObject):
 
     # ---- 事件 ----
     def eventFilter(self, obj, ev):  # noqa: C901
-        t = ev.type()
-        # 动态子控件（QScrollArea / Tab 切换后才创建的控件）
-        if t == QEvent.Type.ChildAdded:
-            child = getattr(ev, "child", None)
-            if isinstance(child, QWidget):
-                self._install(child)
+        if obj is not self._win:
             return False
+        t = ev.type()
 
         if t == QEvent.Type.MouseButtonPress and \
                 ev.button() == Qt.MouseButton.LeftButton:
             edges = self._edge_at(event_global_pos(ev))
             if edges:
-                # 先准备好手动兜底数据
                 self._manual = (edges, self._win.geometry(),
                                 event_global_pos(ev))
                 if self._do_system_resize(edges):
                     self._manual = None
-                return True  # 命中边缘：吞掉，标题拖拽不再触发
+                else:
+                    # 走 manual 路径：先冻结 shadow / 透明背景以提速
+                    self._freeze_heavy_paint()
+                return True
             return False
 
         if t == QEvent.Type.MouseMove:
             if self._manual is not None and \
                     (ev.buttons() & Qt.MouseButton.LeftButton):
                 edges, geo0, press0 = self._manual
+                now_ms = getattr(ev, "timestamp", lambda: 0)()
+                if now_ms - self._last_apply_ms < 33:
+                    return True
+                self._last_apply_ms = now_ms
                 self._manual_move(event_global_pos(ev), press0, geo0)
                 return True
-            # 非拖拽：仅更新光标
+            # 非拖拽：节流更新光标
+            now_ms = getattr(ev, "timestamp", lambda: 0)()
+            if now_ms - self._last_move_ms < 30:
+                return False
+            self._last_move_ms = now_ms
             self._set_cursor(self._edge_at(event_global_pos(ev)))
             return False
 
         if t == QEvent.Type.MouseButtonRelease and self._manual is not None:
             self._manual = None
+            # 恢复 shadow / 透明背景，触发一次完整重绘
+            self._thaw_heavy_paint()
+            self._win.update()
             return True
 
-        if t == QEvent.Type.Leave and obj is self._win:
+        if t == QEvent.Type.Leave:
             self._set_cursor(None)
         return False
 
