@@ -115,6 +115,15 @@ _ANTI_HALLUCINATION_SUFFIX = """
 - 调用工具前，先看清实参。调用后，根据返回值告诉主人结果。
 - 如果已记住主人说过某事，可以引用；如果仅仅是「可能」，说「我不确定」。
 
+【v26: 工具结果诚实回报】(主人 12:30+ 实测多次 LLM 拿到真实数据却回 "看不到" / "没运行" / "需要启动 X")
+- 工具返回的内容（content 字段）是**真实事件**。哪怕工具返回的文字里说"未找到"/"未运行"/
+  "超时" 等, 那也是工具的结果 —— 直接转告主人, 不要自己再编一段"看不到主人..."
+- **已成功调过工具拿到返回值 → 不要再返回 "aw-server 没运行" / "网络不行" / "数据是空的"
+  这种编出来的失败话**. 如果工具真的返回"未运行", 把那句话原样告诉主人.
+- 工具返回的 `过去 X 分钟的窗口活动` 列表 ≠ 空结果 → 这是成功, 要把内容告诉主人.
+- 主人问 "我刚才在干嘛" → 必须真的调 aw_get_recent_activities / aw_get_current_window,
+  不要凭想象编 "主人可能在写代码吧" 这种无信息量的回答.
+
 【高风险工具 confirm 协议】
 """ + _RISKY_PROMPT_FRAGMENT
 
@@ -705,10 +714,133 @@ class RiskyToolConfirm:
         return _confirm_middleware
 
 
+# v34 (2026-10-17): post-LLM 拦截器。
+# 主人实测 12:34 / 12:40 / 12:52 LLM 仍 preemptive 问"要确认一下", 即便
+# prompt 顶部 directive (v33) + 末尾 override (v31) + confirm 协议改写
+# (v32) 都失败 —— 这是第 6 次同样问题。切思路: 不依赖 LLM 听话, 在
+# model response 后改写。
+#
+# 思路 (跟 RiskyToolConfirm 同模式, 状态外部注入, wrap_model_call 拦截):
+#   1. 状态差 (mood/sat/favor 至少一项 LOW) 才拦截, 状态好直通
+#   2. LLM 输出文本含 preemptive 问措辞 ("要确认一下" / "要执行 X 吗" /
+#      "确定的话...就帮" / "确定就" / "真的要") 才拦截, 正常回复直通
+#   3. 命中 → 改写 response.content = 拒绝文案 ("我状态不好..."),
+#      清掉 response.tool_calls (避免 LLM 后面真调高危工具)
+#   4. 不依赖 LLM 听指令, 100% 拦截
+class PostLLMStateGuard:
+    """post-LLM 拦截器: 状态差时, LLM 输出 preemptive 问 → 改写为拒绝。
+
+    v34: prompt 工程走到极限 (v30-v33 五个版本), 实测 LLM 仍 preemptive 问。
+    这层在 model response 出来后、tool 执行前兜底, 不让 preemptive 文案
+    走到 UI。清掉 tool_calls 也保证高危工具不被真调。
+
+    使用:
+      guard = PostLLMStateGuard()
+      guard.set_companion_state(pet_state)   # 状态变更后同步
+      middlewares.append(guard.as_middleware())
+    """
+
+    # 触发拦截的 preemptive 问措辞
+    PREEMPTIVE_PATTERNS = (
+        "要确认一下", "要执行", "确定的话", "真的要",
+        "确定就", "可以吗", "真的可以", "还是要执行",
+        "是否执行", "要不要", "是否确认",
+    )
+
+    # 已拒绝的安全措辞 (避免误伤"我状态不好"等真拒绝回复)
+    REFUSAL_PATTERNS = (
+        "我状态不好", "这次帮不了", "让我先休息",
+        "拒绝执行", "帮不了", "做不到",
+    )
+
+    REFUSAL_TEXT = (
+        "我状态不好, 这次帮不了主人, 让我先休息一下~ "
+        "等主人喂我/陪我玩, 心情/饱食恢复了再来找我吧。"
+    )
+
+    def __init__(self) -> None:
+        self._companion_state: Optional["PetState"] = None
+
+    def set_companion_state(self, pet_state: "Optional[PetState]") -> None:
+        """v34: 注入 (或清除) 当前桌宠 PetState。"""
+        self._companion_state = pet_state
+
+    def _state_is_bad(self) -> bool:
+        if self._companion_state is None:
+            return False
+        try:
+            q = self._companion_state.quantize()
+            mood_v = q.get("mood", "MID")
+            sat_v = q.get("satiety", "MID")
+            favor_v = q.get("favor", "MID")
+            return (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW")
+        except Exception:
+            return False
+
+    @classmethod
+    def _looks_like_preemptive_ask(cls, text: str) -> bool:
+        """检测 LLM 输出是否在 preemptive 问主人。
+
+        二次过滤: 已经包含真拒绝措辞 ("我状态不好" 等) 不算 preemptive,
+        避免误伤本来就拒绝了的回复。
+        """
+        if not text:
+            return False
+        for kw in cls.REFUSAL_PATTERNS:
+            if kw in text:
+                return False
+        for kw in cls.PREEMPTIVE_PATTERNS:
+            if kw in text:
+                return True
+        return False
+
+    def as_middleware(self):
+        """返回 LangChain wrap_model_call 兼容的中间件实例。"""
+        from langchain.agents.middleware import wrap_model_call
+
+        outer = self
+
+        @wrap_model_call
+        async def _post_llm_guard(request, handler):
+            response = await handler(request)
+
+            # 状态好 → 直通, 不影响正常 confirm 流程
+            if not outer._state_is_bad():
+                return response
+
+            # 拿到 LLM 输出的文本
+            content = getattr(response, "content", "")
+            if isinstance(content, list):
+                # 多模态 content_blocks: 拼成字符串
+                content = " ".join(str(c) for c in content)
+            text = str(content) if content else ""
+
+            # 没 preemptive 问 → 直通 (例如 LLM 已经在拒绝, 不动)
+            if not outer._looks_like_preemptive_ask(text):
+                return response
+
+            # 命中: 改写为拒绝文案 + 清掉 tool_calls
+            try:
+                response.content = outer.REFUSAL_TEXT
+            except Exception:
+                pass
+            try:
+                response.tool_calls = []
+            except Exception:
+                pass
+            log.warning(
+                "PostLLMStateGuard: state 差 + LLM preemptive 问, 改写为拒绝文案"
+            )
+            return response
+
+        return _post_llm_guard
+
+
 __all__ = [
     "build_hallucination_middlewares",
     "_RISKY_TOOLS",
     "_CONFIRM_KEY",
     "_prune_orphan_tool_messages",
     "RiskyToolConfirm",
+    "PostLLMStateGuard",
 ]
