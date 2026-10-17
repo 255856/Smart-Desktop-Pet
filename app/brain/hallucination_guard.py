@@ -116,6 +116,14 @@ def _strategy_guidance(state) -> str:
       - 心情低 → 倾向保守 (简短回复, 一次只走一步)
       - 饱食低 → 优先完成核心, 不走长链路
 
+    v30 主人 2026-10-17 12:08 反馈 "状态低她还是会调用 lock_screen" — 之前
+    策略层只让 LLM "简短回复", 没明确 "状态差时拒绝危险工具". LLM 仍按
+    反幻觉基线 "危险工具要 confirm 一次" 的规则, preemptive 问确认
+    ("要确认一下"). 主人期望: 桌宠状态低时, LLM 直接说"我状态不好,
+    这次帮不了你" (甚至不要 confirm), 不调用工具. 强化: state 差 +
+    危险工具 (lock_screen / kill_process / shutdown / run_script 等)
+    → LLM 必须**直接拒绝**, 不要走 confirm 流程.
+
     state=None 走 fallback 保守 (无状态注入), 不影响 persona.
     PetState 字段缺失 / 越界 → 静默, 不注入策略块.
     """
@@ -124,12 +132,14 @@ def _strategy_guidance(state) -> str:
     try:
         sat_v = float(getattr(state, "strength_food", 50.0))
         mood_v = float(getattr(state, "feeling", 50.0))
+        fav_v = float(getattr(state, "likability", 0.0))
         lvl = int(getattr(state, "level", 1))
     except Exception:
         return ""
 
     sat = "HIGH" if sat_v > 67 else ("LOW" if sat_v < 33 else "MID")
     mood = "HIGH" if mood_v > 67 else ("LOW" if mood_v < 33 else "MID")
+    favor = "HIGH" if fav_v > 67 else ("LOW" if fav_v < 33 else "MID")
 
     parts: list[str] = []
     if mood == "LOW":
@@ -144,6 +154,26 @@ def _strategy_guidance(state) -> str:
     if lvl >= 15:
         parts.append("桌宠等级已高, 你可以自主做主人授权过的小决定, "
                     "避免每个细节都问.")
+
+    # v30: 状态差时 (mood LOW / sat LOW / favor LOW), LLM 必须**直接拒绝
+    # 危险工具**, 不要按反幻觉基线"危险工具要 confirm 一次"流程
+    # preemptive 问确认. 主人 12:08 反馈"状态低她还是会调 lock_screen"
+    # 就是要让 LLM 看到此段后, 在状态差时:
+    #   1. 不调危险工具 (lock_screen / kill_process / shutdown / run_script 等)
+    #   2. 直接说"我状态不好, 这次帮不了你, 等我恢复了再帮"
+    # 3. 即使主人坚持, 也**继续拒绝** (不像普通 dangerous 时 confirm 一次
+    #      就放行). 中间件兜底: 主人硬逼的话, 工具被 REJECT, LLM 看到
+    #      rejected_by_companion 应该承认"桌宠坚持拒绝".
+    bad_state = (mood == "LOW" or sat == "LOW" or favor == "LOW")
+    if bad_state:
+        parts.append(
+            "【重要】桌宠当前状态差 (心情/饱食/好感至少一项 LOW), "
+            "对**高风险工具** (lock_screen / kill_process / shutdown_computer / "
+            "run_script / send_email / 任何 _RISKY_TOOLS 集合里的工具) "
+            "必须**直接拒绝** (例如: 「我状态不好, 这次帮不了主人, "
+            "让我先休息一下」), 不要走「危险工具要 confirm 一次」的 "
+            "反幻觉流程, 不要 preemptive 问「要确认一下」。"
+            "直接说不, 不调用工具, 不要求主人确认。")
 
     if not parts:
         return ""
@@ -381,6 +411,9 @@ class RiskyToolConfirm:
 
         注意: companion_policy 在 PetState 未知字段上抛, 这里 try/except 兜底,
         出错就返 None (走 fallback 而非崩溃中间件)。
+
+        v23-1: 每次查表都 trace 决策到 data/companion_log.txt (一行 JSON),
+        让 trace 页能直接 grep "set_brightness 当时 state 是什么 / 决策是什么"。
         """
         if self._companion_state is None:
             return None
@@ -388,7 +421,28 @@ class RiskyToolConfirm:
             return None
         try:
             from app.brain.companion_policy import lookup_decision
-            return lookup_decision(self._companion_state, tool_name)
+            state = self._companion_state
+            d = lookup_decision(state, tool_name)
+            # v23-1 trace: 不传 sat/mood/level 也能算 (companion_policy 内部 quantize);
+            # 不过双量化一份 log 主人看着舒服 (state 跟 quantize 的映射)
+            try:
+                from app.engine.tools._risk import risk_for_tool
+                risk_int = risk_for_tool(tool_name, default=2)
+                q = state.quantize()
+                thread_id = (
+                    getattr(state, "_owner_thread_id", None) or "default"
+                )  # PetState 没 thread_id attr; 用 'default' 占位
+                from app.brain._companion_log import trace_decision
+                trace_decision(
+                    thread_id=thread_id,
+                    tool=tool_name,
+                    risk=risk_int,
+                    decision=d or "FALLBACK",
+                    sat=q["satiety"], mood=q["mood"], level=q["level"],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return d
         except Exception as e:  # noqa: BLE001
             log.warning("RiskyToolConfirm: 查表失败, 走 fallback: %s", e)
             return None

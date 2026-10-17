@@ -3705,3 +3705,56 @@ def test_v29_ast_guard_dev_state_pushed_force_write_sync():
         print("[OK] v29 AST 守卫: dev_state_pushed 立即 write_sync 落盘")
         return
     raise AssertionError("_on_dev_state_pushed 函数未找到")
+
+
+def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
+    """v30: 主人 2026-10-17 12:08 反馈 '状态低她还是会调 lock_screen'.
+    之前 _strategy_guidance 在 state 差时只让 LLM '简短回复', 没明确
+    '状态差时拒绝危险工具', LLM 仍按反幻觉基线 preemptive 问确认
+    ('要确认一下'). 修法: state 差时 (mood/sat/favor 任一 LOW),
+    _strategy_guidance 必须明确告诉 LLM 直接拒绝危险工具, 不走
+    confirm 流程.
+    """
+    from app.brain.hallucination_guard import _strategy_guidance
+    from app.engine.state import PetState
+
+    # 1. state=全 LOW: 必须有「直接拒绝」指令
+    state = PetState()
+    state.feeling = 0; state.strength = 0; state.strength_food = 0
+    state.strength_drink = 0; state.likability = 0; state.health = 0
+    state.normalize()
+    guidance = _strategy_guidance(state)
+    assert "直接拒绝" in guidance or "必须**直接拒绝**" in guidance, (
+        "v30 regression: state=全 LOW 时, _strategy_guidance 必须明确告诉 "
+        "LLM 直接拒绝危险工具. 实际 guidance:\n" + guidance
+    )
+    # 必须有 lock_screen / 危险工具关键词
+    assert "lock_screen" in guidance or "_RISKY_TOOLS" in guidance, (
+        "v30 regression: 拒绝指令必须点名具体危险工具 (如 lock_screen). "
+        "实际: " + guidance
+    )
+    # 必须有"不要 confirm / 不要 preemptive 问确认"
+    assert "不要走" in guidance or "不要 preemptive" in guidance, (
+        "v30 regression: 必须明确说 LLM 不要走 confirm 流程. 实际: "
+        + guidance
+    )
+
+    # 2. state 全 HIGH: 不应有「直接拒绝」指令 (状态好, 仍可走 confirm 流程)
+    state2 = PetState()
+    state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
+    state2.normalize()
+    guidance2 = _strategy_guidance(state2)
+    assert "直接拒绝" not in guidance2, (
+        "v30: state 全 HIGH 时不应有「直接拒绝」指令 (会误伤正常 confirm 流程). "
+        "实际: " + guidance2
+    )
+
+    # 3. state 心情 LOW 但其它 HIGH: 仍应有拒绝指令 (bad_state = 任一 LOW)
+    state3 = PetState()
+    state3.feeling = 0; state3.strength_food = 100; state3.likability = 100
+    state3.normalize()
+    guidance3 = _strategy_guidance(state3)
+    assert "直接拒绝" in guidance3, (
+        "v30: 心情 LOW 时也要触发拒绝指令. 实际: " + guidance3
+    )
+    print("[OK] v30: _strategy_guidance 状态差时直接拒绝危险工具")
