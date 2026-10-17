@@ -41,6 +41,8 @@ class VoiceProfile(BaseModel):
 class CharacterConfig(BaseModel):
     name: str = "鲸鱼娘"
     persona: str = ""
+    # 角色文件路径 (相对项目根, e.g. "characters/xiaoxi.yaml")
+    character_file: str = "characters/xiaoxi.yaml"
     tts_enabled: bool = True
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     # 语音引擎：edge=Microsoft edge-tts（免费）| minimax=MiniMax 声音克隆
@@ -246,12 +248,39 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _load_character_yaml(project_root: Path, rel_path: str) -> dict:
+    """从 characters/<file>.yaml 读人设。返 dict 含 name / persona,
+    没读到返 {} (load_config 会保留 cfg 默认值, 并打 warning)。
+    """
+    if not rel_path:
+        return {}
+    char_path = Path(rel_path)
+    if not char_path.is_absolute():
+        char_path = project_root / char_path
+    if not char_path.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(char_path.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        log.warning("读 character yaml 失败 %s: %s", char_path, e)
+        return {}
+    char_block = raw.get("character") or {}
+    return {
+        k: v for k, v in char_block.items()
+        if k in ("name", "persona") and isinstance(v, str)
+    }
+
+
 def load_config(path: str | Path = "config.yaml") -> Config:
     """读取 YAML 配置（.env 由 BaseSettings 自动加载，环境变量优先级最高）。
 
     字段缺失时用 BaseModel 默认值兜底。
+
+    读 config.yaml 后, 再读 cfg.character.character_file 指向的 yaml,
+    用里面的 name / persona 覆盖 cfg.character。character_file 缺失 / 解析
+    失败时静默 fallback (保留 config.yaml / 默认值), 不阻断启动。
     """
-    p = Path(path)
+    p = Path(path).resolve()
     raw: dict[str, Any] = {}
     if p.is_file():
         with p.open("r", encoding="utf-8") as f:
@@ -259,6 +288,18 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
     cfg = Config(_env_file=os.environ.get("DSH_DOTENV_PATH", ".env") if p.is_file() else None)
     merged = _deep_merge(cfg.model_dump(), raw)
+    if "character" not in merged:
+        merged["character"] = {}
+    # 从 character_file 读人设, override name / persona
+    project_root = p.parent
+    char_file = merged["character"].get("character_file") or cfg.character.character_file
+    char_yaml = _load_character_yaml(project_root, char_file)
+    if char_yaml:
+        merged["character"].update(char_yaml)
+    else:
+        if char_file:
+            log.warning("character_file=%s 读不到 / 没 name+persona, 走 config.yaml 兜底",
+                        char_file)
     return Config.model_validate(merged)
 
 

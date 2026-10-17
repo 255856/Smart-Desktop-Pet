@@ -197,7 +197,7 @@ class UIController(QObject):
         sw.aw_config_changed.connect(self._on_aw_config_changed)
         sw.renderer_changed.connect(self._on_renderer_changed)
         sw.hide_watermark_changed.connect(self._on_hide_watermark_changed)
-        sw.character_changed.connect(self._on_character_changed)
+        # v30: character_changed 已删 (人设改读 yaml, 不在设置面板改)
         sw.always_on_top_changed.connect(self._on_always_on_top_changed)
         sw.save_settings_requested.connect(self._on_save_settings)
 
@@ -833,14 +833,14 @@ class UIController(QObject):
         self.pet._start_frame_timer()
 
     def _on_pet_scale_changed(self, new_scale: float) -> None:
-        """滚轮 / 右键菜单改了缩放 → 持久化 + 同步设置面板。
+        """桌宠缩放变化 → 持久化 + 同步设置面板。
 
-        窗口尺寸与锚点移动已由 PetWindow._zoom_to 完成（它先 apply_display_size
-        再 emit，所以此处 pet._scale 通常已是新值，不能用「_scale 是否变化」早退）。
+        缩放来源：设置面板的滑块 / 预设按钮（主入口）。
+        窗口尺寸调整已由 PetWindow.apply_display_size 完成（先 resize 再 emit，
+        所以此处 pet._scale 通常已是新值，不能用「_scale 是否变化」早退）。
         这里负责：sprite 帧重缩放、写 settings.json、同步滑块/标签/预设高亮。
         """
         new_scale = round(float(new_scale), 2)
-        # 兜底：信号来自未 resize 的路径时补一次（正常 _zoom_to 路径已 resize）
         if abs(self.pet._scale - new_scale) > 0.001:
             self.pet.apply_display_size(new_scale)
         self._rescale_sprite_pixmaps()
@@ -1268,20 +1268,8 @@ class UIController(QObject):
         self.settings_window.settings_store.set("hide_watermark", bool(on))
         self.settings_window._set_status("水印设置已保存，重启桌宠后生效")
 
-    def _on_character_changed(self, cfgd: dict) -> None:
-        """模型配置 Tab：角色名 / 人设（即时更新 cfg + 持久化）。"""
-        if cfgd.get("name"):
-            self.cfg.character.name = str(cfgd["name"])
-        if cfgd.get("persona"):
-            self.cfg.character.persona = str(cfgd["persona"])
-        store = self.settings_window.settings_store
-        if cfgd.get("name"):
-            store.set("character_name", str(cfgd["name"]))
-        if cfgd.get("persona"):
-            store.set("persona", str(cfgd["persona"]))
-        p = getattr(self.brain, "proactive", None)
-        if p is not None and cfgd.get("persona"):
-            p.persona = str(cfgd["persona"])
+    # v30: _on_character_changed 已删 — 人设改读 characters/<file>.yaml,
+    # 不在设置面板运行时改。重启用 load_config 读最新 yaml。
 
     def _on_always_on_top_changed(self, enabled: bool) -> None:
         """视觉 Tab：窗口置顶开关（立即生效并持久化）。"""
@@ -1376,13 +1364,8 @@ class UIController(QObject):
                         int(store.get("proactive_max_minutes", 45)))
                 if not bool(pe) and hasattr(self.brain.proactive, "stop"):
                     self.brain.proactive.stop()
-            # 角色名 / 人设
-            cn = store.get("character_name", None)
-            if cn:
-                self.cfg.character.name = str(cn)
-            ps = store.get("persona", None)
-            if ps:
-                self.cfg.character.persona = str(ps)
+            # v30: 角色名 / 人设 不再从 settings.json 读, 改从 characters/<file>.yaml
+            # load_config 启动时已读 yaml 覆盖 cfg.character, 不需要这里再补。
         except Exception:  # noqa: BLE001
             log.exception("启动应用已保存设置失败")
 

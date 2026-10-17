@@ -89,7 +89,6 @@ class SettingsWindow(QWidget):
     aw_config_changed = Signal(dict)           # {enabled, server_url, lookback, max_events}
     renderer_changed = Signal(str)             # sprite / live2d（重启生效）
     hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
-    character_changed = Signal(dict)           # {name, persona}
     developer_mode_changed = Signal(bool)      # 开发者模式开关: 开启后状态 Tab 显示 slider
     dev_state_pushed = Signal(dict)            # 开发者模式下手改数值: {strength, strength_food, ...}
 
@@ -258,7 +257,14 @@ class SettingsWindow(QWidget):
         self._resizer = FramelessResizer(self).attach()
 
     def _build_tab_status(self) -> QWidget:
+        # 状态 tab 在开启开发者模式后会塞入 dev_panel（6 sliders + 决策预览 + trace + 预设），
+        # 高度远超 tab 默认尺寸 —— 包 QScrollArea 让内容能滚。
+        scroll = QScrollArea()
+        scroll.setObjectName("status_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         page = QWidget()
+        scroll.setWidget(page)
         v = QVBoxLayout(page)
         v.setSpacing(6)
 
@@ -302,8 +308,6 @@ class SettingsWindow(QWidget):
         f = self.lbl_summary.font(); f.setBold(True); self.lbl_summary.setFont(f)
         self.lbl_summary.setStyleSheet("color:#6b6b7d; font-size:9pt; padding-top:2px;")
         gv.addWidget(self.lbl_summary)
-        # 卡片垂直居中：上下留白对称，避免内容挤在顶部、下方一大片空
-        v.addStretch(1)
         v.addWidget(g)
 
         # 开发者模式 sliders（默认隐藏，_set_developer_mode 启可见）
@@ -313,7 +317,7 @@ class SettingsWindow(QWidget):
         v.addWidget(self._dev_panel)
 
         v.addStretch(1)
-        return page
+        return scroll
 
     def _build_dev_trace_block(self, parent_layout):
         """trace 页 3 段 UI（调前量化 / 决策+命中 / 调后 Δ）。
@@ -631,9 +635,7 @@ class SettingsWindow(QWidget):
         preset_row.addStretch(1)
         gv.addLayout(preset_row)
 
-        v.addStretch(1)
         v.addWidget(g)
-        v.addStretch(1)
         return page
 
     def _set_developer_mode(self, enabled: bool) -> None:
@@ -1647,16 +1649,9 @@ class SettingsWindow(QWidget):
         gform.addRow("", self.tts_tip)
         v.addWidget(g_tts_cfg)
 
-        st_char = self._panel_state.get("character", {})
-        g_char = QGroupBox("角色设定")
-        cform = QFormLayout(g_char)
-        cform.setSpacing(8)
-        self.edit_char_name = QLineEdit(str(st_char.get("name", "")))
-        cform.addRow("角色名：", self.edit_char_name)
-        self.edit_char_persona = QLineEdit(str(st_char.get("persona", "")))
-        self.edit_char_persona.setPlaceholderText("角色人设一句话描述（聊天的系统人设会实时采用）")
-        cform.addRow("人设：", self.edit_char_persona)
-        v.addWidget(g_char)
+        # v30: 「角色设定」GroupBox (角色名 + 人设) 已删除。
+        # 人设改读 characters/<file>.yaml (config.yaml 里 character_file 字段),
+        # 改人设直接编辑 yaml + 重启 pet 生效, 设置面板不再管人设。
 
         # 新控件 → 统一发射（放在控件创建之后连接）
         self.cmb_tts_engine.currentIndexChanged.connect(self._emit_tts_config)
@@ -1667,8 +1662,6 @@ class SettingsWindow(QWidget):
         self.edit_gptsovits_ref.editingFinished.connect(self._emit_tts_config)
         self.edit_gptsovits_prompt.editingFinished.connect(self._emit_tts_config)
         self.cb_tts_enabled.toggled.connect(self._emit_tts_config)
-        self.edit_char_name.editingFinished.connect(self._emit_character)
-        self.edit_char_persona.editingFinished.connect(self._emit_character)
 
         v.addStretch(1)
         return page
@@ -2157,11 +2150,8 @@ class SettingsWindow(QWidget):
                               if hasattr(self, "cmb_default_voice") else ""),
         })
 
-    def _emit_character(self) -> None:
-        self.character_changed.emit({
-            "name": self.edit_char_name.text().strip(),
-            "persona": self.edit_char_persona.text().strip(),
-        })
+        # v30: _emit_character 已删除 — 人设改读 characters/<file>.yaml,
+        # 设置面板不再允许运行时编辑 persona / name。
 
     def _emit_proactive(self) -> None:
         lo = min(self.spin_proactive_min.value(), self.spin_proactive_max.value())
