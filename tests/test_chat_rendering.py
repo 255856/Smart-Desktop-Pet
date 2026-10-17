@@ -3284,3 +3284,91 @@ def test_v20_anchor_clicked_img_open_routes_to_popup():
     )
 
     print("[OK] v20: _on_chat_anchor_clicked img-open 路由正确")
+
+def test_v25_ast_guard_multimodal_trace_decision_not_gated():
+    """v25 修复: chat_window._run_multimodal_action 里 trace_decision 调
+    用不能被 if state is not None 这种条件守住. 之前 (v23-11 留下回归):
+    主程序没启 PetWindow / _lc_agent 没接 companion_state 时 state=None,
+    整条 multimodal 路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠
+    trace 记录".
+
+    AST 守卫: 看 _run_multimodal_action 函数体里 trace_decision 调用是否
+    被一个 if state is not None (或类似 condition) 直接包住.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "chat_window" / "__init__.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if (not isinstance(node, _ast.FunctionDef)
+                or node.name != "_run_multimodal_action"):
+            continue
+        body_src = ' '.join(_ast.dump(s) for s in node.body)
+        # 1. 必须有 trace_decision 调用
+        assert "trace_decision" in body_src, (
+            "_run_multimodal_action 必须调 trace_decision 一次, "
+            "multimodal 路径决策可观察性靠这条 trace"
+        )
+        # 2. 看每个 If 节点, 找出包 trace_decision 的 if 条件, 不能是
+        # state is not None 这种 (会随主程序启动状态而跳过 trace)
+        for sub in _ast.walk(node):
+            if not isinstance(sub, _ast.If):
+                continue
+            inner = ' '.join(_ast.dump(s) for s in sub.body)
+            if "trace_decision" not in inner:
+                continue
+            test_src = _ast.dump(sub.test)
+            # 禁掉的 gate 形态: state is not None / state is not None
+            # / state is None 取反 / lc_agent 非空 (取反 / 正向均可, 但
+            # 都不能完全 skip trace_decision 这一侧)
+            assert "state" not in test_src or " is None" not in test_src, (
+                "v25 regression: _run_multimodal_action.trace_decision 不能 "
+                f"被 state is not None 这种条件 gate 住. 守卫 AST: {test_src}"
+            )
+            assert "companion_state" not in test_src, (
+                "v25 regression: trace_decision 不能被 companion_state "
+                "条件 gate 住. 守卫 AST: " + test_src
+            )
+        # 3. multimodal_path source 字符串也必须在 (dashboard / 调试可识别)
+        # AST dump 不直接展示字符串字面量, 走一遍 Constant 节点 value 字段
+        # 比字面量匹配可靠.
+        def _collect_string_consts(n: "_ast.AST") -> list[str]:
+            out: list[str] = []
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str):
+                out.append(n.value)
+            for child in _ast.iter_child_nodes(n):
+                out.extend(_collect_string_consts(child))
+            return out
+        all_strings = _collect_string_consts(node)
+        assert "multimodal_path" in all_strings, (
+            "_run_multimodal_action 写 trace_decision 必须 source='multimodal_path'. "
+            f"函数体内出现过的字符串常量: {all_strings}"
+        )
+        print("[OK] v25 AST 守卫: multimodal trace_decision 不再 gate 在 state 上")
+        return
+    raise AssertionError("_run_multimodal_action 函数未找到")
+
+
+def test_v25_ast_guard_trace_decision_signature_has_favor():
+    """v25 修复: _companion_log.trace_decision 函数签名必须有 favor 形参.
+    v23-11 commit 加了 favor kwarg 在 chat_window 调用方, 但函数没接,
+    TypeError 被 try/except 吞, multimodal 整条 0 trace. 这里锁死函数签名.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "brain" / "_companion_log.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if (not isinstance(node, _ast.FunctionDef)
+                or node.name != "trace_decision"):
+            continue
+        arg_names = [a.arg for a in node.args.args]
+        assert "favor" in arg_names, (
+            "v25 regression: trace_decision 签名必须有 favor 形参. "
+            f"实际: {arg_names}"
+        )
+        print("[OK] v25 AST 守卫: trace_decision 签名含 favor")
+        return
+    raise AssertionError("trace_decision 函数未找到")

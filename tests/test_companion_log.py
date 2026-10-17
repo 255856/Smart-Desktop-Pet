@@ -104,3 +104,56 @@ def test_trace_json_has_required_fields():
         assert field in target_tool, (
             f"trace 缺字段 {field}. 实际: {target_tool}"
         )
+
+
+def test_trace_decision_accepts_favor_kwarg():
+    """v25 regression: chat_window._run_multimodal_action 调
+    trace_decision(favor=...) . v23-11 commit 加了 favor kwarg 但没改
+    函数签名, TypeError 被 try/except 吞, multimodal 整条路径 0 trace
+    落盘, dashboard 永远 '本会话没有桌宠 trace 记录'. 这里锁死 favor
+    必须能传进去且落盘.
+    """
+    trace_decision(
+        thread_id="t-favor-kwarg", tool="generate_image", risk=2,
+        decision="ALLOW", sat="MID", mood="MID", level="MID",
+        favor="HIGH", source="multimodal_path",
+    )
+    recs = read_recent(limit=20, kind="decision")
+    target = None
+    for r in recs:
+        if (r.get("tool") == "generate_image"
+                and r.get("thread_id") == "t-favor-kwarg"):
+            target = r
+            break
+    assert target is not None, (
+        f"trace_decision(favor=HIGH) 应落 1 行 multimodal_path 的记录. "
+        f"实际: {recs[:3]}..."
+    )
+    # v23-3 加 favor 维度后, dashboard trace 页要把 favor 也展示出来.
+    # 必须有 favor 字段 (默认 "MID" 也行, 必须是字符串不在 None).
+    assert "favor" in target, (
+        f"trace JSON 缺 favor 字段. 实际: {target}"
+    )
+    assert target.get("favor") == "HIGH", (
+        f"favor kwarg 应原样落盘. 期望 HIGH 实际 {target.get('favor')}"
+    )
+    assert target.get("decision_source") == "multimodal_path"
+
+
+def test_trace_decision_default_favor_is_mid():
+    """兼容老调用方 (risky_tool_confirm / middleware): 不传 favor 也行."""
+    trace_decision(
+        thread_id="t-favor-default", tool="run_script", risk=1,
+        decision="ALLOW", sat="LOW", mood="MID", level="LOW",
+    )
+    recs = read_recent(limit=10, kind="decision")
+    target = next(
+        (r for r in recs
+         if r.get("thread_id") == "t-favor-default"
+         and r.get("tool") == "run_script"),
+        None,
+    )
+    assert target is not None, "老调用方应仍能落 1 行"
+    assert target.get("favor") == "MID", (
+        f"不传 favor 时默认 MID. 实际 {target.get('favor')}"
+    )

@@ -1979,6 +1979,11 @@ class ChatWindow(QWidget):
             return
 
         # v23-11: 调 tool 前查桌宠决策 (companion_policy 4 维查表)
+        # v25: 即使 state=None 也要写 trace_decision —— 之前 state is not None
+        # 守住的话, 主程序没启 PetWindow / _lc_agent 没接 companion_state 时
+        # multimodal 整条路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠
+        # trace 记录". fallback 默认 sat/mood/level/favor = "MID".
+        # 决策降级成 ALLOW (没有 state 也没法走查表), 让 tool 照调.
         risk_int = 2  # 默认 MEDIUM fallback
         try:
             from app.engine.tools._risk import risk_for_tool
@@ -1986,29 +1991,32 @@ class ChatWindow(QWidget):
         except Exception:
             pass
         decision = "ALLOW"
+        sat_q = mood_q = level_q = favor_q = "MID"
         try:
             lc_agent = getattr(self, "_lc_agent", None)
             state = getattr(lc_agent, "_companion_state", None) if lc_agent else None
             if state is not None:
                 from app.brain.companion_policy import lookup_decision
                 decision = lookup_decision(state, tool_name)
-            # 写 trace_decision
-            from app.brain._companion_log import trace_decision
-            from app.engine.tools._risk import RISK_LABELS
-            thread_id = getattr(lc_agent, "thread_id", "default") if lc_agent else "default"
-            if state is not None:
                 q = state.quantize()
-                trace_decision(
-                    thread_id=thread_id,
-                    tool=tool_name,
-                    risk=risk_int,
-                    decision=decision,
-                    sat=q.get("satiety", "MID"),
-                    mood=q.get("mood", "MID"),
-                    level=q.get("level", "MID"),
-                    favor=q.get("favor", "MID"),
-                    source="multimodal_path",
-                )
+                sat_q = q.get("satiety", "MID")
+                mood_q = q.get("mood", "MID")
+                level_q = q.get("level", "MID")
+                favor_q = q.get("favor", "MID")
+            # 写 trace_decision (无论 state 是否拿到, 都落一行 —— multimodal 行为可观察)
+            from app.brain._companion_log import trace_decision
+            thread_id = getattr(lc_agent, "thread_id", "default") if lc_agent else "default"
+            trace_decision(
+                thread_id=thread_id,
+                tool=tool_name,
+                risk=risk_int,
+                decision=decision,
+                sat=sat_q,
+                mood=mood_q,
+                level=level_q,
+                favor=favor_q,
+                source="multimodal_path",
+            )
             # REJECT/REFUSE 直接弹 assistant 消息, 不调 tool
             if decision in ("REJECT", "REFUSE"):
                 cn = {"REJECT": "永久拒绝", "REFUSE": "本轮拒绝"}.get(decision, decision)
@@ -2099,7 +2107,10 @@ class ChatWindow(QWidget):
         # _render_markdown 的 _img() 会把 url 包成 <a href="img-open:KEY">
         # + <img src="url" title="点击放大">, 鼠标悬浮时系统 tooltip 自然显示。
         # v23-11: 主人说"模型没说图/视频生成好了", 加一句 announce 让他知道.
-        announce = f"{label}已生成 (决策: {decision}, 风险等级: {risk_int})\n\n"
+        # v25: 删 \n\n —— 之前用 \n\n 在 markdown → HTML 时会插一个空段落, 加上
+        # <img> 本身 display:block + margin, 主人反馈「图片下面有一大段空白」。
+        # 改成单换行, _render_markdown 走 <br/>, 不另起段, 视觉上紧贴图片.
+        announce = f"{label}已生成 (决策: {decision}, 风险等级: {risk_int})\n"
         content = f"{announce}![{kind_cn}: {prompt}]({url})"
         msg = Message(role="assistant", content=content, tools=[(f"generate_{kind}", "", "")])
         self.history.append(msg)
@@ -2672,7 +2683,11 @@ class ChatWindow(QWidget):
         if pix.isNull():
             return
         # 3. 弹 QDialog 显示原图
-        dlg = QDialog(self)
+        # v25: 把 dlg parent 设 None (top-level) —— 之前传 self 当 parent,
+        # 关闭 × 时 WA_DeleteOnClose 调度 deleteLater + 焦点回 chat_view,
+        # 个别机器上会触发 chat_view 重绘走白屏路径 (复现窗口错乱).
+        # 无 parent 的 top-level QDialog 跟 chat_window 互不影响.
+        dlg = QDialog(None)
         dlg.setWindowTitle("图片预览")
         dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         try:
@@ -3918,9 +3933,12 @@ class ChatWindow(QWidget):
             return (
                 f'<a href="img-open:{key}" title="点击放大" '
                 f'style="text-decoration:none;display:inline-block;">'
+                # v25: img margin 4px → 2px (上下), 避免主人反馈「图片下面
+                # 有一大段空白」时跟 announce \n\n 复合撑出更大段位. block
+                # 元素上下 margin 跟 anchor inline-block 之间留 2px 已足.
                 f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
                 f'style="display:block;width:{thumb_w}px;height:auto;'
-                f'max-width:100%;border-radius:8px;margin:4px 0;'
+                f'max-width:100%;border-radius:8px;margin:2px 0;'
                 f'cursor:zoom-in;"/>'
                 f'</a>'
             )

@@ -44,11 +44,17 @@ def _default_log_path() -> Path:
 
 def trace_decision(thread_id: str, tool: str, risk: int, decision: str,
                    sat: str, mood: str, level: str,
+                   favor: str = "MID",
                    source: str = "lookup_decision") -> None:
     """v23-1: 写一行 trace 到 log 文件。
 
     调用方 (RiskyToolConfirm._get_companion_decision) 每查一次表就调一次,
     锁住文件句柄 1 行, 失败静默.
+
+    v23-3: 加 favor 形参 (好感维度进决策表后, dashboard trace 页要展示).
+    v25: 修 v23-11 commit 留下的回归 —— chat_window._run_multimodal_action 调
+    trace_decision(favor=...) 但函数没接, TypeError 被 try/except 吞, 整条
+    multimodal 路径 0 trace 落盘, dashboard 永远 "本会话没有桌宠 trace 记录".
     """
     rec = {
         "ts": time.time(),
@@ -59,6 +65,7 @@ def trace_decision(thread_id: str, tool: str, risk: int, decision: str,
         "sat": sat,
         "mood": mood,
         "level": level,
+        "favor": favor,
         "decision_source": source,
     }
     try:
