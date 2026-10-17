@@ -28,3 +28,17 @@ servers:
   #   description: "抓取网页并转为 Markdown"
   #   command: npx
   #   args: ["-y", "mcp-server-fetch"]
+
+  # ActivityWatch (aw-server) 集成 — 让桌宠能查主人当下在干嘛。
+  # 启用步骤:
+  #   1. 下载安装 ActivityWatch: https://activitywatch.net/
+  #      aw-server (Rust, 默认占 5600 端口) + aw-watcher-window 主进程守护 + (可选) aw-watcher-afk
+  #   2. 浏览器想拿 tab title/url, 加 aw-watcher-web Chrome/Firefox 扩展
+  #   3. 把下面 enabled 改成 true, 重启桌宠。aw-server 未运行时工具会优雅降级
+  #      (返"未运行"消息, 不崩)。
+  # 注意: 窗口标题是敏感数据, 主人先考虑隐私再开。
+  - name: aw
+    description: "ActivityWatch 活动查询（当前窗口 / 最近活动 / 浏览器 tab）"
+    command: python
+    args: ["-m", "app.mcp.activitywatch_server"]
+    enabled: false
