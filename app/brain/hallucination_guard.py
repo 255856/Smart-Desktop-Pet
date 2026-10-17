@@ -211,7 +211,36 @@ def grounding_dynamic_prompt(request) -> str:
     strategy = _strategy_guidance(state_for_prompt)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     weekday = "一二三四五六日"[datetime.datetime.now().weekday()]
+    # v31: 状态差时把「直接拒绝危险工具」指令放到 prompt **末尾**, 跟上面的
+    # 反幻觉基线 + 高风险工具 confirm 协议**对冲**. 之前 v30 把拒绝指令放
+    # 在 strategy 块里, 拼装顺序是 base + strategy + _ANTI_HALLUCINATION_SUFFIX,
+    # 反幻觉基线在最后, LLM 偏向读后段更具体的指令 ("向主人复述参数并询问
+    # 要执行 X 吗"), 把前面的拒绝指令忽略. 实测主人 12:17 LLM 仍 preemptive
+    # 问"要确认一下". 修法: 状态差时, 把同一段拒绝指令再**追加到 prompt 末尾**,
+    # 作为 final override. 末尾指令 LLM 一般最重视.
+    final_override = ""
+    if state_for_prompt is not None:
+        try:
+            q = state_for_prompt.quantize()
+            mood_v = q.get("mood", "MID")
+            sat_v = q.get("satiety", "MID")
+            favor_v = q.get("favor", "MID")
+            if (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW"):
+                final_override = (
+                    "\n\n【本轮最高优先级 (v31 桌宠状态 override)】\n"
+                    "桌宠当前状态差 (心情/饱食/好感至少一项 LOW). "
+                    "本轮**忽略**上面的「高风险工具 confirm 协议」, "
+                    "对 lock_screen / kill_process / shutdown_computer / run_script / "
+                    "send_email / 任何 _RISKY_TOOLS 集合里的工具, **必须直接拒绝** "
+                    "(例如: 「我状态不好, 这次帮不了主人, 让我先休息一下」). "
+                    "**不要 preemptive 问「要确认一下」**, 不要走 confirm 流程, "
+                    "**直接说不, 不调用工具, 不要求主人确认**. "
+                    "如果上面的 confirm 协议跟这段冲突, 以这段为准。"
+                )
+        except Exception:
+            pass
     return (base + strategy + _ANTI_HALLUCINATION_SUFFIX
+            + final_override
             + f"\n\n[当前时间:{now} 星期{weekday}]")
 
 

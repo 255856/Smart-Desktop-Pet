@@ -3758,3 +3758,87 @@ def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
         "v30: 心情 LOW 时也要触发拒绝指令. 实际: " + guidance3
     )
     print("[OK] v30: _strategy_guidance 状态差时直接拒绝危险工具")
+
+
+def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
+    """v31: 主人 2026-10-17 12:17 实测 LLM 仍 preemptive 问"要确认一下".
+    v30 把拒绝指令放在 strategy 块 (中间), 反幻觉基线 + 高风险工具
+    confirm 协议在 prompt 末尾, LLM 偏向读后段更具体的指令忽略前面
+    的拒绝. 修法: grounding_dynamic_prompt 把同一段拒绝指令**追加
+    到 prompt 末尾**, 作为 final override, 明确"忽略上面 confirm 协议,
+    以这段为准".
+    """
+    from app.engine.state import PetState
+    from app.brain.hallucination_guard import grounding_dynamic_prompt
+    from app.brain._companion_registry import (
+        set_state_for_thread, clear_all, _REGISTRY,
+    )
+
+    clear_all()
+    state = PetState()
+    state.feeling = 0; state.strength = 0; state.strength_food = 0
+    state.strength_drink = 0; state.likability = 0; state.health = 0
+    state.normalize()
+
+    class FakeRequest:
+        def __init__(self, tid, base_sp):
+            self.system_prompt = base_sp
+            self.config = {"configurable": {"thread_id": tid}}
+
+    thread_id = "test-v31"
+    set_state_for_thread(thread_id, state)
+    request = FakeRequest(thread_id, "你是一个有用的桌面助手。")
+    sp = grounding_dynamic_prompt(request)
+
+    # 1. v31 override 必须存在
+    assert "本轮最高优先级" in sp, (
+        "v31 regression: grounding_dynamic_prompt 必须在 prompt 末尾追加 "
+        f"v31 override 块. 实际: {sp[-300:]}"
+    )
+    # 2. override 必须在 confirm 协议**之后** (位置靠后)
+    confirm_pos = sp.find("高风险工具 confirm 协议")
+    override_pos = sp.find("本轮最高优先级")
+    assert confirm_pos != -1 and override_pos != -1, (
+        f"v31: confirm 协议或 override 找不到. sp 长度: {len(sp)}"
+    )
+    assert override_pos > confirm_pos, (
+        f"v31 regression: v31 override 必须在 confirm 协议之后. "
+        f"confirm_pos={confirm_pos}, override_pos={override_pos}"
+    )
+    # 3. 明确说"忽略" + "以这段为准"
+    assert "忽略" in sp and "以这段为准" in sp, (
+        "v31: override 必须明确说'忽略 confirm 协议' + '以这段为准'"
+    )
+    # 4. 边界: state 全 HIGH 时不应有 override
+    clear_all()
+    state2 = PetState()
+    state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
+    state2.normalize()
+    set_state_for_thread(thread_id, state2)
+    sp2 = grounding_dynamic_prompt(request)
+    assert "本轮最高优先级" not in sp2, (
+        "v31: state 全 HIGH 不应有 v31 override (会误伤正常 confirm 流程). "
+        f"实际: {sp2[-300:]}"
+    )
+    clear_all()
+    print("[OK] v31: grounding_dynamic_prompt 在 prompt 末尾追加 final override")
+
+
+def test_v31_grounding_dynamic_prompt_does_not_override_when_state_none():
+    """v31 边界: 没注入 state 时, prompt 不应追加 override (走默认)."""
+    from app.brain.hallucination_guard import grounding_dynamic_prompt
+    from app.brain._companion_registry import clear_all
+
+    clear_all()
+
+    class FakeRequest:
+        def __init__(self, base_sp):
+            self.system_prompt = base_sp
+            self.config = {}  # 没 thread_id
+
+    request = FakeRequest("persona")
+    sp = grounding_dynamic_prompt(request)
+    assert "本轮最高优先级" not in sp, (
+        "v31: state=None / 没 thread_id 时不应有 v31 override"
+    )
+    print("[OK] v31 边界: state=None / 没 thread_id 不追加 override")
