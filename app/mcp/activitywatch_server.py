@@ -92,9 +92,19 @@ def _aw_status() -> dict:
 
 
 def _list_buckets() -> list[dict]:
-    """列 aw-server 已注册的所有 bucket。返 [] 表示 aw-server 没跑。"""
+    """列 aw-server 已注册的所有 bucket。返 [] 表示 aw-server 没跑。
+
+    aw 0.14 接口实际返 `{bucket_id: meta}` 的 dict (不是 list)。
+    兼容两种 — 旧的 list schema 仍尝试, 失败转成 dict→list-of-{id, ...meta}。
+    """
     data = _http_get_json(_aw_url("/api/0/buckets/"))
-    return data if isinstance(data, list) else []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        # 把 `{id: meta}` 拍平 — meta 里塞不进去, 后面 _find_* 只需要 id
+        return [{"id": bid, **(meta if isinstance(meta, dict) else {})}
+                for bid, meta in data.items()]
+    return []
 
 
 def _find_window_bucket(buckets: list[dict]) -> Optional[str]:

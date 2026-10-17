@@ -118,6 +118,9 @@ def get_recent_activities_summary(
     if not is_available(server_url):
         return None
     buckets = _http_get_json(_aw_url("/api/0/buckets/", server_url))
+    if isinstance(buckets, dict):
+        buckets = [{"id": bid, **(m if isinstance(m, dict) else {})}
+                   for bid, m in buckets.items()]
     if not isinstance(buckets, list):
         return None
     bid = _find_bucket(buckets, "aw-watcher-window", _hostname(hostname))
