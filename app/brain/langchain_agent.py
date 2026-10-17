@@ -576,6 +576,28 @@ class LangChainAgent:
         does not follow tool call' 时,怀疑是 checkpoint 里残留了
         schema 失配的 ToolMessage;清掉本 thread 的 checkpoint 后重试一次。
         """
+        # v27 (2026-10-17): LangChain 这条路径之前完全忽略 _INTENT_TOOL_PATTERNS,
+        # 主人问"我刚才在干嘛" LLM 只凭印象回"小汐看不到", 工具一动不动。
+        # 跟 lightweight backend (AgentLoop) 一致: 命中 aw_query 等 intent 时,
+        # bind 模型加 tool_choice="any" 让 LLM 第一轮必须调工具。
+        #
+        # 关键时序: bind 必须在 _ensure_agent() 之前,否则 agent
+        # 已经用旧 self._model 构造, 后续 bind 不生效。
+        # 现在改架构: 检测 intent 后,**重置** _model 强制 _ensure_agent 重 build。
+        # 但重 build 会重建 ChatOpenAI (httpx client), 频繁检测会慢。
+        # 折中: 改 _build_model() 一次, 把 bind 留在 _build 之后, 然后
+        # _ensure_agent 用 bound self._model 构造 agent。
+        if messages and messages[-1].get("role") == "user":
+            last_user_for_intent = messages[-1].get("content", "") or ""
+        else:
+            last_user_for_intent = ""
+        try:
+            from app.brain.llm_client import detect_action_intent
+            intent = detect_action_intent(last_user_for_intent) if last_user_for_intent else None
+        except Exception:
+            intent = None
+        self._force_tool_choice_intent = intent or ""
+        # _ensure_agent 内部会读这个字段, 决定 bind 不 bind
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
 
@@ -634,6 +656,23 @@ class LangChainAgent:
 
         pet_state=None 解除同步 (主线程关闭 / 测试 cleanup).
         """
+        # v34-debug: 看 setter 是否真被调用
+        if pet_state is not None:
+            try:
+                q = pet_state.quantize()
+                mood_v = q.get("mood", "MID")
+                sat_v = q.get("satiety", "MID")
+                favor_v = q.get("favor", "MID")
+                bad = (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW")
+                log.info(
+                    "LangChainAgent.set_companion_state: pet_state 设入, "
+                    "mood=%s, sat=%s, favor=%s, bad=%s",
+                    mood_v, sat_v, favor_v, bad,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("LangChainAgent.set_companion_state 量化失败: %s", e)
+        else:
+            log.info("LangChainAgent.set_companion_state: pet_state=None (解除)")
         self._companion_state = pet_state
         # v27: 关键 — 同步给 RiskyToolConfirm, 不然 middleware 走查表时
         # _get_companion_decision 返 None, 工具被弹窗确认后照样执行
