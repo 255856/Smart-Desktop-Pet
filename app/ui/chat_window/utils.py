@@ -75,6 +75,15 @@ _CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", 
 # 历史:之前用 ("失败", "错误", "无法", "未安装", "没有找到", "找不到") 任意
 # in 文本判断,误判严重。
 _TOOL_FAIL_MARKERS = ("错误：", "错误:", "失败：", "失败:", "未安装：", "未安装:")
+# v26: 主人 2026-10-17 反馈"状态影响决策 感觉没区别" — companion REJECT/REFUSE
+# 时 LLM 收到的是 {"status": "rejected", "rejected_by_companion": True, ...} JSON,
+# 工具卡片之前没识别这个状态, 默认显示 ✓ 完成. 显式识别后卡片显示"桌宠拒绝",
+# 主人能直接看见"决策被桌宠挡了".
+_COMPANION_REJECT_MARKERS = (
+    "rejected_by_companion",
+    '"status": "rejected"',
+    "桌宠当前状态拒绝执行",
+)
 
 
 def _unpack_tool(t):
@@ -116,23 +125,31 @@ def _tool_label(name: str, args: str) -> Tuple[str, str]:
 
 
 def _tool_status(result: str) -> str:
-    """工具结果状态：'cancel' / 'fail' / 'ok'。
+    """工具结果状态：'cancel' / 'rejected' / 'fail' / 'ok'.
 
-    失败标记涵盖：取消 / 错误: 前缀、失败: 前缀、未安装 等。
+    v26: 加 'rejected' 分桶 — companion REJECT/REFUSE 时 result 里有
+    rejected_by_companion / "status": "rejected" / 桌宠当前状态拒绝执行,
+    单独走 'rejected' 而不是 'fail' (语义不同: 失败是工具自身问题,
+    拒绝是状态/政策不允许, 主人应该能区分).
     """
     r = result or ""
     if "取消" in r:
         return "cancel"
+    if any(k in r for k in _COMPANION_REJECT_MARKERS):
+        return "rejected"
     if any(k in r for k in _TOOL_FAIL_MARKERS):
         return "fail"
     return "ok"
 
 
 def _unpack_status_mark(result: str) -> str:
-    """返回工具结果对应的彩色 mark html,用于折叠态预览行。"""
+    """返回工具结果对应的彩色 mark html,用于折叠态预览行."""
     status = _tool_status(result)
     if status == "cancel":
         return '<span style="color:#9ca3af;">⊘ 取消</span>'
+    if status == "rejected":
+        # v26: 主人反馈"状态影响决策 感觉没区别" — 让桌宠拒绝可视化
+        return '<span style="color:#a45b2e; font-weight:600;">桌宠拒绝</span>'
     if status == "fail":
         return '<span style="color:#dc2626;">✕ 失败</span>'
     return '<span style="color:#16a34a;">✓</span>'

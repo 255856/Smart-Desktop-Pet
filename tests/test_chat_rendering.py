@@ -3372,3 +3372,129 @@ def test_v25_ast_guard_trace_decision_signature_has_favor():
         print("[OK] v25 AST 守卫: trace_decision 签名含 favor")
         return
     raise AssertionError("trace_decision 函数未找到")
+
+
+def test_v26_tool_status_recognizes_companion_rejected():
+    """v26: 主人反馈"状态影响决策 感觉没区别". 工具被桌宠 REJECT/REFUSE
+    时 result 里有 rejected_by_companion / '"status": "rejected"' /
+    "桌宠当前状态拒绝执行", 之前 _tool_status 全判成 'ok' (默认),
+    工具卡片显示 ✓ 完成. 主人从 chat 完全看不出来"决策被桌宠挡了".
+
+    这里锁死 _tool_status 必须返回 'rejected' 分桶, _unpack_status_mark
+    必须显示"桌宠拒绝"标识.
+    """
+    from app.ui.chat_window.utils import (
+        _tool_status, _unpack_status_mark, _COMPANION_REJECT_MARKERS,
+    )
+    # 1. 直接的 rejected_by_companion 字符串
+    s = _tool_status('{"status": "rejected", "rejected_by_companion": true}')
+    assert s == "rejected", (
+        f"rejected_by_companion JSON 应判 rejected. 实际: {s}"
+    )
+    # 2. status=rejected (中间没有 'rejected_by_companion' 串)
+    s2 = _tool_status('{"status": "rejected", "tool": "set_brightness"}')
+    assert s2 == "rejected", (
+        f"status=rejected 应判 rejected. 实际: {s2}"
+    )
+    # 3. 桌宠当前状态拒绝执行
+    s3 = _tool_status(
+        "桌宠当前状态拒绝执行 set_brightness, 请照顾一下桌宠再试。"
+    )
+    assert s3 == "rejected", (
+        f"中文拒绝文案应判 rejected. 实际: {s3}"
+    )
+    # 4. 普通 ok (无 reject marker) 不应误判
+    assert _tool_status("操作成功") == "ok"
+    # 5. 失败仍判 fail
+    assert _tool_status("错误: 文件不存在") == "fail"
+    # 6. _unpack_status_mark 对 rejected 返"桌宠拒绝"标记
+    mark = _unpack_status_mark('{"status": "rejected"}')
+    assert "桌宠拒绝" in mark, (
+        f"rejected 应渲染'桌宠拒绝' 标记. 实际: {mark}"
+    )
+    print("[OK] v26: tool_status 识别 companion REJECT, 卡片显示'桌宠拒绝'")
+
+
+def test_v26_state_to_emotion_mapping():
+    """v26: 主人反馈"状态影响决策 感觉没区别". pet_window 状态量化 4 维
+    映射到 Live2D 表情 — 让主人肉眼看见 state 变化驱动桌宠行为.
+    量化 LOW 至少应映射到 sad/tired (不是 'natural' 静默).
+    """
+    from app.ui.pet_window import PetWindow
+    # 1. 全 LOW → tired (累垮)
+    e = PetWindow._map_state_to_emotion({
+        "mood": "LOW", "satiety": "LOW", "level": "LOW", "favor": "LOW",
+    })
+    assert e == "tired", f"全 LOW 应映射 tired. 实际: {e}"
+    # 2. 单 LOW → sad
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "LOW", "mood": "MID", "level": "MID", "favor": "MID",
+    })
+    assert e == "sad", f"sat=LOW 应映射 sad. 实际: {e}"
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "MID", "mood": "LOW", "level": "MID", "favor": "MID",
+    })
+    assert e == "sad", f"mood=LOW 应映射 sad. 实际: {e}"
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "MID", "mood": "MID", "level": "MID", "favor": "LOW",
+    })
+    assert e == "sad", f"favor=LOW 应映射 sad. 实际: {e}"
+    # 3. mood HIGH → happy
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "MID", "mood": "HIGH", "level": "MID", "favor": "MID",
+    })
+    assert e == "happy", f"mood=HIGH 应映射 happy. 实际: {e}"
+    # 4. mood HIGH + favor HIGH → happy (双好)
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "MID", "mood": "HIGH", "level": "MID", "favor": "HIGH",
+    })
+    assert e == "happy", f"mood+favor 双 HIGH 应映射 happy. 实际: {e}"
+    # 5. 全 MID → natural (走默认, 不强切)
+    e = PetWindow._map_state_to_emotion({
+        "satiety": "MID", "mood": "MID", "level": "MID", "favor": "MID",
+    })
+    assert e == "natural", f"全 MID 应 natural. 实际: {e}"
+    print("[OK] v26: state 量化 → Live2D 表情映射正确")
+
+
+def test_v26_ast_guard_settings_trace_has_thread_combo():
+    """v26: 主人 2026-10-17 反馈设置面板 trace 应 per-conversation 过滤.
+    AST 守卫: _build_dev_trace_block 必须有 _dev_trace_thread_combo 控件,
+    _refresh_dev_trace 必须读 selected_thread 并 filter decisions/outcomes.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "settings_window.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    # 1) 找到 _build_dev_trace_block
+    build_fn = next(
+        (n for n in _ast.walk(tree)
+         if isinstance(n, _ast.FunctionDef) and n.name == "_build_dev_trace_block"),
+        None,
+    )
+    assert build_fn is not None, "_build_dev_trace_block 找不到"
+    build_src = ' '.join(_ast.dump(s) for s in build_fn.body)
+    assert "_dev_trace_thread_combo" in build_src, (
+        "v26 regression: _build_dev_trace_block 必须创建 _dev_trace_thread_combo "
+        "让主人能按 thread_id 过滤. 实际: " + build_src[:200]
+    )
+    # 2) 找到 _refresh_dev_trace
+    refresh_fn = next(
+        (n for n in _ast.walk(tree)
+         if isinstance(n, _ast.FunctionDef) and n.name == "_refresh_dev_trace"),
+        None,
+    )
+    assert refresh_fn is not None, "_refresh_dev_trace 找不到"
+    refresh_src = ' '.join(_ast.dump(s) for s in refresh_fn.body)
+    # 必须有 selected_thread 局部变量
+    assert "selected_thread" in refresh_src, (
+        "v26 regression: _refresh_dev_trace 内部必须按 selected_thread 过滤. "
+        f"实际: {refresh_src[:200]}"
+    )
+    # 必须有 thread_id 收集逻辑 (seen_threads / seen_set)
+    assert "seen_threads" in refresh_src, (
+        "v26 regression: _refresh_dev_trace 必须从 companion_log 收集所有 "
+        "出现过的 thread_id 填到 combobox. 实际: " + refresh_src[:200]
+    )
+    print("[OK] v26 AST 守卫: settings trace per-conversation 过滤存在")

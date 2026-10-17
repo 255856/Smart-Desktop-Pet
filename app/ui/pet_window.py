@@ -513,7 +513,9 @@ class PetWindow(QWidget):
             self._refresh_status_bar()
 
     def _refresh_status_bar(self) -> None:
-        """刷新状态栏进度条。"""
+        """刷新状态栏进度条 + 状态映射到 Live2D 表情 (v26 主人反馈
+        "状态影响决策 感觉没区别")。
+        """
         if self._attached_state is None or not self._status_visible:
             return
         s = self._attached_state
@@ -521,6 +523,47 @@ class PetWindow(QWidget):
         self._status_bars["food"].setValue(int(s.strength_food))
         self._status_bars["drink"].setValue(int(s.strength_drink))
         self._status_bars["feeling"].setValue(int(s.feeling))
+        # v26: 状态量化 → Live2D 表情, 让主人肉眼看见 state 变化影响
+        # 桌宠行为。 4 维量化 (sat/mood/level/favor) → 表情优先级:
+        #   1. 全 LOW (sat=LOW + mood=LOW + favor=LOW) → tired (累垮)
+        #   2. sat=LOW 或 favor=LOW → sad (伤心)
+        #   3. mood=HIGH + favor=HIGH → happy (双好开心)
+        #   4. mood=HIGH → happy
+        #   5. mood=LOW → sad
+        #   6. 其他 (MID) → natural (走默认)
+        # 状态没变化时不切 (避免 idle 期间反复抖表情)。
+        try:
+            q = s.quantize()
+        except Exception:  # noqa: BLE001
+            return
+        target = self._map_state_to_emotion(q)
+        if target and target != getattr(self, "_last_state_emotion", None):
+            self._last_state_emotion = target
+            try:
+                self.animator.set_emotion(target)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _map_state_to_emotion(q: dict) -> str:
+        """v26: 状态量化 4 维 → Live2D 表情名. None 表示不切."""
+        mood = q.get("mood", "MID")
+        sat = q.get("satiety", "MID")
+        favor = q.get("favor", "MID")
+        # 1) 三低 → 累垮
+        if mood == "LOW" and sat == "LOW" and favor == "LOW":
+            return "tired"
+        # 2) 单 LOW → 伤心
+        if mood == "LOW" or sat == "LOW" or favor == "LOW":
+            return "sad"
+        # 3) 双好 → 开心
+        if mood == "HIGH" and favor == "HIGH":
+            return "happy"
+        # 4) 心情好 → 开心
+        if mood == "HIGH":
+            return "happy"
+        # 5) 默认走自然, 不强制切
+        return "natural"
 
     def _build_chat_input(self) -> None:
         """构建底部快捷聊天输入框。"""

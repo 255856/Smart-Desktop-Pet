@@ -322,12 +322,31 @@ class SettingsWindow(QWidget):
 
         从 data/companion_log.txt 读最近 N 条 (decision + outcome) JSON-line,
         用不同色块区分两种记录, 主人可以直观看到每次工具调用的查表 + 反馈闭环.
+
+        v26: 主人 2026-10-17 反馈 "trace 日志应该在每条会话顶部显示对应条目,
+        不是全局滚动" — 加 thread_id 过滤下拉. 主人当前对话的 thread_id 自动
+        选中, 可切到 "全部" 看全局 / 选具体 thread 看单次会话的 trace.
         """
-        # 标题 + 刷新按钮
+        # 标题 + thread 过滤 + 刷新按钮
         title_row = QHBoxLayout()
-        title = QLabel("trace 日志 (data/companion_log.txt 最近 20 条):")
+        title = QLabel("trace 日志 (data/companion_log.txt):")
         title.setStyleSheet("color:#5b5b6e; font-size:9pt; font-weight:600;")
         title_row.addWidget(title, 1)
+
+        # v26: thread_id 过滤下拉 (按主人要求 per-conversation 过滤)
+        self._dev_trace_thread_combo = QComboBox()
+        self._dev_trace_thread_combo.setStyleSheet(
+            "padding:2px 6px; font-size:8pt; border-radius:3px;"
+            "min-width:140px;"
+        )
+        self._dev_trace_thread_combo.setToolTip(
+            "按 thread_id 过滤, 选具体会话只看它的 trace, 选 '全部' 看全局"
+        )
+        self._dev_trace_thread_combo.currentIndexChanged.connect(
+            self._refresh_dev_trace
+        )
+        title_row.addWidget(QLabel("会话:"))
+        title_row.addWidget(self._dev_trace_thread_combo)
 
         btn_refresh = QPushButton("刷新")
         btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -366,6 +385,10 @@ class SettingsWindow(QWidget):
         """v23-7: 重读 companion_log.txt 渲染到 _dev_trace_view.
 
         决策行 (decision) 蓝边框, outcome 行绿边框, 区分清晰.
+
+        v26: 主人 2026-10-17 要求 per-conversation 过滤 — thread_id 下拉
+        选中具体 thread 后只显示该 thread 的 decision + outcome. combobox
+        列出 companion_log.txt 最近出现过的 thread_id (按最新出现倒序).
         """
         try:
             from app.brain._companion_log import read_recent
@@ -373,8 +396,56 @@ class SettingsWindow(QWidget):
             self._dev_trace_view.setText("(trace 模块未就绪)")
             return
 
-        decisions = read_recent(limit=20, kind="decision")
-        outcomes = read_recent(limit=20, kind="outcome")
+        # 1) 收集最近出现的 thread_id (按 latest-first)
+        all_recent = read_recent(limit=500)
+        seen_threads: list[str] = []
+        seen_set: set[str] = set()
+        for r in all_recent:
+            tid = r.get("thread_id") or "default"
+            if tid not in seen_set:
+                seen_set.add(tid)
+                seen_threads.append(tid)
+        # 2) 填 combobox, 保留之前选中的 thread
+        prev_thread = None
+        combo = getattr(self, "_dev_trace_thread_combo", None)
+        if combo is not None and combo.count() > 0:
+            prev_thread = combo.currentData() or combo.currentText()
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("全部", userData=None)
+            for tid in seen_threads:
+                cnt = sum(
+                    1 for r in all_recent
+                    if (r.get("thread_id") or "default") == tid
+                )
+                short = f"{tid[:12]}…" if len(tid) > 12 else tid
+                combo.addItem(f"{short} ({cnt}条)", userData=tid)
+            # 还原之前选中
+            target_idx = 0
+            if prev_thread:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == prev_thread:
+                        target_idx = i
+                        break
+            combo.setCurrentIndex(target_idx)
+            combo.blockSignals(False)
+        # 3) 过滤 decisions + outcomes
+        selected_thread = combo.currentData() if combo is not None else None
+        decisions = read_recent(limit=200, kind="decision")
+        outcomes = read_recent(limit=200, kind="outcome")
+        if selected_thread:
+            decisions = [
+                d for d in decisions
+                if (d.get("thread_id") or "default") == selected_thread
+            ]
+            outcomes = [
+                o for o in outcomes
+                if (o.get("thread_id") or "default") == selected_thread
+            ]
+        # 4) 每个 thread 最多 20 条 (避免长 thread 撑爆 UI)
+        decisions = decisions[:20]
+        outcomes = outcomes[:20]
         lines: list[str] = []
         risk_label = {0: "SAFE", 1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "IRREVERSIBLE"}
 
@@ -385,6 +456,7 @@ class SettingsWindow(QWidget):
             sat = d.get("sat", "?")
             mood = d.get("mood", "?")
             level = d.get("level", "?")
+            favor = d.get("favor", "?")
             ts = d.get("ts", 0)
             import datetime
             time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
@@ -395,7 +467,7 @@ class SettingsWindow(QWidget):
                 f'<b style="color:#2e6da4;">调前</b> '
                 f'<code>{tool}</code> '
                 f'[<span style="color:#a45b2e;">{risk}</span>] '
-                f'sat={sat} mood={mood} level={level} → '
+                f'sat={sat} mood={mood} level={level} favor={favor} → '
                 f'<b>{decision}</b></div>'
             )
 
@@ -427,11 +499,23 @@ class SettingsWindow(QWidget):
             )
 
         if not lines:
-            self._dev_trace_view.setText("(无 trace, 跑几次工具调用后刷新)")
+            suffix = (
+                f" (thread={selected_thread})" if selected_thread else ""
+            )
+            self._dev_trace_view.setText(
+                f"(无 trace{suffix}, 跑几次工具调用后刷新)"
+            )
             return
+        # 头部说明当前过滤范围
+        header = (
+            f'<div style="color:#888; font-size:7pt; margin:0 0 4px 0;">'
+            f'{("thread=" + selected_thread) if selected_thread else "全局"} '
+            f'· 共 {len(decisions)} 调前 / {len(outcomes)} 调后'
+            f'</div>'
+        )
         html = (
             '<div style="line-height:1.4;">'
-            + "".join(lines)
+            + header + "".join(lines)
             + '</div>'
         )
         self._dev_trace_view.setText(html)
