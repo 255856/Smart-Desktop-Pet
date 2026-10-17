@@ -4212,3 +4212,66 @@ def test_v34_langchain_agent_wires_post_llm_guard():
         "v34: _ensure_agent 必须调 _post_llm_guard.as_middleware()"
     )
     print("[OK] v34: LangChainAgent 接通 PostLLMStateGuard (init + setter + _ensure_agent)")
+
+
+def test_v35_ui_controller_passes_state_provider():
+    """v35: UIController._show_chat_window 创建 ChatWindow 时**必须**传
+    state_provider=lambda: self.state_mgr.state.
+
+    v27 修过 main.py:1016 传 state_provider, 但 UIController (托盘菜单 / 双击唤起
+    走这条路径) **漏传了**. 主人实测 13:16 log 报
+    `_kickoff_llm: self._state_provider is None`, 中间件永远走无 state 路径,
+    状态差 LLM 仍 preemptive 问. 锁死两处 ChatWindow 创建都必须传 state_provider.
+    """
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent
+                / "app" / "ui" / "ui_controller.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+
+    found_chat_window_call = False
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, _ast.Name) or func.id != "ChatWindow":
+            continue
+        # 检查 kwargs 里有 state_provider
+        has_sp = any(
+            kw.arg == "state_provider"
+            for kw in node.keywords
+        )
+        assert has_sp, (
+            "v35 regression: ui_controller.py 创建 ChatWindow 必须传 "
+            "state_provider kwarg (不传 → self._state_provider 永远 None, "
+            "PostLLMStateGuard / RiskyToolConfirm 走无 state 路径). "
+            f"实际调用关键字: {[kw.arg for kw in node.keywords]}"
+        )
+        found_chat_window_call = True
+    assert found_chat_window_call, (
+        "v35: ui_controller.py 应该至少有一处 ChatWindow(...) 调用"
+    )
+    print("[OK] v35: ui_controller.py 创建 ChatWindow 已传 state_provider")
+
+
+def test_v35_main_passes_state_provider():
+    """v35 守门员: main.py 创建 ChatWindow 也必须传 state_provider (跟 ui_controller 对齐)."""
+    import ast as _ast
+    src_path = (Path(__file__).resolve().parent.parent / "app" / "main.py")
+    src = src_path.read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    found = False
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, _ast.Name) or func.id != "ChatWindow":
+            continue
+        found = True
+        has_sp = any(kw.arg == "state_provider" for kw in node.keywords)
+        assert has_sp, (
+            "v35 regression: main.py 创建 ChatWindow 必须传 state_provider. "
+            f"实际: {[kw.arg for kw in node.keywords]}"
+        )
+    assert found, "v35: main.py 应该至少有一处 ChatWindow(...) 调用"
+    print("[OK] v35: main.py 创建 ChatWindow 已传 state_provider")

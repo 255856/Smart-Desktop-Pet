@@ -1013,6 +1013,16 @@ class UIController(QObject):
                 session_store=getattr(self.brain, "session_store", None),
                 # skills_dir:brain.skills_dir(项目根/skills/),非空路径
                 skills_dir=str(getattr(self.brain, "skills_dir", "") or ""),
+                # v35 修: 主程序 (main.py:1016) 创建 ChatWindow 时有传
+                # state_provider=lambda: core.state, 但 UIController._show_chat_window
+                # 这条路径 (托盘菜单 / 双击唤起) 创建 ChatWindow 时**漏传**了, 主人
+                # 实际运行走这条路径 → self._state_provider 永远是 None →
+                # PostLLMStateGuard / RiskyToolConfirm 永远走无 state 路径,
+                # 状态差 LLM 仍 preemptive 问 "要确认一下" (实测 13:16 主人).
+                # 修法: 用 lambda 包 self.state_mgr.state (每次 _kickoff_llm 拉最新).
+                # 注意: 不能传 self.state (line 51 __init__ 时的快照引用,
+                # 主人 dev mode 改 state 不会反映到新 agent).
+                state_provider=lambda: self.state_mgr.state,
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)
