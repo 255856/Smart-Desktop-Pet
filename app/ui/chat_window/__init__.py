@@ -67,7 +67,7 @@ from app.core.qt_compat import (
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
     QBuffer, QByteArray, pyqtSlot,
     QDragEnterEvent, QDragMoveEvent, QDropEvent, QMimeData, QUrl,
-    QScrollArea,
+    QScrollArea, QSplitter, QStatusBar,
 )
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
@@ -194,6 +194,7 @@ class ChatWindow(QWidget):
             _filesearch.set_extra_safe_roots(extra)
         except Exception as e:  # noqa: BLE001
             log.warning("set_extra_safe_roots 失败: %s", e)
+        self._last_proc_ticks: int = 0
         self._chat_timeout_s: int | None = (
             chat_cfg.request_timeout_s if chat_cfg is not None else None
         )
@@ -660,18 +661,13 @@ class ChatWindow(QWidget):
         dz.addWidget(self.subtitle_label)
         hl.addWidget(drag_zone, 1)
 
-        # 右侧操作按钮（清空 / 调试 / 最小化 / 关闭）
+        # 右侧操作按钮（v24 精简：清空 / 记忆 / 设置 —— Demo 改去任务栏入口,
+        # 头像改放设置面板。chat 顶部不再塞一堆按钮, 更简洁)
         self.btn_clear = QPushButton("清空")
         self.btn_clear.setObjectName("ghost_btn")
         self.btn_clear.setToolTip("清空上下文（不影响长期记忆）")
         self.btn_clear.clicked.connect(self._on_clear)
         hl.addWidget(self.btn_clear)
-
-        self.btn_demo = QPushButton("Demo")
-        self.btn_demo.setObjectName("ghost_btn")
-        self.btn_demo.setToolTip("打开本地 Live2D 演示页 http://127.0.0.1:8765")
-        self.btn_demo.clicked.connect(self._open_demo)
-        hl.addWidget(self.btn_demo)
 
         self.btn_memory = QPushButton("记忆")
         self.btn_memory.setObjectName("ghost_btn")
@@ -679,12 +675,12 @@ class ChatWindow(QWidget):
         self.btn_memory.clicked.connect(self._open_memory)
         hl.addWidget(self.btn_memory)
 
-        # 2026-10-14 美化：自定义头像入口(菜单：换我 / 换桌宠)
-        self.btn_avatar = QPushButton("头像")
-        self.btn_avatar.setObjectName("ghost_btn")
-        self.btn_avatar.setToolTip("自定义聊天头像（换我 / 换桌宠）")
-        self.btn_avatar.clicked.connect(self._on_avatar_menu)
-        hl.addWidget(self.btn_avatar)
+        # v24: 设置按钮 —— 跳到 settings_window(头像/系统提示词/音调/快捷指令等)
+        self.btn_settings = QPushButton("设置")
+        self.btn_settings.setObjectName("ghost_btn")
+        self.btn_settings.setToolTip("设置（头像 / 提示词 / TTS / 多模态等）")
+        self.btn_settings.clicked.connect(self._open_settings)
+        hl.addWidget(self.btn_settings)
 
         self.btn_min = QToolButton()
         self.btn_min.setObjectName("win_btn")
@@ -713,8 +709,8 @@ class ChatWindow(QWidget):
 
         # 2026-10-15 美化：标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区
         # (ElidedLabel) 省略，而不是把按钮文字裁掉（曾出现 Demo 被压成 em）。
-        for _tb in (self.btn_clear, self.btn_demo, self.btn_memory,
-                    self.btn_avatar):
+        for _tb in (self.btn_clear, self.btn_memory,
+                ):
             _tb.setMinimumWidth(_tb.sizeHint().width())
 
         cl.addWidget(header)
@@ -747,7 +743,21 @@ class ChatWindow(QWidget):
         # 2026-10-15: 换成 MiniMax Code 风格的样式表 (CHAT_MD_CSS,线性流 + 完整 markdown)
         # 旧 CHAT_BUBBLE_CSS 保留在 ui_style.py 里作历史兼容,以防有外部模块直接 import。
         self.chat_view.document().setDefaultStyleSheet(ui_style.CHAT_MD_CSS)
-        cl.addWidget(self.chat_view, 1)
+        # v24: 加右侧工具详情面板 (默认收起)。点击 chat_view 内 assistant 消息的
+        # 工具调用 / 思考过程卡片时, 把内容塞进右侧 panel 显示, 不挡住 chat 主区。
+        # QSplitter 支持用户拖宽 / 关闭, 默认比例 100:0 (藏起来)。
+        self._tools_panel = _NoCmdNavQTextBrowser()
+        self._tools_panel.setObjectName("tools_panel")
+        self._tools_panel.setOpenExternalLinks(False)
+        self._tools_panel.setMaximumWidth(380)   # 防止太大占 chat
+        self._tools_panel.setMinimumWidth(0)
+        self._chat_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._chat_splitter.setObjectName("chat_splitter")
+        self._chat_splitter.addWidget(self.chat_view)
+        self._chat_splitter.addWidget(self._tools_panel)
+        self._chat_splitter.setSizes([9999, 0])   # 默认藏起
+        self._chat_splitter.setHandleWidth(2)
+        cl.addWidget(self._chat_splitter, 1)
 
         input_container = QFrame()
         input_container.setObjectName("input_container")
@@ -804,6 +814,23 @@ class ChatWindow(QWidget):
         ] + [f"/skills/{n} " for n in skill_names]
         self._cmd_completer = _CommandCompleter(self.input_edit, candidates)
         il.addWidget(self.input_edit)
+        # v24: 底部状态栏 — CPU/内存/token 数 (1 Hz 刷新)
+        self.statusbar = QStatusBar()
+        self.statusbar.setObjectName("chat_statusbar")
+        self.statusbar.setSizeGripEnabled(False)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._refresh_status_bar)
+        self._status_timer.start()
+        self._status_label_token = QLabel("tokens: 0")
+        self._status_label_cpu = QLabel("CPU: 0%")
+        self._status_label_mem = QLabel("mem: 0 MB")
+        for _lb in (self._status_label_token, self._status_label_cpu, self._status_label_mem):
+            _lb.setStyleSheet("color:#8e8e93;font-size:8.5pt;padding:0 8px;")
+        self.statusbar.addPermanentWidget(self._status_label_token)
+        self.statusbar.addPermanentWidget(self._status_label_cpu)
+        self.statusbar.addPermanentWidget(self._status_label_mem)
+        il.addWidget(self.statusbar)
 
         # 输入区底部：状态 + 按钮
         bottom_row = QHBoxLayout()
@@ -966,14 +993,16 @@ class ChatWindow(QWidget):
         self._memory_dlg.raise_()
         self._memory_dlg.activateWindow()
 
-    def _on_avatar_menu(self) -> None:
-        """标题栏「头像」按钮：2026-10-15 v2 用户头像已移除,直接弹桌宠头像选择。
-
-        旧版曾提供「换我的头像 / 换桌宠头像」两个选项, 现在只留桌宠。
-        """
-        ok = self.pick_bot_avatar(self)
-        if ok:
-            self._append_system_msg("头像已更新（保存在 data/avatars/）")
+    def _open_settings(self) -> None:
+        """v24: chat 顶部「设置」按钮 —— 跳到 settings_window（头像改在那改）。"""
+        app = self._find_app()
+        if app is not None and hasattr(app, "settings_window"):
+            sw = app.settings_window
+            sw.show()
+            sw.raise_()
+            sw.activateWindow()
+            return
+        self.pick_bot_avatar(self)
 
     def _toggle_maximized(self) -> None:
         """最大化 / 还原 切换 (2026-10-15 加)。
@@ -991,7 +1020,7 @@ class ChatWindow(QWidget):
             self.btn_max.setToolTip("还原")
 
     def _open_demo(self) -> None:
-        """打开纯静态 Live2D Demo（本地 8765）。"""
+        """打开纯静态 Live2D Demo（本地 8765）—— v24 改从任务栏入口触发，chat 顶部 Demo 按钮已删, 此方法保留供托盘菜单调用。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_demo"):
             app.open_demo()
@@ -2694,6 +2723,15 @@ class ChatWindow(QWidget):
             self._parse_run_script_into_blocks(name, args, result)
         else:
             self._current_bot_msg.tools.append((name, args or "", result or ""))
+            # v24: 主人反馈「直接让桌宠生成图片(不走 /image 命令)时,
+            # 聊天窗口只显示一行工具结果 + 一段文字, 不显示生成的图片」。
+            # 根因: LLM 通过 tool 调 generate_image / generate_video /
+            # generate_audio 时, _on_tool 把结果 URL 塞进 tools 列表,
+            # 但 msg.content 没拼图片/视频/音频 → 渲染时只看到工具卡片
+            # + 模型文字回复, 看不到产物。修法: 检测 multimodal 工具,
+            # 把结果 (file:/// 或 http(s):// 路径) 自动追加到 msg.content
+            # 作为 markdown image / video / audio, 跟 /image 命令走同一条路径。
+            self._maybe_inject_multimodal_to_content(name, result)
         # Trace
         if self.trace is not None and self._trace_run_id:
             try:
@@ -2716,6 +2754,116 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 pass
         self._refresh_streaming_message()
+
+    def _maybe_inject_multimodal_to_content(self, name: str, result: str) -> None:
+        """v24: 若工具是 generate_image/video/audio 且结果是 URL/路径,
+        自动拼 markdown 嵌入到当前 bot 消息 content 末尾, 让产物显示在
+        聊天窗口 (跟 /image 命令走同一条路径)。
+
+        跳过条件:
+          - result 不是 http(s):// 或 file:/// 开头 (非产物, 比如错误信息)
+          - content 里已经有同样的 URL (避免重复注入, 比如 chunk 同 tool 来两次)
+          - 不在 _kickoff_llm 流式期间 (msg 可能是历史消息, 不该追加)
+
+        加在 content 末尾而不是开头: 跟主人读 LLM 回复习惯一致 (工具卡片在最
+        前面,产物紧跟模型文字后跟 自然章节顺序)。
+
+        注: 流式期间 _on_chunk / _on_done 都会用 sanitized 文本覆盖 content
+        (line 2974 / 3150), 这里的写入会被冲掉。_on_done 里再从 msg.tools
+        扫一遍重新注入 (见 _reinject_multimodal_from_tools)。
+        """
+        if self._current_bot_msg is None or not result:
+            return
+        kind_map = {
+            "generate_image": "图片",
+            "generate_video": "视频",
+            "generate_audio": "音频",
+        }
+        kind = kind_map.get(name)
+        if not kind:
+            return
+        url = result.strip()
+        # 只处理路径/URL 结果 (跳过 "调用失败: ..." 这种错误文本)
+        if not (url.startswith("file:///")
+                or url.startswith("http://")
+                or url.startswith("https://")
+                or url.startswith("data:")):
+            return
+        # 已经在 content 里就不重复
+        if url in (self._current_bot_msg.content or ""):
+            return
+        # 标题: 从 args JSON 里取 prompt, 失败就空
+        prompt = ""
+        try:
+            import json as _json2
+            _a = _json2.loads(args) if (isinstance(args, str) and args.strip()) \
+                 else (args or {})
+            if isinstance(_a, dict):
+                prompt = str(_a.get("prompt") or "")[:60]
+        except Exception:
+            pass
+        alt = f"{kind}: {prompt}" if prompt else kind
+        # 用 markdown 图片/视频/音频语法; video/audio 也走 ![](URL) 通用渲染
+        # 至少会显示链接或占位 (跟 v14 _img_open_map 配合点开看原图/原视频)
+        inline = f"\n\n![{_html_escape(alt)}]({url})"
+        self._current_bot_msg.content = (
+            (self._current_bot_msg.content or "") + inline
+        )
+
+    def _reinject_multimodal_from_tools(self, msg) -> None:
+        """v24: 流式期间 _on_chunk / _on_done 都会 content = sanitized 覆盖,
+        把 _on_tool 里注入的图片 markdown 冲掉。_on_done 在覆盖完正文后,
+        从 msg.tools 倒着扫一遍 multimodal, 按调用顺序重新拼到 content
+        末尾。这样无论 _on_chunk / _on_done 怎么覆盖都不会丢图片。
+
+        入参 msg 显式传, 这样即使 self._current_bot_msg 已被清空也能复用
+        (用于回放历史消息: 历史消息没 _on_tool 注入过但 msg.tools 可能
+         也有 multimodal result, 同样应该展示 — 现在 _load_history 渲染
+         直接通过 _msg_html → _render_markdown → _inline_local_images_to_data_url
+         也能加载, 这条路径是保险, 不要指望它救场)。
+        """
+        if msg is None:
+            return
+        tools = getattr(msg, "tools", None) or []
+        if not tools:
+            return
+        # 按工具调用顺序追加 (跟 _tool_steps_html 的展示顺序一致)
+        addition = []
+        for t in tools:
+            try:
+                name, args, result = _unpack_tool(t)
+            except Exception:
+                name, args, result = ("", "", "")
+            kind_map = {
+                "generate_image": "图片",
+                "generate_video": "视频",
+                "generate_audio": "音频",
+            }
+            kind = kind_map.get(name)
+            if not kind or not result:
+                continue
+            url = result.strip()
+            if not (url.startswith("file:///")
+                    or url.startswith("http://")
+                    or url.startswith("https://")
+                    or url.startswith("data:")):
+                continue
+            # 已经存在就不重复 (比如 _on_tool 已经注入了的)
+            if url in (msg.content or ""):
+                continue
+            prompt = ""
+            try:
+                import json as _json3
+                _a = _json3.loads(args) if (isinstance(args, str) and args.strip()) \
+                     else (args or {})
+                if isinstance(_a, dict):
+                    prompt = str(_a.get("prompt") or "")[:60]
+            except Exception:
+                pass
+            alt = f"{kind}: {prompt}" if prompt else kind
+            addition.append(f"\n\n![{_html_escape(alt)}]({url})")
+        if addition:
+            msg.content = (msg.content or "") + "".join(addition)
 
     def _parse_run_script_into_blocks(self, name: str, args: str, result: str) -> None:
         """run_script 结果拆成：命令块（execs）+ 简化结果（tools）。"""
@@ -2834,6 +2982,42 @@ class ChatWindow(QWidget):
                         "核对了一下执行结果，好像不太对，让我重新确认一下~"
                     )
                     log.info("ChatWindow: verify_retry 事件已提示用户")
+
+    def _refresh_status_bar(self) -> None:
+        """1 Hz 刷新: 桌宠进程的 CPU/内存占用 + LLM 本轮 token 估算。
+
+        token 数近似: 已发送 user msg + 已生成 assistant 内容字符数 / 4
+        (英文 1 token ≈ 4 字符, 中文 ≈ 1.5 字符 → 除 4 是粗估)。窗口 ~50 条
+        历史, 实际超长上下文会扣更多, 主人不靠这个精打细算。
+        """
+        import os as _os
+        import time as _t
+        try:
+            proc = _os.getpid()
+            with open(f"/proc/{proc}/stat") as _f:
+                parts = _f.read().split()
+            # utime + stime (clock ticks, jiffies). Linux; Windows fallback 下面 else.
+            utime = int(parts[13]); stime = int(parts[14])
+            clk = _os.sysconf("SC_CLK_TCK")
+            cpu_pct = (utime + stime - self._last_proc_ticks) / clk * 100 / 1.0
+            self._last_proc_ticks = utime + stime
+        except Exception:
+            cpu_pct = 0.0
+        try:
+            import psutil
+            mem = psutil.Process().memory_info().rss / 1024 / 1024
+        except Exception:
+            mem = 0.0
+        # token 估算: 累积 content 字符数
+        toks = 0
+        for m in getattr(self, "history", []):
+            toks += max(1, len(getattr(m, "content", "") or "") // 4)
+        try:
+            self._status_label_cpu.setText(f"CPU: {cpu_pct:.0f}%")
+            self._status_label_mem.setText(f"mem: {mem:.0f} MB")
+            self._status_label_token.setText(f"tokens: ~{toks:,}")
+        except Exception:
+            pass
 
     def _on_chunk(self, tok: str) -> None:
         if self._current_bot_msg is None:
@@ -3024,14 +3208,22 @@ class ChatWindow(QWidget):
         # 2. **等所有 prepare worker 完成**（主线程短时阻塞；GPT-SoVITS 通常 3-5 秒）
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
+        # v24: LLM 通过 generate_image/video/audio 工具生成产物时, _on_tool
+        # 已在 _on_done 之前把图片/视频/音频 markdown 注入过 content, 但上面
+        # content = parsed.text 那行把它覆盖掉了 → 主人看到的聊天窗口没有
+        # 图片。修法: 从 msg.tools 倒着扫, 把 multimodal URL 重新拼到 content
+        # 末尾 (跟 _on_tool 注入逻辑等价, 但能扛住覆盖)。
+        self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._flush_tts_tail_to_prepare()  # 启动尾部 prepare
         self._wait_all_sentence_workers(timeout_s=120.0)  # 阻塞等全部 prepare 完
 
         self.history.append(self._current_bot_msg)
         self._trim_history()
         tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
+        # v24: 持久化用的是 msg.content (已经被 re-inject 拼上 multimodal markdown),
+        # 不再用 parsed.text — 否则重启后历史消息里看不到图片, 主人得重新生图。
         self.chat_store.add(
-            "assistant", parsed.text,
+            "assistant", self._current_bot_msg.content or "",
             emotion=parsed.emotion.value if parsed.emotion else "",
             tools=tools_list,
         )
@@ -3075,6 +3267,9 @@ class ChatWindow(QWidget):
             self._lc_agent = None
         self._current_bot_msg.content = f"[错误] {err}"
         self._current_bot_msg.emotion = Emotion.SAD
+        # v24: 即使失败也尝试把 multimodal 产物补回来 (主人在出错消息下面
+        # 还能看见刚才生成的图, 不至于被错误气泡擦掉)。
+        self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._refresh_streaming_message(finished=True, emotion="sad")
         # Trace：失败
         if self.trace is not None and self._trace_run_id:
@@ -3403,8 +3598,14 @@ class ChatWindow(QWidget):
         # (line 1119 _on_clear 已 chat_store.clear()) 一键清理。
         # msg.tools 非空时不走 placeholder (工具调用消息 content
         # 可能空但工具有信息, 仍要渲染)。
+        # v23 修流式期间 placeholder 错显示 bug: _insert_placeholder 用
+        # streaming_meta="typing…" 渲染「三点跳动」占位 (content 此刻确实空),
+        # 旧代码不管 streaming_meta 都走 placeholder, 主人看到「三点 + 灰色空内容」
+        # 同时存在。修: 流式时跳过 placeholder, 走正常分支由 _typing_dots_html
+        # 负责显示 dots; 流式结束 (_on_done 调 _refresh_streaming_message
+        # finished=True) content 非空 → 正常 markdown 渲染。
         raw = msg.content or ""
-        if not raw.strip() and not (msg.tools or []):
+        if (not raw.strip() and not (msg.tools or []) and not streaming_meta):
             time_str = _format_time_short(msg.ts)
             label_html = (
                 f'<div class="msg-label">'
@@ -3847,16 +4048,19 @@ class ChatWindow(QWidget):
         """流式刷新「当前 bot 占位 div」——从 anchor 到末尾删除旧内容后插入新内容。
 
         Args:
-            finished: True = 把流式占位切换为最终完整消息（含 emotion）
-                      False = 仍是流式占位（继续打字）或「准备语音…」占位
-            emotion: 仅 finished=True 时用作 bubble 顶部 meta
+            finished: True = 流式结束,渲染最终完整消息(不加 dots)
+                      False = 仍是流式占位,显示三点跳动等待动画
+            emotion: 已完成时的情绪,目前仅供 trace 等外部使用,不在 chat 里渲染
+                     (避免之前 bug: 把 emotion 当 streaming_meta 传下去,
+                      _msg_html 看到 truthy 就追加 dots → 已完成的消息尾巴还有 ..)
         """
+        _ = emotion  # emotion 不再当 streaming_meta 用,避免跟"是否还在打字"耦合
         if finished:
-            meta = emotion
+            # 流式结束: 不传 streaming_meta → 跳过 dots / placeholder 分支
+            html = self._msg_html(self._current_bot_msg)
         else:
             # 流式打字机期间一律显示三点跳动（typing 动画）
-            meta = "typing…"
-        html = self._msg_html(self._current_bot_msg, streaming_meta=meta)
+            html = self._msg_html(self._current_bot_msg, streaming_meta="typing…")
 
         cursor = self.chat_view.textCursor()
         anchor = getattr(self, "_streaming_anchor_pos", None)

@@ -329,8 +329,10 @@ CHAT_MD_CSS = (
     # 角色微调: user 有非常浅的灰底背景, assistant 纯白 (MiniMax Code 同款)
     ".msg-user{background:#fafbfc;}"
     ".msg-assistant{background:#ffffff;}"
-    # 2026-10-15 v2: 用户消息整体靠右 (主人要求 "我发出的消息应该要保持在右侧")
-    # 用 inline-block + max-width 让 user 块像气泡一样收在右半边
+    # v24: 主人再次反馈 — 桌宠名字 (assistant label) 在左、主人名字
+    # (user label) 在右。这是常见 IM 风格 (微信 / iMessage) — 主人身份
+    # 在自己这一侧, AI 名字固定在左。恢复 2026-10-15 v2 的右对齐 user label,
+    # 但确保 assistant label 用 margin-right:auto (稳定靠左)。
     ".msg-user .msg-label{text-align:right;color:#475569;}"
     ".msg-user .msg-body{text-align:right;}"
     ".msg-assistant .msg-label{text-align:left;}"
@@ -342,13 +344,17 @@ CHAT_MD_CSS = (
     ".msg-label .ts{font-weight:400;color:#94a3b8;margin-left:8px;"
     "font-size:8.5pt;letter-spacing:0;}"
     # 2026-10-15 v2: user 块右对齐 — 用 margin-left:auto 把内容挤到右边,
-    # 但 msg-body 里的多行文本仍走 text-align:right, 这样图片/链接/代码块
-    # 等会自然收在右半边
+    # body 里的多行文本走 text-align:right, 这样图片/链接/代码块等会自然
+    # 收在右半边。v24 主人确认: user label 也跟 body 一起靠右 (桌宠在左)。
     ".msg-user .msg-label, .msg-user .msg-body{display:block;"
     "margin-left:auto;width:fit-content;max-width:75%;}"
-    # 2026-10-15 v2: assistant 块左对齐 — 全宽, margin-right:auto 让它从左边起
-    ".msg-assistant .msg-label, .msg-assistant .msg-body{display:block;"
-    "margin-right:auto;width:fit-content;max-width:90%;}"
+    # v24: assistant 块左对齐 — label 也要稳在左, 不被 body 拉走。
+    # msg-label margin-right:auto 让 name 固定靠左, body 同样靠左,
+    # 跟桌宠消息形成完整的「左侧身份块」(name + content 同列同侧)。
+    ".msg-assistant .msg-label{display:block;margin-right:auto;"
+    "width:fit-content;max-width:90%;text-align:left;}"
+    ".msg-assistant .msg-body{display:block;margin-right:auto;"
+    "width:fit-content;max-width:90%;text-align:left;}"
     # 消息正文容器
     ".msg-body{font-size:11pt;line-height:1.7;color:#1f2937;}"
     ".msg-body p{margin:7px 0;}"
