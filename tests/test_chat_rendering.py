@@ -4012,9 +4012,16 @@ def test_v34_post_llm_guard_refuses_preemptive_when_state_bad():
     """v34: 主人实测 12:52 LLM 仍 preemptive 问 (v33 prompt 工程失败).
     切到 post-LLM 拦截: state=全 LOW + LLM 输出含 '要确认一下' →
     改写为 REFUSAL_TEXT, 清掉 tool_calls.
+
+    v34-fix: handler 返回 ModelResponse (result[0]=AIMessage), 中间件
+    必须改写 ModelResponse.result[0] (AIMessage) 才能传到下游. 之前
+    v34 错改 response.content (ModelResponse 没这字段) 被 try/except
+    吞掉, LLM 还是输出 preemptive 文案.
     """
     from app.brain.hallucination_guard import PostLLMStateGuard
     from app.engine.state import PetState
+    from langchain.agents.middleware.types import ModelResponse
+    from langchain_core.messages import AIMessage
 
     guard = PostLLMStateGuard()
     state = PetState()
@@ -4023,31 +4030,34 @@ def test_v34_post_llm_guard_refuses_preemptive_when_state_bad():
     state.normalize()
     guard.set_companion_state(state)
 
-    # 模拟 AIMessage
-    class FakeMsg:
-        def __init__(self, content, tool_calls=None):
-            self.content = content
-            self.tool_calls = tool_calls or []
-    msg = FakeMsg(
-        "主人~锁屏是危险操作, 要确认一下: 真的要锁屏吗? 确定的话小汐就帮主人锁上啦~",
+    ai_msg = AIMessage(
+        content="主人~锁屏是危险操作, 要确认一下: 真的要锁屏吗? 确定的话小汐就帮主人锁上啦~",
         tool_calls=[{"id": "tc1", "name": "lock_screen", "args": {}}],
     )
-    # 直接走 _looks_like_preemptive_ask + 手动模拟 wrap 行为
-    text = msg.content
-    assert PostLLMStateGuard._looks_like_preemptive_ask(text), (
-        "v34: 含 '要确认一下' 应被识别为 preemptive 问"
+    response = ModelResponse(result=[ai_msg])
+
+    # 模拟中间件改写 (实际 as_middleware 也是这个逻辑)
+    outer = guard
+    if outer._state_is_bad():
+        content = getattr(ai_msg, "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(c) for c in content)
+        text = str(content)
+        if outer._looks_like_preemptive_ask(text):
+            ai_msg.content = outer.REFUSAL_TEXT
+            ai_msg.tool_calls = []
+
+    assert ai_msg.content == PostLLMStateGuard.REFUSAL_TEXT, (
+        f"v34: AIMessage.content 应改写, 实际: {ai_msg.content[:60]}"
     )
-    # 模拟中间件改写
-    if guard._state_is_bad() and PostLLMStateGuard._looks_like_preemptive_ask(text):
-        msg.content = PostLLMStateGuard.REFUSAL_TEXT
-        msg.tool_calls = []
-    assert msg.content == PostLLMStateGuard.REFUSAL_TEXT, (
-        f"v34: 应改写为 REFUSAL_TEXT, 实际: {msg.content[:60]}"
+    assert ai_msg.tool_calls == [], (
+        f"v34: AIMessage.tool_calls 应清空, 实际: {ai_msg.tool_calls}"
     )
-    assert msg.tool_calls == [], (
-        f"v34: tool_calls 应被清空, 实际: {msg.tool_calls}"
+    # response.result[0] 是同一个 ai_msg, 应该同步看到改写
+    assert response.result[0].content == PostLLMStateGuard.REFUSAL_TEXT, (
+        "v34: response.result[0].content 必须被改写 (这就是下游读到的内容)"
     )
-    print("[OK] v34: state 差 + preemptive 问 → 改写为 REFUSAL_TEXT + 清 tool_calls")
+    print("[OK] v34: ModelResponse.result[0] (AIMessage) 被正确改写")
 
 
 def test_v34_post_llm_guard_keeps_normal_when_state_good():

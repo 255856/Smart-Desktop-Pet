@@ -764,6 +764,15 @@ class PostLLMStateGuard:
     def set_companion_state(self, pet_state: "Optional[PetState]") -> None:
         """v34: 注入 (或清除) 当前桌宠 PetState。"""
         self._companion_state = pet_state
+        # v34-debug: 让主人确认 setter 被调到 (state 注入链路不断)
+        is_bad = self._state_is_bad()
+        log.info(
+            "PostLLMStateGuard.set_companion_state: state=%s, "
+            "is_bad=%s, type=%s",
+            "None" if pet_state is None else "set",
+            is_bad,
+            type(pet_state).__name__ if pet_state is not None else "None",
+        )
 
     def _state_is_bad(self) -> bool:
         if self._companion_state is None:
@@ -803,33 +812,80 @@ class PostLLMStateGuard:
         @wrap_model_call
         async def _post_llm_guard(request, handler):
             response = await handler(request)
+            # v34-fix: wrap_model_call 的 handler 返回的是 ModelResponse,
+            # 不是 AIMessage. ModelResponse.result 是 list[BaseMessage],
+            # 真正的 AIMessage 在 response.result[0]. 之前 v34 错把
+            # `response.content = REFUSAL_TEXT` 写在 ModelResponse 上
+            # (它没 content 字段), 异常被 try/except 吞掉, 改写根本没
+            # 传下去. 修法: 改写 response.result[0] (AIMessage).
+            ai_msg = None
+            try:
+                result_list = getattr(response, "result", None)
+                if isinstance(result_list, list) and result_list:
+                    ai_msg = result_list[0]
+            except Exception:
+                ai_msg = None
+
+            # v34-debug: 拿到 response + AIMessage 后立即打 INFO
+            try:
+                if ai_msg is not None:
+                    content_dbg = getattr(ai_msg, "content", "")
+                    if isinstance(content_dbg, list):
+                        content_dbg = " ".join(str(c) for c in content_dbg)
+                    content_preview = str(content_dbg)[:80] if content_dbg else ""
+                else:
+                    content_preview = "<no result[0]>"
+            except Exception:
+                content_preview = "<read content failed>"
+            log.info(
+                "PostLLMStateGuard.run: state=%s, has_ai_msg=%s, content_preview=%r",
+                "BAD" if outer._state_is_bad() else "OK",
+                ai_msg is not None,
+                content_preview,
+            )
 
             # 状态好 → 直通, 不影响正常 confirm 流程
             if not outer._state_is_bad():
                 return response
 
+            # 拿不到 AIMessage → 直通 (unknown shape, 不动)
+            if ai_msg is None:
+                return response
+
             # 拿到 LLM 输出的文本
-            content = getattr(response, "content", "")
+            content = getattr(ai_msg, "content", "")
             if isinstance(content, list):
                 # 多模态 content_blocks: 拼成字符串
                 content = " ".join(str(c) for c in content)
             text = str(content) if content else ""
 
             # 没 preemptive 问 → 直通 (例如 LLM 已经在拒绝, 不动)
-            if not outer._looks_like_preemptive_ask(text):
+            is_preemptive = outer._looks_like_preemptive_ask(text)
+            log.info(
+                "PostLLMStateGuard.run: state=BAD, is_preemptive=%s, text_len=%d",
+                is_preemptive, len(text),
+            )
+            if not is_preemptive:
                 return response
 
-            # 命中: 改写为拒绝文案 + 清掉 tool_calls
+            # 命中: 改写 AIMessage (ModelResponse.result[0]) + 清掉 tool_calls
+            pre_content = text
             try:
-                response.content = outer.REFUSAL_TEXT
-            except Exception:
-                pass
+                ai_msg.content = outer.REFUSAL_TEXT
+                content_write_ok = True
+            except Exception as e:  # noqa: BLE001
+                content_write_ok = False
+                log.warning("PostLLMStateGuard.content 改写失败: %s", e)
             try:
-                response.tool_calls = []
-            except Exception:
-                pass
+                ai_msg.tool_calls = []
+                tool_calls_clear_ok = True
+            except Exception as e:  # noqa: BLE001
+                tool_calls_clear_ok = False
+                log.warning("PostLLMStateGuard.tool_calls 清空失败: %s", e)
             log.warning(
-                "PostLLMStateGuard: state 差 + LLM preemptive 问, 改写为拒绝文案"
+                "PostLLMStateGuard: state 差 + LLM preemptive 问, 已改写 "
+                "(content_write=%s, tool_calls_clear=%s, pre=%r)",
+                content_write_ok, tool_calls_clear_ok, pre_content[:80],
             )
             return response
 
