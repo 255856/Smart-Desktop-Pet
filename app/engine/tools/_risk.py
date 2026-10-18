@@ -153,9 +153,18 @@ RISK_NAME: dict[int, str] = {
 }
 
 
-def risk_name(risk_int: int) -> str:
-    """int 风险等级 → 名称。未知值返 'UNKNOWN'。"""
-    return RISK_NAME.get(int(risk_int), "UNKNOWN")
+def risk_name(risk_int) -> str:
+    """int 风险等级 → 名称。None / 未知值返 'UNKNOWN'。
+
+    MCP 外部工具不在 TOOL_RISK_LEVEL 主表里,调用方 get() 拿到 None,
+    这里必须容忍而不是抛 TypeError。
+    """
+    if risk_int is None:
+        return "UNKNOWN"
+    try:
+        return RISK_NAME.get(int(risk_int), "UNKNOWN")
+    except (TypeError, ValueError):
+        return "UNKNOWN"
 
 
 __all__ = [

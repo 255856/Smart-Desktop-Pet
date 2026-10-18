@@ -43,12 +43,18 @@ CREATE TABLE IF NOT EXISTS messages (
     character_name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
-CREATE INDEX IF NOT EXISTS idx_messages_char_ts ON messages(character_name, ts);
 """
 
-# v31: 旧 db 加列迁移 (列已存在会报 duplicate column, 吞掉)。
+# 旧 db 加列迁移 (列已存在会报 duplicate column, 吞掉)。
 _MIGRATE_ADD_CHAR_COLUMN = (
     "ALTER TABLE messages ADD COLUMN character_name TEXT NOT NULL DEFAULT ''"
+)
+
+# character_name 索引必须在 ALTER 之后建 —— 老表没有该列时
+# CREATE INDEX 会抛 "no such column", 连带 executescript 整体回滚。
+_CHAR_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_messages_char_ts "
+    "ON messages(character_name, ts)"
 )
 
 
@@ -82,7 +88,7 @@ class ChatStore:
         conn = sqlite3.connect(str(self.data_file))
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
-        # v31: 旧 db 没 character_name 列, ALTER 补上。列已存在会抛
+        # 旧 db 没 character_name 列, ALTER 补上。列已存在会抛
         # "duplicate column name", 吞掉(SQLite 不支持 IF NOT EXISTS for ADD COLUMN)。
         try:
             conn.execute(_MIGRATE_ADD_CHAR_COLUMN)
@@ -91,6 +97,12 @@ class ChatStore:
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 log.warning("ChatStore: 加 character_name 列失败(%s), 继续", e)
+        # 列确定存在后再建索引
+        try:
+            conn.execute(_CHAR_INDEX)
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ChatStore: 建 character_name 索引失败(%s), 继续", e)
         return conn
 
     def _migrate_from_json(self) -> int:
