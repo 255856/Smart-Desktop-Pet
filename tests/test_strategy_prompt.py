@@ -105,7 +105,7 @@ def test_prompt_injects_strategy_when_state_in_registry():
         system_prompt = "基线"
         config = {"configurable": {"thread_id": "t-strategy"}}
     prompt = grounding_dynamic_prompt(Req())
-    assert "【桌宠状态策略 (v22-3 策略层)】" in prompt, (
+    assert "【桌宠状态策略】" in prompt, (
         f"prompt 应注入策略块. 实际:\n{prompt}"
     )
     # 默认 state 是 feeling=80/sat=100/level=1 → HIGH sat + HIGH mood

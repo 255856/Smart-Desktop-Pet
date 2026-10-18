@@ -139,6 +139,8 @@ class ChatWindow(QWidget):
                  cfg_path: str = "config.yaml",
                  # 接线(a):Phase 2.1-3.4 引擎层上下文 —— 全部透传给 LangChainAgent
                  cwd: Optional[str] = None,
+                 # v31: 不传 session_id 时, 从 char_cfg.name 派生 (f"char:{name}:main")。
+                 # 切人设 + 重启 pet → 天然换 thread_id, LangGraph checkpoint 不互相串。
                  session_id: Optional[str] = None,
                  session_store: Optional[object] = None,
                  skills_dir: Optional[str] = None,
@@ -187,7 +189,9 @@ class ChatWindow(QWidget):
         self._memory_dlg: Optional[MemoryDialog] = None
         # 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
         self._cwd = cwd
-        self._session_id = session_id
+        # v31: 默认从 char_cfg.name 派生 per-character session_id, 让 LangGraph
+        # checkpoint 天然按角色隔离。手工传 session_id 时仍以传入值为准。
+        self._session_id = session_id or (f"char:{char_cfg.name}:main" if char_cfg else None)
         self._session_store = session_store
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
@@ -232,7 +236,8 @@ class ChatWindow(QWidget):
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
         self._mic_busy = False
-        self.chat_store = ChatStore()  # 聊天历史持久化
+        # v31: 按角色隔离 — 切人设重启后, 各自一份独立历史, 不串味
+        self.chat_store = ChatStore(character_name=self.char_cfg.name)  # 聊天历史持久化
 
         # 语音识别（ASR）：按住说话 → 松开识别 → 自动发送
         self.asr: Optional[SpeechRecognizer] = None
@@ -267,7 +272,8 @@ class ChatWindow(QWidget):
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
         self._mic_busy = False
-        self.chat_store = ChatStore()  # 聊天历史持久化
+        # v31: 按角色隔离 — 切人设重启后, 各自一份独立历史, 不串味
+        self.chat_store = ChatStore(character_name=self.char_cfg.name)  # 聊天历史持久化
         _ico = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
             from app.core.qt_compat import QIcon
@@ -3740,6 +3746,9 @@ class ChatWindow(QWidget):
         这是 cmd:toggle_tools 点击处理用的最稳路径,不动 anchor/cursor,
         用全量重渲染替代「从 anchor 删到末尾再 insertHtml」(后者某些状态会擦白 chat)。
         """
+        # 1. 滚到底 (重渲染后还要在底部)
+        sb = self.chat_view.verticalScrollBar()
+        was_at_bottom = (sb.value() >= sb.maximum() - 4)
         # 4. 重建 streaming 占位 (如果还在 streaming)
         if (self._current_bot_msg is not None
                 and getattr(self, "_streaming_anchor_pos", None) is not None):

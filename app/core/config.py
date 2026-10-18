@@ -1,6 +1,7 @@
 """配置加载与默认值（基于 pydantic-settings）。"""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, List, Literal, Optional
@@ -8,6 +9,8 @@ from typing import Any, List, Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings
+
+log = logging.getLogger(__name__)
 
 
 class LLMConfig(BaseModel):

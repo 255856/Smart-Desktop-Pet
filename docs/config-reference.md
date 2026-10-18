@@ -1,8 +1,8 @@
-# Config Reference · `config.yaml` 全字段
+# config.yaml 全字段
 
-> 复制 `config.example.yaml` 为 `config.yaml` 后填 `llm.api_key` 即可启动。详细字段含义见下。
+复制 `config.example.yaml` 为 `config.yaml` 后填 `llm.api_key` 即可启动。详细字段含义见下。
 
-## `llm`（大模型 API）
+## llm（大模型 API）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -14,7 +14,7 @@
 | `max_tokens` | `1024` | 单次回复上限 |
 | `timeout` | `60` | 秒，请求超时 |
 
-## `character`（角色）
+## character（角色）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -26,23 +26,23 @@
 | `gptsovits_*` | — | GPT-SoVITS 引擎配置，见 [tts-integration.md](tts-integration.md) |
 | `minimax_*` | — | MiniMax 引擎配置 |
 
-## `window`（桌宠窗口）
+## window（桌宠窗口）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `start_x` / `start_y` | `200` / `200` | 启动位置（左上角偏移） |
 | `scale` | `0.4` | 缩放，0.4~0.8 推荐 |
 | `always_on_top` | `true` | 桌宠置顶 |
-| `show_in_taskbar` | `false` | 是否在任务栏显示（桌宠一般 false） |
+| `show_in_taskbar` | `false` | 是否在任务栏显示 |
 
-## `reminder`（提醒）
+## reminder（提醒）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `enabled` | `true` | 是否启用 |
 | `data_file` | `reminders.json` | 持久化路径 |
 
-## `app`（启动）
+## app（启动）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -50,14 +50,14 @@
 | `start_minimized` | `false` | 启动时最小化到托盘 |
 | `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
-## `sprite`（PNG 帧动画）
+## sprite（PNG 帧动画）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `directory` | `assets/sprites` | 帧动画目录（含 `Default/` `Sleep/` 等子目录） |
+| `directory` | `assets/sprites` | 帧动画目录 |
 | `fallback` | `assets/sprites/body_front.png` | 找不到动画时的兜底图 |
 
-## `asr`（语音输入）
+## asr（语音输入）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -65,11 +65,11 @@
 | `model_size` | `base` | `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `language` | `zh` | `zh` / `en` |
 
-## `brain`（智能中枢）
+## brain（智能中枢）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `backend` | `lightweight` | `lightweight`（手写 ReAct，零依赖）/`standard`（LangChain） |
+| `backend` | `lightweight` | `lightweight`（手写 ReAct，零依赖）/ `standard`（LangChain，带创新点 2 决策耦合） |
 | `tools_enabled` | `true` | 允许模型调用工具 |
 | `memory_file` | `data/memory.json` | 长期记忆落盘 |
 | `proactive_enabled` | `true` | 空闲主动搭话 |
@@ -78,12 +78,14 @@
 | `agent.*` | — | V2 Plan-Execute-Reflect 配置（生产未挂载，仅 `_legacy/` 测试用） |
 | `langchain.*` | — | LangChain 后端参数（`backend=standard` 时生效） |
 
-## `pet`（渲染器）
+`backend=standard` 才走创新点 2 全套机制（决策查表 / 状态注入 / post-LLM 拦截器）。`backend=lightweight` 是手写 ReAct，无中间件，无状态耦合。
+
+## pet（渲染器）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `renderer` | `sprite` | `sprite` / `live2d` |
-| `live2d.model_dir` | `assets/live2d/bingtang/bingtang` | Live2D 模型根目录（含 `*.model3.json`） |
+| `live2d.model_dir` | `assets/live2d/bingtang/bingtang` | Live2D 模型根目录 |
 | `live2d.scale` | `0.5` | PIXI 模型显示缩放 |
 | `live2d.random_expression` | `true` | 挂机随机表情 |
 | `live2d.random_expression_min_s` / `max_s` | `25` / `70` | 随机间隔秒数 |
@@ -91,16 +93,43 @@
 
 详细 Live2D 配置见 [live2d-integration.md](live2d-integration.md)。
 
-## `data/` 运行时数据
+## companion（创新点 2 决策表）
+
+不在 `config.yaml` 里，走独立 yaml `app/core/companion_config.yaml`：
+
+| 段 | 作用 |
+|---|---|
+| `ranges` | 4 维状态 (mood/satiety/favor/exp) 的 minimum/maximum/initial |
+| `quantize` | 三档离散化阈值（LOW/MID/HIGH 分界 + hysteresis 防抖） |
+| `leveling` | 升级公式 `base * level^exp` |
+| `time_decay` | 时间驱动衰减（每小时减饱食度等） |
+| `event_hooks` | per-run outcome→state 钩子权重（success/failure/rejected/accepted 各自的 mood/satiety/favor/exp 增量） |
+
+改数值公式 / 阈值 / 钩子权重全在 yaml 里，不用动代码。详见 [innovation-2-companion-policy.md](innovation-2-companion-policy.md)。
+
+## MCP servers（mcp_servers.yaml）
+
+仓库根的 `mcp_servers.yaml` 控制外部 MCP server 启停：
+
+| name | 默认 | 说明 |
+|------|------|------|
+| `filesystem` | enabled | stdio JSON-RPC，`-m app.mcp.filesystem_server` |
+| `aw` | enabled | ActivityWatch 活动感知，详见 [activitywatch-integration.md](activitywatch-integration.md) |
+
+要扩到第三台 server 在 `mcp_servers.yaml` 加一段 `- name: ...` 即可。
+
+## data/ 运行时数据
 
 | 文件 | 用途 | 何时创建 |
 |------|------|----------|
 | `data/memory.json` | 长期记忆（向量 + 重要性） | 首次 `remember_fact` |
 | `data/traces.db` | Agent Trace（SQLite） | 首次 Agent 调用 |
 | `data/chat_history.json` | 聊天历史（持久化） | 启动后首次聊天 |
+| `data/companion_log.txt` | 创新点 2 决策 JSON-line 落盘 | 首次 `lookup_decision` |
 | `data/dashboard.log` | Dashboard 子进程日志 | 启动过 Dashboard |
 | `data/eval_report.md` | Eval 报告 | 跑 `verify_features.py` 后 |
 | `data/feature_check.txt` | 功能验证明细 | 同上 |
-| `~/.desktop-pet/save.json` | 宠物状态存档（等级/金币/好感） | 启动后自动 |
+| `data/pet_state.json` | 桌宠状态存档（等级/金币/好感/心情/饱食） | 启动后自动 |
+| `data/live2d_scenes/<model>.json` | Live2D 18 场景配置覆盖 | 自定义后 |
 
-**备份整个项目** = `data/` + `settings.json` + `~/.desktop-pet/save.json`。
+**备份整个项目** = `data/` + `settings.json` + `mcp_servers.yaml` + `app/core/companion_config.yaml`。

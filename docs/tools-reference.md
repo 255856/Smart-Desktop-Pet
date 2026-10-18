@@ -1,4 +1,4 @@
-# Tools Reference · 桌宠 52 个工具全集
+# Tools Reference · 桌宠 68 个工具全集
 
 > 模型通过 **Function Calling** 协议（OpenAI 格式）调用这些工具。  
 > 用户口语 → 模型选工具 → `ToolRegistry.execute(name, args_json)` → 字符串结果回给模型 → 模型组织自然语言回复。
@@ -13,11 +13,14 @@
 | 二、时间与提醒 | 6 | — |
 | 三、搜索与记忆 | 4 | — |
 | 四、计算与转换 | 3 | — |
-| 五、应用与文件 | 11 | 2 |
+| 五、应用与文件 | 10 | 2 |
+| 六、桌宠自身 | 5 | — |
 | 七、系统控制 | 20 | 5 |
-| **合计** | **52** | **7** |
+| 八、ActivityWatch 活动感知 | 4 | — |
+| 九、生成 / 委派 | 4 | 1（run_script） |
+| **合计** | **68** | **9** |
 
-> 六、桌宠自身（5 个）和 八、语音唤醒（非工具）独立章节。
+> 八、语音唤醒（非工具）独立章节。
 
 ---
 
@@ -317,7 +320,40 @@
 
 ---
 
-## 八、语音唤醒（非工具）
+## 八、ActivityWatch 活动感知
+
+> 需装 [ActivityWatch](https://activitywatch.net/) 桌面客户端（5600 端口）。详见 [activitywatch-integration.md](activitywatch-integration.md)。
+
+### `mcp_aw_get_recent_activities`
+- **触发**：「过去 5 分钟我在做什么 / 刚才用了什么 app」
+- **作用**：调 aw-server `/api/0/.../events` 拉最近 N 分钟 window 事件，按 app 聚合
+- **参数**：`minutes: int (1~120)`，`limit: int (1~20)`
+- **报错**：
+  - server 没跑 → 「ActivityWatch server 未运行, 请启动 aw-server (默认 5600 端口)」
+  - 没装 watcher → 「ActivityWatch 已运行, 但未检测到 aw-watcher-window / afk 数据, 请装 watcher」
+  - watcher 卡住 → 「watcher 在但最近 10 分钟无活动」
+
+### `mcp_aw_get_current_window`
+- **触发**：「我现在在做什么 / 主人在哪个窗口」
+- **作用**：拉最近 1 个 window 事件
+- **报错**：同上
+
+### `mcp_aw_query`
+- **触发**：「主人今天在 VSCode 待了多久 / 浏览器 Chrome 用了多久」
+- **作用**：走 ActivityWatch Query Builder 语法聚合任意时间段数据
+- **参数**：`query: str`（ActivityWatch Web Query 语法），`timeperiods: list`
+- **报错**：同上 + query 语法错时返「query 语法错: ...」
+
+### `mcp_aw_buckets`
+- **触发**：调试用，列出所有 bucket
+- **作用**：返回 aw-server 上所有 bucket + metadata
+- **报错**：server 没跑时报同上
+
+这 4 个工具**不在** `_RISKY_TOOLS` 里（只读查询），不被 post-LLM 拦截器改写，跟其他 SAFE 工具一样正常走 confirm / ALLOW 路径。
+
+---
+
+## 九、语音唤醒（非工具）
 
 **模块名**：`WakeWordRecognizer`（`app/voice/wake_word.py`）
 
@@ -337,9 +373,11 @@
 
 ---
 
-## 危险工具清单（7 个）
+## 危险工具清单（9 个）
 
-集中在 `app/brain/agent.py` 的 `DANGEROUS_TOOLS`：
+集中在 `app/engine/tools/_risk.py` 的 `TOOL_RISK_LEVEL`（5 档：SAFE / LOW / MEDIUM / HIGH / IRREVERSIBLE），自动派生 `_RISKY_TOOLS`（≥ LOW）。`backend=lightweight` 走 `app/brain/agent.py` 的 `DANGEROUS_TOOLS` 弹窗拦截，`backend=standard` 走 `app/brain/hallucination_guard.RiskyToolConfirm` 中间件 + `PostLLMStateGuard` post-LLM 拦截器。
+
+弹窗 confirm 的 8 个：
 
 ```python
 DANGEROUS_TOOLS = {
@@ -348,12 +386,21 @@ DANGEROUS_TOOLS = {
 }
 ```
 
-执行流程：
+只打 WARNING log 不弹窗的 4 个：`send_notification` / `send_email` / `set_brightness` / `set_volume`（owner 自己可控，但 _RISKY_TOOLS 集合里）。
+
+执行流程（`backend=lightweight`）：
+
 1. AgentLoop 解析出 tool_calls
 2. 若 tool_name ∈ DANGEROUS_TOOLS → 弹窗（由 `confirm_tool: Callable[[str, str], bool]` 注入）
 3. 用户点"确认"才真执行；否则返回 "用户取消了此操作"
 
-`shutdown_computer` 已在 DANGEROUS_TOOLS 集合里预留，本版本**未实现**对应工具函数（避免误触发），下一版再加。
+执行流程（`backend=standard` LangChain）：
+
+1. `RiskyToolConfirm` 中间件走 `lookup_decision(state, tool)` 查表 → ALLOW / CONFIRM / REJECT / REFUSE
+2. CONFIRM → 弹窗；REJECT → 拒绝 ToolMessage（不调工具）；ALLOW → 放行；REFUSE → 任务级标 failure
+3. `PostLLMStateGuard` 在 LLM 输出后兜底：state 差 + LLM preemptive 问 → 改写 `ModelResponse.result[0].content = REFUSAL_TEXT` + 清 `tool_calls`
+
+`shutdown_computer` 已预留，本版本**未实现**对应工具函数（避免误触发），下一版再加。完整机制详见 [innovation-2-companion-policy.md](innovation-2-companion-policy.md)。
 
 ---
 
@@ -489,7 +536,7 @@ app/engine/tools/
 
 ## 统计
 
-- **52 个工具**（不含语音唤醒） + 1 个语音模块
-- **7 个危险**（需弹窗确认）
+- **68 个工具**（不含语音唤醒） + 1 个语音模块
+- **8 个弹窗 confirm** + 4 个只 log 不弹窗 = 12 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
-- **23 个新增测试用例**（`tests/test_new_tools.py`）
+- **1270 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

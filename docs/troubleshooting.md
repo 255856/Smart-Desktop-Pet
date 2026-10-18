@@ -1,4 +1,4 @@
-# Troubleshooting · FAQ 展开
+# 常见问题
 
 ## 桌宠本体
 
@@ -39,8 +39,36 @@
 ### 模型不调工具（只回文字）
 
 - `brain.tools_enabled: true`
-- `agent_v2` 暂未挂载，生产用 `AgentLoop`（`agent.py`）—— 3 层抗幻觉：force_tool_use → force_retry → final 兜底
+- `backend=standard`（LangChain）：`_ensure_agent` 在 model 准备阶段会把工具 attach 给模型
+- `backend=lightweight`（手写 ReAct）：3 层抗幻觉 `force_tool_use` → `force_retry` → `final` 兜底
 - 见 `tests/test_anti_hallucination*.py` 回归用例
+
+### 状态差 LLM 还是 preemptive 问「要确认一下」
+
+主人实测 5+ 次报告过，根因有 3 个，按可能性排查：
+
+1. **`brain.backend` 还是 `lightweight`** — 创新点 2 整套机制（决策查表 / 状态注入 / post-LLM 拦截器）只在 `standard` 走。改成 `standard` 重启
+2. **`ui_controller.py` 创建 ChatWindow 时漏传 `state_provider`** — 桌宠从托盘菜单唤起走的是这条路径，`_state_provider` 永远是 None，中间件拿不到 state。`test_v35_ui_controller_passes_state_provider` AST 守卫锁死这条
+3. **`PostLLMStateGuard` 改错对象层级** — 改 `response.content` 没用（ModelResponse 没这字段），要改 `response.result[0].content`。`test_v34_post_llm_guard_refuses_preemptive_when_state_bad` 锁死
+
+排查：
+
+```powershell
+# 看启动 log 有没有 self._state_provider is None warning
+type E:\study\desktop-pet\crash.log
+# 选 搜索 "self._state_provider is None" → 有 → 路径 2
+# 选 搜索 "改写失败" → 有 → 路径 3
+# 都没有 → 路径 1 (backend 没切)
+```
+
+### 状态差 LLM 还是弹 confirm 弹窗
+
+跟 preemptive 问不同：弹 confirm 弹窗是 `RiskyToolConfirm` 中间件正常路径（不是 post-LLM 拦截器）。要让它直接拒绝不走弹窗，需要 `lookup_decision` 返 REJECT / REFUSE，验证：
+
+```powershell
+# 跑测试
+python -m pytest tests/test_companion_policy.py -v
+```
 
 ## TTS
 
@@ -58,7 +86,7 @@
 
 ### GPT-SoVITS 报「参考音频在3~10秒范围外」
 
-- ffmpeg 截：`ffmpeg -i input.wav -ss 00:00:01 -t 5 -c copy ref.wav`
+ffmpeg 截：`ffmpeg -i input.wav -ss 00:00:01 -t 5 -c copy ref.wav`
 
 ## ASR
 
@@ -87,6 +115,25 @@
 - `proactive_min_minutes` 调到 1 测试（默认 25~45 分钟）
 - 看 `crash.log` 里是否有 ProactiveBrain 异常
 
+## 创新点 2（状态决策耦合）
+
+### 决策没生效
+
+- `brain.backend` 必须是 `standard`，`lightweight` 不走查表
+- 看 Dashboard `/api/companion` 有没有 `data/companion_log.txt` 实时写入
+- 跑测试：`pytest tests/test_companion_policy.py -v`
+
+### 决策 trace 没落盘
+
+- 确认 `data/companion_log.txt` 目录可写
+- 看启动 log 有没有 `companion_log` 异常
+
+### `_state_provider is None` warning
+
+- 桌宠从托盘唤起走的 `ui_controller.py:1016` 路径必须传 `state_provider=lambda: self.state_mgr.state`
+- `main.py:1016` 启动时开窗那条路径传了 `lambda: core.state`
+- 两条路径都传了才能用，看代码确认
+
 ## Live2D
 
 ### 切到 Live2D 没生效
@@ -100,6 +147,26 @@
 
 - 模型目录缺 `*.model.yaml` → 渲染器用启发式 fallback 自动分类；如效果差，照 `assets/live2d_profiles/bingtang.model.yaml` 写一份
 - `assets/live2d/cubism-sdk/` 三件套缺失：`live2d.min.js` / `live2dcubismcore.min.js` / `pixi.min.js`
+
+## ActivityWatch
+
+### `mcp_aw_*` 工具回「server 未运行」
+
+- 装 [ActivityWatch](https://activitywatch.net/) 桌面客户端并启动
+- 默认端口 5600，浏览器开 `http://localhost:5600` 能看到 Web UI 即说明 aw-server 跑起来了
+- 详见 [activitywatch-integration.md](activitywatch-integration.md)
+
+### `mcp_aw_*` 工具回「未检测到 aw-watcher-window / afk」
+
+- aw-server 跑了但 watcher 没装
+- Linux：`pip install aw-watcher-window aw-watcher-afk`
+- Windows / macOS：桌面客户端自带，aw-server 启动时自动拉起
+- 浏览器想记 tab：装 [aw-watcher-web](https://activitywatch.net/downloads/) Chrome/Firefox 扩展
+
+### `mcp_aw_*` 工具回「watcher 在但最近 10 分钟无活动」
+
+- 主人没在用电脑 / 真的空闲 / watcher 卡住
+- 重启 aw-server
 
 ## MCP / Dashboard
 
