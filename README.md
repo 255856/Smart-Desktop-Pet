@@ -64,13 +64,25 @@ pip install PyQtWebEngine
 python main.py
 ```
 
+### 可选：ActivityWatch 活动感知 (强烈推荐)
+
+桌宠能告诉你「过去 5 分钟在做什么 / 现在在哪个窗口」，前提是装 [ActivityWatch](https://activitywatch.net/)：
+
+1. 下载安装桌面客户端 (Windows / macOS / Linux) → aw-server 自动在 5600 端口跑
+2. 浏览器想记 tab → 装 [aw-watcher-web](https://activitywatch.net/downloads/) Chrome/Firefox 扩展
+3. `mcp_servers.yaml` 里 `aw` server 默认 `enabled: true`，桌宠启动时自动连
+4. 不装也能用桌宠，mcp_aw_* 工具会回「server 未运行」并教你怎么装
+
+详见 [ActivityWatch 集成](docs/activitywatch-integration.md)
+
 ### 第一次打开会怎样？
 
 1. **默认自动开启内置模型 Hiyori**（Live2D 官方样例，零配置）
 2. **桌宠主动打招呼**：检测当前时间段说「早上好 / 中午好 / 晚上好」
 3. **任意键说话 / 按住说话键 ASR** → 桌宠回复 + 异步嘴型同步
 4. **无 API key**？桌宠用 mock 回复兜底（功能演示完整，但不能调真实 Tavily 搜索 / 真 LLM）
-5. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型
+5. **ActivityWatch 未运行**？桌宠启动时 log 提示 `MCP aw 未启用 (aw-server 未运行?)`，不影响其他功能，mcp_aw_* 工具会回「server 未运行, 请装 ActivityWatch」
+6. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型；设置面板 → 「控制 Tab → 主动关心」段可开 AW SQLite 落盘
 
 ### 试用在线 Demo
 
@@ -137,11 +149,11 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 - **时间衰减**（记忆越久越靠后）
 - **冲突检测**（更新与已有记忆冲突时合并）
 
-### 4. 创新点 2: 状态养成对 Agent 决策的耦合
+### 4. 状态养成对 Agent 决策的耦合
 
-桌宠的 4 维状态（心情 / 饱食 / 好感 / 等级）不再只决定头顶表情，而是直接耦合到 LLM 决策路径 —— 状态差时**强制拒绝**高危工具，状态好时**正常 confirm**。落地是「权限层 + 策略层 + 反馈层」三层 + 3 道 prompt 防线 + post-LLM 兜底。
+桌宠的 4 维状态（心情 / 饱食 / 好感 / 等级）不再只决定表情，而是直接耦合到 LLM 决策路径 —— 状态差时**强制拒绝**高危工具，状态好时**正常 confirm**。落地是「权限层 + 策略层 + 反馈层」三层 + 3 道 prompt 防线 + post-LLM 兜底。
 
-#### 4.1 决策路径（论文核心命题 `Action = f(intent, tools, context, S)`）
+#### 4.1 决策路径（核心命题 `Action = f(intent, tools, context, S)`）
 
 ```
 用户消息
@@ -197,13 +209,14 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 - 「今天天气怎么样？」 → 自动搜索 → 真回答
 - 「3 分钟后提醒我喝水」 → 系统通知 + TTS
 - 「记住我最爱的颜色是蓝色」 → 写入长期记忆 → 下次自动想起
+- 「过去 5 分钟我在做什么？」 → 调 ActivityWatch (需装桌面客户端) → 「主人过去 5 分钟在 VSCode, 待了 4 分 32 秒」
 
 ### 设置项
 
 | 类别 | 项目 |
 |---|---|
 | LLM | 模型名 / base URL / API key / system prompt |
-| TTS / TTS | 引擎（edge / GPT-SoVITS / MiniMax）/ 语速 / 音调 / 试听 |
+| TTS / TTS | 引擎（edge / GPT-SoVITS）/ 语速 / 音调 / 试听 |
 | ASR / ASR | 语言 / 自动发送 |
 | 提醒 / Reminder | 默认 5 / 10 / 30 分钟 |
 | 记忆 / Memory | 重要度阈值 / 冲突合并 / 检索策略 |
@@ -239,7 +252,8 @@ mcp_servers.yaml:
 - [Live2D 集成](docs/live2d-integration.md)
 - [情绪系统](docs/emotion-system.md)
 - [TTS 集成](docs/tts-integration.md)
-- [创新点 2: 状态对 Agent 决策的耦合](docs/innovation-2-companion-policy.md)
+- [ActivityWatch 集成](docs/activitywatch-integration.md) — 桌宠如何读你的活动窗口
+- [状态对 Agent 决策的耦合](docs/innovation-2-companion-policy.md)
 - [桌面版工具参考](docs/tools-reference.md) — 68 个工具详细说明
 
 ## 测试
@@ -259,7 +273,7 @@ pytest tests/test_langchain_agent.py -v
 
 - **1270 passed** / 8 skipped
 - 验证：82 项功能检查
-- 创新点 2: 19 个 AST 守卫 + 量化 / 钩子 / 决策一致性 / post-LLM 拦截器测试
+- 19 个 AST 守卫 + 量化 / 钩子 / 决策一致性 / post-LLM 拦截器测试
 
 CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Windows 专有 API）。
 
@@ -340,13 +354,25 @@ pip install PyQtWebEngine
 python main.py
 ```
 
+### Optional: ActivityWatch activity awareness (strongly recommended)
+
+The pet can tell you "what you did in the last 5 minutes / which window you're in" once you install [ActivityWatch](https://activitywatch.net/):
+
+1. Install the desktop client (Windows / macOS / Linux) → aw-server starts on port 5600
+2. To track browser tabs, install the [aw-watcher-web](https://activitywatch.net/downloads/) Chrome / Firefox extension
+3. `mcp_servers.yaml` ships with `aw` server `enabled: true`, the pet connects automatically on startup
+4. The pet works fine without it — `mcp_aw_*` tools return "server not running, please install ActivityWatch"
+
+See [ActivityWatch integration](docs/activitywatch-integration.md)
+
 ### What happens on first launch?
 
 1. **The bundled model Hiyori is enabled by default** (an official Live2D sample, zero configuration)
 2. **The pet greets you first**: it detects the time of day and says "Good morning / afternoon / evening"
 3. **Type to chat / hold-to-talk for ASR** → the pet replies with async mouth-sync
 4. **No API key?** The pet falls back to mock replies (full feature demo, but no real Tavily search / real LLM)
-5. **Right-click the model → "Settings"** to configure LLM / Tavily keys and enable the real models
+5. **ActivityWatch not running?** Startup log shows `MCP aw not enabled (aw-server not running?)` — everything else keeps working, `mcp_aw_*` tools return "server not running, please install ActivityWatch"
+6. **Right-click the model → "Settings"** to configure LLM / Tavily keys; Settings → "Control Tab → Proactive Care" enables AW SQLite persistence
 
 ### Try the online demo
 
@@ -473,6 +499,7 @@ This repo keeps the Web demo **in sync** with the desktop app — new desktop to
 - "How's the weather today?" → auto-search → a real answer
 - "Remind me to drink water in 3 minutes" → system notification + TTS
 - "Remember my favorite color is blue" → written to long-term memory → recalled next time
+- "What did I do in the last 5 minutes?" → calls ActivityWatch (requires desktop client) → "You were in VSCode for 4m32s"
 
 ### Settings
 
@@ -515,6 +542,7 @@ Enable it in Settings → MCP Servers → the pet can now read/write your Docume
 - [Live2D integration](docs/live2d-integration.md)
 - [Emotion system](docs/emotion-system.md)
 - [TTS integration](docs/tts-integration.md)
+- [ActivityWatch integration](docs/activitywatch-integration.md) — how the pet reads your activity windows
 - [Innovation #2: state-coupling Agent decision](docs/innovation-2-companion-policy.md)
 - [Tools reference](docs/tools-reference.md) — detailed description of all 68 tools
 
