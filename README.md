@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-740%20passed%20%2F%208%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1270%20passed%20%2F%208%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -25,13 +25,14 @@
 ## 它能做什么？
 
 - **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 `max_turns` → 工具结果直接总结），可选 **LangChain** 后端
-- **52 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令...
+- **68 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令 + **ActivityWatch 活动感知**（mcp_aw_get_recent_activities / current_window / query / buckets，桌宠能主动汇报主人最近在做什么）
 - **真记忆**：可插拔 `TF-IDF` / `sentence-transformers` 检索；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
 - **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（**走法生成 / 将军 / 将死 / 困毙 / 飞将全部走 [cchess](https://pypi.org/project/cchess/) 库**，MIT、PyPI 1.20+，我们自己只写 alpha-beta 搜索 + 估值；3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
-- **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server，可外挂任何 MCP 兼容 server
-- **可观测**：所有 LLM / 工具调用落 SQLite，**FastAPI Dashboard**（`localhost:8766`）可视化 Trace、回放、调参
+- **真养成 + 决策耦合（创新点 2）**：桌宠的 **心情 / 饱食 / 好感 / 等级** 4 维度不再只影响头顶表情，而是直接耦合 Agent 决策 —— 状态差时**强制 LLM 直接拒绝** lock_screen / kill_process / shutdown_computer 等高危工具（不走 confirm 弹窗），3 层防御（prompt 顶部 directive + 末尾 override + post-LLM 拦截器）+ 决策 trace 全留痕。详见 [创新点 2 文档](docs/innovation-2-companion-policy.md)
+- **真开放**：内置 **MCP stdio JSON-RPC** + filesystem server + activitywatch server，可外挂任何 MCP 兼容 server
+- **可观测**：所有 LLM / 工具调用落 SQLite，**FastAPI Dashboard**（`localhost:8766`）可视化 Trace、回放、调参；companion 决策每条 JSON-line 落 `data/companion_log.txt` 供 grep 排查
 
 ## 5 分钟跑起来
 
@@ -136,6 +137,40 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 - **时间衰减**（记忆越久越靠后）
 - **冲突检测**（更新与已有记忆冲突时合并）
 
+### 4. 创新点 2: 状态养成对 Agent 决策的耦合
+
+桌宠的 4 维状态（心情 / 饱食 / 好感 / 等级）不再只决定头顶表情，而是直接耦合到 LLM 决策路径 —— 状态差时**强制拒绝**高危工具，状态好时**正常 confirm**。落地是「权限层 + 策略层 + 反馈层」三层 + 3 道 prompt 防线 + post-LLM 兜底。
+
+#### 4.1 决策路径（论文核心命题 `Action = f(intent, tools, context, S)`）
+
+```
+用户消息
+   │
+   ▼
+状态量化 (mood/satiety/favor/level: LOW/MID/HIGH)
+   │
+   ├─ 工具风险等级 (5 档: SAFE/LOW/MID/HIGH/IRREVERSIBLE)
+   │
+   ▼
+查表 lookup_decision(state, tool)  →  ALLOW / CONFIRM / REJECT / REFUSE
+   │
+   ├─ ALLOW   → 直接放行 (即便高风险, 状态好时主人特权)
+   ├─ CONFIRM → 弹窗确认
+   ├─ REJECT  → 返回拒绝 ToolMessage (返回 REJECT 反馈钩子)
+   └─ REFUSE  → 同 REJECT, 但任务级标 failure
+   │
+   ▼
+任务完成 → apply_outcome 调钩子 (mood/sat/favor/exp 增减) → 落盘
+```
+
+#### 4.2 3 道防线
+
+1. **prompt 顶部 directive** (`grounding_dynamic_prompt` 开头): 状态差时硬编码「【!!! 第一原则 !!!】禁止 preemptive 问 / 禁止 confirm 流程 / 直接拒绝」
+2. **prompt 末尾 override**: 跟顶部 directive 互为冗余，确保 LLM 在任意位置都能看到
+3. **post-LLM 拦截器** (`PostLLMStateGuard`): 状态差 + LLM 输出含 preemptive 措辞 → 改写 `ModelResponse.result[0].content = REFUSAL_TEXT` + 清 `tool_calls`，100% 兜底
+
+完整设计与 60+ 个测试见 [docs/innovation-2-companion-policy.md](docs/innovation-2-companion-policy.md)
+
 ## 与桌宠本体不同
 
 | 维度 | 桌面版 | 网页 Demo |
@@ -204,7 +239,8 @@ mcp_servers.yaml:
 - [Live2D 集成](docs/live2d-integration.md)
 - [情绪系统](docs/emotion-system.md)
 - [TTS 集成](docs/tts-integration.md)
-- [桌面版工具参考](docs/tools-reference.md) — 52 个工具详细说明
+- [创新点 2: 状态对 Agent 决策的耦合](docs/innovation-2-companion-policy.md)
+- [桌面版工具参考](docs/tools-reference.md) — 68 个工具详细说明
 
 ## 测试
 
@@ -221,8 +257,9 @@ pytest tests/test_langchain_agent.py -v
 
 测试结果：
 
-- **740 passed** / 8 skipped
+- **1270 passed** / 8 skipped
 - 验证：82 项功能检查
+- 创新点 2: 19 个 AST 守卫 + 量化 / 钩子 / 决策一致性 / post-LLM 拦截器测试
 
 CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Windows 专有 API）。
 
@@ -264,13 +301,14 @@ CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Wi
 ## What can it do?
 
 - **Real intelligence**: hand-rolled **ReAct Agent** loop + **3-layer anti-hallucination** (force tool calls → keep going up to `max_turns` → summarize tool outputs), with an optional **LangChain** backend
-- **52 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts...
+- **68 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts + **ActivityWatch activity awareness** (mcp_aw_get_recent_activities / current_window / query / buckets — the pet proactively reports what the owner has been doing)
 - **Real memory**: pluggable `TF-IDF` / `sentence-transformers` retrieval; importance scoring + time decay + conflict detection + long-term evolution
 - **Real voice**: **3 TTS engines** (edge-tts / GPT-SoVITS local cloning / MiniMax cloud) + browser SpeechRecognition **ASR hold-to-talk** + mouth-sync
 - **Real look**: **dual renderer** (Live2D Cubism 4 + pixi-live2d-display / PNG frame animation), graceful fallback when the model is missing
 - **Real games**: **Gomoku** (3 AI difficulty levels) + **Chinese Chess** (move generation / check / checkmate / stalemate / flying general all come from the **[cchess](https://pypi.org/project/cchess/)** library, MIT, PyPI 1.20+; we only write the alpha-beta search + evaluation, with 3 AI difficulty levels) + **9-player Werewolf** (you + 8 independent NPC agents + the pet as moderator, fully offline without any API key) + daily check-in + feeding + 5-stat nurturing
-- **Real extensibility**: built-in **MCP stdio JSON-RPC** + filesystem server, attach any MCP-compatible server
-- **Observable**: all LLM / tool calls land in SQLite; a **FastAPI Dashboard** (`localhost:8766`) visualizes Trace, replay, and runtime parameters
+- **Real nurturing → decision coupling (Innovation #2)**: the pet's **mood / satiety / favor / level** no longer just drives the on-top expression — they directly couple to the Agent's decision path. When state is low, the LLM is **forced to refuse** risky tools like `lock_screen` / `kill_process` / `shutdown_computer` (no preemptive confirmation prompt, no confirm dialog). 3 layers of defense (top-of-prompt directive + bottom-of-prompt override + post-LLM interceptor) + every decision is JSON-line traced. See [Innovation #2 doc](docs/innovation-2-companion-policy.md)
+- **Real extensibility**: built-in **MCP stdio JSON-RPC** + filesystem server + activitywatch server, attach any MCP-compatible server
+- **Observable**: all LLM / tool calls land in SQLite; a **FastAPI Dashboard** (`localhost:8766`) visualizes Trace, replay, and runtime parameters; companion decisions land in `data/companion_log.txt` as JSON lines for grep-based debugging
 
 ## 5-Min Quick Start
 
@@ -375,6 +413,40 @@ Pet + Life + Research + Code agents + Orchestrator:
 - **Time decay** (older memories rank lower)
 - **Conflict detection** (merge when an update conflicts with an existing memory)
 
+### 4. Innovation #2: pet state couples into Agent decisions
+
+The pet's 4-dimensional state (mood / satiety / favor / level) no longer just decides the on-top expression — it directly couples into the LLM decision path. When state is low, **risky tools are force-rejected**; when state is good, normal `confirm` flow continues. Implementation: a "permission layer + strategy layer + feedback layer" three-tier design, with 3 layers of prompt defense plus a post-LLM safety net.
+
+#### 4.1 Decision path (paper core proposition `Action = f(intent, tools, context, S)`)
+
+```
+User message
+   │
+   ▼
+State quantize (mood/satiety/favor/level: LOW/MID/HIGH)
+   │
+   ├─ Tool risk level (5 tiers: SAFE/LOW/MID/HIGH/IRREVERSIBLE)
+   │
+   ▼
+Lookup lookup_decision(state, tool) → ALLOW / CONFIRM / REJECT / REFUSE
+   │
+   ├─ ALLOW   → pass through (owner privilege even for risky tools)
+   ├─ CONFIRM → dialog confirmation
+   ├─ REJECT  → return rejected ToolMessage (fires REJECT feedback hook)
+   └─ REFUSE  → like REJECT, but task-level marks as failure
+   │
+   ▼
+Task done → apply_outcome fires hooks (mood/sat/favor/exp deltas) → persist
+```
+
+#### 4.2 Three layers of defense
+
+1. **Top-of-prompt directive** (`grounding_dynamic_prompt` head): when state is low, hard-code `[!!! First Principle !!!] forbid preemptive questions / forbid confirm flow / direct refusal`
+2. **Bottom-of-prompt override**: redundant with the top directive so the LLM sees the state-check at any reading position
+3. **Post-LLM interceptor** (`PostLLMStateGuard`): state low + LLM output contains preemptive phrasing → rewrite `ModelResponse.result[0].content = REFUSAL_TEXT` and clear `tool_calls`, a 100% runtime safety net
+
+Full design and 19+ tests in [docs/innovation-2-companion-policy.md](docs/innovation-2-companion-policy.md).
+
 ## How it's different from the desktop app
 
 | Aspect | Desktop | Web Demo |
@@ -443,7 +515,8 @@ Enable it in Settings → MCP Servers → the pet can now read/write your Docume
 - [Live2D integration](docs/live2d-integration.md)
 - [Emotion system](docs/emotion-system.md)
 - [TTS integration](docs/tts-integration.md)
-- [Tools reference](docs/tools-reference.md) — detailed description of all 52 tools
+- [Innovation #2: state-coupling Agent decision](docs/innovation-2-companion-policy.md)
+- [Tools reference](docs/tools-reference.md) — detailed description of all 68 tools
 
 ## Testing
 
@@ -460,8 +533,9 @@ pytest tests/test_langchain_agent.py -v
 
 Test results:
 
-- **740 passed** / 8 skipped
+- **1270 passed** / 8 skipped
 - Verification: 82 feature checks
+- Innovation #2: 19 AST guards + quantize / hook / decision-consistency / post-LLM interceptor tests
 
 CI runs on Windows runners (Qt / pywin32 / WMI brightness / battery all need Windows-specific APIs).
 
