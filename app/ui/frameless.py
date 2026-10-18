@@ -46,6 +46,9 @@ class FramelessResizer(QObject):
         self._last_apply_ms = 0
         # manual 缩放期间被临时禁用的 effect / flags
         self._saved_effects: list[tuple] = []
+        # attach 时给所有 descendant 装 eventFilter,用于 child 上的 release
+        # 兜底清 overrideCursor;事件流处理时会先看 obj 是否在 _win 内。
+        self._children: set = set()
 
     def attach(self) -> "FramelessResizer":
         if self._attached:
@@ -53,6 +56,12 @@ class FramelessResizer(QObject):
         self._attached = True
         self._win.setMouseTracking(True)
         self._win.installEventFilter(self)
+        # 给所有 child 也装 eventFilter,只为接 release 事件清 overrideCursor。
+        # 标题栏拖完窗口时 release 发生在 child 上(_TitleBarDrag 吞掉事件不冒泡),
+        # 必须从这里兜底,否则缩放光标会卡住。
+        self._children = set(self._win.findChildren(QWidget))
+        for child in self._children:
+            child.installEventFilter(self)
         return self
 
     # ---- 边缘命中 ----
@@ -72,10 +81,19 @@ class FramelessResizer(QObject):
         return edges
 
     # ---- 光标 ----
+    def _clear_override_cursor(self) -> None:
+        """清掉所有残留 overrideCursor,把光标恢复到默认。"""
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self._cursor_key = -1
+
     def _set_cursor(self, edges) -> None:
         key = int(edges) if edges else 0
         if key == self._cursor_key:
             return
+        # key 变了说明鼠标从边缘进入 / 离开 —— 先清掉所有 overrideCursor,
+        # 防止之前因为 WA_TranslucentBackground 下 Leave 不触发而残留的
+        # 缩放光标一直跟着鼠标(典型场景:标题栏拖完窗口光标卡缩放图标)
         while QApplication.overrideCursor() is not None:
             QApplication.restoreOverrideCursor()
         self._cursor_key = key
@@ -153,7 +171,10 @@ class FramelessResizer(QObject):
 
     # ---- 事件 ----
     def eventFilter(self, obj, ev):  # noqa: C901
+        # child 上的 release 事件:不修改事件流,只兜底清 overrideCursor。
         if obj is not self._win:
+            if ev.type() == QEvent.Type.MouseButtonRelease:
+                self._clear_override_cursor()
             return False
         t = ev.type()
 
@@ -192,21 +213,27 @@ class FramelessResizer(QObject):
             self._set_cursor(self._edge_at(event_global_pos(ev)))
             return False
 
-        if t == QEvent.Type.MouseButtonRelease and self._manual is not None:
-            self._manual = None
-            # 恢复 shadow / 透明背景，触发一次完整重绘
-            self._thaw_heavy_paint()
-            self._win.update()
-            return True
-
         if t == QEvent.Type.MouseButtonRelease:
-            # 任意左键 release 后重置光标：标题栏拖完、菜单关闭等场景
-            # 都可能让缩放光标残留在窗口内（Leave 不触发因为鼠标还在 win 内）
+            if self._manual is not None:
+                self._manual = None
+                # 恢复 shadow / 透明背景，触发一次完整重绘
+                self._thaw_heavy_paint()
+                self._win.update()
+            # 任意 release 都兜底清 overrideCursor(WA_TranslucentBackground 窗口
+            # 在透明区域不会触发 Leave,标题栏拖完窗口后光标容易卡在缩放图标,
+            # 这里强制重置一次)。
+            self._clear_override_cursor()
             self._set_cursor(self._edge_at(event_global_pos(ev)))
-            return False
+            return True
 
         if t == QEvent.Type.Leave:
             self._set_cursor(None)
+            return False
+
+        if t == QEvent.Type.Enter:
+            # Enter 兜底清 overrideCursor:鼠标从窗口外进窗口时重置一次。
+            self._clear_override_cursor()
+            return False
         return False
 
     def _do_system_resize(self, edges) -> bool:
