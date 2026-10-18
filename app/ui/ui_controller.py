@@ -140,6 +140,21 @@ class UIController(QObject):
             self._on_dev_state_pushed
         )
 
+        # 真实升级(EXP 累积)回调:气泡祝贺 + 解锁提示
+        # dev mode 拖 slider 走的路径不触发这里,只有真实升级才祝贺
+        try:
+            prev = getattr(self.state, "on_level_up", None)
+            def _level_up_bridge(new_lv: int) -> None:
+                if prev is not None:
+                    try:
+                        prev(new_lv)
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._on_pet_level_up(new_lv)
+            self.state.on_level_up = _level_up_bridge
+        except Exception:  # noqa: BLE001
+            log.debug("接 on_level_up 失败(非致命)", exc_info=True)
+
         fallback_rel = self.cfg.sprite.fallback
         fallback_image = root / fallback_rel
         # 优先使用 ICO 文件（多尺寸，任务栏显示效果最佳）
@@ -328,9 +343,57 @@ class UIController(QObject):
                     self.state_mgr.save_store.write_sync(self.state)
             except Exception as e:  # noqa: BLE001
                 log.warning("dev_state_pushed 立即写盘失败: %s", e)
+            # 等级变化 → 清掉工具可见性缓存,下次 LLM 调用走新等级
+            if "level" in (snapshot or {}):
+                self._on_tool_level_changed()
             log.debug("dev_state_pushed applied: %s", snapshot)
         except Exception as e:  # noqa: BLE001
             log.warning("_on_dev_state_pushed 失败: %s", e)
+
+    def _on_tool_level_changed(self) -> None:
+        """等级变化后刷新工具可见性(LLM 每次调用动态读 level_provider,
+        这里只做日志 + 解锁对话框若开着实时刷新)。"""
+        lvl = int(getattr(self.state, "level", 1) or 1)
+        log.info("桌宠等级变化 → Lv.%d (工具可见集下轮刷新)", lvl)
+        # chat_window 若开着工具解锁对话框,关掉让它重开读新等级(简化处理)
+        cw = self._chat_window
+        if cw is not None:
+            try:
+                cw._on_dev_level_changed(lvl)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_pet_level_up(self, new_level: int) -> None:
+        """真实升级(EXP 累积) → 桌宠气泡祝贺 + 刷 UI。
+
+        跟 dev mode 手动拖 level slider 区分:那条不走 on_level_up 回调。
+        """
+        try:
+            from app.engine.tools._unlock import UNLOCK_CELEBRATE, UNLOCK_REWARDS
+            msg = UNLOCK_CELEBRATE.get(int(new_level), "")
+            title = UNLOCK_REWARDS.get(int(new_level), "")
+            if not msg:
+                msg = f"主人,我已经 Lv.{new_level} 了!"
+            if title:
+                msg = f"{msg}\n[解锁 {title}]"
+            # 通过桌宠气泡 + TTS 播报
+            try:
+                self.pet.show_bubble(msg)
+            except Exception:  # noqa: BLE001
+                log.debug("气泡显示失败(非致命)", exc_info=True)
+            try:
+                if self.tts is not None and getattr(self.cfg.character, "tts_enabled", False):
+                    self.tts.speak(msg)
+            except Exception:  # noqa: BLE001
+                log.debug("祝贺 TTS 播报失败(非致命)", exc_info=True)
+            # 刷设置面板状态 tab
+            try:
+                self.settings_window._update_state_view(self.state)
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("桌宠升级至 Lv.%d,已发祝贺", new_level)
+        except Exception as e:  # noqa: BLE001
+            log.warning("_on_pet_level_up 失败: %s", e)
 
     def _fire_alarm(self, text: str, kind: str = "⏰ 提醒") -> None:
         """到点提醒的统一处理：气泡 + 置顶窗 + 提示音 + 系统通知。"""
@@ -964,6 +1027,8 @@ class UIController(QObject):
                 skills_dir=str(getattr(self.brain, "skills_dir", "") or ""),
                 # state_provider: 每次拉最新 state，dev mode 改值能反映到新 agent
                 state_provider=lambda: self.state_mgr.state,
+                # level_provider: 返回当前桌宠等级,LLM 工具列表按等级过滤
+                level_provider=lambda: int(getattr(self.state_mgr.state, "level", 1) or 1),
             )
             cw.reply_ready.connect(self._on_chat_reply_ready)
             cw.streaming_chunk.connect(self._on_streaming_chunk)

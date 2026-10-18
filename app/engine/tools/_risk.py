@@ -143,8 +143,23 @@ def is_risky(name: str, threshold: int = MEDIUM) -> bool:
     return risk_for_tool(name) >= threshold
 
 
+# 风险等级 int → 名称 (供 UI 显示)
+RISK_NAME: dict[int, str] = {
+    SAFE: "SAFE",
+    LOW: "LOW",
+    MEDIUM: "MEDIUM",
+    HIGH: "HIGH",
+    IRREVERSIBLE: "IRREVERSIBLE",
+}
+
+
+def risk_name(risk_int: int) -> str:
+    """int 风险等级 → 名称。未知值返 'UNKNOWN'。"""
+    return RISK_NAME.get(int(risk_int), "UNKNOWN")
+
+
 __all__ = [
     "SAFE", "LOW", "MEDIUM", "HIGH", "IRREVERSIBLE",
     "RISK_LABELS", "RISK_RATIONALE",
-    "TOOL_RISK_LEVEL", "risk_for_tool", "is_risky",
+    "TOOL_RISK_LEVEL", "risk_for_tool", "is_risky", "RISK_NAME", "risk_name",
 ]

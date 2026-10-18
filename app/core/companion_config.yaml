@@ -115,3 +115,105 @@ trace:
   enabled: true
   log_file: data/companion_log.txt
   max_lines_in_memory: 500           # trace 页读盘后保留多少行
+
+# 工具解锁 (v37+ 战令式工具解锁)
+# 设计原则:高频低风险工具放前面(让用户先能体验),按模块划分
+# Lv1 默认解锁 ~35 个基础工具,后续每升 1 级解锁 2-6 个
+# MCP server 加载的外部工具默认锁到 Lv8
+# 解锁顺序参考工具风险等级 TOOL_RISK_LEVEL (SAFE 早, IRREVERSIBLE 晚)
+tool_unlock:
+  levels:
+    1:  # 基础体验 (35 个) - 全部 SAFE + LOW + 部分桌面操作
+      - get_current_time          # 时间
+      - get_weather               # 天气
+      - date_info                 # 日期/农历
+      - calculate                 # 计算
+      - convert_units             # 单位换算
+      - get_pet_status            # 桌宠状态
+      - play_animation            # 播动画
+      - change_pet_emotion        # 切换表情
+      - say_to_user               # 主动搭话
+      - feed_self                 # 喂食
+      - take_screenshot_tool      # 截图
+      - read_file                 # 读文件
+      - read_text_file            # 读文本
+      - list_desktop_files        # 列出桌面文件
+      - open_app                  # 打开应用
+      - open_website              # 打开网页
+      - open_terminal             # 打开终端
+      - open_file_explorer        # 打开文件管理器
+      - open_notepad              # 打开记事本
+      - system_info               # 系统信息
+      - list_installed_apps       # 已装应用
+      - list_processes            # 进程列表
+      - get_battery               # 电池
+      - search_files              # 文件名搜索
+      - glob_files                # glob 匹配
+      - grep_files                # grep
+      - ocr_image                 # OCR
+      - understand_image          # 图像理解
+      - recall_memory             # 查记忆
+      - unmute_tts                # 取消静音
+      - get_tts_mute_status       # 静音状态
+      - get_volume                # 音量查询
+      - get_brightness            # 亮度查询
+      - get_clipboard             # 剪贴板查询
+      - clear_bubble              # 清气泡
+    2:  # 联网能力 (2 个)
+      - web_search
+      - fetch_url_text
+    3:  # 系统写 + 提醒查询 (6 个)
+      - set_volume
+      - set_brightness
+      - set_tts_mute_until
+      - clipboard_copy
+      - list_reminders
+      - list_countdowns
+    4:  # 文件编辑 + 提醒设置 (4 个)
+      - edit_file
+      - multi_edit
+      - add_reminder
+      - delete_reminder
+    5:  # 记忆写 + 子智能体 (3 个)
+      - remember_fact
+      - forget_memory
+      - Task
+    6:  # 计时器 (2 个)
+      - countdown
+      - cancel_countdown
+    7:  # 多媒体生成 (2 个)
+      - generate_image
+      - generate_audio
+    8:  # 高级生成 + MCP 工具 (1 个内建 + 全部 MCP 外部)
+      - generate_video
+    9:  # HIGH 危险工具 (2 个)
+      - send_notification
+      - run_script
+    10: # IRREVERSIBLE 终极能力 (4 个)
+      - kill_process
+      - lock_screen
+      - set_wifi
+      - set_bluetooth
+  mcp_default_level: 8              # MCP server 注册的外部工具默认锁 Lv8
+  rewards_title:
+    1:  "Lv.1 时刻陪伴"
+    2:  "Lv.2 解锁联网 + 信息获取"
+    3:  "Lv.3 解锁系统控制 + 提醒"
+    4:  "Lv.4 解锁文件编辑"
+    5:  "Lv.5 解锁记忆管理 + 子任务"
+    6:  "Lv.6 解锁倒计时"
+    7:  "Lv.7 解锁图片/音频生成"
+    8:  "Lv.8 解锁视频生成 + 外部扩展 (MCP)"
+    9:  "Lv.9 解锁系统通知 + 脚本执行"
+    10: "Lv.10 全部能力已解锁 (含危险工具)"
+  celebrate:                        # 真实升级时桌宠在气泡里发的祝贺语
+    1:  "我已上线,时刻陪主人!"
+    2:  "主人,我学会上网啦,想查什么都可以问我!"
+    3:  "音量亮度剪贴板我都掌握了,主人随时吩咐~"
+    4:  "我学会改文件啦,主人让我改什么都行!"
+    5:  "记忆小本本我可以自己改了,还能派小助手帮我干活~"
+    6:  "倒计时搞定,主人说几点我就几点提醒!"
+    7:  "主人想看图?想听音乐?我都给你做!"
+    8:  "视频生成和外接工具上线,主人玩得更尽兴!"
+    9:  "系统通知和脚本执行我都学会了,小心用哦~"
+    10: "主人,我们一起走到了最高等级,什么都能做,但也请谨慎使用危险工具哦~"

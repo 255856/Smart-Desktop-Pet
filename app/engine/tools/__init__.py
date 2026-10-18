@@ -1,6 +1,7 @@
 """桌宠工具系统（Function Calling）。"""
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 from ._core import Tool, ToolRegistry, is_safe_url
@@ -8,7 +9,10 @@ from . import (
     _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search,
     _audio, _weather, _timer, _power, _filesearch, _webfetch, _ocr, _runner,
     _tts_mute, _subagent, _multimodal,
+    _unlock,
 )
+
+log = logging.getLogger(__name__)
 
 
 def build_default_tools(
@@ -19,6 +23,7 @@ def build_default_tools(
     items: Optional[object] = None,
     hooks: Optional[dict[str, Callable[[str], None]]] = None,
     tavily_api_key: Optional[str] = None,
+    cfg: Optional[object] = None,
 ) -> ToolRegistry:
     """用各子系统组装默认工具集。
 
@@ -26,9 +31,13 @@ def build_default_tools(
            由主程序提供（内部用 Qt 信号转回 UI 线程）。
     tavily_api_key: 若非空，web_search 主用 Tavily；否则降级 DuckDuckGo
                     (建议与 llm.api_key 解耦，但优先用 TAVILY_API_KEY 环境变量)
+    cfg: companion_config 加载后的 dataclass,用于读 tool_unlock 段。
+         传 None 时不解锁任何工具(全部可见,兼容旧版)。
     """
     hooks = hooks or {}
     reg = ToolRegistry()
+    if cfg is not None:
+        _unlock.load_unlock_config(cfg)
 
     # 每个模块暴露 register(reg, ...)，负责把自己组的所有 Tool 注册进去
     _time.register(reg, state=state)

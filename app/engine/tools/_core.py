@@ -141,8 +141,38 @@ class ToolRegistry:
             fn=decorated.fn,
         )
 
-    def names(self) -> list[str]:
-        return list(self._tools)
+    def names(self, level: int | None = None) -> list[str]:
+        """返回工具名列表。level=None 时返全部;否则按 yaml tool_unlock 过滤。
+
+        MCP 外部工具(名以 mcp_ 前缀)统一按 MCP_DEFAULT_LEVEL 判定。
+        """
+        if level is None:
+            return list(self._tools)
+        from . import _unlock
+        configured, mcp_names = _unlock.split_configured_and_mcp(list(self._tools))
+        unlocked = _unlock.compute_unlocked(level, mcp_names=mcp_names)
+        return [n for n in self._tools if n in unlocked]
+
+    def tools_for_level(self, level: int | None = None) -> list["Tool"]:
+        """返 Tool 对象列表(供 LLM tool_spec 拼接),过滤逻辑同 names(level)。"""
+        if level is None:
+            return list(self._tools.values())
+        names_set = set(self.names(level))
+        return [t for t in self._tools.values() if t.name in names_set]
+
+    def to_openai_for_level(self, level: int) -> list[dict]:
+        """按等级过滤的 OpenAI tools 格式(供 LLM tool 字段用)。"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in self.tools_for_level(level)
+        ]
 
     def to_openai(self) -> list[dict]:
         """转成 OpenAI tools 字段格式。"""
@@ -177,6 +207,15 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return f"错误：未知工具 {name}"
+        # 解锁闸:ToolRegistry 自带默认 gate,避免 LangChain 后端漏拦
+        from . import _unlock
+        if _unlock.is_loaded():
+            current_lvl = _get_current_tool_level()
+            if not _unlock.is_unlocked(name, current_lvl):
+                req = _unlock.level_for_tool(name) or 1
+                return (f"错误：{name} 需要升级到 Lv.{req} 才能使用。"
+                        f"当前等级 Lv.{current_lvl}。请告诉主人升级到对应等级后再试，"
+                        "或在聊天窗口顶部点「工具解锁」查看进度。")
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
         except json.JSONDecodeError as e:
@@ -201,3 +240,23 @@ class ToolRegistry:
 
 
 __all__ = ["Tool", "ToolRegistry", "is_under_any"]
+
+
+# ---- 工具解锁:当前等级读取器 ----
+# 主程序通过 set_tool_filter_level_provider() 注入,默认 Lv10 (全部可见)。
+_TOOL_LEVEL_PROVIDER = lambda: 10  # noqa: E731
+
+
+def set_tool_filter_level_provider(fn) -> None:
+    """注入当前桌宠等级读取函数,供 ToolRegistry.execute 解锁闸使用。"""
+    global _TOOL_LEVEL_PROVIDER
+    _TOOL_LEVEL_PROVIDER = fn
+
+
+def _get_current_tool_level() -> int:
+    """读注入的等级读取器,异常 / 越界时钳到 1..10。"""
+    try:
+        lvl = int(_TOOL_LEVEL_PROVIDER())
+    except Exception:  # noqa: BLE001
+        return 10
+    return max(1, min(10, lvl))

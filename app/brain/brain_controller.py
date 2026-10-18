@@ -172,8 +172,9 @@ class BrainController(QObject):
                     "alarm": self._fire_alarm,
                 },
                 tavily_api_key=tavily_key,
+                cfg=cfg,
             )
-            log.info("智能中枢：注册 %d 个工具 %s",
+            log.info("智能中枢：注册 %d 个工具（默认全可见,实际 LLM 可见取决于等级）%s",
                      len(self.tool_registry.names()), self.tool_registry.names())
         else:
             self.tool_registry = None

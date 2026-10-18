@@ -406,7 +406,8 @@ _INTENT_BLOCKED_TOOLS: dict[str, dict[str, str]] = {
 class AgentLoop:
     def __init__(self, client: LLMClient, registry: ToolRegistry,
                  max_turns: int = MAX_TURNS,
-                 confirm_tool: Optional[Callable[[str, str], bool]] = None):
+                 confirm_tool: Optional[Callable[[str, str], bool]] = None,
+                 level_getter: Optional[Callable[[], int]] = None):
         """
         Args:
             client: LLM 客户端
@@ -417,11 +418,29 @@ class AgentLoop:
                           True=放行 / False=主人拒绝 / None=弹窗超时未响应。
                           三者都表示「不执行」时返回跳过结果文本。
                           为 None 时不确认直接执行。
+            level_getter: 返回当前桌宠等级 int 的回调。LLM 工具列表按等级过滤,
+                          未解锁工具直接拦截 (返回「等级不够」文本)。
+                          为 None 时所有工具可见可调,兼容旧版。
         """
         self.client = client
         self.registry = registry
         self.max_turns = max_turns
         self.confirm_tool = confirm_tool
+        self.level_getter = level_getter
+
+    def _current_level(self) -> int:
+        """读当前桌宠等级,无 level_getter 时按 Lv10 处理 (全部可见)。"""
+        if self.level_getter is None:
+            return 10
+        try:
+            lvl = int(self.level_getter())
+        except Exception:  # noqa: BLE001
+            return 10
+        if lvl < 1:
+            return 1
+        if lvl > 10:
+            return 10
+        return lvl
 
     def _select_tools(self, intent: Optional[str],
                       all_tools: Optional[list[dict]]) -> Optional[list[dict]]:
@@ -497,6 +516,18 @@ class AgentLoop:
             name = tc["name"] or f"unknown_{i}"
             args = tc["arguments"] or "{}"
 
+            # 工具解锁闸：未达等级的工具有可见不可调,提示主人升级
+            from app.engine.tools._unlock import is_unlocked, level_for_tool
+            current_lvl = self._current_level()
+            if level_for_tool(name) is not None and not is_unlocked(name, current_lvl):
+                req_lvl = level_for_tool(name)
+                msg = (f"错误：{name} 需要升级到 Lv.{req_lvl} 才能使用。"
+                       f"当前等级 Lv.{current_lvl}。请告诉主人升级到对应等级后再试，"
+                       "或在聊天窗口顶部点「工具解锁」查看进度。")
+                log.warning("AgentLoop: %s 未解锁 (level=%d < required %d)",
+                            name, current_lvl, req_lvl)
+                return i, name, args, msg
+
             # 意图级硬闸：白名单是软约束，这里硬拒并说明原因
             if name in blocked:
                 msg = blocked[name]
@@ -559,7 +590,12 @@ class AgentLoop:
           2) 没调工具 + 有工具意图 → 重试
           3) 连续多轮纯调工具无文字 → 强制 final
         """
-        all_tools = self.registry.to_openai() if self.registry.names() else None
+        if not self.registry.names():
+            all_tools = None
+        elif hasattr(self.registry, "to_openai_for_level"):
+            all_tools = self.registry.to_openai_for_level(self._current_level())
+        else:
+            all_tools = self.registry.to_openai()
         final_text = ""
         # 累计「最近连续纯调工具、无文字」的轮数
         consecutive_tool_only = 0
@@ -599,6 +635,27 @@ class AgentLoop:
             base = str(messages[0].get("content") or "")
             if "回复风格铁律" not in base:
                 messages[0]["content"] = base + _STYLE_RULE
+            # 工具解锁状态行:让 LLM 知道"有更高级工具但现在用不了"
+            # 没注入 level_getter 的旧路径(测试 / 无解锁环境)不追加,保持原行为
+            if self.level_getter is not None:
+                from app.engine.tools._unlock import MCP_DEFAULT_LEVEL
+                lvl = self._current_level()
+                try:
+                    visible_n = len(self.registry.names(lvl))
+                    total_n = len(self.registry.names())
+                except TypeError:
+                    visible_n = total_n = len(self.registry.names())
+                unlock_line = (
+                    f"\n\n【工具解锁】当前等级 Lv.{lvl}。"
+                    f"可见工具 {visible_n} / 全部 {total_n} 个。"
+                    "更高级别才能用更高级工具（如联网、写文件、生成图片、系统控制等），"
+                    "调用未解锁工具会被自动拦截并返回'等级不够'提示。"
+                    "不要假装调用成功,直接告诉主人当前等级不能做这件事并提示升级。"
+                )
+                if MCP_DEFAULT_LEVEL and lvl < MCP_DEFAULT_LEVEL:
+                    unlock_line += f"外部扩展 (MCP) 需要 Lv.{MCP_DEFAULT_LEVEL} 才能用。"
+                if "工具解锁" not in base:
+                    messages[0]["content"] += unlock_line
 
         for turn in range(self.max_turns):
             if cancel_check is not None and cancel_check():
@@ -629,6 +686,12 @@ class AgentLoop:
                     if data:
                         yield ("meta", {"kind": "thought", "text": str(data)})
                 elif ev == "finish":
+                    # v31: 抓 LLM API 真实 token usage (精确值, 替代 "字符数/4" 估算),
+                    # meta 事件透传给 chat_window 状态栏显示。某些 API (老 ollama
+                    # / 某些本地) 不返 usage → 上层 got_real=False 走 fallback。
+                    if isinstance(data, dict) and data.get("usage"):
+                        yield ("meta", {"event": "usage",
+                                        **data["usage"]})
                     if data.get("content") and not content_parts:
                         content_parts.append(data["content"])
                     tool_calls = data.get("tool_calls") or []

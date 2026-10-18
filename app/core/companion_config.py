@@ -121,6 +121,21 @@ class _TraceCfg:
 
 
 @dataclass(frozen=True)
+class _ToolUnlockCfg:
+    """工具解锁（战令式）。
+
+    levels: {等级: [工具名, ...]}，每级解锁的工具
+    mcp_default_level: MCP 外部工具默认锁到的等级
+    rewards_title: {等级: 奖励标题}
+    celebrate: {等级: 真实升级时桌宠祝贺语}
+    """
+    levels: dict = field(default_factory=dict)
+    mcp_default_level: int = 8
+    rewards_title: dict = field(default_factory=dict)
+    celebrate: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class CompanionConfig:
     """桌宠养成数值配置顶层 dataclass。"""
     satiety: _Range = field(default_factory=lambda: _Range(0, 100, 80))
@@ -134,6 +149,7 @@ class CompanionConfig:
     favor_rules: _FavorRules = field(default_factory=_FavorRules)
     persistence: _PersistenceCfg = field(default_factory=_PersistenceCfg)
     trace: _TraceCfg = field(default_factory=_TraceCfg)
+    tool_unlock: _ToolUnlockCfg = field(default_factory=_ToolUnlockCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +227,39 @@ def _build_from_dict(d: dict) -> CompanionConfig:
         sub = d.get(key) or {}
         return cls(**_filter_kwargs(cls, sub))
 
+    def _tool_unlock():
+        sub = d.get("tool_unlock") or {}
+        # levels / rewards_title / celebrate 的 key 在 yaml 里是 int,
+        # 但 dataclass 用 dict[str, ...] 存更安全 (yaml 可能读成 str key)
+        levels = {}
+        for k, v in (sub.get("levels") or {}).items():
+            try:
+                levels[int(k)] = list(v or [])
+            except (TypeError, ValueError):
+                continue
+        rewards = {}
+        for k, v in (sub.get("rewards_title") or {}).items():
+            try:
+                rewards[int(k)] = str(v)
+            except (TypeError, ValueError):
+                continue
+        celeb = {}
+        for k, v in (sub.get("celebrate") or {}).items():
+            try:
+                celeb[int(k)] = str(v)
+            except (TypeError, ValueError):
+                continue
+        try:
+            mcp_lvl = int(sub.get("mcp_default_level", 8) or 8)
+        except (TypeError, ValueError):
+            mcp_lvl = 8
+        return _ToolUnlockCfg(
+            levels=levels,
+            mcp_default_level=mcp_lvl,
+            rewards_title=rewards,
+            celebrate=celeb,
+        )
+
     def _hook(name):
         sub = (d.get("event_hooks") or {}).get(name) or {}
         return _HookDeltas(**_filter_kwargs(_HookDeltas, sub))
@@ -234,6 +283,7 @@ def _build_from_dict(d: dict) -> CompanionConfig:
         favor_rules=_r("favor_rules", _FavorRules),
         persistence=_r("persistence", _PersistenceCfg),
         trace=_r("trace", _TraceCfg),
+        tool_unlock=_tool_unlock(),
     )
 
 

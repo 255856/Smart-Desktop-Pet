@@ -70,7 +70,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# 精灵图（720MB，仓库里不放；用 prompts_for_doubao.md 自己生成）
+# 精灵图
 assets/sprites/
 # TTS 缓存（运行时生成）
 assets/tts_cache/
@@ -136,3 +136,7 @@ scripts/_*.py
 
 # 历史归档目录（已迁移到 gh-pages 或 commit，不在 master 重复保留）
 tools/_archive/
+
+# 实验输出（每次跑脚本重写，不入库）
+app/experiments/results/
+

@@ -59,6 +59,11 @@ def convert_tools(registry: ToolRegistry) -> list[StructuredTool]:
     return [_internal_tool_to_langchain(t) for t in registry._tools.values()]
 
 
+def convert_tools_for_level(registry: ToolRegistry, level: int) -> list[StructuredTool]:
+    """按等级过滤后转换 ToolRegistry → LangChain tool 列表。"""
+    return [_internal_tool_to_langchain(t) for t in registry.tools_for_level(level)]
+
+
 # 主类
 @dataclass
 class LangChainAgentConfig:
@@ -177,11 +182,14 @@ class LangChainAgent:
         skills_dir: Optional[str] = None,
         auto_load_skills: Optional[list] = None,
         memory_store: Optional[Any] = None,
+        level_getter: Optional[Callable[[], int]] = None,
     ):
         self.llm_cfg = llm_cfg
         self.registry = registry
         self.persona = persona
         self.cfg = cfg or LangChainAgentConfig()
+        # 工具解锁:返回当前桌宠等级 int,LLM 工具列表按等级过滤,未解锁拦截
+        self.level_getter = level_getter
         self.cancel_check = cancel_check
         # 长期记忆（MemoryStore），跨 session 共享；system_prompt 注入时调 memory.system_block()
         self.memory_store = memory_store
@@ -440,7 +448,7 @@ class LangChainAgent:
             return
         if self._model is None:
             self._model = self._build_model()
-        tools = convert_tools(self.registry)
+        tools = convert_tools_for_level(self.registry, self._current_level())
         if self._checkpointer is None and self.cfg.enable_checkpointer:
             await self._build_checkpointer()
         checkpointer = self._checkpointer
@@ -682,6 +690,16 @@ class LangChainAgent:
     # 任务结果（success / failure / rejected）反向更新 PetState。
     # 应用方式：主程序调 set_companion_state(state)，内部所有 task 调用都
     # 走同一个 agent 实例，set 一次永久生效（除非外部显式调用 set_companion_state(None) 解除）。
+
+    def _current_level(self) -> int:
+        """读当前桌宠等级,无 level_getter 时按 Lv10 处理 (全部可见)。"""
+        if self.level_getter is None:
+            return 10
+        try:
+            lvl = int(self.level_getter())
+        except Exception:  # noqa: BLE001
+            return 10
+        return max(1, min(10, lvl))
 
     def set_companion_state(self, pet_state: "Optional[Any]") -> None:
         """注入 / 解除桌宠 PetState。

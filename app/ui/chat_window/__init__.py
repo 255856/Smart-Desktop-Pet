@@ -148,7 +148,10 @@ class ChatWindow(QWidget):
                  extra_docs_paths: Optional[list] = None,
                  # 桌宠状态拉取器 —— 每次 _kickoff_llm 创建新 LangChainAgent 时
                  # 调一次拿当前 PetState 注入。
-                 state_provider: Optional[Callable[[], Any]] = None):
+                 state_provider: Optional[Callable[[], Any]] = None,
+                 # 工具解锁:返回当前桌宠等级的回调。
+                 # 给 None 时所有工具全部可见 (兼容旧版)。
+                 level_provider: Optional[Callable[[], int]] = None):
         super().__init__(parent)
         self.llm_cfg = llm_cfg
         self.char_cfg = char_cfg
@@ -218,6 +221,13 @@ class ChatWindow(QWidget):
         self.asr_enabled = asr_enabled
         self.asr_model = asr_model
         self.asr_language = asr_language
+        # 工具注册表：非 None 时走 Agent 循环（能调工具），否则纯聊天
+        # 工具解锁:返回当前桌宠等级 int 的回调 (level_provider 形参来自 __init__)
+        self.level_provider = level_provider
+        if level_provider is not None and registry is not None:
+            # 注入到 ToolRegistry.execute 解锁闸,避免 LangChain 后端漏拦
+            from app.engine.tools._core import set_tool_filter_level_provider
+            set_tool_filter_level_provider(level_provider)
         # 工具注册表：非 None 时走 Agent 循环（能调工具），否则纯聊天
         self.registry = registry
         # 每次发消息前调用，返回追加到 system prompt 的动态上下文
@@ -552,7 +562,7 @@ class ChatWindow(QWidget):
         结构（从上到下）：
             ┌──────────────────────────────────────────────┐
             │ 头像  鲸鱼娘                                  │
-            │       模型 · 工具数 · 记忆数   [清空] [Demo]  │   ← 标题
+            │       模型 · 工具数 · 记忆数   [清屏] [Demo]  │   ← 标题
             ├──────────────────────────────────────────────┤
             │ ┌──────────────────────────────────────────┐ │   ← 能力展示面板
             │ │ [聊天陪伴] [定时提醒] [记住事实]          │ │
@@ -617,9 +627,11 @@ class ChatWindow(QWidget):
 
         # 右侧操作按钮（v24 精简：清空 / 记忆 / 设置 —— Demo 改去任务栏入口,
         # 头像改放设置面板。chat 顶部不再塞一堆按钮, 更简洁)
-        self.btn_clear = QPushButton("清空")
+        self.btn_clear = QPushButton("清屏")
         self.btn_clear.setObjectName("ghost_btn")
-        self.btn_clear.setToolTip("清空上下文（不影响长期记忆）")
+        # v31: 改成"清屏" — 只清 UI, 历史对话留在内存 + DB, 桌宠仍能
+        # 基于全历史回答(不丢"长期对话"能力)。重启 pet 历史会自动加载回来。
+        self.btn_clear.setToolTip("清屏 — 只清聊天窗显示, 历史对话仍保留在内存 + 数据库, 桌宠仍能看到")
         self.btn_clear.clicked.connect(self._on_clear)
         hl.addWidget(self.btn_clear)
 
@@ -628,6 +640,13 @@ class ChatWindow(QWidget):
         self.btn_memory.setToolTip("管理长期记忆（查看 / 新增 / 删除）")
         self.btn_memory.clicked.connect(self._open_memory)
         hl.addWidget(self.btn_memory)
+
+        # 工具解锁入口：与设置/清屏同行
+        self.btn_unlock = QPushButton("工具解锁")
+        self.btn_unlock.setObjectName("ghost_btn")
+        self.btn_unlock.setToolTip("查看工具解锁进度（每升 1 级解锁新工具）")
+        self.btn_unlock.clicked.connect(self._open_tool_unlock)
+        hl.addWidget(self.btn_unlock)
 
         # 设置按钮 —— 跳到 settings_window
         self.btn_settings = QPushButton("设置")
@@ -660,7 +679,7 @@ class ChatWindow(QWidget):
         hl.addWidget(self.btn_close)
 
         # 标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区省略,而不是把按钮文字裁掉
-        for _tb in (self.btn_clear, self.btn_memory,
+        for _tb in (self.btn_clear, self.btn_memory, self.btn_unlock,
                 ):
             _tb.setMinimumWidth(_tb.sizeHint().width())
 
@@ -746,10 +765,10 @@ class ChatWindow(QWidget):
         ] + [f"/skills/{n} " for n in skill_names]
         self._cmd_completer = _CommandCompleter(self.input_edit, candidates)
         il.addWidget(self.input_edit)
-        # 底部状态栏 — CPU/内存/token 数 (1 Hz 刷新)
-        self.statusbar = QStatusBar()
-        self.statusbar.setObjectName("chat_statusbar")
-        self.statusbar.setSizeGripEnabled(False)
+        # v31: token/CPU/mem 状态 — 跟发送按钮并排, 不再放输入框底部独占一行。
+        # 用 QStatusBar 但它没并排能力, 直接用 3 个 QLabel 加到 bottom_row 里
+        # (放在 send_btn 前面)。1 Hz 定时刷新 CPU/mem, token 数在 _on_chunk /
+        # _on_done 收 finish event 时立刻更新 (用 LLM API 真实 usage)。
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_status_bar)
@@ -758,11 +777,25 @@ class ChatWindow(QWidget):
         self._status_label_cpu = QLabel("CPU: 0%")
         self._status_label_mem = QLabel("mem: 0 MB")
         for _lb in (self._status_label_token, self._status_label_cpu, self._status_label_mem):
-            _lb.setStyleSheet("color:#8e8e93;font-size:8.5pt;padding:0 8px;")
-        self.statusbar.addPermanentWidget(self._status_label_token)
-        self.statusbar.addPermanentWidget(self._status_label_cpu)
-        self.statusbar.addPermanentWidget(self._status_label_mem)
-        il.addWidget(self.statusbar)
+            _lb.setStyleSheet(
+                "color:#8e8e93;font-size:8.5pt;padding:0 6px;"
+                "background:transparent;border:none;"
+            )
+        # 累计 token 数 (lightweight backend 走 LLMClient.chat_stream_events 时,
+        # 收 finish event 的 usage 累加。standard (LangChain) 路径走 _AgentWorker,
+        # 它的 astream 不暴露 usage, 此处 fallback 字符估算 = self.history 长度 / 4。
+        self._accum_tokens = 0
+        self._accum_prompt = 0
+        self._accum_completion = 0
+        # psutil 跨平台 CPU 计数器 (Windows 上 /proc 不存在, 走 psutil 路径)
+        self._psutil_proc = None
+        try:
+            import psutil as _ps
+            self._psutil_proc = _ps.Process()
+            # 第一次 cpu_percent 必返 0 (无 prev), 预热一次
+            self._psutil_proc.cpu_percent(interval=None)
+        except Exception:
+            self._psutil_proc = None
 
         # 输入区底部：状态 + 按钮
         bottom_row = QHBoxLayout()
@@ -839,6 +872,13 @@ class ChatWindow(QWidget):
         self.send_btn.setMinimumHeight(32)
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.clicked.connect(self._on_send)
+        # v31: token/CPU/mem 状态在 send_btn 前面 (跟它并排, 跟之前放输入框底部
+        # 独占一行不一样)。中间用 stretch 隔开, 状态靠右, 发送按钮最右。
+        # 3 个状态点紧凑放, 跟 mic_btn 等高, 不让 input 区下面空一坨
+        bottom_row.addStretch(1)
+        bottom_row.addWidget(self._status_label_token)
+        bottom_row.addWidget(self._status_label_cpu)
+        bottom_row.addWidget(self._status_label_mem)
         bottom_row.addWidget(self.send_btn)
 
         il.addLayout(bottom_row)
@@ -927,6 +967,80 @@ class ChatWindow(QWidget):
             sw.activateWindow()
             return
         self.pick_bot_avatar(self)
+
+    def _on_dev_level_changed(self, new_level: int) -> None:
+        """开发者模式改了 level → 刷新 LLM 工具可见性。
+
+        AgentLoop / LangChainAgent 每轮调 level_provider 读最新等级,
+        所以这里只要让下轮重建即可。LangChain 后端的 graph 已按旧等级
+        编译了 tool 列表,需要把 _agent 置 None 强制重建。
+        """
+        try:
+            lc = getattr(self, "_lc_agent", None)
+            if lc is not None:
+                lc._agent = None   # 下一轮 astream 会调 _ensure_agent 重建 tools
+            log.info("工具解锁:等级改为 Lv.%d,Agent 下轮重建工具列表", new_level)
+        except Exception:  # noqa: BLE001
+            log.debug("重建工具列表失败(非致命)", exc_info=True)
+
+    def _open_tool_unlock(self) -> None:
+        """chat 顶部「工具解锁」按钮 —— 弹出当前等级的解锁进度对话框。"""
+        try:
+            from app.engine.tools._unlock import (
+                TOOL_UNLOCK, UNLOCK_REWARDS, UNLOCK_CELEBRATE, compute_unlocked,
+                load_unlock_config, is_loaded, split_configured_and_mcp,
+            )
+            # 确保配置已加载(若 build_default_tools 没传 cfg 这里再补一次)
+            if not is_loaded():
+                try:
+                    from app.core.companion_config import load_companion_config
+                    cfg = load_companion_config()
+                    load_unlock_config(cfg)
+                except Exception:  # noqa: BLE001
+                    pass
+            from app.engine.tools._risk import TOOL_RISK_LEVEL, risk_name
+            from .tool_unlock_dialog import build_tool_unlock_dialog
+
+            level = 1
+            if self.level_provider is not None:
+                try:
+                    level = int(self.level_provider())
+                except Exception:  # noqa: BLE001
+                    pass
+            # MCP 外部工具统一挂到 MCP_DEFAULT_LEVEL 那一级
+            from app.engine.tools._unlock import MCP_DEFAULT_LEVEL
+            mcp_names: list = []
+            total_tools = 0
+            if self.registry is not None:
+                all_names = self.registry.names()
+                total_tools = len(all_names)
+                _, mcp_names = split_configured_and_mcp(all_names)
+            unlocked = compute_unlocked(level, mcp_names=mcp_names)
+
+            # level -> [(name, risk), ...]
+            level_to_tools: dict = {}
+            for lvl, names in TOOL_UNLOCK.items():
+                level_to_tools[int(lvl)] = [
+                    (n, risk_name(TOOL_RISK_LEVEL.get(n))) for n in names
+                ]
+            if mcp_names:
+                level_to_tools.setdefault(MCP_DEFAULT_LEVEL, []).extend(
+                    (n, risk_name(TOOL_RISK_LEVEL.get(n))) for n in mcp_names
+                )
+
+            dlg = build_tool_unlock_dialog(
+                level=level,
+                unlocked=unlocked,
+                level_to_tools=level_to_tools,
+                rewards=UNLOCK_REWARDS,
+                celebrate=UNLOCK_CELEBRATE,
+                risk_lookup=lambda n: risk_name(TOOL_RISK_LEVEL.get(n)),
+                parent=self,
+            )
+            dlg.exec_()
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("打开工具解锁对话框失败")
 
     def _toggle_maximized(self) -> None:
         """最大化 / 还原 切换。"""
@@ -1078,13 +1192,25 @@ class ChatWindow(QWidget):
         self._trim_history()
 
     def _on_clear(self) -> None:
+        """v31+: 清屏 — 聊天窗 UI 清空, 但历史对话**仍保留**在内存 self.history
+        和 DB (chat_store) 里, LLM 下次回复仍能基于全历史。
+
+        之前行为 (pre-v31) 是 chat_view + history + chat_store 一起清,
+        等于删库。主人反馈这样没"长期对话能力"——LLM 忘了之前说啥。
+        现在只清屏, LLM 上下文完整, 重启 pet 仍能加载历史 (除非开了
+        _load_history 隐藏模式, 默认不隐藏)。
+        """
         if self._generating:
             QMessageBox.information(self, "提示", "生成中，请先停止再清空")
             return
-        self.history.clear()
+        # 1) 清屏: chat_view DOM 清空, 主人看到的是空对话
         self.chat_view.clear()
-        self.chat_store.clear()  # 持久化清空
+        # 2) 重新插欢迎语 (跟 _load_history 末尾一样, 跟第一次开窗的体验)
         self._append_system_welcome()
+        # 3) self.history 保留 — _kickoff_llm 仍从这里读, LLM 仍看到全对话
+        # 4) self.chat_store 不动 — DB 记录还在, 重启 pet / _load_history 仍能加载
+        log.info("ChatWindow: 清屏 (历史保留 %d 条 in-memory, LLM 仍可见)",
+                 len(self.history))
 
     def _on_send(self) -> None:
         if self._generating:
@@ -2261,6 +2387,7 @@ class ChatWindow(QWidget):
                     skills_dir=self._skills_dir,
                     auto_load_skills=self._auto_load_skills or None,
                     extra_docs_paths=self._extra_docs_paths or None,
+                    level_getter=self.level_provider,
                 )
                 # 把现有的 Qt confirm 弹窗挂到 LangChain 的 RiskyToolConfirm 拦截器
                 # 上 —— 否则标准后端高风险工具只能靠 chat 里说"确认"二字,体验差。
@@ -2298,7 +2425,9 @@ class ChatWindow(QWidget):
             else:
                 # 轻量 backend:直接用 AgentLoop ReAct 循环
                 self._worker = _AgentWorker(
-                    AgentLoop(client, self.registry, confirm_tool=self._confirm_dangerous_tool),
+                    AgentLoop(client, self.registry,
+                              confirm_tool=self._confirm_dangerous_tool,
+                              level_getter=self.level_provider),
                     [{"role": m.role, "content": m.content} for m in msgs])
                 self._worker.chunk.connect(self._on_chunk)
                 self._worker.tool_used.connect(self._on_tool)
@@ -2306,6 +2435,8 @@ class ChatWindow(QWidget):
         else:
             self._worker = _StreamWorker(client, msgs)
             self._worker.chunk.connect(self._on_chunk)
+        # v31: token usage 走 _on_meta 路径 (AgentLoop 把 LLM API usage 当 meta
+        # 事件 emit, 抓进 self._accum_tokens) — done 仍然只传文本, 保持兼容
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -2707,6 +2838,22 @@ class ChatWindow(QWidget):
             kind: "plan" | "reflection" | "meta" | "thought" | "exec"
             payload: 事件载荷
         """
+        # v31: AgentLoop 把 LLM API 返回的 usage 字典当作 meta 事件透传过来
+        # (event="usage", 含 prompt_tokens / completion_tokens / total_tokens / got_real)
+        # 累加到 self._accum_tokens, 状态栏用真实值显示 (替代旧 "字符/4" 估算)
+        if isinstance(payload, dict) and payload.get("event") == "usage":
+            try:
+                p = int(payload.get("prompt_tokens") or 0)
+                c = int(payload.get("completion_tokens") or 0)
+                t = int(payload.get("total_tokens") or 0)
+                if t > 0:
+                    self._accum_prompt += p
+                    self._accum_completion += c
+                    self._accum_tokens += t
+            except Exception:
+                pass
+            return  # 不再走 trace.record, usage 不入 trace
+
         if self.trace is not None and self._trace_run_id:
             try:
                 self.trace.record(self._trace_run_id, kind, payload or {})
@@ -2779,38 +2926,42 @@ class ChatWindow(QWidget):
                     log.info("ChatWindow: verify_retry 事件已提示用户")
 
     def _refresh_status_bar(self) -> None:
-        """1 Hz 刷新: 桌宠进程的 CPU/内存占用 + LLM 本轮 token 估算。
+        """1 Hz 刷新: 桌宠进程的 CPU/内存占用。
 
-        token 数近似: 已发送 user msg + 已生成 assistant 内容字符数 / 4
-        (英文 1 token ≈ 4 字符, 中文 ≈ 1.5 字符 → 除 4 是粗估)。窗口 ~50 条
-        历史, 实际超长上下文会扣更多, 主人不靠这个精打细算。
+        v31 之前: 走 /proc/{pid}/stat, Windows 上直接抛 → 一直 CPU 0%。
+        现在: 优先 psutil (跨平台), 失败再 fallback 到 /proc (Linux)。
+        token 数由 _on_done 收 finish event 立刻更新 (用 LLM API 真实 usage,
+        got_real=True; 某些老 API 不返 usage 时再 fallback 字符估算)。
         """
-        import os as _os
-        import time as _t
-        try:
-            proc = _os.getpid()
-            with open(f"/proc/{proc}/stat") as _f:
-                parts = _f.read().split()
-            # utime + stime (clock ticks, jiffies). Linux; Windows fallback 下面 else.
-            utime = int(parts[13]); stime = int(parts[14])
-            clk = _os.sysconf("SC_CLK_TCK")
-            cpu_pct = (utime + stime - self._last_proc_ticks) / clk * 100 / 1.0
-            self._last_proc_ticks = utime + stime
-        except Exception:
-            cpu_pct = 0.0
-        try:
-            import psutil
-            mem = psutil.Process().memory_info().rss / 1024 / 1024
-        except Exception:
-            mem = 0.0
-        # token 估算: 累积 content 字符数
-        toks = 0
-        for m in getattr(self, "history", []):
-            toks += max(1, len(getattr(m, "content", "") or "") // 4)
+        # CPU: psutil 跨平台 (Windows / Linux / macOS 都行)
+        cpu_pct = 0.0
+        if self._psutil_proc is not None:
+            try:
+                cpu_pct = self._psutil_proc.cpu_percent(interval=None)
+            except Exception:
+                # psutil Process 句柄可能过期 (子线程等), 重建一次
+                try:
+                    import psutil as _ps
+                    self._psutil_proc = _ps.Process()
+                    cpu_pct = self._psutil_proc.cpu_percent(interval=None)
+                except Exception:
+                    cpu_pct = 0.0
+        # 内存: 同 psutil
+        mem = 0.0
+        if self._psutil_proc is not None:
+            try:
+                mem = self._psutil_proc.memory_info().rss / 1024 / 1024
+            except Exception:
+                pass
         try:
             self._status_label_cpu.setText(f"CPU: {cpu_pct:.0f}%")
             self._status_label_mem.setText(f"mem: {mem:.0f} MB")
-            self._status_label_token.setText(f"tokens: ~{toks:,}")
+            # token 累计 (本轮会立刻 + 一次, 这里只负责显示历史累计)
+            self._status_label_token.setText(
+                f"tokens: {self._accum_tokens:,}"
+                f" ({self._accum_prompt}↓+{self._accum_completion}↑)"
+                if self._accum_tokens else "tokens: 0"
+            )
         except Exception:
             pass
 
