@@ -278,8 +278,16 @@ def make_backend(name: str = "auto") -> VectorBackend:
 
 
 class MemoryStore:
-    """长期记忆：JSON 落盘 + 可插拔向量后端 + 重要性评分 + 时间衰减。"""
+    """长期记忆：JSON 落盘 + 可插拔向量后端 + 重要性评分 + 时间衰减。
 
+    v31 (2026-10-17): per-character 隔离。传 character_name 后, data_file 自动
+    派生为 `data/memory_{name}.db` (老 .json 同步转 .db)。不同 character 各自
+    一个 db, 完全隔离。
+
+    不传 character_name (空字符串) 时走老路径, 行为兼容:
+      - `data/memory.json` 仍迁到 `data/memory.db` (老记录 shared)
+      - `data/memory.db` 留作 legacy shared db, 主人可以手动保留或拷给新角色
+    """
     # 注入 system prompt 时各类别的优先级权重
     CATEGORY_PRIORITY = {
         "preference": 0,
@@ -291,19 +299,29 @@ class MemoryStore:
     }
 
     def __init__(self, data_file: str | Path, max_inject: int = 20,
-                 backend_name: str = "auto"):
+                 backend_name: str = "auto",
+                 character_name: str = ""):
         """
         Args:
-            data_file: JSON 落盘路径。
+            data_file: JSON 落盘路径 (e.g. "data/memory.json")。
             max_inject: 注入 system prompt 的最大条数。
             backend_name: "auto" / "tfidf" / "sbert" / "substring"。
+            character_name: v31 — 角色名。非空时 data_file 派生为
+                `data/memory_{name}.db` (per-character 隔离)。空走老路径。
         """
         # 兼容旧的 .json 入参，检测后缀转 .db
         _p = Path(data_file)
         if _p.suffix.lower() == ".json":
             log.info("MemoryStore: 检测到 .json data_file, 自动迁向 %s", _p.with_suffix(".db"))
             data_file = _p.with_suffix(".db")
+        # v31: per-character 隔离 — db 文件按 character_name 分文件
+        if character_name:
+            _pp = Path(data_file)
+            data_file = _pp.with_name(f"{_pp.stem}_{character_name}{_pp.suffix}")
+            log.info("MemoryStore: character_name=%r → db 路径 %s",
+                     character_name, data_file)
         self.data_file = Path(data_file)
+        self.character_name = character_name
         self.max_inject = max_inject
         self.backend: VectorBackend = make_backend(backend_name)
         self.backend_name = backend_name

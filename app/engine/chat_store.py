@@ -26,6 +26,10 @@ class StoredMessage:
     emotion: str = ""
     ts: float = field(default_factory=time.time)
     tools: list = field(default_factory=list)
+    # v31 (2026-10-17): 人设维度。改 yaml + 重启 pet 时, 只看当前 character_name
+    # 的消息; 翻看历史能区分哪个角色说的 (settings.json 已有 legacy 字段
+    # 走默认 '' = 跨角色, 老记录用 '' 标)。
+    character_name: str = ""
 
 
 _SCHEMA = """
@@ -35,18 +39,29 @@ CREATE TABLE IF NOT EXISTS messages (
     content     TEXT    NOT NULL,
     emotion     TEXT    NOT NULL DEFAULT '',
     ts          REAL    NOT NULL,
-    tools_json  TEXT    NOT NULL DEFAULT '[]'
+    tools_json  TEXT    NOT NULL DEFAULT '[]',
+    character_name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+CREATE INDEX IF NOT EXISTS idx_messages_char_ts ON messages(character_name, ts);
 """
+
+# v31: 旧 db 加列迁移 (列已存在会报 duplicate column, 吞掉)。
+_MIGRATE_ADD_CHAR_COLUMN = (
+    "ALTER TABLE messages ADD COLUMN character_name TEXT NOT NULL DEFAULT ''"
+)
 
 
 class ChatStore:
-    """聊天历史存储。"""
+    """聊天历史存储。v31: 同一 db 文件, 加 character_name 列做 per-character 隔离。
+    不同人设的 chat_window 各自起一个 ChatStore 实例, 各自的 character_name
+    把消息写到同一个 db 但不同行, all(character_name=...) 过滤读出。
+    """
 
     def __init__(self, data_file: str | Path = "data/chat_history.db",
                  max_messages: int = 200,
-                 legacy_json: str | Path | None = "data/chat_history.json"):
+                 legacy_json: str | Path | None = "data/chat_history.json",
+                 character_name: str = ""):
         # 兼容旧的 `data_file` 指向 JSON —— 检测后缀自动转成 .db
         p = Path(data_file)
         if p.suffix.lower() == ".json":
@@ -56,6 +71,9 @@ class ChatStore:
         self.data_file = Path(data_file)
         self.legacy_json = Path(legacy_json) if legacy_json else None
         self.max_messages = max_messages
+        # v31: 实例绑 character_name; add() 自动写入。空字符串 = legacy / 跨角色
+        # (老记录和老 code 路径都按 '' 处理)。
+        self.character_name = character_name
         self._messages: list[StoredMessage] = []
         self._load()
 
@@ -64,13 +82,22 @@ class ChatStore:
         conn = sqlite3.connect(str(self.data_file))
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
-        conn.commit()
+        # v31: 旧 db 没 character_name 列, ALTER 补上。列已存在会抛
+        # "duplicate column name", 吞掉(SQLite 不支持 IF NOT EXISTS for ADD COLUMN)。
+        try:
+            conn.execute(_MIGRATE_ADD_CHAR_COLUMN)
+            conn.commit()
+            log.info("ChatStore: 老 db 已加 character_name 列")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                log.warning("ChatStore: 加 character_name 列失败(%s), 继续", e)
         return conn
 
     def _migrate_from_json(self) -> int:
         """从 legacy JSON 文件读历史消息写入 SQLite。返回迁移条数。
 
         成功 → 删除 JSON（避免下次再迁）；失败 → 保留 JSON。
+        v31: 迁移时给老记录打 '' character_name (跨角色 shared)。
         """
         if not self.legacy_json or not self.legacy_json.is_file():
             return 0
@@ -87,11 +114,12 @@ class ChatStore:
             conn = self._connect()
             try:
                 rows = [(m.role, m.content, m.emotion, m.ts,
-                         json.dumps(m.tools or [], ensure_ascii=False))
+                         json.dumps(m.tools or [], ensure_ascii=False),
+                         "")  # v31: 老记录标 '' (跨角色 shared)
                         for m in msgs]
                 conn.executemany(
-                    "INSERT INTO messages(role, content, emotion, ts, tools_json) "
-                    "VALUES (?, ?, ?, ?, ?)", rows,
+                    "INSERT INTO messages(role, content, emotion, ts, tools_json, character_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?)", rows,
                 )
                 conn.commit()
             finally:
@@ -121,8 +149,8 @@ class ChatStore:
             try:
                 # 按 ts 升序读（老 JSON 是 append 顺序，SQLite id 也是升序）
                 cur = conn.execute(
-                    "SELECT role, content, emotion, ts, tools_json FROM messages "
-                    "ORDER BY id ASC"
+                    "SELECT role, content, emotion, ts, tools_json, character_name "
+                    "FROM messages ORDER BY id ASC"
                 )
                 self._messages = []
                 for row in cur.fetchall():
@@ -132,6 +160,7 @@ class ChatStore:
                         emotion=row["emotion"],
                         ts=row["ts"],
                         tools=json.loads(row["tools_json"]) if row["tools_json"] else [],
+                        character_name=row["character_name"] or "",
                     ))
             finally:
                 conn.close()
@@ -143,10 +172,11 @@ class ChatStore:
             conn = self._connect()
             try:
                 conn.execute(
-                    "INSERT INTO messages(role, content, emotion, ts, tools_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO messages(role, content, emotion, ts, tools_json, character_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (msg.role, msg.content, msg.emotion, msg.ts,
-                     json.dumps(msg.tools or [], ensure_ascii=False)),
+                     json.dumps(msg.tools or [], ensure_ascii=False),
+                     msg.character_name or self.character_name or ""),
                 )
                 conn.commit()
                 return True
@@ -157,27 +187,35 @@ class ChatStore:
             return False
 
     def _prune_old(self) -> None:
-        """保留最近 max_messages 条。"""
-        if len(self._messages) <= self.max_messages:
-            return
-        drop_count = len(self._messages) - self.max_messages
-        try:
-            conn = self._connect()
-            try:
-                conn.execute(
-                    "DELETE FROM messages WHERE id IN ("
-                    "SELECT id FROM messages ORDER BY id ASC LIMIT ?)",
-                    (drop_count,),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception as e:  # noqa: BLE001
-            log.warning("ChatStore: 清理旧消息失败:%s", e)
+        """保留每个 character_name 最近 max_messages 条 (v31 改成 per-character 限长)。
+
+        之前是全局限 max_messages, 切人设后老消息会被挤掉, 破坏隔离。
+        现在按 character_name 分组, 每个角色各自保 max_messages。
+        老记录 (character_name == '') 也单独算一组。
+        """
+        by_char: dict[str, list[StoredMessage]] = {}
+        for m in self._messages:
+            key = m.character_name or ""
+            by_char.setdefault(key, []).append(m)
+        for v in by_char.values():
+            if len(v) > self.max_messages:
+                v[: len(v) - self.max_messages] = []
+        # 不写盘裁剪 — chat_window reload 时会从 db 重读,
+        # 真正的 limit 在 _load 后下一轮 add 之前再做。这函数现在只确保
+        # self._messages 内存里每角色 ≤ max_messages。
+        self._messages = []
+        for v in by_char.values():
+            self._messages.extend(v)
 
     def add(self, role: str, content: str, emotion: str = "", tools: list = None) -> None:
-        """添加一条消息并持久化。"""
-        msg = StoredMessage(role=role, content=content, emotion=emotion, tools=tools or [])
+        """添加一条消息并持久化。v31: 自动用 self.character_name 标。
+
+        add() 一次性把消息标到当前实例的 character_name, 不在外部每条都传。
+        """
+        msg = StoredMessage(
+            role=role, content=content, emotion=emotion, tools=tools or [],
+            character_name=self.character_name,
+        )
         self._messages.append(msg)
         # 写盘前先裁剪，避免 DB 越来越大
         if len(self._messages) > self.max_messages:
@@ -186,17 +224,33 @@ class ChatStore:
         self._prune_old()
         self._save_one(msg)
 
-    def all(self) -> list[StoredMessage]:
-        """返回所有消息的副本列表。"""
-        return list(self._messages)
+    def all(self, character_name: str | None = None) -> list[StoredMessage]:
+        """返消息列表。v31: character_name 过滤 — None = 用 self.character_name
+        (per-character), 显式传 '' 返老 shared 记录, 传具体名返另一角色 (调试用)。
+        """
+        if character_name is None:
+            character_name = self.character_name
+        if not character_name:
+            # 实例无 character_name, 返全部 (legacy / 调试)
+            return list(self._messages)
+        return [m for m in self._messages if (m.character_name or "") == character_name]
 
     def clear(self) -> None:
-        """清空所有消息并持久化。"""
-        self._messages = []
+        """清空所有消息并持久化。v31: 只清本 character_name 的记录, 不影响其他人设。"""
+        if self.character_name:
+            self._messages = [m for m in self._messages
+                             if (m.character_name or "") != self.character_name]
+        else:
+            self._messages = []
         try:
             conn = self._connect()
             try:
-                conn.execute("DELETE FROM messages")
+                if self.character_name:
+                    conn.execute(
+                        "DELETE FROM messages WHERE character_name = ?",
+                        (self.character_name,))
+                else:
+                    conn.execute("DELETE FROM messages")
                 conn.commit()
             finally:
                 conn.close()
@@ -212,8 +266,7 @@ class ChatStore:
 
         返回删掉的条数。
 
-        实现策略：SQLite 默认 trim 只去 ASCII 32，不去 \\n \\t，SQL 判空会漏。
-        max_messages=200 条上限内，整库「DELETE + re-INSERT kept」更鲁棒。
+        v31: 整库「DELETE + re-INSERT kept」保留 character_name 列, 跨角色不破坏。
         """
         before = len(self._messages)
         kept = [
@@ -226,16 +279,16 @@ class ChatStore:
         self._messages = kept
         if not removed:
             return 0
-        # 整库 re-INSERT kept。max_messages=200 没问题
         try:
             conn = self._connect()
             try:
                 conn.execute("DELETE FROM messages")
                 conn.executemany(
                     "INSERT INTO messages(role, content, emotion, ts, "
-                    "tools_json) VALUES (?, ?, ?, ?, ?)",
+                    "tools_json, character_name) VALUES (?, ?, ?, ?, ?, ?)",
                     [(m.role, m.content, m.emotion, m.ts,
-                      json.dumps(m.tools or [], ensure_ascii=False))
+                      json.dumps(m.tools or [], ensure_ascii=False),
+                      m.character_name or "")
                      for m in kept],
                 )
                 conn.commit()

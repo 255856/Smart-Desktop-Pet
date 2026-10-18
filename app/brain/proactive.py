@@ -111,7 +111,7 @@ class ProactiveBrain(QObject):
         self._aw_cfg = aw_cfg
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
-        self._last_remarks: list[str] = []
+        self._last_remarks_by_char: dict[str, list[str]] = {}
         # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     def apply_aw_config(self, aw_cfg) -> None:
@@ -210,7 +210,7 @@ class ProactiveBrain(QObject):
             "time_hint": _get_time_context(now),
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
-            "recent_remarks": self._last_remarks[-3:],
+            "recent_remarks": self._last_remarks_by_char.get(self.char_name, [])[-3:],
             "aw_context": aw_context,
         }
         # 第 6 条规则只在 AW 实际有数据时挂上，避免 prompt 噪声
@@ -262,6 +262,11 @@ class ProactiveBrain(QObject):
         remark = sanitize_text(parsed.text).strip()
         if not remark:
             return
-        self._last_remarks.append(remark)
+        # v31: per-character 隔离 — 旧 self._last_remarks 改 dict
+        bucket = self._last_remarks_by_char.setdefault(self.char_name, [])
+        bucket.append(remark)
+        # 限长: 每个角色最多保留 5 句 (但 prompt 只取 -3)
+        if len(bucket) > 5:
+            self._last_remarks_by_char[self.char_name] = bucket[-5:]
         self.emotion_hint.emit(parsed.emotion)
         self.remark_ready.emit(remark)

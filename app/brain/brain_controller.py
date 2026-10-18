@@ -122,7 +122,12 @@ class BrainController(QObject):
         mem_path = cfg.brain.memory_file
         if not Path(mem_path).is_absolute():
             mem_path = root / mem_path
-        self.memory = MemoryStore(mem_path)
+        # v31: 长期记忆 per-character 隔离 — 切人设 + 重启后, 每个角色各一份 db
+        # (MemoryStore 内部 data_file 派生 data/memory_{name}.db)
+        self.memory = MemoryStore(
+            mem_path,
+            character_name=cfg.character.name if cfg.character.name else "",
+        )
 
         # 接线 SessionStore + skills_dir，让 ChatWindow 能挂到 LangChainAgent
         # 两份对象都做 try/except，失败不阻断桌宠启动
