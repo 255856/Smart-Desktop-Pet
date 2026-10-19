@@ -52,6 +52,9 @@ class UIController(QObject):
         self.tts = tts
         self.brain = brain
         self.motion = motion
+        # 开发者模式开关：dashboard / chat_window 可查 —— 默认关闭，
+        # 面板的 _set_developer_mode emit developer_mode_changed 会在 _on_developer_mode_changed 同步过来
+        self.developer_mode = False
         self._chat_window = None
         self._last_food_warn = 0.0
 
@@ -189,6 +192,7 @@ class UIController(QObject):
         sw.retune_frames_requested.connect(self._do_retune_frames)
         sw.override_frame_ms_requested.connect(self._override_frame_ms_now)
         sw.fps_monitor_toggled.connect(self._on_fps_monitor_toggled)
+        sw.developer_mode_changed.connect(self._on_developer_mode_changed)
         sw.lock_first_idle_changed.connect(self.pet.animator.set_lock_first_idle)
         sw.crossfade_changed.connect(self._on_crossfade_changed)
         sw.preview_voice_requested.connect(self._on_preview_voice_requested)
@@ -979,6 +983,15 @@ class UIController(QObject):
             self.settings_window.set_fps_monitor(on)
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_developer_mode_changed(self, enabled: bool) -> None:
+        """开发者模式开关：记下状态供 dashboard / chat_window 查询。
+
+        之前这个 signal 声明了但没人连、也没人 emit —— 是死信号。
+        现在面板在 _set_developer_mode 里真发出来了，主程序能跟上。
+        """
+        self.developer_mode = bool(enabled)
+        log.info("开发者模式: %s", "开" if enabled else "关")
 
     def _reset_to_default_settings(self) -> None:
         """重置所有设置为默认值。

@@ -187,6 +187,20 @@ def test_developer_mode_persisted():
     assert "settings_store" in body, "开发者模式没持久化"
 
 
+def test_developer_mode_changed_signal_is_wired():
+    """developer_mode_changed signal 必须真发出 + 主程序真接。"""
+    node = _func_node("app/ui/settings_window.py", "_set_developer_mode")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "developer_mode_changed" in body, (
+        "切换开发者模式时没 emit developer_mode_changed —— 又是死信号"
+    )
+
+    src = _src("app/ui/ui_controller.py")
+    assert "_on_developer_mode_changed" in src, "主程序没接这个 signal"
+    assert "developer_mode_changed.connect" in src, "信号没连上"
+
+
 # ---------- TTS：音色下拉 / 试听 ----------
 
 def test_voice_options_follow_engine():

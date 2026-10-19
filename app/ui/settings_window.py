@@ -661,6 +661,9 @@ class SettingsWindow(QWidget):
             self.settings_store.set("developer_mode", self.developer_mode)
         except Exception:  # noqa: BLE001
             pass
+        # 通知主程序 —— 之前 developer_mode_changed 声明了但从不 emit，是死信号；
+        # 现在真发出去，主程序就知道开发者模式开了（dashboard / chat 可以查）
+        self.developer_mode_changed.emit(self.developer_mode)
         if hasattr(self, "_dev_panel"):
             self._dev_panel.setVisible(self.developer_mode)
             if self.developer_mode:
