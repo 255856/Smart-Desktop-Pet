@@ -36,6 +36,15 @@ LOCKED_BG  = "#F4F4F8"   # 未解锁浅底
 LOCKED_BORDER = "#E2E2EA" # 未解锁描边
 SHADOW_RGBA = "rgba(124, 108, 240, 0.07)"  # 卡片柔阴影
 
+# 4 个窗统一的 QGraphicsDropShadowEffect 参数 (QSS 不支持 box-shadow, 编程设)
+# 3 个窗 (chat_window / settings_window / memory_panel) 都用这套, 看着一致
+WINDOW_SHADOW_BLUR   = 44
+WINDOW_SHADOW_OFFSET = 10
+WINDOW_SHADOW_COLOR_R = 124
+WINDOW_SHADOW_COLOR_G = 108
+WINDOW_SHADOW_COLOR_B = 240
+WINDOW_SHADOW_ALPHA   = 60
+
 
 #  无边框窗口卡片容器（透明窗口内部的白色圆角卡片）
 WINDOW_CARD_QSS = f"""

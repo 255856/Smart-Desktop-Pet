@@ -590,9 +590,14 @@ class ChatWindow(QWidget):
         card.setObjectName("window_card")
         card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
         _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(48)
-        _shadow.setOffset(0, 10)
-        _shadow.setColor(QColor(90, 78, 200, 55))
+        # v37: 4 个窗统一阴影 token (跟 settings / memory 一致)
+        _shadow.setBlurRadius(ui_style.WINDOW_SHADOW_BLUR)
+        _shadow.setOffset(0, ui_style.WINDOW_SHADOW_OFFSET)
+        _shadow.setColor(QColor(
+            ui_style.WINDOW_SHADOW_COLOR_R,
+            ui_style.WINDOW_SHADOW_COLOR_G,
+            ui_style.WINDOW_SHADOW_COLOR_B,
+            ui_style.WINDOW_SHADOW_ALPHA))
         card.setGraphicsEffect(_shadow)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -986,20 +991,17 @@ class ChatWindow(QWidget):
     def _open_tool_unlock(self) -> None:
         """chat 顶部「工具解锁」按钮 —— 弹出当前等级的解锁进度对话框。"""
         try:
-            from app.engine.tools._unlock import (
-                TOOL_UNLOCK, UNLOCK_REWARDS, UNLOCK_CELEBRATE, compute_unlocked,
-                load_unlock_config, is_loaded, split_configured_and_mcp,
-            )
-            # 确保配置已加载(若 build_default_tools 没传 cfg 这里再补一次)
-            if not is_loaded():
-                try:
-                    from app.core.companion_config import load_companion_config
-                    cfg = load_companion_config()
-                    load_unlock_config(cfg)
-                except Exception:  # noqa: BLE001
-                    pass
+            from app.engine.tools import _unlock
             from app.engine.tools._risk import TOOL_RISK_LEVEL, risk_name
             from .tool_unlock_dialog import build_tool_unlock_dialog
+
+            # load_unlock_config 内部会回落 companion_config；
+            # 必须先加载再取 TOOL_UNLOCK, 早于加载取到的是空 dict 引用。
+            _unlock.load_unlock_config()
+            TOOL_UNLOCK = _unlock.TOOL_UNLOCK
+            rewards = dict(_unlock.UNLOCK_REWARDS)
+            celebrate = dict(_unlock.UNLOCK_CELEBRATE)
+            MCP_DEFAULT_LEVEL = _unlock.MCP_DEFAULT_LEVEL
 
             level = 1
             if self.level_provider is not None:
@@ -1007,34 +1009,44 @@ class ChatWindow(QWidget):
                     level = int(self.level_provider())
                 except Exception:  # noqa: BLE001
                     pass
-            # MCP 外部工具统一挂到 MCP_DEFAULT_LEVEL 那一级
-            from app.engine.tools._unlock import MCP_DEFAULT_LEVEL
-            mcp_names: list = []
-            total_tools = 0
-            if self.registry is not None:
-                all_names = self.registry.names()
-                total_tools = len(all_names)
-                _, mcp_names = split_configured_and_mcp(all_names)
-            unlocked = compute_unlocked(level, mcp_names=mcp_names)
 
-            # level -> [(name, risk), ...]
+            mcp_names: list = []
+            if self.registry is not None:
+                _, mcp_names = _unlock.split_configured_and_mcp(
+                    self.registry.names())
+            unlocked = _unlock.compute_unlocked(level, mcp_names=mcp_names)
+            # 计数用显示名（MCP 走短名），保证跟 level_to_tools 的 key 对得上
+            unlocked_display = {_unlock.short_mcp_name(n) for n in unlocked}
+
+            # level -> [(显示名, 风险等级名, 功能说明), ...]
+            def _desc_of(real_name: str) -> str:
+                """工具的 LLM description —— 对话框用它说明这工具能干什么。"""
+                if self.registry is None:
+                    return ""
+                try:
+                    tool = self.registry.get(real_name)
+                except Exception:  # noqa: BLE001
+                    return ""
+                return getattr(tool, "description", "") or ""
+
             level_to_tools: dict = {}
             for lvl, names in TOOL_UNLOCK.items():
                 level_to_tools[int(lvl)] = [
-                    (n, risk_name(TOOL_RISK_LEVEL.get(n))) for n in names
+                    (n, risk_name(TOOL_RISK_LEVEL.get(n)), _desc_of(n))
+                    for n in names
                 ]
             if mcp_names:
                 level_to_tools.setdefault(MCP_DEFAULT_LEVEL, []).extend(
-                    (n, risk_name(TOOL_RISK_LEVEL.get(n))) for n in mcp_names
-                )
+                    (_unlock.short_mcp_name(n), "UNKNOWN",
+                     _desc_of(n) or f"MCP 外部工具（{n.split('_')[1]} 服务器）")
+                    for n in mcp_names)
 
             dlg = build_tool_unlock_dialog(
                 level=level,
-                unlocked=unlocked,
+                unlocked_display=unlocked_display,
                 level_to_tools=level_to_tools,
-                rewards=UNLOCK_REWARDS,
-                celebrate=UNLOCK_CELEBRATE,
-                risk_lookup=lambda n: risk_name(TOOL_RISK_LEVEL.get(n)),
+                rewards=rewards,
+                celebrate=celebrate,
                 parent=self,
             )
             dlg.exec_()

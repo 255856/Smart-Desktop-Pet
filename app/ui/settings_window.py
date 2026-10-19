@@ -175,9 +175,14 @@ class SettingsWindow(QWidget):
         card.setObjectName("window_card")
         card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
         _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(48)
-        _shadow.setOffset(0, 10)
-        _shadow.setColor(QColor(90, 78, 200, 55))
+        # v37: 4 个窗统一阴影 token (跟 chat / memory 一致)
+        _shadow.setBlurRadius(ui_style.WINDOW_SHADOW_BLUR)
+        _shadow.setOffset(0, ui_style.WINDOW_SHADOW_OFFSET)
+        _shadow.setColor(QColor(
+            ui_style.WINDOW_SHADOW_COLOR_R,
+            ui_style.WINDOW_SHADOW_COLOR_G,
+            ui_style.WINDOW_SHADOW_COLOR_B,
+            ui_style.WINDOW_SHADOW_ALPHA))
         card.setGraphicsEffect(_shadow)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(0, 0, 0, 0)

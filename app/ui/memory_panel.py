@@ -82,27 +82,31 @@ QPushButton {{
 }}
 QPushButton:hover {{ border-color: {ui_style.ACCENT_LT}; color: {ui_style.ACCENT_DK}; background: {ui_style.ACCENT_BG}; }}
 QPushButton#add_btn {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #a78bfa, stop:1 #7c6cf0);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #a78bfa, stop:1 {ui_style.ACCENT});
     color: #fff; border: none; padding: 7px 22px; border-radius: 10px;
 }}
-QPushButton#add_btn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9a7ef8, stop:1 #6a58e0); }}
+QPushButton#add_btn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9a7ef8, stop:1 {ui_style.ACCENT_DK}); }}
 QPushButton#del_btn {{
     background: transparent; border: none; color: #c2c2d0;
     font-size: 13pt; font-weight: 700; padding: 2px 8px;
 }}
-QPushButton#del_btn:hover {{ color: #ef4444; background: #fee2e2; border-radius: 8px; }}
+QPushButton#del_btn:hover {{ color: {ui_style.DANGER}; background: #fee2e2; border-radius: 8px; }}
 QScrollArea#mem_scroll {{ background: transparent; border: none; }}
 QWidget#mem_list_host {{ background: transparent; }}
+/* v37: 卡片加 1.5px padding + 边框更明显, 看着有「悬浮」感 */
 QFrame#mem_row {{
     background: #ffffff;
-    border: 1px solid #eceaf5;
-    border-radius: 12px;
+    border: 1.5px solid #e7e3f5;
+    border-radius: 14px;
+    padding: 1.5px;
 }}
-QFrame#mem_row:hover {{ border-color: #d8d2f7; background: #fcfbff; }}
+QFrame#mem_row:hover {{ border-color: {ui_style.ACCENT_LT}; background: #fcfbff; }}
+/* v37: add_card 用 token 化渐变, 跟主系统紫罗兰一致 */
 QFrame#add_card {{
-    background: #f7f5ff;
-    border: 1.5px dashed #c9c0f3;
-    border-radius: 12px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 {ui_style.ACCENT_BG}, stop:1 #fdf4fb);
+    border: 1.5px dashed {ui_style.ACCENT_LT};
+    border-radius: 14px;
 }}
 QScrollBar:vertical {{ background: transparent; width: 6px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #d5d2e6; border-radius: 3px; min-height: 30px; }}
@@ -177,9 +181,14 @@ class MemoryDialog(QDialog):
         card.setObjectName("window_card")
         card.setStyleSheet(ui_style.WINDOW_CARD_QSS)
         shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(44)
-        shadow.setOffset(0, 10)
-        shadow.setColor(QColor(90, 78, 200, 50))
+        # v37: 4 个窗统一阴影 token (跟 chat / settings 一致)
+        shadow.setBlurRadius(ui_style.WINDOW_SHADOW_BLUR)
+        shadow.setOffset(0, ui_style.WINDOW_SHADOW_OFFSET)
+        shadow.setColor(QColor(
+            ui_style.WINDOW_SHADOW_COLOR_R,
+            ui_style.WINDOW_SHADOW_COLOR_G,
+            ui_style.WINDOW_SHADOW_COLOR_B,
+            ui_style.WINDOW_SHADOW_ALPHA))
         card.setGraphicsEffect(shadow)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(0, 0, 0, 0)
