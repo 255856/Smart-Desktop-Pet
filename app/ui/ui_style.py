@@ -56,6 +56,84 @@ WINDOW_SHADOW_COLOR_B = 174
 WINDOW_SHADOW_ALPHA   = 60
 
 
+# v39: 设置窗顶部"心情仪表盘" 样式
+# 3 段式: [桌宠名 + 心情徽章] | [4 维状态迷你条] | [等级圆 + 经验]
+# 心情色跟 chat 心情色带 (MOOD_*) 完全一致, 主人进设置一眼看到桌宠当前心情
+PET_DASHBOARD_QSS = f"""
+QFrame#pet_dashboard {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 {CARD}, stop:1 {CARD_GRAD});
+    border: none;
+    border-bottom: 1px solid {BORDER};
+}}
+QLabel#dash_name {{
+    color: {TEXT};
+    font-size: 13pt;
+    font-weight: 700;
+    background: transparent; border: none;
+}}
+QLabel#dash_mood_chip {{
+    /* 心情徽章 — 颜色由 update_dashboard 内联设 */
+    color: #fff;
+    font-size: 8pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+    padding: 0;
+}}
+QLabel#dash_stat_label {{
+    color: {TEXT_SUB};
+    font-size: 8pt;
+    background: transparent; border: none;
+}}
+QLabel#dash_stat_value {{
+    color: {TEXT};
+    font-size: 9pt;
+    font-weight: 700;
+    background: transparent; border: none;
+}}
+QFrame#dash_mood_block {{
+    /* 心情色块 (signature): 渐变背景 + 圆角 */
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 36px;
+    max-height: 36px;
+}}
+QLabel#dash_level {{
+    color: #fff;
+    font-size: 14pt;
+    font-weight: 700;
+    background: transparent;
+    border: none;
+}}
+QFrame#dash_level_ring {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 {GOLD}, stop:1 #D97706);
+    border: none;
+    border-radius: 22px;
+    min-width: 44px; max-width: 44px;
+    min-height: 44px; max-height: 44px;
+}}
+QProgressBar#dash_exp {{
+    background: #f1ede6;
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    height: 6px;
+    text-align: center;
+    font-size: 7pt;
+    color: {TEXT_SUB};
+}}
+QProgressBar#dash_exp::chunk {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {GOLD}, stop:1 #FBBF24);
+    border-radius: 4px;
+}}
+"""
+
+
 #  无边框窗口卡片容器（透明窗口内部的白色圆角卡片）
 WINDOW_CARD_QSS = f"""
 QFrame#window_card {{
