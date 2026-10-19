@@ -11,8 +11,20 @@ def qapp():
 
 
 @pytest.fixture
-def settings_window(qapp, monkeypatch):
-    """构造一个最小可用的 SettingsWindow (省略 chat_cfg / pet_window 这些可选 deps)."""
+def settings_window(qapp, monkeypatch, tmp_path):
+    """构造一个最小可用的 SettingsWindow (省略 chat_cfg / pet_window 这些可选 deps).
+
+    settings.json 隔离到临时目录 —— 否则真机上存下来的 developer_mode
+    会让"默认关闭"这类断言随机挂。
+    """
+    import app.ui.settings_window as sw_mod
+    from app.core.settings_store import SettingsStore
+
+    def _isolated_store(path="settings.json"):
+        return SettingsStore(tmp_path / "settings.json")
+
+    monkeypatch.setattr(sw_mod, "SettingsStore", _isolated_store)
+
     from app.ui.settings_window import SettingsWindow
     # SettingsWindow 需要一些非空 cfg; 我们给最小 None char_cfg,
     # 让它走 _build_tab_visual 等分支需要的 None fallback.

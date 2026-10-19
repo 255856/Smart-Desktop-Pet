@@ -77,6 +77,15 @@ def test_lock_first_idle_hidden_for_live2d():
     assert "_renderer_type" in body, "没按渲染器类型显隐锁第一帧选项"
 
 
+def test_sprite_only_tabs_gated_by_renderer():
+    """帧率预设 / 帧时长细调 / 淡入淡出都只对 sprite 有效。"""
+    node = _func_node("app/ui/settings_window.py", "_build_tab_fps")
+    assert node is not None
+    assert "_renderer_type" in _ast.dump(node), (
+        "帧时长 Tab 没按渲染器类型显隐（Live2D 下点了没反应）"
+    )
+
+
 def test_sprite_lock_first_idle_behaviour(qapp):
     """行为：勾上后待机只播第一张 idle。"""
     from types import SimpleNamespace

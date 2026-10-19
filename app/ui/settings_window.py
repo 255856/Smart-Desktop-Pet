@@ -792,6 +792,8 @@ class SettingsWindow(QWidget):
         self.lbl_fps_apply = QLabel("当前：未选择（启动时按 PNG 文件自带 ms 段）")
         self.lbl_fps_apply.setStyleSheet(f"color: {ui_style.TEXT_SUB};")
         gv.addWidget(self.lbl_fps_apply)
+        # 帧率预设只对 sprite 帧图有效（Live2D 的帧率在 Live2D 标签页里调）
+        g_fps.setVisible(self._renderer_type() == "sprite")
         v.addWidget(g_fps)
 
         g_ms = QGroupBox("帧时长细调")
@@ -812,7 +814,15 @@ class SettingsWindow(QWidget):
         self.lbl_ms_range.setStyleSheet(
             f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
         gv.addWidget(self.lbl_ms_range)
+        is_sprite = self._renderer_type() == "sprite"
+        g_ms.setVisible(is_sprite)
         v.addWidget(g_ms)
+        if not is_sprite:
+            tip = QLabel("帧率预设和帧时长细调只对 Sprite 帧图模式有效；"
+                         "Live2D 的渲染帧率在「Live2D」标签页里调。")
+            tip.setWordWrap(True)
+            tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+            v.addWidget(tip)
 
         g_save = QGroupBox("持久化")
         gv = QVBoxLayout(g_save)
@@ -924,13 +934,24 @@ class SettingsWindow(QWidget):
         row.addWidget(lbl); row.addWidget(self.crossfade_ms_slider, 1); row.addWidget(self.crossfade_ms_label)
         gv.addLayout(row)
 
-        row = QHBoxLayout()
+        # 淡入淡出 / 锁第一帧都只对 sprite 帧图有意义（Live2D 换的是表情和动作，
+        # 没有帧间淡入）—— 不支持的选项不摆出来，免得点了没反应。
+        # 用 setVisible 隐藏而不是"不加进布局"：PyQt 里没有 parent 的控件会被
+        # 连带着删掉，后面 connect 信号会撞 "object has been deleted"。
         self.cb_lock_first_idle = QCheckBox("永远用第一张 idle")
+        row = QHBoxLayout()
         row.addWidget(self.cb_lock_first_idle, 1)
-        # 锁第一帧只对 sprite 有意义 —— Live2D 没有帧序列，勾了不会发生任何事
-        if self._renderer_type() == "sprite":
-            gv.addLayout(row)
+        gv.addLayout(row)
+
+        is_sprite = self._renderer_type() == "sprite"
+        g_anim.setVisible(is_sprite)
         v.addWidget(g_anim)
+        if not is_sprite:
+            tip = QLabel("淡入淡出和「永远用第一张 idle」只对 Sprite 帧图模式有效"
+                         "（Live2D 用不到）。")
+            tip.setWordWrap(True)
+            tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
+            v.addWidget(tip)
 
         v.addStretch(1)
         return page
@@ -1110,8 +1131,10 @@ class SettingsWindow(QWidget):
         v.setSpacing(10)
         renderer = self._renderer
         # 能力矩阵：不同模型支持的项数不同（有没有贴纸/水印/随机表情…），
-        # 控件一律先建好再按能力决定要不要摆进布局 —— 属性始终存在，
+        # 控件一律建好并留在布局里，只按能力切可见性 —— 属性始终存在，
         # 别的代码引用不会 AttributeError，界面上也不会出现"勾了没反应"的死选项。
+        # 注意: 这里不能用"不加进布局"来隐藏 —— PyQt 里没有 parent 的控件会被
+        # 连带着删掉，之后访问会撞 "object has been deleted"。
         try:
             caps = renderer.capabilities()
         except Exception:  # noqa: BLE001
@@ -1157,24 +1180,27 @@ class SettingsWindow(QWidget):
         self.cb_random_exp = QCheckBox("挂机随机表情/动作（空闲时随机切换，互动即暂停）")
         self.cb_random_exp.setChecked(rnd_on)
         self.cb_random_exp.toggled.connect(self.random_exp_changed.emit)
-        if caps.has_random_expressions:
-            gm.addWidget(self.cb_random_exp)
+        self.cb_random_exp.setVisible(caps.has_random_expressions)
+        gm.addWidget(self.cb_random_exp)
 
         self.cb_random_sticker = QCheckBox("随机表情包贴纸（角色右上方弹出）")
         self.cb_random_sticker.setChecked(self._sticker_enabled)
         self.cb_random_sticker.toggled.connect(self.random_sticker_changed.emit)
-        if caps.has_stickers:
-            gm.addWidget(self.cb_random_sticker)
+        self.cb_random_sticker.setVisible(caps.has_stickers)
+        gm.addWidget(self.cb_random_sticker)
 
         self.cb_hide_watermark = QCheckBox("隐藏模型水印（重启生效）")
         self.cb_hide_watermark.setChecked(self._panel_state.get("hide_watermark", True))
         self.cb_hide_watermark.toggled.connect(self.hide_watermark_changed.emit)
-        if caps.has_watermark:
-            gm.addWidget(self.cb_hide_watermark)
+        self.cb_hide_watermark.setVisible(caps.has_watermark)
+        gm.addWidget(self.cb_hide_watermark)
 
         ri = self._live2d_state.get("random_interval", (20, 50))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("随机间隔（秒）"))
+        # 随机间隔跟挂机随机是一套的，整行包进容器里一起显隐
+        box_interval = QFrame()
+        il = QHBoxLayout(box_interval)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.addWidget(QLabel("随机间隔（秒）"))
         self.spin_random_min = QSpinBox()
         self.spin_random_min.setRange(5, 600)
         self.spin_random_min.setValue(int(ri[0]))
@@ -1184,12 +1210,12 @@ class SettingsWindow(QWidget):
         for w in (self.spin_random_min, self.spin_random_max):
             w.valueChanged.connect(self._emit_random_interval)
         dash = QLabel("–")
-        row.addWidget(self.spin_random_min)
-        row.addWidget(dash)
-        row.addWidget(self.spin_random_max)
-        row.addStretch(1)
-        if caps.has_random_expressions:
-            gm.addLayout(row)
+        il.addWidget(self.spin_random_min)
+        il.addWidget(dash)
+        il.addWidget(self.spin_random_max)
+        il.addStretch(1)
+        box_interval.setVisible(caps.has_random_expressions)
+        gm.addWidget(box_interval)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("渲染帧率"))
@@ -1251,8 +1277,8 @@ class SettingsWindow(QWidget):
         self.spin_sticker_duration.setValue(int(st_cfg.get("duration_s", 4)))
         self.spin_sticker_duration.valueChanged.connect(self._emit_sticker_options)
         gs.addWidget(self.spin_sticker_duration, 3, 1)
-        if caps.has_stickers:
-            v.addWidget(g_st)
+        g_st.setVisible(caps.has_stickers)
+        v.addWidget(g_st)
 
         self._scene_card = self._build_scene_card(renderer)
         v.addWidget(self._scene_card)

@@ -7,6 +7,8 @@
 import ast as _ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -51,6 +53,22 @@ def _guards_on_name(node, name: str) -> bool:
         for n in _ast.walk(sub.test):
             if isinstance(n, _ast.Name) and n.id == name:
                 return True
+    return False
+
+
+def _setvisible_with_attr(node, attr: str) -> bool:
+    """是否存在 `xxx.setVisible(... caps.<attr> ...)` 形式的显隐控制。"""
+    for sub in _ast.walk(node):
+        if not isinstance(sub, _ast.Call):
+            continue
+        if not (isinstance(sub.func, _ast.Attribute)
+                and sub.func.attr == "setVisible"):
+            continue
+        args = list(sub.args) + [k.value for k in sub.keywords]
+        for a in args:
+            for n in _ast.walk(a):
+                if isinstance(n, _ast.Attribute) and n.attr == attr:
+                    return True
     return False
 
 
@@ -185,11 +203,15 @@ def test_settings_window_gates_live2d_widgets_on_capabilities():
 
 
 def test_settings_window_creates_widgets_regardless_of_capability():
-    """控件对象恒创建 —— 只在 addWidget 层面条件化，属性不会缺失。"""
+    """控件对象恒创建、恒在布局里 —— 显隐靠 setVisible，不靠"不 addWidget"。
+
+    不 addWidget 的话 PyQt 会把没有 parent 的控件连带着删掉，
+    之后访问会撞 "object has been deleted"。
+    """
     node = _func_node("app/ui/settings_window.py", "_build_tab_live2d")
     for attr in ("has_random_expressions", "has_stickers", "has_watermark"):
-        assert _guards_on_attr(node, attr), (
-            f"caps.{attr} 没用在 if 条件里（控件会无条件显示）"
+        assert _setvisible_with_attr(node, attr), (
+            f"caps.{attr} 没接进 setVisible（控件会无条件显示或被删掉）"
         )
 
 
@@ -206,3 +228,148 @@ def test_scene_dialog_optional_combo_rows():
     assert _guards_on_name(node, "hair_items"), (
         "发型下拉还是无条件创建 —— 模型没发型组时会多一行空控件"
     )
+
+
+# ---------- 真控件验证（offscreen 建真窗口, 不只靠 AST 断言） ----------
+
+@pytest.fixture
+def isolated_store(monkeypatch, tmp_path):
+    """把 settings.json 隔离到临时目录 —— 真机上存的值不该影响显隐断言。"""
+    import app.ui.settings_window as sw_mod
+    from app.core.settings_store import SettingsStore
+
+    monkeypatch.setattr(
+        sw_mod, "SettingsStore",
+        lambda path="settings.json": SettingsStore(tmp_path / "settings.json"))
+
+
+class _FakeRenderer:
+    """假的 Live2D 渲染器：只提供设置面板要用到的接口。"""
+
+    def __init__(self, caps, rtype="live2d"):
+        self._caps = caps
+        self._rtype = rtype
+
+    def capabilities(self):
+        return self._caps
+
+    def get_menu_groups(self):
+        return [{"id": "face", "label": "表情", "kind": "emotion",
+                 "mode": "exclusive", "items": [("a", "开心")]}]
+
+    def get_renderer_type(self):
+        return self._rtype
+
+    def get_emotion_options(self):
+        return [("happy", "开心")]
+
+    def supports_hairstyles(self):
+        return False
+
+    def get_hairstyle_options(self):
+        return []
+
+    def is_random_expressions_enabled(self):
+        return self._caps.has_random_expressions
+
+    def get_scene_bundle(self, sid):
+        from app.animation.live2d_scene import SceneBundle
+        return SceneBundle()
+
+    def get_custom_actions(self):
+        return []
+
+    def list_expressions(self):
+        return []
+
+
+def _visible_widgets(qapp, caps, rtype="live2d"):
+    """建一个真设置面板，返回各控件的"面板上有没有" + 分组标题集合。
+
+    判定用 WA_WState_Hidden（"被显式隐藏"标志），不依赖窗口是否 show，
+    也不切 tab —— 切 tab + 进事件循环在整套测试里跑会触发 Qt 段错误。
+    """
+    from app.core.qt_compat import QGroupBox, Qt
+    from app.ui.settings_window import SettingsWindow
+
+    sw = SettingsWindow(parent=None, char_cfg=None,
+                        renderer=_FakeRenderer(caps, rtype))
+
+    def shown(w):
+        # 没进布局（parent 为 None）= 面板上根本没这个控件；
+        # 进布局但被显式隐藏 = 面板上不显示
+        if w is None or w.parent() is None:
+            return False
+        return not w.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
+
+    def group_shown(title):
+        """分组容器的显隐（组里的子控件跟随父，自身标志不反映）。"""
+        for g in sw.findChildren(QGroupBox):
+            if g.title() == title:
+                return not g.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
+        return None
+
+    out = {
+        "random_exp": shown(sw.cb_random_exp),
+        "sticker": shown(sw.cb_random_sticker),
+        "watermark": shown(sw.cb_hide_watermark),
+        "lock_first_idle": group_shown("动画切换优化"),
+        "crossfade": group_shown("动画切换优化"),
+        "fps_presets": group_shown("帧率预设"),
+        "frame_ms": group_shown("帧时长细调"),
+        "sticker_group": group_shown("表情包贴纸"),
+    }
+    sw.deleteLater()
+    return out
+
+
+def test_widgets_visibility_for_model_without_stickers(qapp, isolated_store):
+    """模型没有随机表情 / 没有贴纸 → 对应控件不该出现在面板上。"""
+    from app.animation.pet_renderer import ModelCapabilities
+
+    caps = ModelCapabilities(has_emotion_group=True, has_hairstyle_group=True,
+                              has_watermark=True, has_actions=True)
+    v = _visible_widgets(qapp, caps)
+    assert v["random_exp"] is False, "模型不支持挂机随机，勾选框却显示了"
+    assert v["sticker"] is False, "模型没有表情包，勾选框却显示了"
+    assert v["sticker_group"] is False, "模型没有表情包，整组滑块却显示了"
+    assert v["watermark"] is True, "模型带水印，勾选框却没显示"
+
+
+def test_widgets_visibility_for_full_model(qapp, isolated_store):
+    """全功能模型 → 对应控件全部出现。"""
+    from app.animation.pet_renderer import ModelCapabilities
+
+    caps = ModelCapabilities(has_emotion_group=True, has_hairstyle_group=True,
+                              has_toggle_groups=True, toggle_group_count=3,
+                              has_random_expressions=True, has_stickers=True,
+                              has_watermark=True, has_actions=True)
+    v = _visible_widgets(qapp, caps)
+    assert v["random_exp"] is True
+    assert v["sticker"] is True
+    assert v["sticker_group"] is True
+    assert v["watermark"] is True
+
+
+def test_lock_first_idle_only_for_sprite(qapp, isolated_store):
+    """锁第一张 idle 只对 sprite 有意义 —— Live2D 不该显示。"""
+    from app.animation.pet_renderer import ModelCapabilities
+
+    caps = ModelCapabilities(has_emotion_group=True, has_watermark=True)
+    assert _visible_widgets(qapp, caps, rtype="live2d")["lock_first_idle"] is False
+    assert _visible_widgets(qapp, caps, rtype="sprite")["lock_first_idle"] is True
+
+
+def test_sprite_only_options_hidden_for_live2d(qapp, isolated_store):
+    """淡入淡出 / 帧率预设 / 帧时长细调都只对 sprite 有效。"""
+    from app.animation.pet_renderer import ModelCapabilities
+
+    caps = ModelCapabilities(has_emotion_group=True, has_watermark=True)
+    live = _visible_widgets(qapp, caps, rtype="live2d")
+    assert live["crossfade"] is False, "Live2D 下还在显示淡入淡出（点了没反应）"
+    assert live["fps_presets"] is False, "Live2D 下还在显示帧率预设"
+    assert live["frame_ms"] is False, "Live2D 下还在显示帧时长细调"
+    sp = _visible_widgets(qapp, caps, rtype="sprite")
+    assert sp["crossfade"] is True
+    assert sp["fps_presets"] is True
+    assert sp["frame_ms"] is True
