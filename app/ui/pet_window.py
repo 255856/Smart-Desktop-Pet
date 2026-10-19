@@ -69,6 +69,8 @@ class PetWindow(QWidget):
     open_settings_requested = Signal()
     retune_ms_requested = Signal(int)
     scale_changed = Signal(float)
+    # 窗口尺寸被用户拖动改变（桌面应用式缩放）：参数为 (宽, 高) 像素
+    display_size_changed = Signal(int, int)
     crossfade_toggled = Signal(bool, int)
     lock_first_idle_toggled = Signal(bool)
 
@@ -97,6 +99,13 @@ class PetWindow(QWidget):
 
     # sprite 设计尺寸（与生成器一致）
     SPRITE_SIZE = QSize(1000, 1000)
+
+    # 窗口最小尺寸（拖边缘缩放下限）
+    _MIN_WINDOW_SIZE = QSize(120, 120)
+
+    # 缩放手柄：窗口四角各留一小块可点区域（剪影遮罩会裁掉透明区，
+    # 不留这块就永远拖不到边缘，缩放功能等于没有）
+    _RESIZE_GRIP = 16
 
     # 滚轮/菜单缩放范围与步进（与设置面板滑块 20~100 保持一致）
     SCALE_MIN = 0.20
@@ -268,9 +277,17 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setFixedSize(self._window_size)
+        # 不再固定尺寸：像普通桌面应用那样，拖窗口边缘/四角就能改大小
+        self.setMinimumSize(self._MIN_WINDOW_SIZE.width(),
+                            self._MIN_WINDOW_SIZE.height())
+        self.resize(self._window_size)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
+
+        # 桌面应用式缩放：与设置窗口共用 FramelessResizer（8 方向边缘 + 系统原生缩放）。
+        # 桌宠窗口是透明的，freeze_translucent=False —— 缩放期间不能关透明，否则整块变黑。
+        from app.ui.frameless import FramelessResizer
+        self._resizer = FramelessResizer(self, freeze_translucent=False).attach()
 
         # 每个区域带 on_click / on_press 回调，加 sprite 改尺寸不用改业务代码
         self._init_touch_areas()
@@ -767,6 +784,15 @@ class PetWindow(QWidget):
             return False
 
         if isinstance(evt, QMouseEvent):
+            # 缩放优先：鼠标落在窗口边缘带内（或正在缩放）时，把事件让给
+            # FramelessResizer —— 否则拖角缩放会被当成"拖动桌宠"，
+            # 缩放结束时还会误触发一次 TouchArea click。
+            resizer = getattr(self, "_resizer", None)
+            if resizer is not None and evt.type() in (
+                    QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
+                    QEvent.Type.MouseButtonRelease):
+                if resizer.is_resizing or resizer.edge_at(event_global_pos(evt)):
+                    return False
             # 注意：必须同时带上全局坐标（否则右键菜单会永远弹在屏幕同一个固定位置）
             local_pt = QPoint(evt.pos())
             global_pt = obj.mapToGlobal(local_pt)
@@ -1038,17 +1064,29 @@ class PetWindow(QWidget):
         必须同步调 renderer.set_size 让模型按新画布重新 fit。
         """
         self._scale = float(scale)
-        self._window_size = QSize(
+        self._sync_display_size(QSize(
             int(self.SPRITE_SIZE.width() * self._scale),
             int(self.SPRITE_SIZE.height() * self._scale),
-        )
-        self.setFixedSize(self._window_size)
+        ))
+
+    def _sync_display_size(self, size: QSize) -> None:
+        """把窗口调整到指定像素尺寸，并同步渲染器 / 遮罩 / 对外信号。
+
+        等比缩放（apply_display_size）和用户拖边缘缩放（resizeEvent）
+        共用这一条路径，保证两边行为一致。
+        """
+        w = max(self._MIN_WINDOW_SIZE.width(), int(size.width()))
+        h = max(self._MIN_WINDOW_SIZE.height(), int(size.height()))
+        target = QSize(w, h)
+        if self._window_size == target and self.size() == target:
+            return
+        self._window_size = target
+        self.resize(target)
         if self._sprite_label is not None:
-            self._sprite_label.setGeometry(
-                0, 0, self._window_size.width(), self._window_size.height())
+            self._sprite_label.setGeometry(0, 0, w, h)
         resize = getattr(self.renderer, "set_size", None)
         if callable(resize):
-            resize(self._window_size.width(), self._window_size.height())
+            resize(w, h)
         # 尺寸变化后旧遮罩坐标失效，需要重建
         self._mask_base = None
         self._mask_prev_region = None
@@ -1058,11 +1096,36 @@ class PetWindow(QWidget):
         self._mask_sample_epoch = getattr(self, "_mask_sample_epoch", 0) + 1
         self._base_samples = []
         self._base_poses = []
-        QTimer.singleShot(800, self._sample_base_mask)
+        # 拖边缘时 resizeEvent 连续触发：用可复用的 singleShot timer，
+        # 否则每 resize 排一个 QTimer.singleShot，拖完会堆积几十个采样任务
+        timer = getattr(self, "_mask_resample_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._resample_mask_after_resize)
+            self._mask_resample_timer = timer
+        timer.start(150)
         # 闲置时遮罩定时器是停的，尺寸变了没人负责重建 —— 这里主动补一次
         if self._mask_timer is not None and not self._mask_timer.isActive():
             self._idle_mask_stopped = False
             self._mask_timer.start(1500)
+        # 等比参考值 = 宽度比（设置面板缩放条按它同步）
+        base_w = self.SPRITE_SIZE.width() or 1
+        self._scale = round(w / base_w, 4)
+        self.display_size_changed.emit(w, h)
+        self.scale_changed.emit(self._scale)
+
+    def set_display_size(self, width: int, height: int) -> None:
+        """按像素设置窗口大小（恢复用户拖出来的自由尺寸）。"""
+        self._sync_display_size(QSize(int(width), int(height)))
+
+    def resizeEvent(self, ev) -> None:
+        """窗口被拖边缘/四角改大小：同步渲染器画布、遮罩与对外信号。"""
+        super().resizeEvent(ev)
+        size = self.size()
+        if size == self._window_size:
+            return
+        self._sync_display_size(size)
 
     # ---------- 缩放入口 ----------
     # 桌宠本体不再做滚轮 / 右键缩放，缩放只能通过设置面板调整。
@@ -1129,6 +1192,26 @@ class PetWindow(QWidget):
         self._base_samples: list = []
         self._base_epoch = getattr(self, "_mask_sample_epoch", 0)
         self._sample_base_step()
+
+    def _resample_mask_after_resize(self) -> None:
+        """缩放后重建遮罩：先按当前帧重建剪影（立刻生效），再补极限姿势采样。"""
+        self._mask_sig = None
+        self._update_click_mask()
+        self._sample_base_mask()
+
+    def _resize_grip_region(self) -> QRegion:
+        """四角缩放手柄的可点区域（窗口坐标）。
+
+        剪影遮罩会把透明角裁掉，那里收不到鼠标 —— 不留这块，
+        "拖角缩放"永远触发不了。四个角各留一小块，鼠标移上去会显示缩放光标。
+        """
+        g = self._RESIZE_GRIP
+        w, h = self._window_size.width(), self._window_size.height()
+        region = QRegion(0, 0, g, g)
+        region += QRegion(max(0, w - g), 0, g, g)
+        region += QRegion(0, max(0, h - g), g, g)
+        region += QRegion(max(0, w - g), max(0, h - g), g, g)
+        return region
 
     def _sample_base_step(self) -> None:
         # 缩放已开启新一轮采样 → 本轮（旧尺寸）回调全部作废
@@ -1206,6 +1289,8 @@ class PetWindow(QWidget):
                 if isinstance(child, QWidget) and child is not w \
                         and child.isVisible() and not child.isHidden():
                     region += QRegion(child.geometry())
+            # 四角缩放手柄：剪影外的角块保留可点区（否则拖角缩放触发不了）
+            region += self._resize_grip_region()
             self.setMask(region)
             self._mask_prev_region = QRegion(region)
         except Exception as _e:  # noqa: BLE001

@@ -225,6 +225,7 @@ class UIController(QObject):
         self.pet.open_settings_requested.connect(self._show_settings)
         self.pet.retune_ms_requested.connect(self._do_retune_frames)
         self.pet.scale_changed.connect(self._on_pet_scale_changed)
+        self.pet.display_size_changed.connect(self._on_pet_display_size_changed)
         self.pet.crossfade_toggled.connect(self._on_crossfade_changed)
         self.pet.lock_first_idle_toggled.connect(
             self.pet.animator.set_lock_first_idle)
@@ -914,6 +915,18 @@ class UIController(QObject):
             sw.scale_slider.blockSignals(False)
             sw._highlight_scale_preset(new_scale)
 
+    def _on_pet_display_size_changed(self, width: int, height: int) -> None:
+        """用户拖窗口边缘改了大小 → 记住自由尺寸（重启后还原）。
+
+        缩放条只记等比倍率（store["scale"]），拖出来的自由宽高单独存
+        display_size —— 否则重启会退回正方形，等于白拖。
+        """
+        try:
+            self.settings_window.settings_store.set(
+                "display_size", [int(width), int(height)])
+        except Exception:  # noqa: BLE001
+            log.debug("保存桌宠窗口尺寸失败", exc_info=True)
+
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
         if not self._is_sprite():
@@ -1383,7 +1396,14 @@ class UIController(QObject):
                 if callable(fn):
                     fn(bool(aot))
             scale = store.get("scale", None)
-            if scale is not None:
+            # 用户拖窗口边缘拖出来的自由尺寸优先（没有才回退等比倍率）
+            disp = store.get("display_size", None)
+            if isinstance(disp, (list, tuple)) and len(disp) == 2:
+                try:
+                    self.pet.set_display_size(int(disp[0]), int(disp[1]))
+                except Exception:  # noqa: BLE001
+                    log.debug("恢复桌宠窗口尺寸失败", exc_info=True)
+            elif scale is not None:
                 self.pet.apply_display_size(float(scale))
             opacity = store.get("opacity", None)
             if opacity is not None:

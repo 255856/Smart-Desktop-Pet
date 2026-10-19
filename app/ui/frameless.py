@@ -34,9 +34,13 @@ class FramelessResizer(QObject):
 
     EDGE = 10  # 边缘感应宽度（像素）
 
-    def __init__(self, win: QWidget):
+    def __init__(self, win: QWidget, freeze_translucent: bool = True):
         super().__init__(win)
         self._win = win
+        # 缩放期间要不要临时关掉 WA_TranslucentBackground。
+        # 普通无边框窗关掉无所谓（省一次 alpha 合成）；桌宠窗口关了会整块变黑，
+        # 必须传 False 保留透明。
+        self._freeze_translucent = freeze_translucent
         self._attached = False
         # 手动缩放兜底状态：(edges, 初始几何, 按下全局点)；None 表示走系统缩放
         self._manual = None
@@ -65,6 +69,19 @@ class FramelessResizer(QObject):
         return self
 
     # ---- 边缘命中 ----
+    @property
+    def is_resizing(self) -> bool:
+        """当前是否处于拖边缘缩放中（宿主窗口据此让路，别把缩放当拖动）。"""
+        return self._manual is not None
+
+    def edge_at(self, gpos: QPoint):
+        """公开的边缘命中检测。
+
+        宿主窗口自己的事件过滤器据此让路：鼠标落在边缘带内时不要把按下事件
+        当成"拖动桌宠"处理，否则缩放永远触发不了。
+        """
+        return self._edge_at(gpos)
+
     def _edge_at(self, gpos: QPoint):
         r = self._win.frameGeometry()
         m = self.EDGE
@@ -117,7 +134,9 @@ class FramelessResizer(QObject):
                 self._saved_effects.append((w, fx))
                 w.setGraphicsEffect(None)
         # 临时关掉透明背景 —— 缩放期间不需要 alpha 通道，重绘路径更短
-        if self._win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+        # 桌宠窗口传 freeze_translucent=False：透明是它的命脉，关了会整块变黑
+        if self._freeze_translucent and \
+                self._win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
             self._saved_effects.append(
                 ("translucent", Qt.WidgetAttribute.WA_TranslucentBackground))
             self._win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
