@@ -51,6 +51,8 @@ class PetAnimator(PetRenderer):
         self._drag_chain_active: bool = False
         # 睡觉状态（用于 state.tick 判断是否跳过衰减）
         self._sleeping: bool = False
+        # 锁定第一张 idle（关掉待机随机变体）
+        self._lock_first_idle: bool = False
 
     def _setup_special_idle_timer(self) -> None:
         """设置定时器，每分钟触发一次特殊待机动画。"""
@@ -96,8 +98,10 @@ class PetAnimator(PetRenderer):
         self._sleeping = False
         if not self.atlas.idle_default:
             return
-        # 从主待机变体中随机选择一个（Default 目录可能有多个动画）
-        new_idle = random.choice(self.atlas.idle_default)
+        # 从主待机变体中随机选择一个（Default 目录可能有多个动画）；
+        # 勾了「永远用第一张 idle」就固定选第一个
+        new_idle = (self.atlas.idle_default[0] if self._lock_first_idle
+                    else random.choice(self.atlas.idle_default))
         if not new_idle:
             return
         cur = self.player.current_animation()
@@ -111,7 +115,13 @@ class PetAnimator(PetRenderer):
         self._notify_anim_changed()
 
     def set_lock_first_idle(self, on: bool) -> None:
-        """兼容接口。"""
+        """锁定第一张 idle 动画（关掉待机随机变体）。
+
+        之前是空实现 —— 设置面板上那个勾选框点了毫无反应。
+        """
+        self._lock_first_idle = bool(on)
+        if self._lock_first_idle:
+            self.set_idle()
 
     def set_sleep(self) -> None:
         """睡觉：先播「入睡」动画（sleep），播完循环播放「睡着」动画（sleep_2）。"""

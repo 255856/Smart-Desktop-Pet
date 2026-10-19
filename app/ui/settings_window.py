@@ -145,6 +145,12 @@ class SettingsWindow(QWidget):
         # 设置持久化：从 JSON 文件加载已保存的设置
         self.settings_store = SettingsStore()
         self._load_from_store()
+        # 开发者模式持久化 —— 之前不存，重启就关（面板上勾了像没勾）
+        try:
+            self.developer_mode = bool(
+                self.settings_store.get("developer_mode", False))
+        except Exception:  # noqa: BLE001
+            pass
 
     #  Public: attach state（V3 状态条）
     def attach_state(self, state) -> None:
@@ -318,7 +324,7 @@ class SettingsWindow(QWidget):
 
         # 开发者模式 sliders（默认隐藏，_set_developer_mode 启可见）
         self._dev_panel = self._build_tab_status_dev()
-        self._dev_panel.setVisible(False)
+        self._dev_panel.setVisible(self.developer_mode)
         self._dev_panel.setObjectName("dev_panel")
         v.addWidget(self._dev_panel)
 
@@ -647,6 +653,11 @@ class SettingsWindow(QWidget):
     def _set_developer_mode(self, enabled: bool) -> None:
         """切换开发者模式: 显示/隐藏 dev_panel, 重算决策预览。"""
         self.developer_mode = bool(enabled)
+        # 持久化 —— 之前不存，重启就关（勾了像没勾）
+        try:
+            self.settings_store.set("developer_mode", self.developer_mode)
+        except Exception:  # noqa: BLE001
+            pass
         if hasattr(self, "_dev_panel"):
             self._dev_panel.setVisible(self.developer_mode)
             if self.developer_mode:
@@ -848,7 +859,9 @@ class SettingsWindow(QWidget):
         rrow.addWidget(self.cmb_renderer)
         rrow.addStretch(1)
         gr.addLayout(rrow)
-        tip_r = QLabel("切换渲染引擎需重启桌宠后生效。")
+        tip_r = QLabel("渲染引擎以 config.yaml 的 pet.renderer 为准"
+                       "（配置文件没写时才用这里的设置）；改完需重启桌宠生效。")
+        tip_r.setWordWrap(True)
         tip_r.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
         gr.addWidget(tip_r)
         v.addWidget(g_renderer)
@@ -914,11 +927,23 @@ class SettingsWindow(QWidget):
         row = QHBoxLayout()
         self.cb_lock_first_idle = QCheckBox("永远用第一张 idle")
         row.addWidget(self.cb_lock_first_idle, 1)
-        gv.addLayout(row)
+        # 锁第一帧只对 sprite 有意义 —— Live2D 没有帧序列，勾了不会发生任何事
+        if self._renderer_type() == "sprite":
+            gv.addLayout(row)
         v.addWidget(g_anim)
 
         v.addStretch(1)
         return page
+
+    def _renderer_type(self) -> str:
+        """当前渲染器类型（'sprite' | 'live2d'）—— 按渲染器显隐专属选项。"""
+        r = getattr(self, "_renderer", None)
+        if r is None:
+            return "sprite"
+        try:
+            return r.get_renderer_type()
+        except Exception:  # noqa: BLE001
+            return "sprite"
 
     def _build_tab_control(self) -> QWidget:
         # 外层包 QScrollArea，防止内容过多时按钮被压缩、文字糊成黑条

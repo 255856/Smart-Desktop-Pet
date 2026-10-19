@@ -43,16 +43,16 @@ try:
         QDropEvent, QFont, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence,
         QMouseEvent, QPainter, QPainterPath, QLinearGradient, QPaintEvent, QPixmap,
         QRegion, QTextCursor, QTextDocument, QTransform,
-        QPen, QBrush, QRadialGradient, QWheelEvent,
+        QPen, QBrush, QRadialGradient, QWheelEvent, QFontMetrics,
     )
     from PyQt5.QtWidgets import QAction
     from PyQt5.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
+        QFileDialog, QInputDialog, QLayout, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
         QSpinBox, QSplitter, QStatusBar, QSystemTrayIcon, QTabWidget, QTextBrowser,
-        QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
+        QToolButton, QToolTip, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     if not hasattr(QtCore, "QMimeData"):
         from PyQt5.QtCore import QMimeData as _QM
@@ -69,15 +69,15 @@ except ImportError:
         QDragMoveEvent, QDropEvent, QFont, QGuiApplication, QIcon, QImage,
         QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QLinearGradient,
         QPaintEvent, QPixmap, QRegion, QTextCursor, QTextDocument, QTransform,
-        QPen, QBrush, QRadialGradient, QWheelEvent,
+        QPen, QBrush, QRadialGradient, QWheelEvent, QFontMetrics,
     )
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFormLayout, QFrame,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QFileDialog, QInputDialog, QListWidget, QListWidgetItem, QMenu,
+        QFileDialog, QInputDialog, QLayout, QListWidget, QListWidgetItem, QMenu,
         QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider,
         QSpinBox, QSplitter, QStatusBar, QStringListModel, QSystemTrayIcon, QTabWidget, QTextBrowser,
-        QToolButton, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
+        QToolButton, QToolTip, QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QScrollArea,
     )
     _BACKEND = "PySide6"
 
@@ -138,14 +138,14 @@ __all__ = [
     "QAction", "QColor", "QCursor", "QFont", "QGuiApplication", "QIcon", "QImage",
     "QKeyEvent", "QKeySequence", "QMouseEvent", "QPainter", "QPainterPath", "QLinearGradient",
     "QPaintEvent", "QPixmap", "QTextCursor", "QTextDocument", "QTransform",
-    "QPen", "QBrush", "QRadialGradient", "QWheelEvent",
+    "QPen", "QBrush", "QRadialGradient", "QWheelEvent", "QFontMetrics",
     "QApplication", "QCheckBox", "QComboBox", "QCompleter", "QDoubleSpinBox", "QFormLayout",
     "QFrame", "QGridLayout", "QGroupBox",
     "QHBoxLayout", "QLabel", "QLineEdit", "QDialog", "QDialogButtonBox", "QFileDialog",
-    "QInputDialog", "QListWidget", "QListWidgetItem",
+    "QInputDialog", "QLayout", "QListWidget", "QListWidgetItem",
     "QMenu", "QMessageBox", "QPlainTextEdit", "QProgressBar", "QPushButton", "QRegion", "QSizePolicy",
     "QSlider", "QSpinBox", "QSplitter", "QStringListModel", "QSystemTrayIcon", "QTabWidget",
-    "QTextBrowser", "QToolButton", "QVBoxLayout", "QWidget", "QGraphicsDropShadowEffect",
+    "QTextBrowser", "QToolButton", "QToolTip", "QVBoxLayout", "QWidget", "QGraphicsDropShadowEffect",
     "QScrollArea",
     "QDragEnterEvent", "QDragLeaveEvent", "QDragMoveEvent", "QDropEvent",
     "event_global_pos", "event_local_pos", "is_qobject_alive",

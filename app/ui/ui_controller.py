@@ -119,7 +119,10 @@ class UIController(QObject):
                     "min_minutes": _store0.get("proactive_min_minutes", getattr(self.cfg.brain, "proactive_min_minutes", 25)),
                     "max_minutes": _store0.get("proactive_max_minutes", getattr(self.cfg.brain, "proactive_max_minutes", 45)),
                 },
-                "renderer": _store0.get("renderer", _renderer_cfg),
+                # 渲染器以 config.yaml 为准（main.py 启动时就是 yaml 优先），
+                # 这里必须显示真实生效值 —— 之前读 store 会让面板显示用户选的、
+                # 实际跑另一个，勾了等于没勾。
+                "renderer": _renderer_cfg,
                 "hide_watermark": _store0.get("hide_watermark", _hw_cfg),
             },
         )
@@ -225,7 +228,6 @@ class UIController(QObject):
         self.pet.open_settings_requested.connect(self._show_settings)
         self.pet.retune_ms_requested.connect(self._do_retune_frames)
         self.pet.scale_changed.connect(self._on_pet_scale_changed)
-        self.pet.display_size_changed.connect(self._on_pet_display_size_changed)
         self.pet.crossfade_toggled.connect(self._on_crossfade_changed)
         self.pet.lock_first_idle_toggled.connect(
             self.pet.animator.set_lock_first_idle)
@@ -915,18 +917,6 @@ class UIController(QObject):
             sw.scale_slider.blockSignals(False)
             sw._highlight_scale_preset(new_scale)
 
-    def _on_pet_display_size_changed(self, width: int, height: int) -> None:
-        """用户拖窗口边缘改了大小 → 记住自由尺寸（重启后还原）。
-
-        缩放条只记等比倍率（store["scale"]），拖出来的自由宽高单独存
-        display_size —— 否则重启会退回正方形，等于白拖。
-        """
-        try:
-            self.settings_window.settings_store.set(
-                "display_size", [int(width), int(height)])
-        except Exception:  # noqa: BLE001
-            log.debug("保存桌宠窗口尺寸失败", exc_info=True)
-
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
         if not self._is_sprite():
@@ -1396,14 +1386,7 @@ class UIController(QObject):
                 if callable(fn):
                     fn(bool(aot))
             scale = store.get("scale", None)
-            # 用户拖窗口边缘拖出来的自由尺寸优先（没有才回退等比倍率）
-            disp = store.get("display_size", None)
-            if isinstance(disp, (list, tuple)) and len(disp) == 2:
-                try:
-                    self.pet.set_display_size(int(disp[0]), int(disp[1]))
-                except Exception:  # noqa: BLE001
-                    log.debug("恢复桌宠窗口尺寸失败", exc_info=True)
-            elif scale is not None:
+            if scale is not None:
                 self.pet.apply_display_size(float(scale))
             opacity = store.get("opacity", None)
             if opacity is not None:
@@ -1445,6 +1428,30 @@ class UIController(QObject):
                         int(store.get("proactive_max_minutes", 45)))
                 if not bool(pe) and hasattr(self.brain.proactive, "stop"):
                     self.brain.proactive.stop()
+            # 行为节拍（idle / walk / decide）—— 之前运行时改了有效，
+            # 重启就丢（store 里有值但启动时没人读）
+            motion_kw = {}
+            for key, skey in (("idle_seconds", "motion_idle_s"),
+                              ("walk_seconds", "motion_walk_s"),
+                              ("decide_seconds", "motion_decide_s")):
+                v = store.get(skey, None)
+                if v is not None:
+                    motion_kw[key] = int(v)
+            if motion_kw:
+                try:
+                    self.motion.apply_settings(**motion_kw)
+                except Exception:  # noqa: BLE001
+                    log.debug("恢复行为节拍失败", exc_info=True)
+            # FPS 气泡监测开关 —— 同样之前重启就丢
+            fps_mon = store.get("fps_monitor", None)
+            if fps_mon is not None:
+                self.pet._fps_enabled = bool(fps_mon)
+            # 锁定第一张 idle
+            lock_idle = store.get("lock_first_idle", None)
+            if lock_idle is not None:
+                setter = getattr(self.pet.animator, "set_lock_first_idle", None)
+                if callable(setter):
+                    setter(bool(lock_idle))
             # v30: 角色名 / 人设 不再从 settings.json 读, 改从 characters/<file>.yaml
             # load_config 启动时已读 yaml 覆盖 cfg.character, 不需要这里再补。
         except Exception:  # noqa: BLE001

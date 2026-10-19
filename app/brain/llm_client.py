@@ -609,6 +609,10 @@ class LLMClient:
         effort = getattr(self.cfg, "reasoning_effort", None)
         if effort:
             payload["reasoning_effort"] = effort
+        # v31: 让 API 在最后 chunk 返回真实 token usage (miniMax 标准协议
+        # 支持, OpenAI 兼容). stream=True 时默认不返, 加这个选项 server 才发。
+        # 状态栏精确显示 token 数, 不再走 "字符数/4" 粗估。
+        payload["stream_options"] = {"include_usage": True}
         return payload
 
     # -------------------- 视觉输入 --------------------
@@ -685,6 +689,14 @@ class LLMClient:
         if is_placeholder_key(self.cfg.api_key):
             raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
+        # 关了流式就别再发 SSE —— 之前照发流式、等收不到 content 再 fallback
+        # 重发一次非流式，等于同一个请求发两遍（费钱且慢）。
+        if not getattr(self.cfg, "stream", True):
+            full = await self._fetch_non_streaming(messages)
+            if full:
+                yield full
+            return
+
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         payload = self._build_payload(messages)
         headers = {
@@ -694,6 +706,15 @@ class LLMClient:
         }
 
         saw_content = False
+        # v31: 攒 LLM API 返回的 usage 字段 (prompt/completion/total tokens)。
+        # 多个 chunk 里同一字段会重复, 用 max() 取最后那次的值 (流式协议
+        # 最后一条 SSE 通常带累计总量, 前面的可能只有部分增量)。
+        usage_acc: dict = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "got_real": False,   # API 是否真的返了 usage, 决定走精确值还是 fallback
+        }
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -714,6 +735,20 @@ class LLMClient:
                         obj = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # v31: 攒 usage 字段 — 必须在 choices 检查之前!
+                    # 流式协议最后一条 chunk (MiniMax / OpenAI) 通常是
+                    # `{"choices":[], "usage":{...}}` —— 跳 choices 检查会吞掉 usage
+                    # 捕获, got_real 永远 False, 状态栏 token 数一直 0。
+                    if obj.get("usage"):
+                        usage = obj["usage"]
+                        if isinstance(usage, dict):
+                            usage_acc["prompt_tokens"] = usage.get(
+                                "prompt_tokens", usage_acc["prompt_tokens"])
+                            usage_acc["completion_tokens"] = usage.get(
+                                "completion_tokens", usage_acc["completion_tokens"])
+                            usage_acc["total_tokens"] = usage.get(
+                                "total_tokens", usage_acc["total_tokens"])
+                            usage_acc["got_real"] = True
                     choices = obj.get("choices") or []
                     if not choices:
                         continue
@@ -863,6 +898,10 @@ class LLMClient:
         effort = getattr(self.cfg, "reasoning_effort", None)
         if effort:
             payload["reasoning_effort"] = effort
+        # v31: 让 API 在最后 chunk 返回真实 token usage (miniMax 标准协议
+        # 支持, OpenAI 兼容). _build_payload 也加了, 但本方法自己构造
+        # payload 不走 _build_payload, 这里要再加一次。
+        payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
             if tool_choice:
@@ -948,6 +987,13 @@ class LLMClient:
     async def _stream_once(self, url, payload, headers, cancel_check=None):
         """真正发一次流式请求（不含重试逻辑）。"""
         saw_content = False
+        # v31: usage 累加器 — 多个 chunk 里 usage 会重复, 用 max() 取最后
+        usage_acc: dict = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "got_real": False,
+        }
         reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
@@ -969,6 +1015,20 @@ class LLMClient:
                         obj = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # v31: 攒 usage 字段 — 必须在 choices 检查之前!
+                    # 流式协议最后一条 chunk (MiniMax / OpenAI) 通常是
+                    # `{"choices":[], "usage":{...}}` —— 跳 choices 检查会吞掉 usage
+                    # 捕获, got_real 永远 False, 状态栏 token 数一直 0。
+                    if obj.get("usage"):
+                        usage = obj["usage"]
+                        if isinstance(usage, dict):
+                            usage_acc["prompt_tokens"] = usage.get(
+                                "prompt_tokens", usage_acc["prompt_tokens"])
+                            usage_acc["completion_tokens"] = usage.get(
+                                "completion_tokens", usage_acc["completion_tokens"])
+                            usage_acc["total_tokens"] = usage.get(
+                                "total_tokens", usage_acc["total_tokens"])
+                            usage_acc["got_real"] = True
                     choices = obj.get("choices") or []
                     if not choices:
                         continue
@@ -1032,6 +1092,15 @@ class LLMClient:
                 "tool_calls": tool_calls,
                 "content": final_content,
                 "reasoning": "".join(reasoning_parts),   # 给 Trace 用，不给 UI
+                # v31: API 返回的真实 token usage (got_real=True 时) — chat_window
+                # 用这个在状态栏精确显示, 不再走 "字符数 / 4" 粗估。某些 API
+                # (老 ollama / 本地) 不返 usage, got_real=False, 上层 fallback
+                "usage": {
+                    "prompt_tokens": usage_acc.get("prompt_tokens", 0),
+                    "completion_tokens": usage_acc.get("completion_tokens", 0),
+                    "total_tokens": usage_acc.get("total_tokens", 0),
+                    "got_real": usage_acc.get("got_real", False),
+                },
             })
 
     async def _stream_with_force_prompt(

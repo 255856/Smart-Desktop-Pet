@@ -24,12 +24,25 @@ MCP_DEFAULT_LEVEL: int = 8
 _LOADED = False
 
 
-def load_unlock_config(cfg) -> None:
-    """从 companion_config 加载 tool_unlock 段。多次调用幂等。"""
+def load_unlock_config(cfg=None) -> None:
+    """加载 tool_unlock 配置。多次调用幂等。
+
+    cfg: 传入的 companion_config 对象。若为 None 或没有 tool_unlock 字段
+        (比如误传了主配置 config.yaml 的 Config),自动回落到
+        app.core.companion_config 的 singleton —— 那里才是 tool_unlock 的家。
+    """
     global TOOL_UNLOCK, UNLOCK_REWARDS, UNLOCK_CELEBRATE, MCP_DEFAULT_LEVEL, _LOADED
     if _LOADED:
         return
     block = getattr(cfg, "tool_unlock", None)
+    if block is None:
+        # cfg 不带 tool_unlock(传了主配置 / None)→ 回落到 companion_config
+        try:
+            from app.core.companion_config import companion_config as _cc
+            block = getattr(_cc, "tool_unlock", None)
+        except Exception as e:  # noqa: BLE001
+            log.warning("工具解锁: companion_config 读取失败 %s, 全部工具可见", e)
+            block = None
     if block is None:
         log.warning("tool_unlock 段未配置,所有工具始终可见 (兼容旧版)")
         _LOADED = True
@@ -106,6 +119,24 @@ def is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp_")
 
 
+def short_mcp_name(name: str) -> str:
+    """MCP 注册名 → UI 显示名，去掉重复的 server 段。
+
+    bridge_to 里拼的是 f"mcp_{server}_{tool.name}"，而外部 tool.name 本身
+    常已带 server 前缀（mcp_aw_aw_status ← server=aw, name=aw_status），
+    直接显示会出现 aw 重复两次。这里去掉重复段，只用于展示。
+    """
+    if not name.startswith("mcp_"):
+        return name
+    parts = name.split("_", 2)
+    if len(parts) < 3:
+        return name
+    server, tool_name = parts[1], parts[2]
+    if tool_name == server or tool_name.startswith(f"{server}_"):
+        tool_name = tool_name[len(server) + 1:]
+    return f"{server}_{tool_name}"
+
+
 def level_for_tool(name: str) -> Optional[int]:
     """反查工具名对应的最低解锁等级。None 表示未在配置里 (按 SAFE 处理 → Lv1 解锁)。"""
     if is_mcp_tool(name):
@@ -142,5 +173,5 @@ __all__ = [
     "TOOL_UNLOCK", "UNLOCK_REWARDS", "UNLOCK_CELEBRATE", "MCP_DEFAULT_LEVEL",
     "load_unlock_config", "is_loaded",
     "compute_unlocked", "level_for_tool", "is_unlocked",
-    "is_mcp_tool", "split_configured_and_mcp",
+    "is_mcp_tool", "short_mcp_name", "split_configured_and_mcp",
 ]

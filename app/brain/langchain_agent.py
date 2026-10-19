@@ -40,6 +40,11 @@ from app.engine.tools import Tool, ToolRegistry
 log = logging.getLogger(__name__)
 
 
+# 派生 session_id 前缀（chat_window 按人设派生："char:<人设名>:main"）。
+# 这种 id 不登记在 SessionStore 里，直接当 thread_id 用；其余未知 id 照旧报错。
+_DERIVED_SESSION_PREFIX = "char:"
+
+
 # 内部 Tool → LangChain StructuredTool 的适配器
 def _internal_tool_to_langchain(tool: Tool) -> StructuredTool:
     """把桌宠的 Tool(name, description, parameters, fn) 包装为 LangChain StructuredTool。
@@ -197,14 +202,23 @@ class LangChainAgent:
         self._session_id: Optional[str] = session_id
         self._session_store = session_store
         if session_id is not None:
-            if session_store is None:
+            info = (session_store.get(session_id)
+                    if session_store is not None else None)
+            if info is not None:
+                # store 里真实存在的会话 → 用它登记的 thread_id
+                # （checkpoint 才落在同一条线上）
+                self.thread_id = info.thread_id
+            elif session_store is None:
                 raise ValueError("session_id given without session_store")
-            info = session_store.get(session_id)
-            if info is None:
+            elif session_id.startswith(_DERIVED_SESSION_PREFIX):
+                # v31: 派生 session_id（"char:<人设>:main"）本来就不在 store 里 ——
+                # 直接把它当 thread_id：切人设 = 换 session_id = 换 checkpoint 分文件。
+                # 注意别把 store 查询整个绕开：真·未知 session_id 必须照旧报错。
+                self.thread_id = session_id
+            else:
                 raise ValueError(
                     f"SessionStore: session_id={session_id!r} not found"
                 )
-            self.thread_id = info.thread_id
         else:
             self.thread_id = thread_id
         # 项目级指令：从 cwd 向上找 AGENTS.md / CLAUDE.md + 主程序注入的 extra_paths
@@ -344,7 +358,14 @@ class LangChainAgent:
             temperature=self.llm_cfg.temperature,
             max_tokens=self.llm_cfg.max_tokens,
             timeout=self.llm_cfg.timeout,
-            streaming=True,
+            # 流式开关跟设置面板走 —— 之前硬编码 True，面板上那个
+            # 「启用流式输出」勾选框点了毫无反应。
+            streaming=bool(getattr(self.llm_cfg, "stream", True)),
+            # v31: 打开 usage 流 — LangChain ChatOpenAI 1.0+ 用 stream_usage 控制。
+            # 没开的话 LangGraph messages 流的 chunk.usage_metadata 全是 None,
+            # 标准后端 chat_window 状态栏 token 永远 0。OpenAI / MiniMax / DeepSeek
+            # 都能返 usage, 老 ollama 不支持时这字段保持 None 不影响。
+            stream_usage=True,
         )
         # 推理强度：OpenAI o1/o3、部分推理模型支持。没设或为空就不传
         effort = getattr(self.llm_cfg, "reasoning_effort", None)
@@ -836,7 +857,23 @@ class LangChainAgent:
                 if cancel and cancel():
                     yield ("error", "cancelled")
                     return
+                # v31: 抓 LLM API usage 字典 — AIMessageChunk 有 usage_metadata 字段
+                # (LangChain 1.0+), 走 messages 模式时只在最后一个 chunk 带, 直接 yield
+                # meta 事件 (跟 AgentLoop 路径一致, chat_window._on_meta 接收累加)
                 if isinstance(chunk, (AIMessageChunk, AIMessage)):
+                    usage_meta = getattr(chunk, "usage_metadata", None)
+                    if usage_meta:
+                        log.debug(
+                            "langchain agent.run: chunk type=%s, usage_meta=%r",
+                            type(chunk).__name__, usage_meta)
+                        try:
+                            yield ("meta", {"event": "usage",
+                                            "prompt_tokens": int(usage_meta.get("input_tokens", 0) or 0),
+                                            "completion_tokens": int(usage_meta.get("output_tokens", 0) or 0),
+                                            "total_tokens": int(usage_meta.get("total_tokens", 0) or 0),
+                                            "got_real": True})
+                        except Exception:
+                            pass
                     text = chunk.content
                     if isinstance(text, list):
                         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
@@ -875,6 +912,16 @@ class LangChainAgent:
                     yield ("error", "cancelled")
                     return
                 if isinstance(chunk, (AIMessageChunk, AIMessage)):
+                    # v31: 抓 LLM API usage — AIMessageChunk 末尾带 usage_metadata 字段
+                    # (LangChain 1.0+ 在 stream_usage=True 时返)。chat_window._on_meta
+                    # 累加到 self._accum_tokens, 状态栏精确显示。
+                    usage_meta = getattr(chunk, "usage_metadata", None)
+                    if usage_meta:
+                        yield ("meta", {"event": "usage",
+                                        "prompt_tokens": int(usage_meta.get("input_tokens", 0) or 0),
+                                        "completion_tokens": int(usage_meta.get("output_tokens", 0) or 0),
+                                        "total_tokens": int(usage_meta.get("total_tokens", 0) or 0),
+                                        "got_real": True})
                     text = chunk.content
                     if isinstance(text, list):
                         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)

@@ -255,12 +255,15 @@ def _build_tts(cfg, root: Path) -> TTS:
     if engine == "gptsovits":
         # 方案 B：本地 GPT-SoVITS（完全免费，需先启动本地 api_v2 服务）
         from app.voice.gptsovits_tts import GPTSoVITSTTS
-        _av = cfg.character.active_voice()
-        if _av is not None:
-            _ref, _pt = _av.ref_audio, _av.prompt_text
-        else:
-            _ref = getattr(cfg.character, "gptsovits_ref_audio", "")
-            _pt = getattr(cfg.character, "gptsovits_prompt_text", "")
+        # 面板里手填的参考音频/参考文本优先 —— 之前一律被 voices profile 覆盖，
+        # 面板那两个框等于白填。profile 只在面板没填全时兜底补齐。
+        _ref = getattr(cfg.character, "gptsovits_ref_audio", "") or ""
+        _pt = getattr(cfg.character, "gptsovits_prompt_text", "") or ""
+        if not (_ref and _pt):
+            _av = cfg.character.active_voice()
+            if _av is not None:
+                _ref = _ref or _av.ref_audio
+                _pt = _pt or _av.prompt_text
         tts = GPTSoVITSTTS(
             url=getattr(cfg.character, "gptsovits_url", "http://127.0.0.1:9880"),
             ref_audio=_ref,
