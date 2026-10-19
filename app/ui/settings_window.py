@@ -12,7 +12,6 @@ from app.core.qt_compat import (
     QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
     QToolButton, QObject, QScrollArea, event_global_pos,
 )
-from app.core.companion_config import companion_config
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
 from app.animation.live2d_scene import (
@@ -157,8 +156,6 @@ class SettingsWindow(QWidget):
             original_on_change = getattr(state, 'on_change', None)
             def _combined():
                 self.refresh_state()
-                # v39: 仪表盘同步 (心情色 + 4 维条 + 等级环)
-                self.update_dashboard()
                 if original_on_change is not None:
                     try:
                         original_on_change()
@@ -166,160 +163,6 @@ class SettingsWindow(QWidget):
                         pass
             state.on_change = _combined
             self.refresh_state()
-            self.update_dashboard()
-
-    #  UI 构造
-    def _build_dashboard(self) -> QFrame:
-        """v39: 桌宠心情仪表盘 — 3 段式布局.
-
-        段 1: 桌宠名 + 心情徽章 (心情色块 + 文案)
-        段 2: 4 维状态迷你条 (心情 / 饱食 / 好感 / 体力)
-        段 3: 等级环 + 经验进度条
-
-        主人进设置第一眼看到桌宠当前心情, 跟 chat 心情色带 (MOOD_*) 一致.
-        state 变化 (dev mode 滑块 / 喂食 / 时间衰减) 时 update_dashboard() 实时刷新.
-        """
-        frame = QFrame()
-        frame.setObjectName("pet_dashboard")
-        frame.setStyleSheet(ui_style.PET_DASHBOARD_QSS)
-        frame.setFixedHeight(96)
-        hl = QHBoxLayout(frame)
-        hl.setContentsMargins(16, 10, 16, 10)
-        hl.setSpacing(16)
-
-        # 段 1: 桌宠名 + 心情徽章
-        seg1 = QVBoxLayout()
-        seg1.setSpacing(4)
-        # v39: char_cfg 可能为 None (测试场景), 走 "桌宠" 兜底
-        pet_name = (
-            (self.char_cfg.name or "桌宠") if self.char_cfg is not None else "桌宠"
-        )
-        self.dash_name = QLabel(pet_name)
-        self.dash_name.setObjectName("dash_name")
-        seg1.addWidget(self.dash_name)
-        # 心情徽章 (心情色块 36x36 + 文案)
-        chip_row = QHBoxLayout()
-        chip_row.setSpacing(8)
-        self.dash_mood_block = QFrame()
-        self.dash_mood_block.setObjectName("dash_mood_block")
-        chip_row.addWidget(self.dash_mood_block)
-        self.dash_mood_chip = QLabel("—")
-        self.dash_mood_chip.setObjectName("dash_mood_chip")
-        chip_row.addWidget(self.dash_mood_chip)
-        chip_row.addStretch(1)
-        seg1.addLayout(chip_row)
-        hl.addLayout(seg1, 0)
-
-        # 段 2: 4 维状态迷你条
-        seg2 = QVBoxLayout()
-        seg2.setSpacing(4)
-        self.dash_stats: dict[str, tuple[QLabel, QLabel]] = {}
-        for k, label_text in (
-            ("feeling", "心情"),
-            ("strength_food", "饱食"),
-            ("likability", "好感"),
-            ("strength", "体力"),
-        ):
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            lbl = QLabel(label_text)
-            lbl.setObjectName("dash_stat_label")
-            row.addWidget(lbl)
-            val = QLabel("—")
-            val.setObjectName("dash_stat_value")
-            row.addWidget(val)
-            seg2.addLayout(row)
-            self.dash_stats[k] = (lbl, val)
-        hl.addLayout(seg2, 1)  # 中段拉伸占主要宽度
-
-        # 段 3: 等级环 + 经验进度条
-        seg3 = QVBoxLayout()
-        seg3.setSpacing(2)
-        ring_row = QHBoxLayout()
-        ring_row.setSpacing(8)
-        self.dash_level_ring = QFrame()
-        self.dash_level_ring.setObjectName("dash_level_ring")
-        ring_row.addWidget(self.dash_level_ring)
-        self.dash_level = QLabel("—")
-        self.dash_level.setObjectName("dash_level")
-        # QLabel 嵌在 ring 中央: 用一个透明 layout 包 label
-        ring_inner = QHBoxLayout(self.dash_level_ring)
-        ring_inner.setContentsMargins(0, 0, 0, 0)
-        ring_inner.addStretch(1)
-        ring_inner.addWidget(self.dash_level)
-        ring_inner.addStretch(1)
-        seg3.addLayout(ring_row)
-        self.dash_exp = QProgressBar()
-        self.dash_exp.setObjectName("dash_exp")
-        self.dash_exp.setRange(0, 100)
-        self.dash_exp.setFormat("Lv %v / %m")
-        seg3.addWidget(self.dash_exp)
-        hl.addLayout(seg3, 0)
-
-        return frame
-
-    def update_dashboard(self) -> None:
-        """v39: 把 state 量化 → 仪表盘各控件.
-
-        没 state / quantize 失败 → 显示 —.
-        心情色块背景由 _mood_block_color 决定 (HIGH=樱粉, MID=蜜桃, LOW=雾蓝).
-        """
-        state = self._attached_state
-        if state is None:
-            # 无 state: 4 维 + 心情 + 等级全显示 —
-            for lbl, val in self.dash_stats.values():
-                val.setText("—")
-            self.dash_mood_chip.setText("—")
-            self.dash_level.setText("—")
-            self.dash_exp.setValue(0)
-            self.dash_mood_block.setStyleSheet(
-                f"background:{ui_style.MOOD_NONE};border-radius:10px;"
-            )
-            return
-        try:
-            q = state.quantize()
-        except Exception:  # noqa: BLE001
-            return
-        # 4 维数值
-        for k, (lbl, val) in self.dash_stats.items():
-            try:
-                v = float(getattr(state, k, 0) or 0)
-                val.setText(f"{int(v)}")
-            except Exception:  # noqa: BLE001
-                val.setText("—")
-        # 心情 + 色块
-        mood = q.get("mood", "MID")
-        mood_label = {"HIGH": "心情好", "MID": "心情一般", "LOW": "心情低落"}.get(
-            mood, "—"
-        )
-        self.dash_mood_chip.setText(mood_label)
-        mood_color = {
-            "HIGH": ui_style.MOOD_HIGH,
-            "MID": ui_style.MOOD_MID,
-            "LOW": ui_style.MOOD_LOW,
-        }.get(mood, ui_style.MOOD_NONE)
-        self.dash_mood_block.setStyleSheet(
-            f"background:{mood_color};border-radius:10px;"
-        )
-        # 等级 + 经验
-        try:
-            level = int(getattr(state, "level", 1) or 1)
-            exp = float(getattr(state, "exp", 0) or 0)
-            self.dash_level.setText(str(level))
-            # 升级公式 base * level^exp, 拿 companion_config
-            try:
-                next_lv = max(1, level + 1)
-                cfg_lv = companion_config.leveling
-                base = float(getattr(cfg_lv, "base", 100))
-                need_next = int(base * (next_lv ** float(getattr(cfg_lv, "exp", 1.5))))
-            except Exception:  # noqa: BLE001
-                need_next = 100
-            self.dash_exp.setRange(0, max(1, need_next))
-            self.dash_exp.setValue(int(exp))
-            self.dash_exp.setFormat(f"Lv{level} {int(exp)}/{need_next}")
-        except Exception:  # noqa: BLE001
-            self.dash_level.setText("—")
-            self.dash_exp.setValue(0)
 
     #  UI 构造
     def _build_ui(self) -> None:
@@ -374,11 +217,6 @@ class SettingsWindow(QWidget):
         hl.addWidget(self.btn_title_close)
 
         cl.addWidget(header)
-
-        # v39: 桌宠心情仪表盘 (3 段: 桌宠名+心情徽章 | 4 维状态条 | 等级圆+经验)
-        # 紧跟标题栏下方, 主人进设置第一眼看到桌宠当前心情 (跟 chat 心情色带呼应)
-        self.dashboard = self._build_dashboard()
-        cl.addWidget(self.dashboard)
 
         # 标题栏拖动
         self._drag_filter = _SettingsDrag(self)
