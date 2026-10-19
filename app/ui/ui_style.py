@@ -24,6 +24,18 @@ ACCENT_LT = "#a99bfa"   # 主色浅（focus 边框/发光）
 DANGER    = "#ef5f7e"   # 停止/退出
 FONT      = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 
+# v37: 升级解锁 / 状态色三件套 + 柔阴影 (轻抛光)
+GOLD       = "#F59E0B"   # 当前等级 (橘金)
+GOLD_BG    = "#FFF7E6"   # 当前等级浅底
+GOLD_BORDER= "#FCD9A1"   # 当前等级描边
+MINT       = "#10B981"   # 已完成 (薄荷绿)
+MINT_BG    = "#ECFDF5"   # 已完成浅底
+MINT_BORDER= "#A7E6C7"   # 已完成描边
+LOCKED     = "#A0A0B0"   # 未解锁 (中性灰)
+LOCKED_BG  = "#F4F4F8"   # 未解锁浅底
+LOCKED_BORDER = "#E2E2EA" # 未解锁描边
+SHADOW_RGBA = "rgba(124, 108, 240, 0.07)"  # 卡片柔阴影
+
 
 #  无边框窗口卡片容器（透明窗口内部的白色圆角卡片）
 WINDOW_CARD_QSS = f"""
@@ -676,6 +688,90 @@ STAT_BAR_COLORS = {
     "health":     ("#f87171", "#ef4444"),
     "likability": ("#c4b5fd", "#8b5cf6"),
 }
+
+
+# v37: 工具解锁窗
+# 三态用 3 种颜色 (GOLD 当前 / MINT 已完成 / LOCKED 未解锁) — 视觉冲击力强,
+# 让主人一眼看出"我现在到哪级 / 还差什么没解锁"
+UNLOCK_QSS = f"""
+QDialog, QWidget#unlock_root {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #f6f4ff, stop:1 #fdf4fb);
+    font-family: {FONT};
+    font-size: 10pt;
+    color: {TEXT};
+}}
+QLabel#header_title {{
+    color: #3f3560; font-size: 17pt; font-weight: 700;
+    background: transparent; border: none;
+}}
+QLabel#header_subtitle {{
+    color: #6f6690; font-size: 9pt; font-weight: 500;
+    background: transparent; border: none;
+}}
+QLabel#progress_text {{
+    color: #4a3d6e; font-size: 11pt; font-weight: 700;
+    background: transparent; border: none;
+}}
+QLabel#progress_bar {{
+    background: #e4e1ee; border: none; border-radius: 4px;
+    height: 8px;
+}}
+QLabel#next_hint {{
+    color: #6f6690; font-size: 9pt;
+    background: transparent; border: none;
+}}
+
+/* 三态卡片 — 颜色 token 化, 跟主系统一致 */
+QFrame#card_done {{
+    background: {MINT_BG};
+    border: 1.5px solid {MINT_BORDER};
+    border-radius: 12px;
+}}
+QFrame#card_current {{
+    background: {GOLD_BG};
+    border: 2px solid {GOLD_BORDER};
+    border-radius: 12px;
+}}
+QFrame#card_locked {{
+    background: {LOCKED_BG};
+    border: 1.5px solid {LOCKED_BORDER};
+    border-radius: 12px;
+}}
+
+QLabel#lv_done    {{ color: {MINT}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
+QLabel#lv_current {{ color: {GOLD}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
+QLabel#lv_locked  {{ color: {LOCKED}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
+
+QLabel#reward_done    {{ color: #2f6b34; font-size: 10pt; background: transparent; border: none; }}
+QLabel#reward_current {{ color: #8a5a08; font-size: 10pt; font-weight: 700; background: transparent; border: none; }}
+QLabel#reward_locked  {{ color: {LOCKED}; font-size: 10pt; background: transparent; border: none; }}
+
+QLabel#cnt {{
+    color: {TEXT_SUB}; font-size: 9pt; background: transparent; border: none;
+}}
+QLabel#celebrate {{
+    color: #4a3d6e; font-size: 9pt; font-style: italic;
+    background: #f7f4ff; border-radius: 6px; padding: 5px 8px;
+    border: 1px solid {BORDER};
+}}
+QLabel#chip {{
+    font-size: 9pt; padding: 3px 8px; border-radius: 9px;
+    background: #ffffff; border: 1px solid {BORDER};
+    color: {TEXT};
+}}
+QPushButton#close_btn {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #a78bfa, stop:1 {ACCENT});
+    color: #ffffff; border: none;
+    border-radius: 8px; padding: 7px 26px; font-weight: 600;
+}}
+QPushButton#close_btn:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #9a7ef8, stop:1 {ACCENT_DK});
+}}
+QPushButton#close_btn:pressed {{ background: {ACCENT_DK}; }}
+"""
 
 
 def stat_bar_qss(light: str, dark: str) -> str:
