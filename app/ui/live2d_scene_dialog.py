@@ -197,33 +197,37 @@ class _BaseAppearanceDialog(QDialog):
             else:
                 toggle_groups.append(g)
 
-        # 表情（单选）
-        self._emotion_combo = QComboBox()
-        self._emotion_combo.addItem("不改变（保持当前）", "")
-        self._emotion_combo.addItem("恢复自然（普通眼）", "natural")
-        for iid, label in emotion_items:
-            if iid == "__default__":
-                continue
-            self._emotion_combo.addItem(label, iid)
-        row = QHBoxLayout()
-        cap = QLabel("表情")
-        cap.setFixedWidth(64)
-        row.addWidget(cap)
-        row.addWidget(self._emotion_combo, 1)
-        body.addLayout(row)
+        # 表情（单选）—— 模型没有表情组就不摆这一行
+        self._emotion_combo = None
+        if emotion_items:
+            self._emotion_combo = QComboBox()
+            self._emotion_combo.addItem("不改变（保持当前）", "")
+            self._emotion_combo.addItem("恢复自然（普通眼）", "natural")
+            for iid, label in emotion_items:
+                if iid == "__default__":
+                    continue
+                self._emotion_combo.addItem(label, iid)
+            row = QHBoxLayout()
+            cap = QLabel("表情")
+            cap.setFixedWidth(64)
+            row.addWidget(cap)
+            row.addWidget(self._emotion_combo, 1)
+            body.addLayout(row)
 
-        # 发型（单选）
-        self._hairstyle_combo = QComboBox()
-        self._hairstyle_combo.addItem("不改变（保持当前）", "")
-        for iid, label in hair_items:
-            self._hairstyle_combo.addItem(
-                ("默认发型" if iid == "__default__" else label), iid)
-        row = QHBoxLayout()
-        cap = QLabel("发型")
-        cap.setFixedWidth(64)
-        row.addWidget(cap)
-        row.addWidget(self._hairstyle_combo, 1)
-        body.addLayout(row)
+        # 发型（单选）—— 模型没有发型组就不摆这一行
+        self._hairstyle_combo = None
+        if hair_items:
+            self._hairstyle_combo = QComboBox()
+            self._hairstyle_combo.addItem("不改变（保持当前）", "")
+            for iid, label in hair_items:
+                self._hairstyle_combo.addItem(
+                    ("默认发型" if iid == "__default__" else label), iid)
+            row = QHBoxLayout()
+            cap = QLabel("发型")
+            cap.setFixedWidth(64)
+            row.addWidget(cap)
+            row.addWidget(self._hairstyle_combo, 1)
+            body.addLayout(row)
 
         # toggle 三类（多选）
         for g in toggle_groups:

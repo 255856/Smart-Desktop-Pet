@@ -7,6 +7,7 @@ import mimetypes
 import random
 import threading
 import urllib.parse
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,7 @@ from app.animation.live2d_scene import (
     SceneBundle,
     SceneStore,
 )
-from app.animation.pet_renderer import PetRenderer
+from app.animation.pet_renderer import ModelCapabilities, PetRenderer
 from app.core.qt_compat import QObject, QTimer, QUrl
 
 # PyQtWebEngine 会在模块加载时初始化 OpenGL plugin，先设置共享上下文
@@ -958,6 +959,17 @@ class Live2DRenderer(PetRenderer):
                 groups.append({"id": cat.id, "label": cat.label, "kind": kind,
                                "mode": cat.mode, "items": items})
         return groups
+
+    def capabilities(self) -> ModelCapabilities:
+        """能力矩阵：设置面板按它显隐功能入口（能力驱动显隐）。
+
+        profile 只声明了贴纸目录名，这里再校验目录真实存在且有图片 ——
+        目录空/不存在时面板不该显示贴纸相关控件。
+        """
+        caps = self.profile.capabilities()
+        if caps.has_stickers and self.get_sticker_config() is None:
+            caps = replace(caps, has_stickers=False)
+        return caps
 
     def activate_menu_item(self, group_id: str, item_id: str,
                            toggle_off: bool = True) -> None:

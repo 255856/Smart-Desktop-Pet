@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import yaml
 
+from app.animation.pet_renderer import ModelCapabilities
+
 log = logging.getLogger(__name__)
 
 # exp3 文件名分类格式："类别 名称.exp3.json"（超频猫猫官方热键包的命名规则）
@@ -181,6 +183,25 @@ class Live2DModelProfile:
             return [n for n in self.random_pool if self.find_item(n) is not None]
         cat = self.emotion_category()
         return [it.name for it in cat.items] if cat else []
+
+    def capabilities(self) -> ModelCapabilities:
+        """能力矩阵：设置面板按它显隐功能入口（能力驱动显隐）。
+
+        这里只看 profile 自身声明；贴纸目录是否真实有效由渲染层再校验一次
+        （Live2DRenderer.capabilities() 会覆盖 has_stickers）。
+        """
+        toggle_groups = [c for c in self.categories
+                         if not c.emotion and not c.hairstyle]
+        return ModelCapabilities(
+            has_emotion_group=self.emotion_category() is not None,
+            has_hairstyle_group=self.hairstyle_category() is not None,
+            has_toggle_groups=bool(toggle_groups),
+            toggle_group_count=len(toggle_groups),
+            has_random_expressions=bool(self.random_enabled),
+            has_stickers=bool(self.stickers_dir),
+            has_watermark=self.watermark_mode != "none",
+            has_actions=bool(self.actions),
+        )
 
 
 def _load_yaml(model_dir: Path) -> dict:

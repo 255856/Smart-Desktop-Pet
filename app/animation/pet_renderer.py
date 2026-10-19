@@ -2,9 +2,28 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional
 
 from app.core.qt_compat import QWidget
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """渲染器能力矩阵：设置面板据此显隐功能入口（能力驱动显隐）。
+
+    不同模型能力差异很大（没有表情包贴纸 / 没有水印 / 没有叠加组 / 没有动作），
+    面板按这份矩阵决定哪些控件出现，避免出现"勾了没反应"的死选项。
+    """
+
+    has_emotion_group: bool = False       # 有表情组（单选情绪）
+    has_hairstyle_group: bool = False     # 有发型组（单选发型）
+    has_toggle_groups: bool = False       # 有叠加组（配件/手势/特殊，可多选）
+    toggle_group_count: int = 0           # 叠加组数量
+    has_random_expressions: bool = False  # 支持挂机随机表情/动作
+    has_stickers: bool = False            # 有表情包贴纸
+    has_watermark: bool = False           # 模型带水印（可隐藏）
+    has_actions: bool = False             # 有一次性动作（玩一下）
 
 
 class PetRenderer(ABC):
@@ -66,6 +85,10 @@ class PetRenderer(ABC):
     def get_menu_groups(self) -> list[dict]:
         """分类外观子菜单数据：[{"id","label","mode","items":[(id,label)]}, ...]。"""
         return []
+
+    def capabilities(self) -> ModelCapabilities:
+        """模型能力矩阵（sprite 无分类外观，恒为空能力）。"""
+        return ModelCapabilities()
 
     def activate_menu_item(self, group_id: str, item_id: str) -> None:
         """菜单/设置页点击一个分类条目（sprite 默认 no-op）。"""

@@ -14,6 +14,7 @@ from app.core.qt_compat import (
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
+from app.animation.pet_renderer import ModelCapabilities
 from app.animation.live2d_scene import (
     BUILTIN_SCENES, SCENE_GROUP_CHAT, SCENE_GROUP_INTERACT, SCENE_GROUP_STATE,
     SceneStore,
@@ -1083,6 +1084,13 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(8, 10, 8, 12)
         v.setSpacing(10)
         renderer = self._renderer
+        # 能力矩阵：不同模型支持的项数不同（有没有贴纸/水印/随机表情…），
+        # 控件一律先建好再按能力决定要不要摆进布局 —— 属性始终存在，
+        # 别的代码引用不会 AttributeError，界面上也不会出现"勾了没反应"的死选项。
+        try:
+            caps = renderer.capabilities()
+        except Exception:  # noqa: BLE001
+            caps = ModelCapabilities()
 
         # 触发场景配置：场景行摘要 label + 打开的配置弹窗（保持引用防 GC）
         self._scene_summary_labels: dict[str, QLabel] = {}
@@ -1124,17 +1132,20 @@ class SettingsWindow(QWidget):
         self.cb_random_exp = QCheckBox("挂机随机表情/动作（空闲时随机切换，互动即暂停）")
         self.cb_random_exp.setChecked(rnd_on)
         self.cb_random_exp.toggled.connect(self.random_exp_changed.emit)
-        gm.addWidget(self.cb_random_exp)
+        if caps.has_random_expressions:
+            gm.addWidget(self.cb_random_exp)
 
         self.cb_random_sticker = QCheckBox("随机表情包贴纸（角色右上方弹出）")
         self.cb_random_sticker.setChecked(self._sticker_enabled)
         self.cb_random_sticker.toggled.connect(self.random_sticker_changed.emit)
-        gm.addWidget(self.cb_random_sticker)
+        if caps.has_stickers:
+            gm.addWidget(self.cb_random_sticker)
 
         self.cb_hide_watermark = QCheckBox("隐藏模型水印（重启生效）")
         self.cb_hide_watermark.setChecked(self._panel_state.get("hide_watermark", True))
         self.cb_hide_watermark.toggled.connect(self.hide_watermark_changed.emit)
-        gm.addWidget(self.cb_hide_watermark)
+        if caps.has_watermark:
+            gm.addWidget(self.cb_hide_watermark)
 
         ri = self._live2d_state.get("random_interval", (20, 50))
         row = QHBoxLayout()
@@ -1152,7 +1163,8 @@ class SettingsWindow(QWidget):
         row.addWidget(dash)
         row.addWidget(self.spin_random_max)
         row.addStretch(1)
-        gm.addLayout(row)
+        if caps.has_random_expressions:
+            gm.addLayout(row)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("渲染帧率"))
@@ -1214,7 +1226,8 @@ class SettingsWindow(QWidget):
         self.spin_sticker_duration.setValue(int(st_cfg.get("duration_s", 4)))
         self.spin_sticker_duration.valueChanged.connect(self._emit_sticker_options)
         gs.addWidget(self.spin_sticker_duration, 3, 1)
-        v.addWidget(g_st)
+        if caps.has_stickers:
+            v.addWidget(g_st)
 
         self._scene_card = self._build_scene_card(renderer)
         v.addWidget(self._scene_card)
