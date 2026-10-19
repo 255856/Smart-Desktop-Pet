@@ -75,7 +75,8 @@ class SettingsWindow(QWidget):
     idle_requested = Signal()
     chat_requested = Signal()
     model_config_changed = Signal(dict)
-    voice_changed = Signal(str)
+    voice_changed = Signal(str)    # edge 音色名（空串 = 关闭朗读）
+    preview_voice_requested = Signal(str)   # 试听：请用当前引擎实例播这段文字
     live2d_item_activated = Signal(str, str)   # (group_id, item_id)
     live2d_reset_requested = Signal()
     random_exp_changed = Signal(bool)          # 挂机随机表情开关
@@ -139,6 +140,8 @@ class SettingsWindow(QWidget):
         }
         self._build_ui()
         self._wire_signals()
+        # 按当前引擎摆好 TTS 相关字段（edge / gptsovits / minimax 各用各的）
+        self._update_tts_engine_visibility()
         self._load_defaults()
         self._attached_state = None
 
@@ -1082,13 +1085,16 @@ class SettingsWindow(QWidget):
         gp.addWidget(self.cb_proactive, 0, 0, 1, 3)
         gp.addWidget(QLabel("间隔下限（分）"), 1, 0)
         self.spin_proactive_min = QSpinBox()
-        self.spin_proactive_min.setRange(1, 720)
+        # 下限最小 5 分钟：ProactiveBrain 内部会把 <5 的值抬成 5，
+        # 面板下限照着来，用户才设不出"显示了却不是那个值"的选项
+        self.spin_proactive_min.setRange(5, 720)
         self.spin_proactive_min.setValue(int(st_p.get("min_minutes", 25)))
         self.spin_proactive_min.valueChanged.connect(self._emit_proactive)
         gp.addWidget(self.spin_proactive_min, 1, 1)
         gp.addWidget(QLabel("上限（分）"), 2, 0)
         self.spin_proactive_max = QSpinBox()
-        self.spin_proactive_max.setRange(5, 720)
+        # 上限至少要比下限多 5（ProactiveBrain 的规则），这里同步
+        self.spin_proactive_max.setRange(10, 720)
         self.spin_proactive_max.setValue(int(st_p.get("max_minutes", 45)))
         self.spin_proactive_max.valueChanged.connect(self._emit_proactive)
         gp.addWidget(self.spin_proactive_max, 2, 1)
@@ -1656,7 +1662,13 @@ class SettingsWindow(QWidget):
             "zh-CN-YunzeNeural",
         ])
         self.cmb_voice.currentTextChanged.connect(self._on_voice_changed)
-        vform.addRow("语音音色：", self.cmb_voice)
+        # 语音音色只有 edge 引擎认 —— 整行包进容器, 切引擎时一起显隐
+        self._row_edge_voice = QWidget()
+        _rv = QHBoxLayout(self._row_edge_voice)
+        _rv.setContentsMargins(0, 0, 0, 0)
+        _rv.addWidget(QLabel("语音音色："))
+        _rv.addWidget(self.cmb_voice, 1)
+        vform.addRow("", self._row_edge_voice)
 
         # GPT-SoVITS 多音色：默认音色（桌宠平时说话用；候选在 config.yaml voices 配置）
         self.cmb_default_voice = QComboBox()
@@ -1667,7 +1679,12 @@ class SettingsWindow(QWidget):
         _ci0 = self.cmb_default_voice.findData(_cv0)
         if self.cmb_default_voice.count():
             self.cmb_default_voice.setCurrentIndex(_ci0 if _ci0 >= 0 else 0)
-        vform.addRow("默认音色：", self.cmb_default_voice)
+        self._row_default_voice = QWidget()
+        _rd = QHBoxLayout(self._row_default_voice)
+        _rd.setContentsMargins(0, 0, 0, 0)
+        _rd.addWidget(QLabel("默认音色："))
+        _rd.addWidget(self.cmb_default_voice, 1)
+        vform.addRow("", self._row_default_voice)
 
         self.cb_tts_enabled = QCheckBox("启用语音朗读")
         self.cb_tts_enabled.setChecked(True)
@@ -1698,18 +1715,38 @@ class SettingsWindow(QWidget):
 
         self.edit_minimax_voice_id = QLineEdit(str(st_tts.get("minimax_voice_id", "")))
         self.edit_minimax_voice_id.setPlaceholderText("tools/clone_voice.py 生成的 voice_id")
-        gform.addRow("MiniMax voice_id：", self.edit_minimax_voice_id)
+        self._row_minimax = QWidget()
+        _rm = QHBoxLayout(self._row_minimax)
+        _rm.setContentsMargins(0, 0, 0, 0)
+        _rm.addWidget(QLabel("MiniMax voice_id："))
+        _rm.addWidget(self.edit_minimax_voice_id, 1)
+        gform.addRow("", self._row_minimax)
 
         self.edit_gptsovits_url = QLineEdit(str(st_tts.get("gptsovits_url", "http://127.0.0.1:9880")))
-        gform.addRow("GSV 服务地址：", self.edit_gptsovits_url)
+        self._row_gsv_url = QWidget()
+        _rg = QHBoxLayout(self._row_gsv_url)
+        _rg.setContentsMargins(0, 0, 0, 0)
+        _rg.addWidget(QLabel("GSV 服务地址："))
+        _rg.addWidget(self.edit_gptsovits_url, 1)
+        gform.addRow("", self._row_gsv_url)
 
         self.edit_gptsovits_ref = QLineEdit(str(st_tts.get("ref_audio", "")))
         self.edit_gptsovits_ref.setPlaceholderText("参考音频 wav 的完整路径（3~10 秒）")
-        gform.addRow("参考音频：", self.edit_gptsovits_ref)
+        self._row_gsv_ref = QWidget()
+        _rr = QHBoxLayout(self._row_gsv_ref)
+        _rr.setContentsMargins(0, 0, 0, 0)
+        _rr.addWidget(QLabel("参考音频："))
+        _rr.addWidget(self.edit_gptsovits_ref, 1)
+        gform.addRow("", self._row_gsv_ref)
 
         self.edit_gptsovits_prompt = QLineEdit(str(st_tts.get("prompt_text", "")))
         self.edit_gptsovits_prompt.setPlaceholderText("参考音频里说的那句话")
-        gform.addRow("参考文本：", self.edit_gptsovits_prompt)
+        self._row_gsv_prompt = QWidget()
+        _rp = QHBoxLayout(self._row_gsv_prompt)
+        _rp.setContentsMargins(0, 0, 0, 0)
+        _rp.addWidget(QLabel("参考文本："))
+        _rp.addWidget(self.edit_gptsovits_prompt, 1)
+        gform.addRow("", self._row_gsv_prompt)
 
         self.tts_tip = QLabel("修改任一项立即保存并热切换引擎。minimax 需账号开通声音克隆；"
                               "gptsovits 需先启动本地 api_v2 服务。")
@@ -1724,6 +1761,8 @@ class SettingsWindow(QWidget):
 
         # 新控件 → 统一发射（放在控件创建之后连接）
         self.cmb_tts_engine.currentIndexChanged.connect(self._emit_tts_config)
+        self.cmb_tts_engine.currentIndexChanged.connect(
+            self._update_tts_engine_visibility)
         if hasattr(self, "cmb_default_voice"):
             self.cmb_default_voice.currentIndexChanged.connect(self._emit_tts_config)
         self.edit_minimax_voice_id.editingFinished.connect(self._emit_tts_config)
@@ -2097,20 +2136,70 @@ class SettingsWindow(QWidget):
             self.btn_toggle_key.setText("显示")
 
     def _on_preset_clicked(self, btn, cfg: dict) -> None:
-        """点击预设按钮，自动填充对应 API 地址和模型名。"""
+        """点击预设按钮：自动填充对应 API 地址和模型名。
+
+        换厂商必须换 Key —— 留着上一家的 Key 带着旧地址发请求必然 401，
+        所以这里把 Key 清空并提示用户填新厂商的。
+        """
         self.edt_base_url.blockSignals(True)
         self.edt_base_url.setText(cfg["base_url"])
         self.edt_base_url.blockSignals(False)
         self.cmb_model.blockSignals(True)
         self.cmb_model.setEditText(cfg["model"])
         self.cmb_model.blockSignals(False)
+        self.edt_api_key.blockSignals(True)
+        self.edt_api_key.clear()
+        self.edt_api_key.blockSignals(False)
         self._on_model_config_changed()
-        self._set_status(f"已应用预设：{btn.text()}")
+        self._set_status(f"已应用预设：{btn.text()} —— 请填该厂商的 API Key")
 
     def _on_voice_changed(self, voice: str) -> None:
         """用户修改了 TTS 语音，发出信号并持久化。"""
         self.settings_store.set("tts_voice", voice)
         self.voice_changed.emit(voice)
+
+    def snapshot_to_store(self) -> None:
+        """把面板当前状态整体写进 settings.json（「保存设置」按钮用）。
+
+        之前保存按钮只快照了 scale / opacity / 置顶 + 几个 Live2D 参数，
+        跨fade / 行为节拍 / FPS 监测 / 锁第一帧这些改了都不落盘 ——
+        提示写着"重启后自动生效"，实际重启就丢。
+        """
+        st = self.settings_store
+        st.set("scale", self.get_scale())
+        st.set("opacity", self.get_opacity())
+        st.set("always_on_top", self.is_always_on_top())
+        st.set("crossfade_enabled", self.is_crossfade_enabled())
+        st.set("crossfade_ms", self.crossfade_ms_slider.value())
+        st.set("lock_first_idle", self.is_lock_first_idle())
+        st.set("fps_monitor", self.cb_fps_monitor.isChecked())
+        st.set("frame_ms", self.frame_ms_slider.value())
+        for key, (slider, _label) in self.motion_sliders.items():
+            st.set(f"motion_{key}", slider.value())
+        st.set("developer_mode", bool(self.developer_mode))
+        st.set("proactive_enabled", self.cb_proactive.isChecked())
+        st.set("proactive_min_minutes", self.spin_proactive_min.value())
+        st.set("proactive_max_minutes", self.spin_proactive_max.value())
+        st.set("tts_enabled", self.cb_tts_enabled.isChecked())
+        st.set("tts_voice", self.cmb_voice.currentText())
+        st.set("tts_engine", str(self.cmb_tts_engine.currentData() or "edge"))
+        st.set("minimax_voice_id", self.edit_minimax_voice_id.text().strip())
+        st.set("gptsovits_url", self.edit_gptsovits_url.text().strip())
+        st.set("gptsovits_ref_audio", self.edit_gptsovits_ref.text().strip())
+        st.set("gptsovits_prompt_text", self.edit_gptsovits_prompt.text().strip())
+        st.set("current_voice", str(self.cmb_default_voice.currentData() or ""))
+
+    def reset_to_defaults(self) -> None:
+        """「重置默认值」按钮：UI + settings.json + 模型配置一起回默认。
+
+        只调 _load_defaults 不够 —— 那是纯 UI 重置（__init__ 里也在用，
+        不能写 store，否则每次启动都会把主人存的设置刷成默认）。
+        """
+        self._load_defaults()
+        # 模型参数回默认并落到 cfg.llm —— _load_defaults 里是 blockSignals 的，
+        # 这里显式发一次，主程序才会真的改 cfg
+        self._on_model_config_changed()
+        self.snapshot_to_store()
         self._set_status(f"语音已切换：{voice}")
 
     def _on_tts_enabled_changed(self, enabled: bool) -> None:
@@ -2119,20 +2208,19 @@ class SettingsWindow(QWidget):
         self.voice_changed.emit(self.cmb_voice.currentText() if enabled else "")
 
     def _on_preview_voice(self) -> None:
-        """试听当前选中的语音。"""
-        from app.voice.voice import TTS
-        voice = self.cmb_voice.currentText()
+        """试听：交给主程序用**当前引擎的真实实例**播。
+
+        之前这里自己 new 了一个 edge-tts —— 引擎是 gptsovits/minimax 时，
+        听到的根本不是你配的音色。
+        """
         # 角色名：优先 char_cfg，兜底「桌宠」，避免 None 触发 AttributeError
         name = "桌宠"
         if getattr(self, "char_cfg", None) is not None:
             name = getattr(self.char_cfg, "name", None) or name
         preview_text = f"你好呀，我是{name}，很高兴见到你。"
-        try:
-            tts = TTS(voice=voice)
-            tts.speak(preview_text)
-            self._set_status(f"正在试听：{voice}")
-        except Exception as e:  # noqa: BLE001
-            self._set_status(f"试听失败：{e}")
+        engine = str(self.cmb_tts_engine.currentData() or "edge")
+        self.preview_voice_requested.emit(preview_text)
+        self._set_status(f"正在试听（{engine}）：{preview_text}")
 
     def get_model_config(self) -> dict:
         """获取当前模型配置（供主程序读取）。"""
@@ -2222,9 +2310,42 @@ class SettingsWindow(QWidget):
         # v30: _emit_character 已删除 — 人设改读 characters/<file>.yaml,
         # 设置面板不再允许运行时编辑 persona / name。
 
+    def _update_tts_engine_visibility(self) -> None:
+        """按当前 TTS 引擎显隐相关选项。
+
+        之前所有字段一股脑全摆出来 —— 换个引擎, 上一家的字段还杵在那儿,
+        看着能填, 填了没用 (edge 的音色下拉在 gptsovits 下完全不参与合成)。
+        """
+        engine = str(self.cmb_tts_engine.currentData() or "edge")
+        is_edge = engine == "edge"
+        is_gsv = engine == "gptsovits"
+        is_mm = engine == "minimax"
+        if hasattr(self, "_row_edge_voice"):
+            self._row_edge_voice.setVisible(is_edge)
+        if hasattr(self, "_row_default_voice"):
+            # 默认音色是 voices profile 那套（gptsovits 用），edge 走音色下拉
+            self._row_default_voice.setVisible(is_gsv and self.cmb_default_voice.count() > 0)
+        if hasattr(self, "_row_minimax"):
+            self._row_minimax.setVisible(is_mm)
+        for attr, on in (("_row_gsv_url", is_gsv), ("_row_gsv_ref", is_gsv),
+                         ("_row_gsv_prompt", is_gsv)):
+            row = getattr(self, attr, None)
+            if row is not None:
+                row.setVisible(on)
+
     def _emit_proactive(self) -> None:
-        lo = min(self.spin_proactive_min.value(), self.spin_proactive_max.value())
-        hi = max(self.spin_proactive_min.value(), self.spin_proactive_max.value())
+        lo = max(5, self.spin_proactive_min.value())
+        hi = max(lo + 5, self.spin_proactive_max.value())
+        # 回显实际生效值 —— ProactiveBrain 会按同样规则钳制，
+        # 面板不跟着回显的话，用户看到的数和实际跑的不是一回事
+        if self.spin_proactive_min.value() != lo:
+            self.spin_proactive_min.blockSignals(True)
+            self.spin_proactive_min.setValue(lo)
+            self.spin_proactive_min.blockSignals(False)
+        if self.spin_proactive_max.value() != hi:
+            self.spin_proactive_max.blockSignals(True)
+            self.spin_proactive_max.setValue(hi)
+            self.spin_proactive_max.blockSignals(False)
         self.proactive_changed.emit({
             "enabled": self.cb_proactive.isChecked(),
             "min_minutes": lo,

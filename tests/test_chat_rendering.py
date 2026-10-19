@@ -516,16 +516,19 @@ def test_settings_window_preview_voice_no_crash_without_cfg():
 
 
 def test_settings_window_preview_voice_uses_char_name():
-    """试听时拼接的角色名应来自 char_cfg。"""
-    import unittest.mock as mock
+    """试听时拼接的角色名应来自 char_cfg。
+
+    试听不再自己 new 一个 edge-tts（那样引擎是 gptsovits/minimax 时
+    听到的根本不是你配的音色），改成把文本发给主程序，用当前引擎实例播。
+    """
     char_cfg = CharacterConfig(name="测试娘")
     sw = SettingsWindow(char_cfg=char_cfg)
-    with mock.patch("app.voice.voice.TTS") as mock_tts:
-        mock_tts.return_value.speak = mock.MagicMock()
-        sw._on_preview_voice()
-        # 验证 speak 被调用，参数包含 "测试娘"
-        args, _ = mock_tts.return_value.speak.call_args
-        assert "测试娘" in args[0], f"preview text should contain character name, got {args[0]!r}"
+    sent: list = []
+    sw.preview_voice_requested.connect(sent.append)
+    sw._on_preview_voice()
+    assert sent, "试听没有发出 preview_voice_requested 信号"
+    assert "测试娘" in sent[0], (
+        f"preview text should contain character name, got {sent[0]!r}")
     print("[OK] SettingsWindow preview voice uses character name from char_cfg")
 
 

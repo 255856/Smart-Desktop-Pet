@@ -191,6 +191,7 @@ class UIController(QObject):
         sw.fps_monitor_toggled.connect(self._on_fps_monitor_toggled)
         sw.lock_first_idle_changed.connect(self.pet.animator.set_lock_first_idle)
         sw.crossfade_changed.connect(self._on_crossfade_changed)
+        sw.preview_voice_requested.connect(self._on_preview_voice_requested)
         sw.emotion_requested.connect(self.pet.play_emotion)
         sw.sleep_requested.connect(self.pet.animator.set_sleep)
         sw.idle_requested.connect(self.pet.animator.set_wake)
@@ -917,6 +918,32 @@ class UIController(QObject):
             sw.scale_slider.blockSignals(False)
             sw._highlight_scale_preset(new_scale)
 
+    def _on_preview_voice_requested(self, text: str) -> None:
+        """试听：用**当前引擎的真实 TTS 实例**播。
+
+        面板之前自己 new 了一个 edge-tts，引擎是 gptsovits/minimax 时，
+        听到的压根不是你配的音色。
+        """
+        tts = getattr(self, "tts", None)
+        sw = self.settings_window
+        if tts is None:
+            sw._set_status("试听失败：语音引擎还没初始化")
+            return
+        # speak() 在关闭状态下会直接丢弃 —— 试听时临时打开一下
+        was_on = bool(getattr(tts, "enabled", False))
+        try:
+            if not was_on:
+                tts.set_enabled(True)
+            tts.speak(text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("试听失败: %s", e)
+            sw._set_status(f"试听失败：{e}")
+            return
+        finally:
+            if not was_on:
+                tts.set_enabled(False)
+        sw._set_status("正在试听…")
+
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
         if not self._is_sprite():
@@ -954,15 +981,20 @@ class UIController(QObject):
             pass
 
     def _reset_to_default_settings(self) -> None:
-        """重置所有设置为默认值。"""
-        self.settings_window._load_defaults()
+        """重置所有设置为默认值。
+
+        走 settings_window.reset_to_defaults() —— 它除了重置 UI，
+        还会把默认值真正写进 settings.json 并落到 cfg.llm。
+        之前只调 _load_defaults（纯 UI），重启又被旧值盖回来。
+        """
+        self.settings_window.reset_to_defaults()
         self._apply_visual_settings_with_rescale()
         self.pet.animator.set_lock_first_idle(False)
         if self._is_sprite():
             self.pet.player.set_crossfade_ms(0)
             self._override_frame_ms_now(50)
         self.pet._fps_enabled = False
-        self.settings_window._set_status("已重置默认值")
+        self.settings_window._set_status("已重置默认值（含 settings.json 与模型配置）")
 
     #  帧持久化
     def _do_retune_frames(self, ms: int) -> None:
@@ -1127,6 +1159,11 @@ class UIController(QObject):
         # 通知 brain 重建 proactive 的 LLMClient
         if self.brain.proactive is not None:
             self.brain.proactive.update_llm_config(self.cfg.llm)
+            # 面板的「超时时间」也要管主动关心 —— 之前它固定走
+            # chat.request_timeout_s（默认 20 秒），面板写 60 实际还是 20
+            setter = getattr(self.brain.proactive, "set_request_timeout", None)
+            if callable(setter):
+                setter(int(self.cfg.llm.timeout))
 
     def _on_voice_changed(self, voice: str) -> None:
         """用户修改了 TTS 语音，更新 TTS 引擎。"""
@@ -1348,9 +1385,8 @@ class UIController(QObject):
         sw = self.settings_window
         store = sw.settings_store
         try:
-            store.set("scale", sw.get_scale())
-            store.set("opacity", sw.get_opacity())
-            store.set("always_on_top", sw.is_always_on_top())
+            # 面板自己知道每个控件对应哪个键 —— 快照交给它做，别在这儿手抄一遍
+            sw.snapshot_to_store()
             r = self._live2d_renderer()
             if r is not None:
                 store.set("random_exp_enabled",

@@ -11,6 +11,8 @@
 import ast as _ast
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -183,3 +185,167 @@ def test_developer_mode_persisted():
     assert node is not None
     body = _ast.dump(node)
     assert "settings_store" in body, "开发者模式没持久化"
+
+
+# ---------- TTS：音色下拉 / 试听 ----------
+
+def test_voice_options_follow_engine():
+    """语音音色下拉只有 edge 认 —— 切到 gptsovits/minimax 时不该还杵在那儿。"""
+    node = _func_node("app/ui/settings_window.py", "_update_tts_engine_visibility")
+    assert node is not None, "缺 _update_tts_engine_visibility"
+    body = _ast.dump(node)
+    assert "_row_edge_voice" in body, "edge 音色行没按引擎显隐"
+    assert "_row_default_voice" in body
+    assert "_row_gsv_ref" in body
+    assert "_row_minimax" in body
+
+
+def test_preview_voice_uses_live_engine_instance():
+    """试听要走主程序当前的引擎实例，不能自己 new 一个 edge-tts。"""
+    node = _func_node("app/ui/settings_window.py", "_on_preview_voice")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "preview_voice_requested" in body, (
+        "面板没把试听请求发给主程序 —— 用的还是固定 edge-tts"
+    )
+    assert "TTS(" not in body, "面板不该自己 new TTS 实例"
+
+    src = _src("app/ui/ui_controller.py")
+    node = _func_node("app/ui/ui_controller.py", "_on_preview_voice_requested")
+    assert node is not None, "主程序没接试听请求"
+    body = _ast.dump(node)
+    assert "tts" in body, "试听没走当前引擎的 TTS 实例"
+
+
+# ---------- 主动关心间隔 ----------
+
+def test_proactive_interval_range_matches_backend():
+    """面板的间隔范围要跟 ProactiveBrain 的钳制规则一致。"""
+    src = _src("app/ui/settings_window.py")
+    node = _func_node("app/ui/settings_window.py", "_build_tab_control")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "spin_proactive_min" in body
+    # 下限最少 5 分钟（后端会抬到 5），上限至少比下限多 5
+    assert "setRange(5, 720)" in src, "间隔下限范围没跟后端规则对齐"
+    assert "setRange(10, 720)" in src, "间隔上限范围没跟后端规则对齐"
+
+    node = _func_node("app/ui/settings_window.py", "_emit_proactive")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "setValue" in body, "间隔被后端钳制后没回显 —— 面板显示的和实际跑的不是一回事"
+
+
+# ---------- API 预设 ----------
+
+def test_api_preset_clears_key():
+    """换厂商必须换 Key —— 留着旧 Key 必然 401。"""
+    node = _func_node("app/ui/settings_window.py", "_on_preset_clicked")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "edt_api_key" in body and "clear" in body, (
+        "切 API 预设没清 Key —— 换厂商带着旧 Key 必然 401"
+    )
+
+
+# ---------- 超时时间 ----------
+
+def test_proactive_follows_llm_timeout():
+    """面板的「超时时间」要管主动关心（之前它固定走 20 秒）。"""
+    node = _func_node("app/brain/proactive.py", "set_request_timeout")
+    assert node is not None, "ProactiveBrain 缺 set_request_timeout"
+    src = _src("app/ui/ui_controller.py")
+    assert "set_request_timeout" in src, "模型配置变更时没同步主动关心的超时"
+
+
+# ---------- 保存设置 / 重置默认值 ----------
+
+def test_snapshot_to_store_covers_all_groups():
+    """「保存设置」要真落盘 —— 之前只存了 scale/opacity/置顶几个。"""
+    node = _func_node("app/ui/settings_window.py", "snapshot_to_store")
+    assert node is not None, "缺 snapshot_to_store"
+    body = _ast.dump(node)
+    for key in ("crossfade_enabled", "motion_", "fps_monitor", "frame_ms",
+                "lock_first_idle", "developer_mode", "proactive_enabled",
+                "tts_engine", "scale", "opacity"):
+        assert key in body, f"snapshot_to_store 没覆盖 {key}"
+
+
+def test_reset_writes_store_and_model_config():
+    """「重置默认值」要写 store 并落到模型配置（之前只重置 UI）。"""
+    node = _func_node("app/ui/settings_window.py", "reset_to_defaults")
+    assert node is not None, "缺 reset_to_defaults"
+    body = _ast.dump(node)
+    assert "snapshot_to_store" in body, "重置后没写 store —— 重启又被旧值盖回来"
+    assert "_on_model_config_changed" in body, "重置后模型配置没落到 cfg"
+
+    src = _src("app/ui/ui_controller.py")
+    assert "reset_to_defaults" in src, "重置按钮走的还是旧的 _load_defaults"
+
+
+def test_load_defaults_does_not_write_store():
+    """_load_defaults 是纯 UI 重置（__init__ 里也在用）—— 不能写 store。"""
+    node = _func_node("app/ui/settings_window.py", "_load_defaults")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "snapshot_to_store" not in body, (
+        "_load_defaults 写 store 的话，每次启动都会把主人存的设置刷成默认"
+    )
+
+
+# ---------- TTS 行显隐：真控件验证 ----------
+
+@pytest.fixture
+def isolated_store(monkeypatch, tmp_path):
+    """settings.json 隔离到临时目录 —— 真机上存的值不该影响断言。"""
+    import app.ui.settings_window as sw_mod
+    from app.core.settings_store import SettingsStore
+
+    monkeypatch.setattr(
+        sw_mod, "SettingsStore",
+        lambda path="settings.json": SettingsStore(tmp_path / "settings.json"))
+
+
+def _tts_rows(qapp, engine: str) -> dict:
+    """建设置面板切到某引擎，返回各行的可见状态。"""
+    from app.core.qt_compat import Qt
+    from app.ui.settings_window import SettingsWindow
+
+    sw = SettingsWindow(parent=None, char_cfg=None, renderer=None)
+    idx = sw.cmb_tts_engine.findData(engine)
+    if idx >= 0:
+        sw.cmb_tts_engine.setCurrentIndex(idx)
+    qapp.processEvents()
+
+    def shown(row):
+        if row is None:
+            return False
+        return not row.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
+
+    out = {
+        "edge_voice": shown(getattr(sw, "_row_edge_voice", None)),
+        "default_voice": shown(getattr(sw, "_row_default_voice", None)),
+        "minimax": shown(getattr(sw, "_row_minimax", None)),
+        "gsv_url": shown(getattr(sw, "_row_gsv_url", None)),
+        "gsv_ref": shown(getattr(sw, "_row_gsv_ref", None)),
+        "gsv_prompt": shown(getattr(sw, "_row_gsv_prompt", None)),
+    }
+    sw.deleteLater()
+    return out
+
+
+def test_tts_rows_switch_with_engine(qapp, isolated_store):
+    """切引擎时, 只有该引擎认的字段留在面板上。"""
+    edge = _tts_rows(qapp, "edge")
+    assert edge["edge_voice"] is True, "edge 引擎下该显示音色下拉"
+    assert edge["gsv_ref"] is False, "edge 引擎下不该显示 GPT-SoVITS 的参考音频"
+
+    gsv = _tts_rows(qapp, "gptsovits")
+    assert gsv["gsv_ref"] is True, "gptsovits 引擎下该显示参考音频"
+    assert gsv["gsv_prompt"] is True
+    assert gsv["edge_voice"] is False, "gptsovits 下不该显示 edge 音色下拉"
+    assert gsv["minimax"] is False, "gptsovits 下不该显示 minimax 的 voice_id"
+
+    mm = _tts_rows(qapp, "minimax")
+    assert mm["minimax"] is True, "minimax 引擎下该显示 voice_id"
+    assert mm["gsv_url"] is False

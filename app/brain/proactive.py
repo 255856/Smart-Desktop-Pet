@@ -145,6 +145,15 @@ class ProactiveBrain(QObject):
         self.llm_cfg = new_cfg
         log.info("ProactiveBrain: LLM 配置已更新 → %s @ %s", new_cfg.model, new_cfg.base_url)
 
+    def set_request_timeout(self, seconds: int | None) -> None:
+        """设置面板改了「超时时间」—— 主动关心这边也跟。
+
+        之前主动关心固定走 chat.request_timeout_s（默认 20 秒），面板上那个
+        超时时间对它不生效 —— 面板显示 60、实际 20，行为跟界面说的不一样。
+        """
+        self._request_timeout_s = None if seconds is None else int(seconds)
+        log.info("ProactiveBrain: 请求超时 → %s", self._request_timeout_s)
+
     def _build_aw_context(self) -> str:
         """拿 AW 活动数据；未启用 / aw-server 未跑 / 无 watcher 时返回空字符串。"""
         aw_cfg = self._aw_cfg
