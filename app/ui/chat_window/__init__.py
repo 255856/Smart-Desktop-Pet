@@ -3485,6 +3485,31 @@ class ChatWindow(QWidget):
         )
         return '<div class="file-edits">' + head + "".join(rows) + '</div>'
 
+    def _msg_mood_to_border(self) -> str:
+        """v38: 把桌宠当前 mood 量化 → 心情色 token (signature 元素).
+
+        state 为 None / quantize 失败 → MOOD_NONE (暖灰)
+        mood HIGH → 樱粉 (热情)
+        mood MID  → 蜜桃 (温和)
+        mood LOW  → 雾蓝 (低落)
+
+        配合 CHAT_MD_CSS 的 .msg-assistant border-left + 内联 style 覆盖,
+        主人看到桌宠心情直接呈现在聊天气泡左边, 不需要专门看状态栏.
+        """
+        try:
+            state = self._attached_state
+            if state is None:
+                return ui_style.MOOD_NONE
+            q = state.quantize()
+            mood = q.get("mood", "MID")
+            if mood == "HIGH":
+                return ui_style.MOOD_HIGH
+            if mood == "LOW":
+                return ui_style.MOOD_LOW
+            return ui_style.MOOD_MID
+        except Exception:  # noqa: BLE001
+            return ui_style.MOOD_NONE
+
     def _msg_html(self, msg: Message, *, streaming_meta: Optional[str] = None) -> str:
         """按已完成的 Message 渲染成 HTML 字符串 (MiniMax Code 风格线性流)。
 
@@ -3571,8 +3596,18 @@ class ChatWindow(QWidget):
             f'</div>'
         )
         role_class = "msg-user" if is_user else "msg-assistant"
+        # v38: signature 元素 — 桌宠消息左边 3px 心情色带
+        # _msg_mood_to_border(quantize → mood HIGH/MID/LOW) 映射到 MOOD_HIGH/MID/LOW
+        # 没量化数据时 (state=None) 走 MOOD_NONE (暖灰)
+        msg_style = ""
+        if not is_user:
+            try:
+                border_color = self._msg_mood_to_border()
+            except Exception:  # noqa: BLE001
+                border_color = ui_style.MOOD_NONE
+            msg_style = f' style="border-left:3px solid {border_color};"'
         return (
-            f'<div class="msg {role_class}">'
+            f'<div class="msg {role_class}"{msg_style}>'
             f'{label_html}'
             f'<div class="msg-body">{body_html}</div>'
             f'</div>'

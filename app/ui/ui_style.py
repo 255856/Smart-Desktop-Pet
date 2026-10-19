@@ -11,16 +11,17 @@ _ARROW_URL = (_ICON_DIR / "arrow_down.png").as_posix()
 _ARROW_UP_URL = (_ICON_DIR / "arrow_up.png").as_posix()
 _CHECK_URL = (_ICON_DIR / "check.png").as_posix()
 
-BG        = "#f5f5fb"   # 窗口底色（浅紫灰）
-CARD      = "#ffffff"   # 卡片
-CARD_GRAD = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ffffff, stop:1 #fbfaff)"
-BORDER    = "#e7e4f2"   # 卡片描边
-TEXT      = "#2c2c38"   # 主文字
-TEXT_SUB  = "#8a8a9c"   # 次要文字
-ACCENT    = "#7c6cf0"   # 主色（紫罗兰）
-ACCENT_DK = "#6a58e0"   # 主色 hover
-ACCENT_BG = "#efeaff"   # 主色浅底（选中/hover 背景）
-ACCENT_LT = "#a99bfa"   # 主色浅（focus 边框/发光）
+BG        = "#faf6f2"   # 窗口底色（暖米白）
+CARD      = "#fffcf8"   # 卡片（暖白）
+CARD_GRAD = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #fffcf8, stop:1 #fdf3ed)"
+BORDER    = "#ebe3d6"   # 卡片描边（暖灰）
+TEXT      = "#4a3d6e"   # 主文字（莓紫, 跟樱粉配）
+TEXT_SUB  = "#8a7f8c"   # 次要文字
+# v38: 主色从紫罗兰改为樱粉 — 摆脱通用 SaaS 感, 跟桌宠养成主题契合
+ACCENT    = "#E89AAE"   # 主色（樱粉）
+ACCENT_DK = "#D17F95"   # 主色 hover（深樱粉）
+ACCENT_BG = "#fceef1"   # 主色浅底（选中/hover 背景）
+ACCENT_LT = "#F5C9D3"   # 主色浅（focus 边框/发光）
 DANGER    = "#ef5f7e"   # 停止/退出
 FONT      = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 
@@ -34,15 +35,24 @@ MINT_BORDER= "#A7E6C7"   # 已完成描边
 LOCKED     = "#A0A0B0"   # 未解锁 (中性灰)
 LOCKED_BG  = "#F4F4F8"   # 未解锁浅底
 LOCKED_BORDER = "#E2E2EA" # 未解锁描边
-SHADOW_RGBA = "rgba(124, 108, 240, 0.07)"  # 卡片柔阴影
+SHADOW_RGBA = "rgba(232, 154, 174, 0.10)"  # 卡片柔阴影（粉调）
+
+# v38: 桌宠心情光谱 (signature 元素 — 聊天气泡左侧色边)
+# 跟创新点 2 主题契合: 桌宠心情 LOW/MID/HIGH → 聊天气泡左边色带不同颜色
+# HIGH = 樱粉 (热情), MID = 蜜桃 (温和), LOW = 雾蓝 (低落)
+MOOD_HIGH = "#E89AAE"   # 樱粉
+MOOD_MID  = "#FFB88A"   # 蜜桃
+MOOD_LOW  = "#B8C5D6"   # 雾蓝
+MOOD_NONE = "#D8D2C8"   # 无数据 (暖灰)
 
 # 4 个窗统一的 QGraphicsDropShadowEffect 参数 (QSS 不支持 box-shadow, 编程设)
 # 3 个窗 (chat_window / settings_window / memory_panel) 都用这套, 看着一致
+# v38: 阴影色跟主色一致 (樱粉, 不再是紫罗兰)
 WINDOW_SHADOW_BLUR   = 44
 WINDOW_SHADOW_OFFSET = 10
-WINDOW_SHADOW_COLOR_R = 124
-WINDOW_SHADOW_COLOR_G = 108
-WINDOW_SHADOW_COLOR_B = 240
+WINDOW_SHADOW_COLOR_R = 232
+WINDOW_SHADOW_COLOR_G = 154
+WINDOW_SHADOW_COLOR_B = 174
 WINDOW_SHADOW_ALPHA   = 60
 
 
@@ -298,10 +308,13 @@ CHAT_BUBBLE_CSS = (
     "td{vertical-align:top;}"
     # 消息元信息（名字 + 时间），位于气泡上方小字
     "span.meta{font-size:8pt;color:#a0a0b4;}"
-    "span.meta .name{font-weight:700;color:#7a6fe0;margin-right:6px;}"
-    # 气泡单元格：背景/边框/padding 在 _msg_html 里内联给出（Qt 对多 class
-    # 选择器和 td border-radius 支持不稳定，内联样式最可靠）。
-    "td.bubble{line-height:1.55;font-size:10pt;}"
+    "span.meta .name{font-weight:700;color:#d17f95;margin-right:6px;}"
+    # v38: 气泡左边 3px 心情色带 (signature 元素)
+    # 桌宠消息默认樱粉 (心情 HIGH), chat_window._msg_html 解析 message.mood
+    # 字段后可内联覆盖为蜜桃/雾蓝/暖灰. 状态联动让 UI 有"桌宠心情" 的视觉表达.
+    "td.bubble{line-height:1.55;font-size:10pt;border-left:3px solid #E89AAE;}"
+    # 用户消息气泡: 右边 3px 主色 (跟主系统樱粉呼应)
+    "td.user_bubble{border-left:none;border-right:3px solid #E89AAE;}"
     # 工具调用记录（紧凑小卡片）
     "div.tools{font-size:9pt;color:#3f3f46;background-color:#f5f3ff;"
     "border:1px solid #e9e3ff;border-radius:8px;padding:6px 9px;"
@@ -324,26 +337,29 @@ CHAT_BUBBLE_CSS = (
 # 类名必须保留（tests/test_chat_rendering.py 有断言）
 CHAT_MD_CSS = (
     # 基础排版: 跟 MiniMax Code 类似的中性灰底
-    "body{margin:0;padding:8px 14px;background:#ffffff;"
+    "body{margin:0;padding:8px 14px;background:#fffcf8;"
     "font-family:'Microsoft YaHei UI','Microsoft YaHei',"
     "'PingFang SC','SF Pro Text','Segoe UI',sans-serif;"
-    "font-size:11pt;line-height:1.65;color:#1f2937;}"
+    "font-size:11pt;line-height:1.65;color:#4a3d6e;}"
     # 消息主块: 上下 padding, 底部 1px 分隔线 (MiniMax Code 风格)
-    ".msg{padding:14px 4px 12px 4px;border-bottom:1px solid #eef0f4;}"
+    ".msg{padding:14px 4px 12px 4px;border-bottom:1px solid #ebe3d6;}"
     ".msg:last-child{border-bottom:none;}"
-    # 角色微调: user 有非常浅的灰底背景, assistant 纯白 (MiniMax Code 同款)
-    ".msg-user{background:#fafbfc;}"
-    ".msg-assistant{background:#ffffff;}"
+    # 角色微调: user 有非常浅的暖灰底背景, assistant 暖白 (跟新 BG 呼应)
+    ".msg-user{background:#faf6f2;}"
+    # v38: assistant 消息左边 3px 心情色带 (signature 元素, 跟 chat-window._msg_mood_to_border 联动)
+    # chat_window 内联 style 覆盖 border-left-color, 默认樱粉 (心情 HIGH)
+    ".msg-assistant{background:#fffcf8;border-left:3px solid #E89AAE;padding-left:10px;}"
+    ".msg-assistant:first-child{padding-top:14px;}"
     # user label 右对齐，assistant label 左对齐（IM 风格）
-    ".msg-user .msg-label{text-align:right;color:#475569;}"
+    ".msg-user .msg-label{text-align:right;color:#8a7f8c;}"
     ".msg-user .msg-body{text-align:right;}"
     ".msg-assistant .msg-label{text-align:left;}"
     ".msg-assistant .msg-body{text-align:left;}"
-    # 角色标签 (You / 桌宠) + 时间
-    ".msg-label{font-size:9pt;font-weight:600;color:#6366f1;"
+    # 角色标签 (You / 桌宠) + 时间 (主色改樱粉, 不再是紫罗兰)
+    ".msg-label{font-size:9pt;font-weight:600;color:#D17F95;"
     "letter-spacing:0.5px;margin-bottom:5px;}"
-    ".msg-user .msg-label{color:#475569;}"
-    ".msg-label .ts{font-weight:400;color:#94a3b8;margin-left:8px;"
+    ".msg-user .msg-label{color:#8a7f8c;}"
+    ".msg-label .ts{font-weight:400;color:#a89eaa;margin-left:8px;"
     "font-size:8.5pt;letter-spacing:0;}"
     # user 块右对齐（margin-left:auto 挤到右边，body 文本走 text-align:right）
     ".msg-user .msg-label, .msg-user .msg-body{display:block;"
