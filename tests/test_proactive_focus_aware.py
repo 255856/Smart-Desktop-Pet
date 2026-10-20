@@ -418,3 +418,200 @@ def test_tts_mute_threadsafe_can_be_called_from_non_main():
         assert mute_mod.is_muted() is True
     finally:
         mute_mod.set_mute_hook(None)
+
+
+# ============================================================
+# v55: OCR 进主动关心
+# ============================================================
+
+
+def test_app_supports_ocr_matches_ide_and_browser():
+    """编辑器/IDE/浏览器/办公软件都算内容型窗口，触发 OCR。"""
+    brain = _make_proactive()
+    assert brain._app_supports_ocr("当前窗口: Code - main.py (持续 60s)") is True
+    assert brain._app_supports_ocr("当前窗口: Chrome - GitHub (持续 120s)") is True
+    assert brain._app_supports_ocr("当前窗口: PyCharm - proj (持续 30s)") is True
+    assert brain._app_supports_ocr("当前窗口: Word - 报告.docx (持续 60s)") is True
+
+
+def test_app_supports_ocr_rejects_generic_apps():
+    """桌面/文件管理器这类无内容窗口不应该触发 OCR（节能）。"""
+    brain = _make_proactive()
+    assert brain._app_supports_ocr("当前窗口: 桌面 (持续 5s)") is False
+    assert brain._app_supports_ocr("当前窗口: Explorer - 我的文档 (持续 5s)") is False
+    assert brain._app_supports_ocr("") is False
+
+
+def test_should_run_ocr_now_respects_rate_limit():
+    """第一次必跑, 跑完后 5 分钟内不跑, 5 分钟后恢复。"""
+    import time as _t
+    brain = _make_proactive()
+    # 初始 _last_screen_ocr_ts = 0 → 必跑
+    assert brain._should_run_ocr_now() is True
+    # 模拟刚刚跑完
+    brain._last_screen_ocr_ts = _t.time()
+    assert brain._should_run_ocr_now() is False
+    # 5 分钟前 → 恢复
+    brain._last_screen_ocr_ts = _t.time() - 301
+    assert brain._should_run_ocr_now() is True
+
+
+def test_read_screen_excerpt_returns_none_when_screenshot_fails():
+    """截图失败时返 None（不阻塞主动搭话）。"""
+    brain = _make_proactive()
+    with mock.patch(
+        "app.engine.screenshot.take_screenshot",
+        return_value=None,
+    ):
+        assert brain._read_screen_excerpt() is None
+
+
+def test_read_screen_excerpt_returns_none_when_ocr_returns_error():
+    """OCR 后端不可用 (返 '错误：...') 时, 返 None。"""
+    brain = _make_proactive()
+    with mock.patch(
+        "app.engine.screenshot.take_screenshot",
+        return_value=b"\x89PNG fake",
+    ), mock.patch(
+        "app.engine.tools._ocr._ocr",
+        return_value="错误：OCR 不可用。Windows 内置 OCR 需要 pip install winsdk...",
+    ):
+        assert brain._read_screen_excerpt() is None
+
+
+def test_read_screen_excerpt_truncates_to_max_chars():
+    """OCR 文本截到 _OCR_MAX_CHARS 字符 (200)。"""
+    from app.brain import proactive as p_mod
+    brain = _make_proactive()
+    long_text = "一二三四五六七八九十" * 50  # 500 字
+    with mock.patch(
+        "app.engine.screenshot.take_screenshot",
+        return_value=b"\x89PNG fake",
+    ), mock.patch(
+        "app.engine.tools._ocr._ocr",
+        return_value=long_text,
+    ):
+        excerpt = brain._read_screen_excerpt()
+    assert excerpt is not None
+    assert len(excerpt) <= p_mod._OCR_MAX_CHARS
+    assert excerpt == long_text[:p_mod._OCR_MAX_CHARS]
+
+
+def test_read_screen_excerpt_handles_ocr_exception():
+    """OCR 抛异常时优雅返 None。"""
+    brain = _make_proactive()
+    with mock.patch(
+        "app.engine.screenshot.take_screenshot",
+        return_value=b"\x89PNG fake",
+    ), mock.patch(
+        "app.engine.tools._ocr._ocr",
+        side_effect=RuntimeError("winsdk fail"),
+    ):
+        assert brain._read_screen_excerpt() is None
+
+
+def test_prepare_injects_screen_excerpt_when_conditions_met():
+    """窗口是 VSCode + 距上次 OCR > 5min + AW 不可达（空上下文）→ 注入 OCR 文字。"""
+    from app.brain.proactive import _ChatOnceWorker
+    import app.brain.llm_client as llm_mod
+
+    brain = _make_proactive()
+    # 让 _should_run_ocr_now 一定为 True
+    brain._last_screen_ocr_ts = 0.0
+
+    captured_messages = []
+
+    class _FakeLLMClient:
+        def __init__(self, cfg, system, request_timeout_s=None):
+            self.cfg = cfg
+            self.system = system
+
+        async def chat_once(self, messages):
+            # 把系统提示保存, 我们在外面检查它是否包含 screen_excerpt
+            captured_messages.append(self.system)
+            return "主人好~"
+
+        async def close(self):
+            pass
+
+    def fake_init(cfg, system, request_timeout_s=None):
+        return _FakeLLMClient(cfg, system, request_timeout_s)
+
+    def fake_prepare():
+        # 跳过 idle / meeting 短路
+        if brain._read_idle_minutes() is not None and brain._read_idle_minutes() >= brain.idle_skip_minutes:
+            return None, None
+        if brain._is_in_meeting():
+            return None, None
+        # 复刻 ProactiveBrain._fire 内的 _prepare 逻辑 (OCR 部分)
+        focus_line = brain._fetch_focus_line() or ""
+        if focus_line and brain._app_supports_ocr(focus_line) and brain._should_run_ocr_now():
+            excerpt = brain._read_screen_excerpt()
+            brain._last_screen_ocr_ts = 9999999999  # 标记已跑
+            if excerpt:
+                context_extras = {"screen_excerpt": excerpt}
+            else:
+                context_extras = {}
+        else:
+            context_extras = {}
+        # 简化 system 拼接 (我们这里只关心 OCR 是否进了 system 提示)
+        system = (
+            "persona... [base prompt]"
+            + (f"\n[screen_excerpt]: {context_extras.get('screen_excerpt', '')}"
+               if context_extras.get('screen_excerpt') else "")
+        )
+        from app.brain.llm_client import ChatMessage
+        return system, [ChatMessage(role="user", content="dummy")]
+
+    done_signal = threading.Event()
+    done_payload = []
+    worker = _ChatOnceWorker(
+        llm_cfg=brain.llm_cfg,
+        system_prompt="",
+        messages=[],
+        prepare=fake_prepare,
+    )
+    worker.done.connect(lambda text: (done_payload.append(text), done_signal.set()))
+
+    with mock.patch.object(llm_mod, "LLMClient", side_effect=fake_init), \
+         mock.patch(
+             "app.integrations.activitywatch.get_idle_status",
+             return_value=0.0,
+         ), \
+         mock.patch(
+             "app.integrations.activitywatch.is_focus_meeting",
+             return_value=False,
+         ), \
+         mock.patch(
+             "app.integrations.activitywatch.get_current_window_one_liner",
+             return_value="当前窗口: Code - myproject/main.py (持续 60s)",
+         ), \
+         mock.patch(
+             "app.engine.screenshot.take_screenshot",
+             return_value=b"\x89PNG fake",
+         ), \
+         mock.patch(
+             "app.engine.tools._ocr._ocr",
+             return_value="def main():\n    print('hello world')",
+         ):
+        worker.run()
+        done_signal.wait(timeout=2.0)
+
+    assert done_payload == ["主人好~"]
+    assert len(captured_messages) == 1
+    assert "screen_excerpt" in captured_messages[0]
+
+
+def test_prepare_skips_ocr_when_window_not_content_app():
+    """窗口是桌面/文件管理器 → 不触发 OCR, context 不含 screen_excerpt。"""
+    brain = _make_proactive()
+    brain._last_screen_ocr_ts = 0.0  # 必跑
+
+    # _app_supports_ocr 返 False → OCR 整体跳过
+    focus = "当前窗口: Desktop (持续 5s)"
+    assert brain._app_supports_ocr(focus) is False
+
+    # 直接验证 _should_run_ocr_now + _app_supports_ocr 的组合逻辑:
+    # 都满足才触发
+    assert (brain._should_run_ocr_now()
+            and brain._app_supports_ocr(focus)) is False

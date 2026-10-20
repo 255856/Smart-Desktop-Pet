@@ -9,14 +9,37 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
+import tempfile
 import threading
+import time
 from typing import Callable, Optional
 
 from app.core.qt_compat import QObject, QThread, Signal
 from app.core.api_keys import is_placeholder_key
 
 log = logging.getLogger(__name__)
+
+
+# v55: OCR 进主动关心的限速常量
+# 只对「内容创作型」窗口做 OCR, 5 分钟最多 1 次, 截前 200 字
+_OCR_APP_KEYWORDS = (
+    # 编辑器 / IDE
+    "Code", "Visual Studio", "PyCharm", "IntelliJ", "Sublime",
+    "Atom", "Notepad++", "WebStorm", "GoLand", "CLion",
+    "Cursor", "Trae", "Zed", "Xcode",
+    # 浏览器
+    "Chrome", "chrome", "Edge", "edge", "Firefox", "firefox",
+    "Brave", "Opera", "Vivaldi", "Arc",
+    # 办公 / 文档
+    "Word", "WPS", "PowerPoint", "Excel", "Acrobat",
+    "Adobe Reader", "Obsidian", "Typora", "Notion",
+    # 终端 / 命令行 (有时主人 tail 日志需要上下文)
+    "PowerShell", "WindowsTerminal", "iTerm", "Terminal",
+)
+_OCR_RATE_LIMIT_S = 300   # 5 分钟一次
+_OCR_MAX_CHARS = 200     # 截前 200 字, 够 LLM 拿类别
 
 
 class _ChatOnceWorker(QThread):
@@ -135,6 +158,8 @@ class ProactiveBrain(QObject):
         # v54: 闲置 / 会议感知阈值
         self.idle_skip_minutes = max(1, int(idle_skip_minutes))
         self.meeting_auto_mute_minutes = max(1, int(meeting_auto_mute_minutes))
+        # v55: 上次 OCR 屏幕的时间戳 (限速用)
+        self._last_screen_ocr_ts: float = 0.0
         # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     def apply_aw_config(self, aw_cfg) -> None:
@@ -209,6 +234,54 @@ class ProactiveBrain(QObject):
             )
         except Exception:  # noqa: BLE001
             return False
+
+    def _app_supports_ocr(self, focus_line: str) -> bool:
+        """当前窗口是否值得 OCR (编辑器 / 浏览器 / 文档类)。"""
+        return bool(focus_line) and any(kw in focus_line for kw in _OCR_APP_KEYWORDS)
+
+    def _should_run_ocr_now(self) -> bool:
+        """是否过 5 分钟限速窗口。"""
+        return (time.time() - self._last_screen_ocr_ts) >= _OCR_RATE_LIMIT_S
+
+    def _read_screen_excerpt(self) -> Optional[str]:
+        """截屏 + OCR + 截前 N 字。任何环节失败都返 None（不阻塞主动搭话）。
+
+        用本地 OCR (Windows.Media.Ocr / Tesseract), 不走云端。
+        """
+        try:
+            from app.engine.screenshot import take_screenshot
+            from app.engine.tools._ocr import _ocr as run_ocr
+            png = take_screenshot()
+            if not png:
+                return None
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                f.write(png)
+                tmp_path = f.name
+            try:
+                text = run_ocr(tmp_path) or ""
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            text = (text or "").strip()
+            # 错误信息 / 未识别 都不要当线索
+            if not text or text.startswith("错误：") or text == "(未识别到文字)":
+                return None
+            return text[:_OCR_MAX_CHARS]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _fetch_focus_line(self) -> Optional[str]:
+        """当前焦点窗口一句话描述 (复用 AW 集成)。失败返 None。"""
+        try:
+            from app.integrations.activitywatch import get_current_window_one_liner
+            return get_current_window_one_liner(
+                server_url=(getattr(self._aw_cfg, "server_url", None) or None),
+                hostname=(getattr(self._aw_cfg, "hostname", None) or None),
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     def _build_aw_context(self) -> str:
         """拿 AW 活动数据；未启用 / aw-server 未跑 / 无 watcher 时返回空字符串。"""
@@ -321,6 +394,24 @@ class ProactiveBrain(QObject):
                     "比如「看了半天 VSCode, 休息一下吧」; "
                     "对敏感标题（私人聊天/银行）只概括类别不复读标题。"
                 )
+
+            # v55: 低频 OCR — 当窗口是编辑器 / 浏览器 / 文档类时截屏 OCR 拿屏幕文字
+            focus_line = self._fetch_focus_line() or ""
+            if (focus_line and self._app_supports_ocr(focus_line)
+                    and self._should_run_ocr_now()):
+                excerpt = self._read_screen_excerpt()
+                # 不管成功失败都更新时间戳, 避免 OCR 持续失败时反复触发
+                self._last_screen_ocr_ts = time.time()
+                if excerpt:
+                    context["screen_excerpt"] = excerpt
+
+            screen_rule = ""
+            if context.get("screen_excerpt"):
+                screen_rule = (
+                    "\n7. `screen_excerpt` 是当前窗口 OCR 文字摘要 (可能与本地代码差异), "
+                    "可以用来更具体地关心主人在看什么, 比如「在看这篇 XX 啊, 累不累」; "
+                    "只概括类别/主题, 不要复述完整内容。"
+                )
             system = (
                 self.persona
                 + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
@@ -333,6 +424,7 @@ class ProactiveBrain(QObject):
                   "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
                   "情绪由语气自然表达即可。"
                   + aw_rule
+                  + screen_rule
             )
             from app.brain.llm_client import ChatMessage
             user = json.dumps(context, ensure_ascii=False)
