@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 from app.core.qt_compat import QObject, QThread, Signal
 from app.core.api_keys import is_placeholder_key
+from app.brain.routine_profiler import RoutineProfiler
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,11 @@ _OCR_APP_KEYWORDS = (
 )
 _OCR_RATE_LIMIT_S = 300   # 5 分钟一次
 _OCR_MAX_CHARS = 200     # 截前 200 字, 够 LLM 拿类别
+
+
+# v57: RoutineProfiler 数据目录 (在项目根 cwd/data 下, 默认)
+_ROUTINE_DATA_DIR = "data"
+_ROUTINE_REFRESH_THREAD_NAME = "proactive-rp-refresh"
 
 
 class _ChatOnceWorker(QThread):
@@ -160,6 +166,11 @@ class ProactiveBrain(QObject):
         self.meeting_auto_mute_minutes = max(1, int(meeting_auto_mute_minutes))
         # v55: 上次 OCR 屏幕的时间戳 (限速用)
         self._last_screen_ocr_ts: float = 0.0
+        # v57: 规律学习 — 离线聚合 AW 历史的 RoutineProfiler, 失败时不阻塞
+        try:
+            self.rp = RoutineProfiler(_ROUTINE_DATA_DIR)
+        except Exception:  # noqa: BLE001
+            self.rp = None
         # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     def apply_aw_config(self, aw_cfg) -> None:
@@ -171,6 +182,8 @@ class ProactiveBrain(QObject):
 
     def start(self) -> None:
         self._schedule()
+        # v57: 首次启动触发一次规律聚合 (后台线程, 不阻塞 GUI)
+        self._maybe_refresh_routine(force=True)
 
     def stop(self) -> None:
         if self._timer is not None:
@@ -283,6 +296,38 @@ class ProactiveBrain(QObject):
         except Exception:  # noqa: BLE001
             return None
 
+    # ---- v57: RoutineProfiler ----
+
+    def _routine_hint_for_now(self) -> str:
+        """当前时间的历史规律 hint, 失败/无数据返空串 (不阻塞主动搭话)。"""
+        if self.rp is None:
+            return ""
+        try:
+            return self.rp.hint_for_now() or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _maybe_refresh_routine(self, *, force: bool = False) -> None:
+        """后台线程拉 AW 历史聚合成规律; 陈旧时自动重拉。"""
+        if self.rp is None:
+            return
+        if not force and not self.rp.is_stale():
+            return
+        server_url = (getattr(self._aw_cfg, "server_url", None) or None)
+        hostname = (getattr(self._aw_cfg, "hostname", None) or None)
+
+        def _worker():
+            try:
+                self.rp.refresh_from_aw(
+                    server_url=server_url, hostname=hostname,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("RoutineProfiler: 后台刷新失败")
+
+        threading.Thread(
+            target=_worker, name=_ROUTINE_REFRESH_THREAD_NAME, daemon=True,
+        ).start()
+
     def _build_aw_context(self) -> str:
         """拿 AW 活动数据；未启用 / aw-server 未跑 / 无 watcher 时返回空字符串。"""
         aw_cfg = self._aw_cfg
@@ -329,6 +374,9 @@ class ProactiveBrain(QObject):
             self._schedule()   # 先排下一轮，本轮失败也不影响节奏
         except Exception:  # noqa: BLE001
             pass
+        # v57: 陈旧时异步刷新规律 (后台线程, 不阻塞本轮)
+        if self.rp is not None and self.rp.is_stale():
+            self._maybe_refresh_routine(force=False)
         if self.is_sleeping():
             log.info("ProactiveBrain: 桌宠在睡觉，跳过")
             return
@@ -340,6 +388,12 @@ class ProactiveBrain(QObject):
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
         mem = self.memory.recent(10)
+        # v56: 共同经历记忆 (我们之间发生过的事), 单独抽出来给规则 8 用
+        try:
+            shared = self.memory.recent_shared(3)
+        except AttributeError:
+            # 老版本 MemoryStore 没有 recent_shared, 兜底空
+            shared = []
         # 下面这些是纯内存/轻量读取，放 GUI 线程没关系。
         context_base = {
             "now": now.strftime(f"%Y-%m-%d %H:%M 星期{wd}"),
@@ -347,7 +401,10 @@ class ProactiveBrain(QObject):
             "time_hint": _get_time_context(now),
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
+            "shared_memories": [s.content for s in shared],
             "recent_remarks": self._last_remarks_by_char.get(self.char_name, [])[-3:],
+            # v57: 规律 hint — RoutineProfiler 读盘是轻量 IO, GUI 线程没关系
+            "routine_hint": self._routine_hint_for_now(),
         }
 
         def _prepare():
@@ -412,6 +469,24 @@ class ProactiveBrain(QObject):
                     "可以用来更具体地关心主人在看什么, 比如「在看这篇 XX 啊, 累不累」; "
                     "只概括类别/主题, 不要复述完整内容。"
                 )
+
+            # v56: 共同经历 — 自然引用「我们一起 XX」的故事, 比普通 fact 更贴切
+            shared_rule = ""
+            if context.get("shared_memories"):
+                shared_rule = (
+                    "\n8. `shared_memories` 是我们之间共同经历过的事 (关系叙事), "
+                    "如果跟当前话题相关, 可以自然引用一句 (比如「上次那盘棋你还记得吗」), "
+                    "但不要每轮都引用, 偶尔提一次就好; 没相关就别提。"
+                )
+
+            # v57: 规律 — 不强加「应该做什么」, 只在合适时提一句历史规律
+            routine_rule = ""
+            if context.get("routine_hint"):
+                routine_rule = (
+                    "\n9. `routine_hint` 是主人这个时段的历史规律 (比如通常在写代码), "
+                    "可以拿来当关心入口 (「这个时间又在写啊」), 不要硬套 — "
+                    "跟现在做的不一致时不要纠正主人。"
+                )
             system = (
                 self.persona
                 + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
@@ -425,6 +500,8 @@ class ProactiveBrain(QObject):
                   "情绪由语气自然表达即可。"
                   + aw_rule
                   + screen_rule
+                  + shared_rule
+                  + routine_rule
             )
             from app.brain.llm_client import ChatMessage
             user = json.dumps(context, ensure_ascii=False)
