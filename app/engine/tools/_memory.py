@@ -19,7 +19,7 @@ def register(reg: ToolRegistry, *, memory) -> None:
             "properties": {
                 "content": {"type": "string", "description": "要记住的内容，一句话"},
                 "category": {"type": "string", "enum": list(
-                    ("preference", "fact", "event", "skill", "person", "other")),
+                    ("preference", "fact", "event", "skill", "person", "shared", "other")),
                     "description": "类别"},
                 "importance": {"type": "number", "description": "重要性 0-1，默认 0.5"},
             },
@@ -49,7 +49,7 @@ def register(reg: ToolRegistry, *, memory) -> None:
             "properties": {
                 "keyword": {"type": "string", "description": "关键词，为空则按重要性返回"},
                 "category": {"type": "string", "enum": list(
-                    ("preference", "fact", "event", "skill", "person", "other")),
+                    ("preference", "fact", "event", "skill", "person", "shared", "other")),
                     "description": "按类别过滤"},
                 "limit": {"type": "integer", "description": "返回条数（默认 10）"},
             },

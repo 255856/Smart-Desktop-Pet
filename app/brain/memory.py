@@ -20,7 +20,7 @@ from typing import Optional, Protocol
 
 log = logging.getLogger(__name__)
 
-CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "other")
+CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "shared", "other")
 
 
 # SQLite schema：FTS5 虚拟表跟主表 1:1（trigger 同步），全文检索 O(log N)
@@ -585,6 +585,21 @@ class MemoryStore:
             self._index_dirty = True
         log.info("记忆新增 [%s] importance=%.2f: %s", category, importance, content[:60])
         return item
+
+    def add_shared(self, content: str, importance: float = 0.7) -> MemoryItem:
+        """v56: 加一条「共同经历」记忆（我们之间发生过的事）。
+
+        比 fact/person 多了一层关系叙事 —— 「上周三一起下棋你连输三盘」、
+        「上次那个方案你吐槽了最后还是采纳了」。主动搭话时会注入到
+        context，主人也能通过 recall_memory 按 shared 类别检索。
+        """
+        return self.add(content, category="shared", importance=importance)
+
+    def recent_shared(self, n: int = 3) -> list:
+        """v56: 最近 N 条共同经历（按 created_at 倒序）。"""
+        items = [i for i in self.all() if i.category == "shared"]
+        items.sort(key=lambda i: i.created_at, reverse=True)
+        return items[:max(0, int(n))]
 
     def remove(self, mid: str) -> bool:
         with self._lock:

@@ -22,6 +22,7 @@ CATEGORY_LABELS = {
     "event": "事件",
     "skill": "技能",
     "person": "人物",
+    "shared": "共同经历",
     "other": "其他",
 }
 # 类别小标签配色（文字 / 底色 / 边框）
@@ -31,6 +32,7 @@ CATEGORY_COLORS = {
     "event":      ("#b45309", "#fef3c7", "#fde68a"),
     "skill":      ("#047857", "#d1fae5", "#a7f3d0"),
     "person":     ("#6d28d9", "#ede9fe", "#ddd6fe"),
+    "shared":     ("#0e7490", "#cffafe", "#a5f3fc"),
     "other":      ("#475569", "#f1f5f9", "#e2e8f0"),
 }
 
