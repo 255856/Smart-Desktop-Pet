@@ -70,10 +70,6 @@ class SettingsWindow(QWidget):
     lock_first_idle_changed = Signal(bool)
     crossfade_changed = Signal(bool, int)  # enabled, ms
     fps_monitor_toggled = Signal(bool)
-    emotion_requested = Signal(str)   # 'happy' / 'sad' / 'angry' / 'shy' / 'think'
-    sleep_requested = Signal()
-    idle_requested = Signal()
-    chat_requested = Signal()
     model_config_changed = Signal(dict)
     voice_changed = Signal(str)    # edge 音色名（空串 = 关闭朗读）
     preview_voice_requested = Signal(str)   # 试听：请用当前引擎实例播这段文字
@@ -991,52 +987,6 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
-        g_short = QGroupBox("快捷入口")
-        gv = QHBoxLayout(g_short)
-        self.btn_chat  = QPushButton("和她聊聊")
-        self.btn_chat.setObjectName("accent_btn")
-        self.btn_sleep = QPushButton("睡觉")
-        self.btn_wake  = QPushButton("醒来")
-        gv.addWidget(self.btn_chat); gv.addWidget(self.btn_sleep); gv.addWidget(self.btn_wake)
-        v.addWidget(g_short)
-
-        # live2d 模型在 Live2D 页已有完整表情/外观，这里只给引导，不重复铺一长串按钮；
-        # sprite 渲染器则保留 5 个基础情绪。
-        g_emo = QGroupBox("切换表情")
-        self.emo_btns: list[tuple[QPushButton, str]] = []
-        has_live2d_menu = False
-        if self._renderer is not None:
-            try:
-                has_live2d_menu = bool(self._renderer.get_menu_groups())
-            except Exception:  # noqa: BLE001
-                has_live2d_menu = False
-        if has_live2d_menu:
-            gv = QVBoxLayout(g_emo)
-            tip = QLabel("完整的表情、发型、配件、手势请到「Live2D」标签页切换。")
-            tip.setWordWrap(True)
-            tip.setStyleSheet(f"color: {ui_style.TEXT_SUB}; font-size: 11px;")
-            gv.addWidget(tip)
-        else:
-            gv = QGridLayout(g_emo)
-            emo_list: list[tuple[str, str]] = []
-            if self._renderer is not None:
-                try:
-                    emo_list = [(label, key) for key, label in
-                                self._renderer.get_emotion_options()]
-                except Exception:  # noqa: BLE001
-                    emo_list = []
-            if not emo_list:
-                emo_list = [('开心', 'happy'), ('悲伤', 'sad'), ('生气', 'angry'),
-                            ('害羞', 'shy'), ('思考', 'think')]
-            for i, (text, key) in enumerate(emo_list):
-                btn = QPushButton(text)
-                btn.setCheckable(True)
-                btn.setMinimumHeight(32)
-                self.emo_btns.append((btn, key))
-                r, c = divmod(i, 3)
-                gv.addWidget(btn, r, c)
-        v.addWidget(g_emo)
-
         # 开发者模式开关
         g_dev = QGroupBox("开发者模式")
         gvd = QVBoxLayout(g_dev)
@@ -1819,16 +1769,6 @@ class SettingsWindow(QWidget):
         # lock idle
         self.cb_lock_first_idle.toggled.connect(self._on_lock_first_idle_toggled)
 
-        # 快捷入口
-        self.btn_chat.clicked.connect(self.chat_requested.emit)
-        self.btn_sleep.clicked.connect(self.sleep_requested.emit)
-        self.btn_wake.clicked.connect(self.idle_requested.emit)
-
-        # 表情
-        for btn, key in self.emo_btns:
-            btn.clicked.connect(lambda _=False, b=btn, k=key:
-                self._on_emotion_clicked(b, k))
-
         # 行为节拍
         for key, (slider, val_lbl) in self.motion_sliders.items():
             slider.valueChanged.connect(lambda v, k=key: self._on_motion_changed(k, v))
@@ -1911,11 +1851,6 @@ class SettingsWindow(QWidget):
         # 重新高亮（不触发信号）
         self._highlight_fps_preset(50)
         self._highlight_scale_preset(0.40)
-        # 表情互斥：全不选
-        for btn, _ in self.emo_btns:
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
         self._set_status("默认值已加载")
 
     #  从持久化存储加载设置
@@ -2110,16 +2045,6 @@ class SettingsWindow(QWidget):
         self.settings_store.set("crossfade_ms", v)
         if self.cb_crossfade.isChecked():
             self.crossfade_changed.emit(True, v)
-
-    def _on_emotion_clicked(self, btn, key: str) -> None:
-        for b, _ in self.emo_btns:
-            b.blockSignals(True)
-            b.setChecked(b is btn)
-            b.blockSignals(False)
-        self.emotion_requested.emit(key)
-        names = {'happy': '开心', 'sad': '悲伤', 'angry': '生气',
-                 'shy': '害羞', 'think': '思考'}
-        self._set_status(f"切换到表情：{names.get(key, key)}")
 
     def _on_motion_changed(self, key: str, v: int) -> None:
         if key in self.motion_sliders:

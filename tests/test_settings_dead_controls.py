@@ -445,7 +445,63 @@ def test_settings_window_has_avatar_picker_entry():
     assert "bot_avatar_changed.connect" in _src("app/ui/ui_controller.py")
 
 
-# ---------- 工具解锁窗口：自定义标题栏 (min/max/close) ----------
+# ---------- 贴纸/食物图片被 mask 遮罩挡住 ----------
+
+def test_sticker_show_forces_mask_update():
+    """主人反馈: 头顶表情包 / 食物图片刚 show 时被遮罩裁掉, 1.5s 后才完整显示。
+
+    _update_click_mask 是 1.5s 一次的定时采样, 贴纸矩形加进 mask 是按当前
+    isVisible() 算的 —— show 之后不立即触发, 就被旧 mask 裁到下一轮采样。
+    """
+    node = _func_node("app/ui/pet_window.py", "_present_sticker")
+    assert node is not None, "pet_window 缺 _present_sticker"
+    # _ast.dump 会把 QTimer.singleShot(0, ...) 里的数字字面量归一化成 Constant(value=0)
+    # 所以不能用字符串匹配, 直接扫所有 Call 节点找 singleShot(_, _update_click_mask)
+    found = False
+    for sub in _ast.walk(node):
+        if (isinstance(sub, _ast.Call)
+                and isinstance(sub.func, _ast.Attribute)
+                and sub.func.attr == "singleShot"
+                and len(sub.args) >= 2
+                and isinstance(sub.args[1], _ast.Attribute)
+                and sub.args[1].attr == "_update_click_mask"):
+            found = True
+            break
+    assert found, "贴纸 show 之后没立即触发 _update_click_mask —— 1.5s 内被旧 mask 裁"
+
+
+# ---------- 状态进度条改椭圆 ----------
+
+def test_status_progressbar_uses_ellipse_radius():
+    """状态模块的进度条改椭圆 (height 10px, border-radius 5px = 高度/2)。"""
+    src = _src("app/ui/ui_style.py")
+    # min-height 10 + border-radius 5 → 视觉上两端半圆
+    assert "min-height: 10px" in src, "进度条高度没改成 10px (椭圆要看高度/2)"
+    # chunk 同步 (不然填充跟外框圆角不一致)
+    assert "QProgressBar::chunk" in src
+    # radius 5 = 高度/2 (椭圆)
+    assert "border-radius: 5px" in src, "进度条圆角没改 5px (高度 10 的一半)"
+    # 老的 8px 圆角不该再出现
+    assert "border-radius: 8px" not in src or "QProgressBar" not in src.split("border-radius: 8px")[0][-200:], (
+        "QProgressBar 还用 8px 圆角 (高度 10 时不椭圆)"
+    )
+
+
+# ---------- 删控制模块的快捷入口和切换表情 ----------
+
+def test_control_tab_dropped_shortcut_and_emotion_panel():
+    """主人要求: 设置面板「控制」模块的快捷入口 + 切换表情整块删。
+
+    这两块对主人是冗余的 (右键桌宠、Live2D 标签页都能用), 删了更清爽。
+    """
+    src = _src("app/ui/settings_window.py")
+    for name in ("btn_chat", "btn_sleep", "btn_wake", "emo_btns",
+                 "chat_requested", "sleep_requested", "idle_requested",
+                 "emotion_requested", "_on_emotion_clicked"):
+        assert name not in src, f"控制 tab 还残留 {name} —— 主人要求删干净"
+    # signal 声明也要清 (4 个)
+    assert "快捷入口" not in src, "快捷入口的 GroupBox 文本还在"
+    assert "切换表情" not in src, "切换表情的 GroupBox 文本还在"
 
 def test_tool_unlock_has_titlebar_window_chrome():
     """工具解锁窗口无边框, 主人要求加 min/max/close 跟其他窗口一致。

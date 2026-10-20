@@ -1412,6 +1412,14 @@ class PetWindow(QWidget):
         self._sticker_label.move(x, y)
         self._sticker_label.show()
         self._sticker_label.raise_()
+        # 主人反馈：贴纸/食物图片有时候被遮罩挡住, 1.5s 之后才被纳入 mask 区域。
+        # _update_click_mask 是 1.5s 一次定时采样, 期间角色 + 贴纸都在动,
+        # 贴纸大概率落在旧 mask 外就被裁掉。show 之后立刻单跑一次 mask 更新,
+        # 让贴纸矩形(可见子控件)立即进 mask 区域 —— 用户眼里就是"瞬间出现"。
+        try:
+            QTimer.singleShot(0, self._update_click_mask)
+        except Exception:  # noqa: BLE001
+            pass
         QTimer.singleShot(max(300, int(duration_ms)), self._sticker_label.hide)
         return True
 

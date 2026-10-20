@@ -12,7 +12,8 @@ from typing import Optional
 from app.core.qt_compat import (
     QBrush, QColor, QDialog, QFont, QFontMetrics, QFrame, QHBoxLayout, QLabel,
     QLayout, QPainter, QPen, QPushButton, QRect, QScrollArea, QSize, QSizePolicy,
-    QToolTip, QVBoxLayout, QWidget, Qt, Signal, event_global_pos, event_local_pos,
+    QToolButton, QToolTip, QVBoxLayout, QWidget, Qt, Signal, event_global_pos,
+    event_local_pos,
 )
 
 

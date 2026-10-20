@@ -689,10 +689,10 @@ QCheckBox:disabled {{ color: #c3c1d4; }}
 QCheckBox::indicator:disabled {{ background: #f2f2f7; border-color: #e2e0ec; }}
 QCheckBox::indicator:checked:disabled {{ background: #d8d3f5; border-color: #d8d3f5; }}
 QProgressBar {{
-    background: #ecebf3; border: 1px solid #e4e3ee; border-radius: 8px;
-    min-height: 14px; text-align: center; font-size: 8pt; color: {TEXT_SUB};
+    background: #ecebf3; border: 1px solid #e4e3ee; border-radius: 5px;
+    min-height: 10px; text-align: center; font-size: 8pt; color: {TEXT_SUB};
 }}
-QProgressBar::chunk {{ border-radius: 8px; background: {ACCENT_LT}; }}
+QProgressBar::chunk {{ border-radius: 5px; background: {ACCENT_LT}; }}
 
 /* 滚动区域与窗口卡片融为一体（模型配置 Tab 内容较多） */
 QScrollArea {{ background: transparent; border: none; }}
