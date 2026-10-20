@@ -70,7 +70,8 @@ def test_tts_speak_queue_serialization():
             self.played: list[str] = []
             self._lock = threading.Lock()
 
-        def _speak_blocking(self, text, profile=None):  # type: ignore[override]
+        def _speak_blocking(self, text, profile=None, prosody=None):  # type: ignore[override]
+            # v58: prosody 是情绪 prosody 参数, 这里只测入队顺序不关心
             with self._lock:
                 self.played.append(text)
 

@@ -63,6 +63,30 @@ def _cache_key(text: str, tag: str = "") -> str:
     return hashlib.md5((tag + "\x00" + text).encode("utf-8")).hexdigest()
 
 
+# v58: 情绪 → TTS prosody 映射 (edge-tts 用 rate/volume/pitch 字符串)
+# 仅给「听起来跟情绪搭」, 不抢戏 — 高兴轻快、悲伤放慢压低、生气更快响、惊讶更尖
+_EMOTION_PROSODY: dict[str, dict[str, str]] = {
+    "happy":     {"rate": "+10%", "pitch": "+3Hz",  "volume": "+0%"},
+    "sad":       {"rate": "-15%", "pitch": "-3Hz",  "volume": "-5%"},
+    "angry":     {"rate": "+15%", "pitch": "+2Hz",  "volume": "+10%"},
+    "surprised": {"rate": "+20%", "pitch": "+8Hz",  "volume": "+0%"},
+    "shy":       {"rate": "-10%", "pitch": "-1Hz",  "volume": "-10%"},
+    "proud":     {"rate": "+5%",  "pitch": "+2Hz",  "volume": "+5%"},
+    "thinking":  {"rate": "-5%",  "pitch": "-1Hz",  "volume": "-5%"},
+}
+
+
+def emotion_to_prosody(emotion) -> dict[str, str]:
+    """Emotion 枚举 / 字符串 → edge-tts prosody 字典。未知情绪 / None 返空 dict。
+
+    调用方把结果 merge 进 edge_tts.Communicate(text, voice, rate=..., pitch=..., volume=...)。
+    """
+    if emotion is None:
+        return {}
+    key = getattr(emotion, "value", None) or str(emotion)
+    return _EMOTION_PROSODY.get(key, {})
+
+
 # pygame.mixer 是进程级单例，**只 init 一次**，否则每次 init/quit 抖动大且会和
 # 现有播放任务打架。下面用一个 module-level 标志位 + lock。
 _MIXER_READY = False
@@ -257,16 +281,37 @@ class TTS:
         self._enqueue_speak(text, profile)
         self._ensure_speak_worker()
 
-    def _enqueue_speak(self, text: str, profile) -> None:
+    def speak_with_emotion(self, text: str, emotion, profile=None) -> None:
+        """v58: 朗读时按情绪调 prosody (rate / pitch / volume)。
+
+        跟 speak / speak_as 区别:
+          - 不入 _speak_queue 复用路径, 走单独队列项 (text, profile, prosody)
+          - 用 emotion_to_prosody() 把 Emotion 枚举映射成 edge-tts 参数
+          - 缓存 key 区分 prosody, 同一句不同情绪不会互相覆盖
+
+        emotion 可以是 Emotion 枚举 / 字符串 / None (None = 不调 prosody)
+        """
+        if not self._enabled or not text.strip():
+            return
+        if profile is None:
+            # 走默认音色, 直接复用 speak() (无 prosody)
+            if emotion is None:
+                return self.speak(text)
+        prosody = emotion_to_prosody(emotion) if emotion is not None else {}
+        self._enqueue_speak(text, profile, prosody)
+        self._ensure_speak_worker()
+
+    def _enqueue_speak(self, text: str, profile, prosody: dict | None = None) -> None:
         """入队。队列满时丢最老的一条（不阻塞调用方，也不积压过期台词）。"""
         import queue as _queue
+        item = (text, profile, prosody or {})
         try:
-            self._speak_queue.put_nowait((text, profile))
+            self._speak_queue.put_nowait(item)
         except _queue.Full:
             try:
                 self._speak_queue.get_nowait()      # 丢最老的一条
                 self._speak_queue.task_done()
-                self._speak_queue.put_nowait((text, profile))
+                self._speak_queue.put_nowait(item)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -288,9 +333,14 @@ class TTS:
                 item = self._speak_queue.get(timeout=0.5)
             except _queue.Empty:
                 continue
-            text, profile = item
+            # 兼容 v58 之前的 2 元组 (text, profile)
+            if len(item) == 3:
+                text, profile, prosody = item
+            else:
+                text, profile = item
+                prosody = {}
             try:
-                self._speak_blocking(text, profile)
+                self._speak_blocking(text, profile, prosody)
             except Exception as e:  # noqa: BLE001
                 log.warning("TTS worker 单句失败：%s", e)
             finally:
@@ -355,8 +405,12 @@ class TTS:
         if profile is not None and getattr(profile, "edge_voice", ""):
             self.voice = profile.edge_voice
 
-    def _speak_blocking(self, text: str, profile=None) -> None:
+    def _speak_blocking(self, text: str, profile=None, prosody: dict | None = None) -> None:
         tag = self._profile_tag(profile)
+        # v58: 不同情绪用不同 cache key, 同一句话高兴/悲伤各存一份
+        if prosody:
+            prosody_tag = "|".join(f"{k}={v}" for k, v in sorted(prosody.items()))
+            tag = f"{tag}|{prosody_tag}" if tag else prosody_tag
         try:
             # 移除 emoji 和装饰性符号，避免 TTS 朗读字符名称
             clean_text = _strip_emojis(text)
@@ -367,7 +421,7 @@ class TTS:
             cache_path = self.cache_dir / cache_name
             if not cache_path.is_file():
                 log.info("TTS: 合成并缓存 → %s (引擎=%s)", cache_name, type(self).__name__)
-                asyncio.run(self._synthesize(text, cache_path, profile))
+                asyncio.run(self._synthesize(text, cache_path, profile, prosody))
             if not cache_path.is_file():
                 log.warning("TTS: 合成后文件不存在 %s", cache_path)
                 return
@@ -403,13 +457,21 @@ class TTS:
             log.warning("  ▸ 当前引擎=%s；可在设置面板切换或参考 docs/资源下载说明.md",
                         type(self).__name__)
 
-    async def _synthesize(self, text: str, out_path: Path, profile=None) -> None:
+    async def _synthesize(self, text: str, out_path: Path, profile=None,
+                          prosody: dict[str, str] | None = None) -> None:
         # 延迟 import，避免启动时无 pygame/edge-tts 也能跑程序
         import edge_tts
         voice = self.voice
         if profile is not None and getattr(profile, "edge_voice", ""):
             voice = profile.edge_voice
-        communicate = edge_tts.Communicate(text, voice=voice)
+        kwargs = {"voice": voice}
+        if prosody:
+            # v58: 情绪 prosody — 只 merge 已识别的字段, 不让调用方乱传
+            for k in ("rate", "pitch", "volume"):
+                v = prosody.get(k)
+                if v:
+                    kwargs[k] = v
+        communicate = edge_tts.Communicate(text, **kwargs)
         await communicate.save(str(out_path))
 
     def _play(self, mp3_path: Path) -> None:

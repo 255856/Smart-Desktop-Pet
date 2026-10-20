@@ -48,7 +48,11 @@ class GPTSoVITSTTS(TTS):
             if getattr(profile, "prompt_text", ""):
                 self.prompt_text = profile.prompt_text
 
-    async def _synthesize(self, text: str, out_path: Path, profile=None) -> None:
+    async def _synthesize(self, text: str, out_path: Path, profile=None,
+                          prosody=None) -> None:
+        # prosody: v58 TTS 情绪参数 (rate/pitch/volume), GPT-SoVITS 当前不接
+        # 保持签名兼容 base class, 后续接入时再读 prosody
+        _ = prosody
         import httpx
         clean = _strip_emojis(text)
         if not clean:

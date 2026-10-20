@@ -177,7 +177,11 @@ class MiniMaxTTS(TTS):
         self.model = model
         self.group_id = group_id
 
-    async def _synthesize(self, text: str, out_path: Path) -> None:
+    async def _synthesize(self, text: str, out_path: Path, profile=None,
+                          prosody=None) -> None:
+        # prosody: v58 TTS 情绪参数 (rate/pitch/volume), MiniMax TTS 当前不接
+        # 保持签名兼容 base class, 后续接入时再读 prosody
+        _ = (profile, prosody)
         import httpx
         clean = _strip_emojis(text)
         if not clean:
