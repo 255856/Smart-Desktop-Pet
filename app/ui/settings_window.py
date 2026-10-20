@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.qt_compat import (
-    QCheckBox, QComboBox, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
     QSize, QSlider, QTabWidget, QVBoxLayout,
     QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
-    QToolButton, QObject, QScrollArea, event_global_pos,
+    QToolButton, QObject, QScrollArea, QWheelEvent, event_global_pos,
 )
 from app.ui import ui_style
 from app.core.settings_store import SettingsStore
@@ -24,6 +24,42 @@ if TYPE_CHECKING:
     from app.core.config import CharacterConfig
 
 log = logging.getLogger(__name__)
+
+
+class _NoWheelOnParams(QObject):
+    """参数控件禁滚轮改值, 但滚轮照常滚面板。
+
+    主人反馈: 设置面板装在 QScrollArea 里, 鼠标停在 spinbox / slider 上滚动时,
+    数值会被滚轮直接改掉, 很容易误触。标准做法是拦掉 wheel event,
+    再把它转给最近的 QScrollArea —— 面板照常滚, 数值不动。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() != QEvent.Type.Wheel:
+            return False
+        area = self._scroll_area(obj)
+        if area is not None:
+            try:
+                QApplication.postEvent(area, QWheelEvent(
+                    ev.pos(), ev.globalPos(), ev.pixelDelta(), ev.angleDelta(),
+                    ev.buttons(), ev.modifiers(), ev.phase(), ev.source()))
+            except Exception:  # noqa: BLE001
+                pass
+        ev.ignore()
+        return True
+
+    @staticmethod
+    def _scroll_area(obj):
+        """往上找最近的 QScrollArea (控件 → inner → viewport → scroll area)。"""
+        parent = obj.parent()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parent()
+        return None
 
 
 class _SettingsDrag(QObject):
@@ -137,6 +173,10 @@ class SettingsWindow(QWidget):
         }
         self._build_ui()
         self._wire_signals()
+        # 参数控件禁滚轮改值（面板滚动时容易误触）—— 滚轮转给 QScrollArea
+        self._no_wheel = _NoWheelOnParams(self)
+        for _w in self.findChildren((QSpinBox, QDoubleSpinBox, QSlider, QComboBox)):
+            _w.installEventFilter(self._no_wheel)
         # 按当前引擎摆好 TTS 相关字段（edge / gptsovits / minimax 各用各的）
         self._update_tts_engine_visibility()
         self._load_defaults()

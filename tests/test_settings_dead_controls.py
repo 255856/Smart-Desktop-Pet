@@ -519,6 +519,44 @@ def test_control_tab_dropped_shortcut_and_emotion_panel():
     assert "快捷入口" not in src, "快捷入口的 GroupBox 文本还在"
     assert "切换表情" not in src, "切换表情的 GroupBox 文本还在"
 
+
+# ---------- 参数控件禁滚轮 ----------
+
+def test_param_widgets_ignore_wheel(qapp, isolated_store):
+    """滚轮停在 spinbox / slider 上不该改数值。
+
+    主人反馈: 面板装在 QScrollArea 里, 滚动设置时鼠标正好压在参数上,
+    数值就被滚轮改掉了 —— 很容易误触。
+    """
+    from app.core.qt_compat import QApplication, QPoint, QWheelEvent, Qt
+    from app.ui.settings_window import SettingsWindow
+
+    sw = SettingsWindow(parent=None, char_cfg=None, renderer=None)
+    try:
+        # spinbox: 滚一下不该变
+        sb = sw.spin_proactive_min
+        before = sb.value()
+        ev = QWheelEvent(
+            QPoint(1, 1), QPoint(1, 1), QPoint(0, 0), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, Qt.MouseEventSource.MouseEventNotSynthesized)
+        QApplication.sendEvent(sb, ev)
+        assert sb.value() == before, (
+            f"滚轮把 spinbox 改了: {before} → {sb.value()}")
+    finally:
+        sw.close()
+        sw.deleteLater()
+
+
+def test_wheel_filter_installed_on_param_widgets():
+    """所有参数控件 (spinbox / slider / combo) 都要装禁滚轮过滤器。"""
+    src = _src("app/ui/settings_window.py")
+    assert "_NoWheelOnParams" in src, "缺禁滚轮过滤器"
+    assert "installEventFilter(self._no_wheel)" in src
+    # 覆盖 spin / double-spin / slider / combo 四类
+    for cls in ("QSpinBox", "QDoubleSpinBox", "QSlider", "QComboBox"):
+        assert cls in src, f"禁滚轮没覆盖 {cls}"
+
 def test_tool_unlock_has_titlebar_window_chrome():
     """工具解锁窗口无边框, 主人要求加 min/max/close 跟其他窗口一致。
 
