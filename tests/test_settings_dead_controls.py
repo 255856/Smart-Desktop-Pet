@@ -386,17 +386,6 @@ def test_memory_panel_and_werewolf_have_minimum_size():
         )
 
 
-# ---------- 工具解锁窗口顶部紧凑（不再标题/副标题/图例 3 行）----------
-
-def test_tool_unlock_compact_header():
-    """主人反馈顶部太空：把标题/副标题/图例压成两行, 进度文本+条+hint 合并一行。"""
-    src = _src("app/ui/chat_window/tool_unlock_dialog.py")
-    # 顶部第一行: 标题 + 副标题列 (左) | 风险图例 (右), 用 head_row QHBoxLayout 合并
-    assert "head_row" in src, "工具解锁顶部没用 head_row 紧凑布局"
-    # 进度条嵌进 prog_row (不再单独一行), 减少垂直空间
-    assert "prog_row.addWidget(bar_outer" in src, "进度条没嵌进进度行"
-    # 副标题不再单独 root.addWidget 摆一行
-    assert "root.addWidget(subtitle)" not in src, "副标题还在单独占一行"
 
 
 # ---------- 头像悬浮 tooltip 用迷你进度条 ----------
@@ -454,6 +443,35 @@ def test_settings_window_has_avatar_picker_entry():
     # ui_controller 必须接这个 signal
     assert "_on_bot_avatar_changed" in _src("app/ui/ui_controller.py")
     assert "bot_avatar_changed.connect" in _src("app/ui/ui_controller.py")
+
+
+# ---------- 工具解锁窗口：自定义标题栏 (min/max/close) ----------
+
+def test_tool_unlock_has_titlebar_window_chrome():
+    """工具解锁窗口无边框, 主人要求加 min/max/close 跟其他窗口一致。
+
+    之前顶部只有一个灰色栏, 看起来跟其他窗口不一样;
+    现在加 QToolButton 标题栏 (─/▢/X) + 拖动支持, 跟 chat / settings 一致。
+    """
+    src = _src("app/ui/chat_window/tool_unlock_dialog.py")
+    # 标题栏
+    assert "unlock_titlebar" in src, "工具解锁缺自定义标题栏"
+    # 三个按钮对象名
+    for objname in ("title_btn_min", "title_btn_max", "title_btn_close"):
+        assert f'setObjectName("{objname}")' in src, (
+            f"标题栏缺 {objname} 按钮"
+        )
+    # 关闭按钮接到 reject
+    assert "btn_close.clicked.connect(dlg.reject)" in src
+    # 最小化接到 showMinimized
+    assert "btn_min.clicked.connect(dlg.showMinimized)" in src
+    # 最大化有 toggle
+    assert "isMaximized" in src and "showMaximized" in src, (
+        "最大化按钮没接 toggle 逻辑"
+    )
+    # 标题栏可拖动 (复用 chat_window 的 _TitleBarDrag)
+    assert "_TitleBarDrag" in src, "标题栏没装拖动"
+    assert "titlebar.installEventFilter(_TitleBarDrag" in src
 
 
 # ---------- TTS 行显隐：真控件验证 ----------

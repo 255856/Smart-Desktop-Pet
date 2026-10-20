@@ -355,87 +355,89 @@ def build_tool_unlock_dialog(
     dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
 
     root = QVBoxLayout(dlg)
-    root.setContentsMargins(22, 14, 22, 14)
-    root.setSpacing(6)
+    root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(0)
 
-    # ---- 顶部第一行：标题 + 副标题（左） | 风险图例（右）----
-    head_row = QHBoxLayout()
-    head_row.setSpacing(10)
+    # ---- 自定义标题栏 (无边框窗口没系统标题栏)
+    # 跟 chat_window / settings_window 一致: 标题 + 副标题 (左) | min/max/close (右)
+    # 也可按住拖动整窗
+    from app.ui.chat_window.chrome import _TitleBarDrag
+    titlebar = QFrame()
+    titlebar.setObjectName("unlock_titlebar")
+    titlebar.setFixedHeight(46)
+    thbox = QHBoxLayout(titlebar)
+    thbox.setContentsMargins(18, 8, 6, 8)
+    thbox.setSpacing(8)
+
     title_col = QVBoxLayout()
-    title_col.setSpacing(1)
+    title_col.setSpacing(0)
     title = QLabel("工具解锁")
     title.setObjectName("header_title")
     title_col.addWidget(title)
-    subtitle = QLabel("每升 1 级解锁新工具。低等级优先解锁常用工具，高等级解锁高级与危险工具。")
+    subtitle = QLabel("每升 1 级解锁新工具")
     subtitle.setObjectName("header_subtitle")
-    subtitle.setWordWrap(True)
     title_col.addWidget(subtitle)
-    title_col.addStretch(1)
-    head_row.addLayout(title_col, 1)
+    thbox.addLayout(title_col, 1)
 
-    legend_row = QHBoxLayout()
-    legend_row.setSpacing(6)
-    legend_label = QLabel("风险")
-    legend_label.setStyleSheet("color: #9a9aac; font-size: 8pt;")
-    legend_row.addWidget(legend_label)
+    btn_min = QToolButton()
+    btn_min.setText("─")
+    btn_min.setObjectName("title_btn_min")
+    btn_min.setToolTip("最小化")
+    btn_min.setFixedSize(30, 28)
+    btn_min.clicked.connect(dlg.showMinimized)
+
+    btn_max = QToolButton()
+    btn_max.setText("▢")
+    btn_max.setObjectName("title_btn_max")
+    btn_max.setToolTip("最大化")
+    btn_max.setFixedSize(30, 28)
+    def _toggle_max() -> None:
+        if dlg.isMaximized():
+            dlg.showNormal()
+            btn_max.setText("▢")
+            btn_max.setToolTip("最大化")
+        else:
+            dlg.showMaximized()
+            btn_max.setText("❐")
+            btn_max.setToolTip("还原")
+    btn_max.clicked.connect(_toggle_max)
+
+    btn_close = QToolButton()
+    btn_close.setText("X")
+    btn_close.setObjectName("title_btn_close")
+    btn_close.setToolTip("关闭")
+    btn_close.setFixedSize(30, 28)
+    btn_close.clicked.connect(dlg.reject)
+
+    thbox.addWidget(btn_min)
+    thbox.addWidget(btn_max)
+    thbox.addWidget(btn_close)
+    root.addWidget(titlebar)
+    # 标题栏可拖动整窗 (复用 chat_window 的 _TitleBarDrag)
+    titlebar.installEventFilter(_TitleBarDrag(dlg))
+
+    # 内容区沿用主系统的 UNLOCK_QSS, 内容距顶 14 像素
+    content = QFrame()
+    content_layout = QVBoxLayout(content)
+    content_layout.setContentsMargins(22, 14, 22, 14)
+    content_layout.setSpacing(8)
+    root.addWidget(content, 1)
+
+    # 风险图例
+    legend = QHBoxLayout()
+    legend.setSpacing(10)
+    legend.addWidget(QLabel("工具风险："))
     for rk in ("SAFE", "LOW", "MEDIUM", "HIGH", "IRREVERSIBLE"):
         c = _risk_color(rk)
-        dot = QLabel(_risk_label(rk))
+        dot = QLabel(f"{_risk_label(rk)}")
         dot.setStyleSheet(
             f"color: {c}; font-size: 8pt; border: 1px solid {c};"
             " border-radius: 8px; padding: 1px 7px; background: #ffffff;")
         dot.setToolTip(rk)
         dot.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        legend_row.addWidget(dot)
-    head_row.addLayout(legend_row, 0)
-    root.addLayout(head_row)
-
-    # ---- 顶部第二行：等级 + 已解锁 + 进度条 + 下一级提示（合并成一行）----
-    # 之前是 3 行（文本 / 进度条 / hint），现在合并成 1 行省空间。
-    next_lv = level + 1 if level < 10 else None
-    total_cfg = sum(len(v) for v in level_to_tools.values())
-    total_tools = total_cfg or len(unlocked_display)
-    got = sum(1 for names in level_to_tools.values() for n, _, _ in names
-              if n in unlocked_display)
-    pct = (got / total_tools * 100.0) if total_tools else 0.0
-
-    prog_row = QHBoxLayout()
-    prog_row.setSpacing(8)
-    prog_text = QLabel(f"Lv.{level} / 10    已解锁 {got} / {total_tools}")
-    prog_text.setObjectName("progress_text")
-    prog_row.addWidget(prog_text)
-
-    # 进度条嵌进同一行：QHBoxLayout 里加一个 FixedHeight QFrame + 拉伸占满
-    bar_outer = QFrame()
-    bar_outer.setFixedSize(160, 8)
-    bar_outer.setStyleSheet(
-        "QFrame { background: #e4e1ee; border: none; border-radius: 4px; }")
-    bar_layout = QHBoxLayout(bar_outer)
-    bar_layout.setContentsMargins(0, 0, 0, 0)
-    bar_layout.setSpacing(0)
-    if pct > 0:
-        fill = QLabel()
-        fill.setFixedHeight(8)
-        fill.setStyleSheet(
-            "QLabel { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            " stop:0 #8b7ae8, stop:1 #6d5cd0); border-radius: 4px; }")
-        bar_layout.addWidget(fill, max(1, int(pct)))
-    bar_layout.addStretch(1)
-    prog_row.addWidget(bar_outer, 1)
-
-    if next_lv is not None:
-        nxt = level_to_tools.get(next_lv, [])
-        names = ", ".join(n for n, _, _ in nxt[:3])
-        more = f" 等 {len(nxt)} 个" if len(nxt) > 3 else (" 个" if nxt else "")
-        hint_text = (f"下一级 Lv.{next_lv} 解锁 {len(nxt)}{more}"
-                     + (f"：{names}" if names else ""))
-    else:
-        hint_text = "已满级，全部能力（含危险工具）均已解锁。"
-    hint = QLabel(hint_text)
-    hint.setObjectName("next_hint")
-    hint.setStyleSheet("color: #9a9aac; font-size: 9pt;")
-    prog_row.addWidget(hint, 0)
-    root.addLayout(prog_row)
+        legend.addWidget(dot)
+    legend.addStretch(1)
+    content_layout.addLayout(legend)
 
     # ---- 等级路线轴（10 级总览，奇偶级上下交错）----
     timeline_levels = []
@@ -446,7 +448,60 @@ def build_tool_unlock_dialog(
             (int(lvl), rewards.get(int(lvl), ""),
              len(level_to_tools.get(lvl, [])), state))
     timeline = LevelTimeline(timeline_levels)
-    root.addWidget(timeline)
+    content_layout.addWidget(timeline)
+
+    # ---- 进度 ----
+    total_cfg = sum(len(v) for v in level_to_tools.values())
+    total_tools = total_cfg or len(unlocked_display)
+    # level_to_tools 里存的是显示名（MCP 用短名），所以这里也用显示名集合计数
+    got = sum(1 for names in level_to_tools.values() for n, _, _ in names
+              if n in unlocked_display)
+
+    prog_row = QHBoxLayout()
+    prog_row.setSpacing(10)
+    prog_text = QLabel(f"当前等级  Lv.{level} / 10    已解锁  {got} / {total_tools}  个工具")
+    prog_text.setObjectName("progress_text")
+    prog_row.addWidget(prog_text)
+    prog_row.addStretch(1)
+    content_layout.addLayout(prog_row)
+
+    # 进度条（用 QLabel 做纯 CSS 条，避免额外依赖 QProgressBar 样式）
+    bar_outer = QFrame()
+    bar_outer.setFixedHeight(8)
+    bar_outer.setStyleSheet(
+        "QFrame { background: #e4e1ee; border: none; border-radius: 4px; }")
+    bar_layout = QHBoxLayout(bar_outer)
+    bar_layout.setContentsMargins(0, 0, 0, 0)
+    bar_layout.setSpacing(0)
+    pct = (got / total_tools * 100.0) if total_tools else 0.0
+    if pct > 0:
+        # fill 必须内联上色：QLabel 是 QFrame 子类，bar_outer 的 `QFrame {...}`
+        # 会一起染灰它，优先级高于对话框里的 QLabel#progress_fill
+        fill = QLabel()
+        fill.setFixedHeight(8)
+        fill.setStyleSheet(
+            "QLabel { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            " stop:0 #8b7ae8, stop:1 #6d5cd0); border-radius: 4px; }")
+        bar_layout.addWidget(fill, max(1, int(pct)))
+    bar_layout.addStretch(1)
+    content_layout.addWidget(bar_outer)
+
+    next_lv = level + 1 if level < 10 else None
+    if next_lv is not None:
+        nxt = level_to_tools.get(next_lv, [])
+        names = ", ".join(n for n, _, _ in nxt[:5])
+        more = f" 等 {len(nxt)} 个" if len(nxt) > 5 else (" 个" if nxt else "")
+        hint = QLabel(
+            f"下一级 Lv.{next_lv} 解锁 {len(nxt)}{more}"
+            + (f"：{names}" if names else "")
+        )
+        hint.setObjectName("next_hint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+    else:
+        hint = QLabel("已满级，全部能力（含危险工具）均已解锁。")
+        hint.setObjectName("next_hint")
+        root.addWidget(hint)
 
     # ---- 卡片列表 ----
     scroll = QScrollArea()
@@ -544,7 +599,7 @@ def build_tool_unlock_dialog(
 
     cards.addStretch(1)
     scroll.setWidget(inner)
-    root.addWidget(scroll, 1)
+    content_layout.addWidget(scroll, 1)
 
     # 点路线轴节点 → 卡片列表滚到对应等级
     def _jump_to_level(lv: int) -> None:
@@ -564,6 +619,6 @@ def build_tool_unlock_dialog(
     close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
     close_btn.clicked.connect(dlg.accept)
     btn_row.addWidget(close_btn)
-    root.addLayout(btn_row)
+    content_layout.addLayout(btn_row)
 
     return dlg
