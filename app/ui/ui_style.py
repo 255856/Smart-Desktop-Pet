@@ -230,6 +230,14 @@ QPushButton#accent_btn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2
     stop:0 #9a7ef8, stop:1 #6a58e0); }}
 QPushButton#accent_btn:pressed {{ background: #5d4bd6; }}
 
+/* 危险动作（删除 / 移到回收站）—— 确认态用这个, 跟普通主按钮区分开 */
+QPushButton#danger_btn {{
+    background: {DANGER};
+    color: #fff; border: none; padding: 8px 20px;
+}}
+QPushButton#danger_btn:hover {{ background: #d64d6b; }}
+QPushButton#danger_btn:pressed {{ background: #c74a63; }}
+
 QTabWidget::pane {{
     border: 1px solid {BORDER};
     border-radius: 14px;
