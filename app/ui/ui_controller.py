@@ -196,6 +196,7 @@ class UIController(QObject):
         sw.lock_first_idle_changed.connect(self.pet.animator.set_lock_first_idle)
         sw.crossfade_changed.connect(self._on_crossfade_changed)
         sw.preview_voice_requested.connect(self._on_preview_voice_requested)
+        sw.bot_avatar_changed.connect(self._on_bot_avatar_changed)
         sw.emotion_requested.connect(self.pet.play_emotion)
         sw.sleep_requested.connect(self.pet.animator.set_sleep)
         sw.idle_requested.connect(self.pet.animator.set_wake)
@@ -983,6 +984,24 @@ class UIController(QObject):
             self.settings_window.set_fps_monitor(on)
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_bot_avatar_changed(self, path: str) -> None:
+        """桌宠头像换好：写 cfg.character.bot_avatar_path + 让 chat 刷新头像。
+
+        settings_window 弹窗选完只发个信号过来, 这俩写回主配置 + 通知
+        已开的聊天窗重置头像缓存 / chat 气泡头像（下次新消息用）。
+        """
+        try:
+            self.cfg.character.bot_avatar_path = path
+        except Exception:  # noqa: BLE001
+            pass
+        if self._chat_window is not None and hasattr(self._chat_window, "set_avatar"):
+            try:
+                from pathlib import Path as _P
+                self._chat_window.set_avatar(_P(path))
+            except Exception:  # noqa: BLE001
+                log.debug("chat_window.set_avatar 失败", exc_info=True)
+        log.info("桌宠头像已更新：%s", path)
 
     def _on_developer_mode_changed(self, enabled: bool) -> None:
         """开发者模式开关：记下状态供 dashboard / chat_window 查询。

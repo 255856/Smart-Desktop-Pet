@@ -93,6 +93,7 @@ class SettingsWindow(QWidget):
     hide_watermark_changed = Signal(bool)      # 隐藏水印（重启生效）
     developer_mode_changed = Signal(bool)      # 开发者模式开关: 开启后状态 Tab 显示 slider
     dev_state_pushed = Signal(dict)            # 开发者模式下手改数值: {strength, strength_food, ...}
+    bot_avatar_changed = Signal(str)           # 桌宠头像更换：参数为新头像的绝对路径
 
     def __init__(self, parent: Optional[QWidget] = None,
                  char_cfg: Optional["CharacterConfig"] = None,
@@ -1540,6 +1541,21 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(10)
 
+        # ---- 桌宠头像（资产随代码提交：预设 assets/avatars/presets/,
+        # 用户上传 assets/avatars/uploads/, 当前 assets/avatars/bot.png）----
+        g_avatar = QGroupBox("桌宠头像")
+        gav = QHBoxLayout(g_avatar)
+        self.lbl_avatar_path = QLabel(self._current_avatar_text())
+        self.lbl_avatar_path.setStyleSheet("color: #4a3d6e; font-size: 9pt;")
+        self.lbl_avatar_path.setWordWrap(True)
+        gav.addWidget(self.lbl_avatar_path, 1)
+        self.btn_pick_avatar = QPushButton("选择头像…")
+        self.btn_pick_avatar.setObjectName("accent_btn")
+        self.btn_pick_avatar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pick_avatar.clicked.connect(self._open_avatar_picker)
+        gav.addWidget(self.btn_pick_avatar)
+        v.addWidget(g_avatar)
+
         g_api = QGroupBox("API 连接")
         gv = QVBoxLayout(g_api)
         form = QFormLayout()
@@ -2224,6 +2240,35 @@ class SettingsWindow(QWidget):
         engine = str(self.cmb_tts_engine.currentData() or "edge")
         self.preview_voice_requested.emit(preview_text)
         self._set_status(f"正在试听（{engine}）：{preview_text}")
+
+    def _open_avatar_picker(self) -> None:
+        """打开头像选择弹窗（预设 + 用户上传）。
+
+        弹窗独立管理文件 IO, 选定后 emit avatarSelected(path)；
+        这里只负责接住结果, 把路径存进 panel_state 并对外发 signal,
+        ui_controller 那边把 cfg.character.bot_avatar_path 写回 + 通知 chat 刷新头像。
+        """
+        from app.ui.chat_window.avatar_picker import AvatarPickerDialog
+        current = self._current_avatar_path()
+        dlg = AvatarPickerDialog(current_path=current, parent=self)
+        dlg.avatarSelected.connect(self._on_avatar_picked)
+        dlg.exec_()
+
+    def _on_avatar_picked(self, path: str) -> None:
+        self._panel_state.setdefault("chat", {})["bot_avatar_path"] = path
+        self.lbl_avatar_path.setText(self._current_avatar_text())
+        self.bot_avatar_changed.emit(path)
+
+    def _current_avatar_path(self) -> str:
+        from app.core.qt_compat import QFileDialog
+        return (
+            self._panel_state.get("chat", {}).get("bot_avatar_path", "")
+            or (getattr(self.char_cfg, "bot_avatar_path", "") if self.char_cfg else "")
+        )
+
+    def _current_avatar_text(self) -> str:
+        p = self._current_avatar_path()
+        return f"当前头像：{p}" if p else "当前头像：未设置（用默认 assets/icon.ico）"
 
     def get_model_config(self) -> dict:
         """获取当前模型配置（供主程序读取）。"""

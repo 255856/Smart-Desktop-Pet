@@ -386,6 +386,76 @@ def test_memory_panel_and_werewolf_have_minimum_size():
         )
 
 
+# ---------- 工具解锁窗口顶部紧凑（不再标题/副标题/图例 3 行）----------
+
+def test_tool_unlock_compact_header():
+    """主人反馈顶部太空：把标题/副标题/图例压成两行, 进度文本+条+hint 合并一行。"""
+    src = _src("app/ui/chat_window/tool_unlock_dialog.py")
+    # 顶部第一行: 标题 + 副标题列 (左) | 风险图例 (右), 用 head_row QHBoxLayout 合并
+    assert "head_row" in src, "工具解锁顶部没用 head_row 紧凑布局"
+    # 进度条嵌进 prog_row (不再单独一行), 减少垂直空间
+    assert "prog_row.addWidget(bar_outer" in src, "进度条没嵌进进度行"
+    # 副标题不再单独 root.addWidget 摆一行
+    assert "root.addWidget(subtitle)" not in src, "副标题还在单独占一行"
+
+
+# ---------- 头像悬浮 tooltip 用迷你进度条 ----------
+
+def test_avatar_hover_tooltip_uses_mini_progress_bars():
+    """_AvatarHoverHook._build_tip 输出 HTML + 进度条（不是一行文字）。"""
+    node = _func_node("app/ui/chat_window/chrome.py", "_build_tip")
+    assert node is not None
+    body = _ast.dump(node)
+    # 进度条用 ■/□ 块字符 + <font> 染色
+    assert "■" in body, "没进度条填充字符"
+    assert "font color" in body, "没颜色标记 (没在分高/中/低)"
+    # 应有体力/饱食/饮水/健康/好感至少 5 行
+    for metric in ("strength", "strength_food", "strength_drink", "health", "likability"):
+        assert metric in body, f"tooltip 缺 {metric} 这条进度"
+
+
+# ---------- 头像目录 + 弹窗 + 设置面板入口 ----------
+
+def test_avatar_dir_lives_under_assets_not_data():
+    """主人要求: 头像目录从 data/ 迁到 assets/ (随代码提交)。"""
+    src = _src("app/ui/chat_window/__init__.py")
+    # 必须有 assets 子目录声明 (不是 data)
+    assert "AVATAR_PRESETS_DIR" in src, "缺预设目录常量"
+    assert "AVATAR_UPLOADS_DIR" in src, "缺用户上传目录常量"
+    # 不应再指 data
+    assert 'Path("data") / "avatars"' not in src, (
+        "AVATAR_DIR 还指向 data/avatars —— 应该迁到 assets/avatars"
+    )
+    # 真有 assets 路径
+    assert 'Path("assets")' in src
+
+
+def test_avatar_picker_dialog_exists():
+    """新组件: AvatarPickerDialog 区分「预设」「上传」两个 tab。"""
+    src = _src("app/ui/chat_window/avatar_picker.py")
+    # 必须有 AvatarPickerDialog 类 + 预设/上传 tab
+    assert "class AvatarPickerDialog" in src, "缺 AvatarPickerDialog 类"
+    assert "预设" in src, "缺预设 tab"
+    assert "我上传的" in src, "缺上传 tab"
+    # emit avatarSelected 给外部
+    assert "avatarSelected" in src
+    # 上传走 QFileDialog
+    assert "QFileDialog" in src
+
+
+def test_settings_window_has_avatar_picker_entry():
+    """设置面板「模型配置」tab 有头像入口: 按钮 + signal + 路径显示。"""
+    src = _src("app/ui/settings_window.py")
+    assert "bot_avatar_changed" in src, (
+        "缺 bot_avatar_changed signal —— 选了头像后主程序没法知道"
+    )
+    assert "_open_avatar_picker" in src, "设置面板缺头像按钮入口"
+    assert "选择头像" in src
+    # ui_controller 必须接这个 signal
+    assert "_on_bot_avatar_changed" in _src("app/ui/ui_controller.py")
+    assert "bot_avatar_changed.connect" in _src("app/ui/ui_controller.py")
+
+
 # ---------- TTS 行显隐：真控件验证 ----------
 
 @pytest.fixture

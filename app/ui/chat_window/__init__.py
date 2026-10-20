@@ -8,9 +8,16 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-# 头像持久化目录(.gitignore 的 data/ 兜底,不会入库)
-AVATAR_DIR = Path("data") / "avatars"
+# 头像目录：随代码提交（assets/ 默认进 git）。
+# 预设头像 assets/avatars/presets/, 用户上传 assets/avatars/uploads/
+# （uploads 已在 .gitignore 排除）。
+# 当前选中头像放在 assets/avatars/bot.png, 跟代码一起入库。
+AVATAR_DIR = Path("assets") / "avatars"
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+AVATAR_PRESETS_DIR = AVATAR_DIR / "presets"
+AVATAR_UPLOADS_DIR = AVATAR_DIR / "uploads"
+AVATAR_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+AVATAR_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_qapp():
