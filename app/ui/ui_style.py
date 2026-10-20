@@ -188,6 +188,79 @@ QToolButton:pressed {{ background: #e6e0fd; }}
 QToolButton:disabled {{ color: #c3c1d4; border-color: #f0eff6; background: transparent; }}
 """
 
+#  弹窗外壳（工具解锁 / 头像选择 …）：跟聊天窗同源的皮肤
+DIALOG_QSS = f"""
+QWidget {{
+    font-family: {FONT};
+    font-size: 10pt;
+    color: {TEXT};
+}}
+QDialog {{ background: transparent; }}
+QWidget#dialog_body {{ background: transparent; }}
+
+QPushButton {{
+    background: #ffffff;
+    border: 1.5px solid #e0e0ee;
+    border-radius: 12px;
+    padding: 8px 18px;
+    font-weight: 600;
+    font-size: 9pt;
+}}
+QPushButton:hover {{ border-color: {ACCENT_LT}; color: {ACCENT_DK}; background: {ACCENT_BG}; }}
+QPushButton:pressed {{ background: #ede9fe; }}
+QPushButton:disabled {{ color: #b0b0c0; background: #f5f5fa; border-color: #e8e8f0; }}
+
+QPushButton#ghost_btn {{
+    background: transparent;
+    border: 1px solid #e3e1f0;
+    border-radius: 9px;
+    padding: 3px 12px;
+    font-size: 9pt;
+    color: #5b4f9c;
+}}
+QPushButton#ghost_btn:hover {{ background: {ACCENT_BG}; border-color: {ACCENT_LT}; }}
+QPushButton#ghost_btn:disabled {{ color: #ccc; border-color: #f0f0f0; }}
+
+QPushButton#accent_btn {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #a78bfa, stop:1 #7c6cf0);
+    color: #fff; border: none; padding: 8px 20px;
+}}
+QPushButton#accent_btn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+    stop:0 #9a7ef8, stop:1 #6a58e0); }}
+QPushButton#accent_btn:pressed {{ background: #5d4bd6; }}
+
+QTabWidget::pane {{
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    background: {BG};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {TEXT_SUB};
+    padding: 8px 18px;
+    margin: 4px 3px 0 3px;
+    border-radius: 10px;
+    font-weight: 600;
+}}
+QTabBar::tab:selected {{ background: {ACCENT}; color: #fff; }}
+QTabBar::tab:hover:!selected {{ background: {ACCENT_BG}; color: {ACCENT_DK}; }}
+
+QScrollBar:vertical {{
+    background: transparent; width: 6px; margin: 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: #d5d2e6; border-radius: 3px; min-height: 30px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {ACCENT_LT}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{ height: 0; }}
+
+{COMMON_QSS}
+"""
+
+
 #  聊天窗
 CHAT_QSS = f"""
 QWidget {{
@@ -719,9 +792,14 @@ STAT_BAR_COLORS = {
 # 三态用 3 种颜色 (GOLD 当前 / MINT 已完成 / LOCKED 未解锁) — 视觉冲击力强,
 # 让主人一眼看出"我现在到哪级 / 还差什么没解锁"
 UNLOCK_QSS = f"""
-QDialog, QWidget#unlock_root {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #f6f4ff, stop:1 #fdf4fb);
+QDialog {{
+    background: transparent;
+    font-family: {FONT};
+    font-size: 10pt;
+    color: {TEXT};
+}}
+QWidget#dialog_body {{
+    background: transparent;
     font-family: {FONT};
     font-size: 10pt;
     color: {TEXT};
@@ -764,8 +842,8 @@ QFrame#card_locked {{
     border-radius: 12px;
 }}
 
-QLabel#lv_done    {{ color: {MINT}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
-QLabel#lv_current {{ color: {GOLD}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
+QLabel#lv_done    {{ color: #2f7a44; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
+QLabel#lv_current {{ color: #8a5a08; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
 QLabel#lv_locked  {{ color: {LOCKED}; font-size: 12pt; font-weight: 700; background: transparent; border: none; }}
 
 QLabel#reward_done    {{ color: #2f6b34; font-size: 10pt; background: transparent; border: none; }}

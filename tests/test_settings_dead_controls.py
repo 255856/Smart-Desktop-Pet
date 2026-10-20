@@ -314,20 +314,21 @@ def test_load_defaults_does_not_write_store():
 # ---------- 工具解锁窗口：模态 + 顶层 + 类型独特 ----------
 
 def test_tool_unlock_window_type_and_modality():
-    """工具解锁窗口: Tool 类型 + StaysOnTopHint + ApplicationModal。
+    """工具解锁窗口: 无边框 + 顶层 + ApplicationModal。
 
-    主人要求：打开后其他窗口点不动（modal）、固定在最上面（StaysOnTopHint）、
-    类型与其他窗口不一样（Tool = 浮动工具窗，不在任务栏）。
+    主人要求：打开后其他窗口点不动（modal）、固定在最上面（StaysOnTopHint）。
+    无边框外壳（去原生标题栏）由 app/ui/dialog_shell.py 统一提供。
     """
     src = _src("app/ui/chat_window/tool_unlock_dialog.py")
-    assert "Qt.WindowType.Tool" in src, "没设 Tool 类型"
+    shell = _src("app/ui/dialog_shell.py")
     assert "WindowStaysOnTopHint" in src, "没设 WindowStaysOnTopHint"
     assert "ApplicationModal" in src, "没设 ApplicationModal（其他窗口能抢焦点）"
-    # 注意顺序: setWindowFlags 必须在 setWindowModality 之前（否则 flags 清掉 modality）
-    flag_pos = src.index("setWindowFlags")
-    mod_pos = src.index("setWindowModality")
-    assert flag_pos < mod_pos, (
-        "setWindowFlags 必须在 setWindowModality 之前 —— "
+    # 少了 FramelessWindowHint，系统原生标题栏会跟自绘标题栏叠成两个
+    assert "FramelessWindowHint" in shell, "弹窗外壳没去原生标题栏"
+    # 注意顺序: 外壳先 setWindowFlags, 再 setWindowModality
+    # (setWindowFlags 会清掉 modality)
+    assert src.index("FramelessDialog(") < src.index("setWindowModality"), (
+        "setWindowModality 必须在构造外壳之后 —— "
         "否则 setWindowFlags 会把 modal 状态清掉"
     )
 
@@ -561,28 +562,47 @@ def test_tool_unlock_has_titlebar_window_chrome():
     """工具解锁窗口无边框, 主人要求加 min/max/close 跟其他窗口一致。
 
     之前顶部只有一个灰色栏, 看起来跟其他窗口不一样;
-    现在加 QToolButton 标题栏 (─/▢/X) + 拖动支持, 跟 chat / settings 一致。
+    现在无边框 + 圆角卡片 + 自绘标题栏(─/▢/X) + 拖动,
+    由 app/ui/dialog_shell.py 统一提供, 工具解锁窗 / 头像选择窗共用。
     """
-    src = _src("app/ui/chat_window/tool_unlock_dialog.py")
+    shell = _src("app/ui/dialog_shell.py")
     # 标题栏: 必须用 ui_style.TITLEBAR_QSS (渐变) + QToolButton#win_btn 样式,
     # 自造 objectName 会没样式 → 渲染成系统默认灰色方块 (主人反馈的"灰色栏")
-    assert "TITLEBAR_QSS" in src, "标题栏没用 ui_style.TITLEBAR_QSS"
-    assert 'setObjectName("titlebar")' in src, "标题栏 objectName 不是 titlebar"
+    assert "TITLEBAR_QSS" in shell, "标题栏没用 ui_style.TITLEBAR_QSS"
+    assert 'setObjectName("titlebar")' in shell, "标题栏 objectName 不是 titlebar"
     for objname in ("win_btn", "win_btn_close"):
-        assert f'setObjectName("{objname}")' in src, (
+        assert f'setObjectName("{objname}")' in shell, (
             f"标题栏按钮没用 {objname} 样式 —— 会显示成系统默认灰方块"
         )
     # 关闭按钮接到 reject
-    assert "btn_close.clicked.connect(dlg.reject)" in src
+    assert "btn_close.clicked.connect(self.reject)" in shell
     # 最小化接到 showMinimized
-    assert "btn_min.clicked.connect(dlg.showMinimized)" in src
+    assert "btn_min.clicked.connect(self.showMinimized)" in shell
     # 最大化有 toggle
-    assert "isMaximized" in src and "showMaximized" in src, (
+    assert "isMaximized" in shell and "showMaximized" in shell, (
         "最大化按钮没接 toggle 逻辑"
     )
-    # 标题栏可拖动 (复用 chat_window 的 _TitleBarDrag)
-    assert "_TitleBarDrag" in src, "标题栏没装拖动"
-    assert "titlebar.installEventFilter(_TitleBarDrag" in src
+    # 标题栏可拖动
+    assert "TitleBarDrag" in shell, "标题栏没装拖动"
+    assert "installEventFilter(self._drag_filter)" in shell
+
+
+def test_popup_windows_share_frameless_shell():
+    """工具解锁窗 / 头像选择窗必须走同一个无边框外壳。
+
+    之前一个用系统原生标题栏、一个自绘，叠成双标题栏，跟聊天窗风格对不上。
+    现在统一走 FramelessDialog: 圆角卡片 + 自绘标题栏 + 柔阴影。
+    """
+    unlock = _src("app/ui/chat_window/tool_unlock_dialog.py")
+    picker = _src("app/ui/chat_window/avatar_picker.py")
+    assert "FramelessDialog" in unlock, "工具解锁窗没走 FramelessDialog 外壳"
+    assert "class AvatarPickerDialog(FramelessDialog)" in picker, (
+        "头像选择窗没走 FramelessDialog 外壳"
+    )
+    # 外壳必须真的去掉了原生标题栏, 否则会跟自绘标题栏叠一起
+    shell = _src("app/ui/dialog_shell.py")
+    assert "FramelessWindowHint" in shell
+    assert "WA_TranslucentBackground" in shell, "外壳没开透明背景（圆角阴影会露白边）"
 
 
 # ---------- TTS 行显隐：真控件验证 ----------

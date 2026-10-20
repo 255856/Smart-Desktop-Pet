@@ -12,7 +12,7 @@ from typing import Optional
 from app.core.qt_compat import (
     QBrush, QColor, QDialog, QFont, QFontMetrics, QFrame, QHBoxLayout, QLabel,
     QLayout, QPainter, QPen, QPushButton, QRect, QScrollArea, QSize, QSizePolicy,
-    QToolButton, QToolTip, QVBoxLayout, QWidget, Qt, Signal, event_global_pos,
+    QToolTip, QVBoxLayout, QWidget, Qt, Signal, event_global_pos,
     event_local_pos,
 )
 
@@ -336,96 +336,24 @@ def build_tool_unlock_dialog(
     rewards: {等级: 奖励标题}
     celebrate: {等级: 真实升级时的祝贺语}
     """
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("工具解锁")
-    dlg.setMinimumSize(860, 640)
-    dlg.resize(920, 700)
-    dlg.setObjectName("unlock_root")
-    # v37: 改用 ui_style.UNLOCK_QSS (GOLD/MINT/LOCKED 三态 + 渐变背景),
-    # 跟主系统 token 一致, 4 个窗现在都走同一套颜色定义
     from app.ui import ui_style
-    dlg.setStyleSheet(ui_style.UNLOCK_QSS)
-    # 窗口类型: Tool (浮动工具窗, 不在任务栏) + WindowStaysOnTopHint (始终最上层)。
-    # 跟主聊天窗 / 设置窗 / 桌宠窗都是普通 Window 类型, 这里特意不一样 —— 一眼能分辨。
-    # 注意: setWindowFlags 会清掉 setWindowModality, 必须先设 flags 再设 modality。
-    dlg.setWindowFlags(
-        Qt.WindowType.Window
-        | Qt.WindowType.Tool
-        | Qt.WindowType.WindowStaysOnTopHint
+    from app.ui.dialog_shell import FramelessDialog
+
+    # 跟聊天窗同一套外壳：无边框 + 圆角卡片 + 自绘标题栏 + 柔阴影
+    dlg = FramelessDialog(
+        parent,
+        title="工具解锁",
+        subtitle="每升 1 级解锁新工具",
+        width=920, height=700,
+        min_width=860, min_height=640,
+        extra_flags=Qt.WindowType.WindowStaysOnTopHint,
     )
+    # 皮肤 = 弹窗外壳通用皮肤 + 解锁窗专用卡片样式
+    dlg.setStyleSheet(ui_style.DIALOG_QSS + ui_style.UNLOCK_QSS)
     dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
 
-    root = QVBoxLayout(dlg)
-    root.setContentsMargins(0, 0, 0, 0)
-    root.setSpacing(0)
-
-    # ---- 自定义标题栏 (无边框窗口没系统标题栏)
-    # 跟 chat_window / settings_window 完全同一套: ui_style.TITLEBAR_QSS 渐变标题栏
-    # + QToolButton#win_btn / #win_btn_close 样式 (用自定义 objectName 会没样式,
-    # 渲染成系统默认灰色方块 —— 主人反馈"顶部灰色栏"就是这个)。
-    from app.ui.chat_window.chrome import _TitleBarDrag
-    from app.ui import ui_style as _ui_style
-    titlebar = QFrame()
-    titlebar.setObjectName("titlebar")
-    titlebar.setFixedHeight(46)
-    titlebar.setStyleSheet(_ui_style.TITLEBAR_QSS)
-    thbox = QHBoxLayout(titlebar)
-    thbox.setContentsMargins(18, 6, 6, 6)
-    thbox.setSpacing(6)
-
-    title_col = QVBoxLayout()
-    title_col.setSpacing(0)
-    title = QLabel("工具解锁")
-    title.setObjectName("titlebar_title")
-    title_col.addWidget(title)
-    subtitle = QLabel("每升 1 级解锁新工具")
-    subtitle.setObjectName("titlebar_subtitle")
-    title_col.addWidget(subtitle)
-    thbox.addLayout(title_col, 1)
-
-    btn_min = QToolButton()
-    btn_min.setText("─")
-    btn_min.setObjectName("win_btn")
-    btn_min.setToolTip("最小化")
-    btn_min.setFixedSize(30, 28)
-    btn_min.clicked.connect(dlg.showMinimized)
-
-    btn_max = QToolButton()
-    btn_max.setText("▢")
-    btn_max.setObjectName("win_btn")
-    btn_max.setToolTip("最大化")
-    btn_max.setFixedSize(30, 28)
-    def _toggle_max() -> None:
-        if dlg.isMaximized():
-            dlg.showNormal()
-            btn_max.setText("▢")
-            btn_max.setToolTip("最大化")
-        else:
-            dlg.showMaximized()
-            btn_max.setText("❐")
-            btn_max.setToolTip("还原")
-    btn_max.clicked.connect(_toggle_max)
-
-    btn_close = QToolButton()
-    btn_close.setText("X")
-    btn_close.setObjectName("win_btn_close")
-    btn_close.setToolTip("关闭")
-    btn_close.setFixedSize(30, 28)
-    btn_close.clicked.connect(dlg.reject)
-
-    thbox.addWidget(btn_min)
-    thbox.addWidget(btn_max)
-    thbox.addWidget(btn_close)
-    root.addWidget(titlebar)
-    # 标题栏可拖动整窗 (复用 chat_window 的 _TitleBarDrag)
-    titlebar.installEventFilter(_TitleBarDrag(dlg))
-
-    # 内容区沿用主系统的 UNLOCK_QSS, 内容距顶 14 像素
-    content = QFrame()
-    content_layout = QVBoxLayout(content)
-    content_layout.setContentsMargins(22, 14, 22, 14)
-    content_layout.setSpacing(8)
-    root.addWidget(content, 1)
+    # 内容区（无边框卡片 + 自绘标题栏 + 阴影 由 FramelessDialog 统一提供）
+    content_layout = dlg.body_layout
 
     # 风险图例
     legend = QHBoxLayout()
@@ -501,11 +429,11 @@ def build_tool_unlock_dialog(
         )
         hint.setObjectName("next_hint")
         hint.setWordWrap(True)
-        root.addWidget(hint)
+        content_layout.addWidget(hint)
     else:
         hint = QLabel("已满级，全部能力（含危险工具）均已解锁。")
         hint.setObjectName("next_hint")
-        root.addWidget(hint)
+        content_layout.addWidget(hint)
 
     # ---- 卡片列表 ----
     scroll = QScrollArea()
@@ -527,17 +455,28 @@ def build_tool_unlock_dialog(
         is_current = lvl == level
         if is_current:
             card = QFrame(); card.setObjectName("card_current")
+            card_bg, card_bw, card_bc = (
+                ui_style.GOLD_BG, "2px", ui_style.GOLD)
             lv_key, badge_bg, badge_txt, badge_bold = (
                 "lv_current", "#e8a33d", "当前等级", "700")
         elif unlocked_now:
             card = QFrame(); card.setObjectName("card_done")
+            card_bg, card_bw, card_bc = (
+                ui_style.MINT_BG, "1.5px", ui_style.MINT_BORDER)
             lv_key, badge_bg, badge_txt, badge_bold = (
-                "lv_done", "#5aa845", "已解锁", "400")
+                "lv_done", "#3a9e5c", "已解锁", "400")
         else:
             card = QFrame(); card.setObjectName("card_locked")
+            card_bg, card_bw, card_bc = (
+                ui_style.LOCKED_BG, "1.5px", ui_style.LOCKED_BORDER)
             lv_key, badge_bg, badge_txt, badge_bold = (
-                "lv_locked", "#a8a8b8", "未解锁", "400")
+                "lv_locked", "#8f8f9e", "未解锁", "400")
+        # objectName 带 _lvN 后缀（供路线轴定位），QSS 的 #card_done 规则匹配不上，
+        # 所以配色必须内联，且用 objectName 限定选择器，避免波及卡片里的子控件
         card.setObjectName(f"{card.objectName()}_lv{int(lvl)}")
+        card.setStyleSheet(
+            f"QFrame#{card.objectName()} {{ background: {card_bg};"
+            f" border: {card_bw} solid {card_bc}; border-radius: 12px; }}")
 
         cl = QVBoxLayout(card)
         cl.setContentsMargins(14, 9, 14, 11)
@@ -619,7 +558,7 @@ def build_tool_unlock_dialog(
     btn_row = QHBoxLayout()
     btn_row.addStretch(1)
     close_btn = QPushButton("关闭")
-    close_btn.setObjectName("close_btn")
+    close_btn.setObjectName("ghost_btn")
     close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
     close_btn.clicked.connect(dlg.accept)
     btn_row.addWidget(close_btn)

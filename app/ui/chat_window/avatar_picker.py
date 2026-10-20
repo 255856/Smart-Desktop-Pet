@@ -16,9 +16,10 @@ from pathlib import Path
 from app.core.qt_compat import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QTabWidget, QToolButton, QVBoxLayout, QWidget,
-    Qt, QDialog, Signal,
+    Qt, Signal,
 )
 from app.ui.chat_window.tool_unlock_dialog import FlowLayout
+from app.ui.dialog_shell import FramelessDialog
 
 log = logging.getLogger(__name__)
 
@@ -36,22 +37,20 @@ def _list_avatar_pngs(folder: Path) -> list[Path]:
     return sorted(out)
 
 
-class AvatarPickerDialog(QDialog):
+class AvatarPickerDialog(FramelessDialog):
     """头像选择弹窗。选定后 emit avatarSelected(str path)。"""
 
     avatarSelected = Signal(str)   # 选中的头像绝对路径
 
     def __init__(self, current_path: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("选择桌宠头像")
-        self.setMinimumSize(640, 480)
-        self.resize(720, 560)
-        # 跟工具解锁一致的窗口类型（Tool 浮动 + StaysOnTopHint + ApplicationModal），
-        # 打开后其他窗口点不动
-        self.setWindowFlags(
-            Qt.WindowType.Window
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowStaysOnTopHint
+        # 跟聊天窗 / 工具解锁窗同一套外壳：无边框 + 圆角卡片 + 自绘标题栏
+        super().__init__(
+            parent,
+            title="选择桌宠头像",
+            subtitle="点选一个头像，预设与上传可随时切换",
+            width=720, height=560,
+            min_width=640, min_height=480,
+            extra_flags=Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
 
@@ -60,14 +59,9 @@ class AvatarPickerDialog(QDialog):
         self._uploads_dir = AVATAR_UPLOADS_DIR
         self._current_path = current_path
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
+        root = self.body_layout
+        root.setContentsMargins(16, 12, 16, 14)
         root.setSpacing(10)
-
-        # 顶部提示
-        tip = QLabel("点选一个头像。预设与上传分两个 tab，可随时切换。")
-        tip.setStyleSheet("color: #7a7a8c; font-size: 9pt;")
-        root.addWidget(tip)
 
         # 两个 tab: 预设 / 上传
         self.tabs = QTabWidget()
