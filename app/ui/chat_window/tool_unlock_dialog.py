@@ -344,6 +344,15 @@ def build_tool_unlock_dialog(
     # 跟主系统 token 一致, 4 个窗现在都走同一套颜色定义
     from app.ui import ui_style
     dlg.setStyleSheet(ui_style.UNLOCK_QSS)
+    # 窗口类型: Tool (浮动工具窗, 不在任务栏) + WindowStaysOnTopHint (始终最上层)。
+    # 跟主聊天窗 / 设置窗 / 桌宠窗都是普通 Window 类型, 这里特意不一样 —— 一眼能分辨。
+    # 注意: setWindowFlags 会清掉 setWindowModality, 必须先设 flags 再设 modality。
+    dlg.setWindowFlags(
+        Qt.WindowType.Window
+        | Qt.WindowType.Tool
+        | Qt.WindowType.WindowStaysOnTopHint
+    )
+    dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
 
     root = QVBoxLayout(dlg)
     root.setContentsMargins(22, 18, 22, 16)

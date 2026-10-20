@@ -34,9 +34,13 @@ class FramelessResizer(QObject):
 
     EDGE = 10  # 边缘感应宽度（像素）
 
-    def __init__(self, win: QWidget):
+    def __init__(self, win: QWidget, freeze_translucent: bool = True):
         super().__init__(win)
         self._win = win
+        # 缩放期间要不要临时关掉 WA_TranslucentBackground。
+        # 半透明窗口（chat / memory_panel / werewolf）传 False —— 关了会整块变黑；
+        # 不透明窗口（settings / 默认）保留 True，省一次 alpha 合成。
+        self._freeze_translucent = freeze_translucent
         self._attached = False
         # 手动缩放兜底状态：(edges, 初始几何, 按下全局点)；None 表示走系统缩放
         self._manual = None
@@ -117,7 +121,10 @@ class FramelessResizer(QObject):
                 self._saved_effects.append((w, fx))
                 w.setGraphicsEffect(None)
         # 临时关掉透明背景 —— 缩放期间不需要 alpha 通道，重绘路径更短
-        if self._win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+        # 半透明窗口（freeze_translucent=False）保留 WA_TranslucentBackground，
+        # 否则缩放瞬间整块变黑。普通不透明窗口走默认 True 省一次 alpha 合成。
+        if self._freeze_translucent and \
+                self._win.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
             self._saved_effects.append(
                 ("translucent", Qt.WidgetAttribute.WA_TranslucentBackground))
             self._win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)

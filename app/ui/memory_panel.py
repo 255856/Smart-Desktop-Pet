@@ -167,7 +167,14 @@ class MemoryDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(_MEMORY_QSS)
         self.resize(480, 620)
+        # 最小尺寸防止拖角缩到内容不可见：
+        # 宽度 420 (下面有 setMinimumWidth) + 高度 380 (单条记忆卡片 80 + 顶部工具栏 100 + 余量)
         self.setMinimumWidth(420)
+        self.setMinimumHeight(380)
+        # 无边框窗口补上 8 方向边缘缩放（记忆多了能拖行也能看）
+        # 半透明窗口需要 freeze_translucent=False —— 否则缩放期间整块变黑
+        from app.ui.frameless import FramelessResizer
+        self._resizer = FramelessResizer(self, freeze_translucent=False).attach()
         self._build_ui()
         self.refresh()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.core.qt_compat import (
-    QEvent, QObject, QPoint, Qt,
+    QCursor, QEvent, QObject, QPoint, Qt, QToolTip,
     event_global_pos,
 )
 
@@ -39,4 +39,43 @@ class _TitleBarDrag(QObject):
         return False
 
 
-__all__ = ["_TitleBarDrag"]
+class _AvatarHoverHook(QObject):
+    """鼠标悬浮头像时弹 tooltip 显示桌宠状态。
+
+    之前头像只是个静态图, 鼠标移上去什么都看不到;
+    现在拿最新的 PetState 拼 stats_summary, 不用切到桌宠本体就能瞄一眼当前
+    (等级 / 体力 / 饱食 / 心情 / 健康 / 好感 / 金币)。
+
+    不吞事件 (返回 False) —— 让 _TitleBarDrag 仍然能拖动标题栏。
+    """
+
+    def __init__(self, chat_window: "ChatWindow"):
+        super().__init__(chat_window)
+        self._cw = chat_window
+
+    def eventFilter(self, obj, ev) -> bool:
+        t = ev.type()
+        if t == QEvent.Type.Enter:
+            text = self._build_tip()
+            if text:
+                QToolTip.showText(QCursor.pos(), text, obj)
+        elif t == QEvent.Type.Leave:
+            QToolTip.hideText()
+        return False
+
+    def _build_tip(self) -> str:
+        try:
+            sp = getattr(self._cw, "_state_provider", None)
+            if not callable(sp):
+                return ""
+            state = sp()
+        except Exception:  # noqa: BLE001
+            return ""
+        try:
+            summary = str(state.stats_summary())
+        except Exception:  # noqa: BLE001
+            return ""
+        return summary or ""
+
+
+__all__ = ["_TitleBarDrag", "_AvatarHoverHook"]

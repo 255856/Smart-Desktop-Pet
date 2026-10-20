@@ -191,6 +191,10 @@ class WerewolfWindow(QDialog):
         self._started = False
 
         self._build_ui()
+        # 无边框窗口补上 8 方向边缘缩放（长对话能拖行也能看）
+        # 半透明 + freeze_translucent=False 防止缩放期间整块变黑
+        from app.ui.frameless import FramelessResizer
+        self._resizer = FramelessResizer(self, freeze_translucent=False).attach()
         self._show_intro()
 
     # ------------------------------------------------------------ UI
@@ -306,6 +310,8 @@ class WerewolfWindow(QDialog):
         body.addWidget(self.action_box)
 
         self.resize(680, 920)
+        # 最小尺寸: 容纳座位区 + 操作区, 拖角缩到更小就看不见任何东西了
+        self.setMinimumSize(560, 620)
 
     def _make_seat(self, seat: int) -> QFrame:
         f = QFrame()

@@ -307,6 +307,85 @@ def test_load_defaults_does_not_write_store():
     )
 
 
+# ---------- 工具解锁窗口：模态 + 顶层 + 类型独特 ----------
+
+def test_tool_unlock_window_type_and_modality():
+    """工具解锁窗口: Tool 类型 + StaysOnTopHint + ApplicationModal。
+
+    主人要求：打开后其他窗口点不动（modal）、固定在最上面（StaysOnTopHint）、
+    类型与其他窗口不一样（Tool = 浮动工具窗，不在任务栏）。
+    """
+    src = _src("app/ui/chat_window/tool_unlock_dialog.py")
+    assert "Qt.WindowType.Tool" in src, "没设 Tool 类型"
+    assert "WindowStaysOnTopHint" in src, "没设 WindowStaysOnTopHint"
+    assert "ApplicationModal" in src, "没设 ApplicationModal（其他窗口能抢焦点）"
+    # 注意顺序: setWindowFlags 必须在 setWindowModality 之前（否则 flags 清掉 modality）
+    flag_pos = src.index("setWindowFlags")
+    mod_pos = src.index("setWindowModality")
+    assert flag_pos < mod_pos, (
+        "setWindowFlags 必须在 setWindowModality 之前 —— "
+        "否则 setWindowFlags 会把 modal 状态清掉"
+    )
+
+
+# ---------- 头像悬浮显示桌宠状态 ----------
+
+def test_chat_avatar_hover_hook_installed():
+    """鼠标悬浮 chat 顶部头像 → 弹 tooltip 显示桌宠状态。
+
+    之前头像只是个静态图，hover 啥都没有；现在拿最新 PetState.stats_summary()
+    拼一行，让用户不用切回桌宠本体就能瞄一眼当前情况。
+    """
+    src = _src("app/ui/chat_window/__init__.py")
+    assert "_AvatarHoverHook" in src, "chat 顶部头像没装 _AvatarHoverHook"
+    # _build_ui 是 chat_window 唯一的 UI 构造函数（含 header）
+    node = _func_node("app/ui/chat_window/__init__.py", "_build_ui")
+    assert node is not None, "chat_window 缺 _build_ui"
+    body = _ast.dump(node)
+    assert "avatar_label" in body, "avatar_label 没在 _build_ui 里建"
+    assert "_AvatarHoverHook" in body, "_build_ui 没装 hover hook"
+    assert "installEventFilter" in body
+
+
+# ---------- 窗口角落缩放 (FramelessResizer) ----------
+
+def test_frameless_resizer_freeze_translucent_param():
+    """FramelessResizer 必须支持 freeze_translucent=False —— 半透明窗缩放期间不能整块变黑。"""
+    src = _src("app/ui/frameless.py")
+    assert "freeze_translucent" in src, (
+        "FramelessResizer 没 freeze_translucent 参数 —— "
+        "半透明窗口 (chat / memory_panel / werewolf) 缩放期间会变黑"
+    )
+    # _freeze_heavy_paint 必须尊重该开关
+    node = _func_node("app/ui/frameless.py", "_freeze_heavy_paint")
+    assert node is not None
+    assert "_freeze_translucent" in _attrs(node), (
+        "_freeze_heavy_paint 没尊重 freeze_translucent —— "
+        "半透明窗口缩放期间仍会被关掉透明背景"
+    )
+
+
+def test_memory_panel_and_werewolf_have_resizer():
+    """记忆 / 狼人杀 窗口: 无边框 + FramelessResizer (角落拖角缩放)。"""
+    mem_src = _src("app/ui/memory_panel.py")
+    ww_src = _src("app/ui/werewolf_window.py")
+    for name, src in (("memory_panel", mem_src), ("werewolf_window", ww_src)):
+        assert "FramelessResizer" in src, f"{name} 没挂 FramelessResizer"
+        assert "freeze_translucent=False" in src, (
+            f"{name} 是半透明窗口, 缩放期间需要传 freeze_translucent=False"
+        )
+
+
+def test_memory_panel_and_werewolf_have_minimum_size():
+    """窗口缩放有底线 —— 拖角缩到看不见任何东西, 体验就崩了。"""
+    mem_src = _src("app/ui/memory_panel.py")
+    ww_src = _src("app/ui/werewolf_window.py")
+    for name, src in (("memory_panel", mem_src), ("werewolf_window", ww_src)):
+        assert "setMinimumSize" in src or "setMinimumWidth" in src, (
+            f"{name} 没设最小尺寸 —— 拖角能缩到看不见内容"
+        )
+
+
 # ---------- TTS 行显隐：真控件验证 ----------
 
 @pytest.fixture

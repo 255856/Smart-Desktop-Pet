@@ -117,8 +117,8 @@ from .utils import _html_escape, _format_time_short, _img_open_key  # noqa: F401
 from .command_completer import _CommandCompleter  # noqa: F401
 
 
-# _TitleBarDrag — 拆到 chat_window.chrome
-from .chrome import _TitleBarDrag  # noqa: F401
+# _TitleBarDrag / _AvatarHoverHook — 拆到 chat_window.chrome
+from .chrome import _TitleBarDrag, _AvatarHoverHook  # noqa: F401
 
 
 class ChatWindow(QWidget):
@@ -696,6 +696,8 @@ class ChatWindow(QWidget):
         drag_zone.installEventFilter(self._drag_filter)
         self.avatar_label.installEventFilter(self._drag_filter)
         title.installEventFilter(self._drag_filter)
+        # 头像悬浮 → tooltip 显示桌宠状态（不用切回桌宠本体就能瞄一眼）
+        self.avatar_label.installEventFilter(_AvatarHoverHook(self))
 
         self.chat_view = _NoCmdNavQTextBrowser()
         self.chat_view.setObjectName("chat_view")
