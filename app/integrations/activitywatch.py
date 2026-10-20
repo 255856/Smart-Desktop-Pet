@@ -155,8 +155,81 @@ def get_current_window_one_liner(
     return "当前窗口: " + _format_window_event_zh(events[0])
 
 
+# === AFK + 会议检测（v54：主动关心感知主人是否在场） ===
+
+# 会议类窗口标题关键词（覆盖主流远程会议软件的中英文）
+_MEETING_TITLE_KEYWORDS = (
+    # 中文（精确词，避免误命中 钉钉/微信 这类通用 IM）
+    "腾讯会议", "飞书会议室", "钉钉视频会议", "会议室 -",
+    # 英文 / 国际版
+    "Zoom Meeting", "Microsoft Teams", "Cisco Webex Meetings",
+    "Google Meet", "Lark Meeting",
+)
+
+
+def get_idle_status(
+    *,
+    server_url: Optional[str] = None,
+    hostname: Optional[str] = None,
+) -> Optional[float]:
+    """读 aw-watcher-afk 拿最近一次状态 → 返回空闲分钟数。
+
+    aw-watcher-afk 事件 `data.status` ∈ {"afk", "not-afk"}，`duration` 是距上
+    一次状态切换的秒数。
+
+    返回:
+      None     — aw-server 不可达 / 没装 afk watcher / 没数据（不阻塞主动搭话）
+      0.0      — 最近事件是 not-afk（主人在用电脑）
+      >0.0     — 当前 afk 持续分钟数（duration / 60）
+
+    不抛异常。
+    """
+    if not is_available(server_url):
+        return None
+    buckets = _http_get_json(_aw_url("/api/0/buckets/", server_url))
+    if isinstance(buckets, dict):
+        buckets = [{"id": bid, **(m if isinstance(m, dict) else {})}
+                   for bid, m in buckets.items()]
+    if not isinstance(buckets, list):
+        return None
+    bid = _find_bucket(buckets, "aw-watcher-afk", _hostname(hostname))
+    if not bid:
+        return None
+    events = _query_events(bid, minutes=180, limit=1, server_url=server_url)
+    if not events:
+        return None
+    latest = events[0]
+    data = latest.get("data", {}) or {}
+    status = data.get("status", "")
+    try:
+        dur = float(latest.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if status == "afk":
+        return dur / 60.0
+    return 0.0
+
+
+def is_focus_meeting(
+    *,
+    server_url: Optional[str] = None,
+    hostname: Optional[str] = None,
+) -> bool:
+    """当前焦点窗口标题是否匹配会议软件关键词。
+
+    走 get_current_window_one_liner（最近 2 分钟内 1 条窗口事件），
+    任一关键词命中就返 True。数据不可达返 False（保守不自动静音）。
+    """
+    line = get_current_window_one_liner(server_url=server_url, hostname=hostname)
+    if not line:
+        return False
+    return any(kw in line for kw in _MEETING_TITLE_KEYWORDS)
+
+
 __all__ = [
     "is_available",
     "get_recent_activities_summary",
     "get_current_window_one_liner",
+    "get_idle_status",
+    "is_focus_meeting",
 ]

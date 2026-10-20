@@ -1,4 +1,9 @@
-"""桌宠主动行为：空闲时主动找主人说话（时间/状态/记忆驱动的主动关怀）。"""
+"""桌宠主动行为：空闲时主动找主人说话（时间/状态/记忆驱动的主动关怀）。
+
+v54 增强：感知主人「是否在场」（aw-watcher-afk）与「是否在会议」
+（窗口标题关键词），空闲过久或正在开会就跳过本轮主动搭话，避免打扰。
+开会场景还会自动把 TTS 静音 30 分钟，免得突然冒一句话。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +47,10 @@ class _ChatOnceWorker(QThread):
                 system_prompt, messages = self._prepare()
             else:
                 system_prompt, messages = self.system_prompt, self.messages
+            # v54: _prepare 返 (None, None) = 跳过本轮（主人不在场 / 在会议）
+            if system_prompt is None and messages is None:
+                self.done.emit("")
+                return
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             from app.brain.llm_client import LLMClient
@@ -101,6 +110,8 @@ class ProactiveBrain(QObject):
         is_sleeping: Optional[Callable[[], bool]] = None,
         chat_cfg=None,            # app.core.config.ChatConfig, 可选
         aw_cfg=None,              # app.core.config.ActivityWatchConfig, 可选
+        idle_skip_minutes: int = 30,           # v54: 主人空闲多久（分钟）跳过主动搭话
+        meeting_auto_mute_minutes: int = 30,   # v54: 检测到会议自动静音 TTS 多长时间
     ):
         super().__init__()
         self.llm_cfg = llm_cfg
@@ -121,6 +132,9 @@ class ProactiveBrain(QObject):
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
         self._last_remarks_by_char: dict[str, list[str]] = {}
+        # v54: 闲置 / 会议感知阈值
+        self.idle_skip_minutes = max(1, int(idle_skip_minutes))
+        self.meeting_auto_mute_minutes = max(1, int(meeting_auto_mute_minutes))
         # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
 
     def apply_aw_config(self, aw_cfg) -> None:
@@ -150,6 +164,16 @@ class ProactiveBrain(QObject):
         self._schedule()
         log.info("ProactiveBrain: 间隔调整为 %d-%d 分钟", self.min_minutes, self.max_minutes)
 
+    def apply_idle_skip_minutes(self, minutes: int) -> None:
+        """设置面板：调整「主人空闲多久跳过主动搭话」的阈值（分钟）。"""
+        self.idle_skip_minutes = max(1, int(minutes))
+        log.info("ProactiveBrain: 空闲跳过阈值 → %d 分钟", self.idle_skip_minutes)
+
+    def apply_meeting_auto_mute_minutes(self, minutes: int) -> None:
+        """设置面板：调整「检测到会议自动静音 TTS」的时长（分钟）。"""
+        self.meeting_auto_mute_minutes = max(1, int(minutes))
+        log.info("ProactiveBrain: 会议自动静音时长 → %d 分钟", self.meeting_auto_mute_minutes)
+
     def update_llm_config(self, new_cfg) -> None:
         """用户修改了模型配置，下一次 _fire 自动用新配置。"""
         self.llm_cfg = new_cfg
@@ -163,6 +187,28 @@ class ProactiveBrain(QObject):
         """
         self._request_timeout_s = None if seconds is None else int(seconds)
         log.info("ProactiveBrain: 请求超时 → %s", self._request_timeout_s)
+
+    def _read_idle_minutes(self) -> Optional[float]:
+        """查 AW aw-watcher-afk 拿主人空闲分钟数；任何环节失败都返 None（不打扰策略）。"""
+        try:
+            from app.integrations.activitywatch import get_idle_status
+            return get_idle_status(
+                server_url=(getattr(self._aw_cfg, "server_url", None) or None),
+                hostname=(getattr(self._aw_cfg, "hostname", None) or None),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _is_in_meeting(self) -> bool:
+        """当前窗口是否是会议软件；AW 不可达或失败返 False（保守不自动静音）。"""
+        try:
+            from app.integrations.activitywatch import is_focus_meeting
+            return is_focus_meeting(
+                server_url=(getattr(self._aw_cfg, "server_url", None) or None),
+                hostname=(getattr(self._aw_cfg, "hostname", None) or None),
+            )
+        except Exception:  # noqa: BLE001
+            return False
 
     def _build_aw_context(self) -> str:
         """拿 AW 活动数据；未启用 / aw-server 未跑 / 无 watcher 时返回空字符串。"""
@@ -237,7 +283,32 @@ class ProactiveBrain(QObject):
             ActivityWatch 抓取是阻塞 HTTP（最多 6 次 urlopen，超时 2+4+6 秒）。
             原来在 GUI 线程做 → 桌宠动画/气泡/托盘/输入全部冻住（最长 24 秒）。
             现在整个 prompt 组装都放进 worker 线程，GUI 线程只负责调度。
+
+            v54 起还承担「在窗口场景过滤」：
+              - 主人空闲 > idle_skip_minutes → (None, None) 跳过本轮
+              - 当前窗口是会议软件 → (None, None) + 自动静音 TTS
             """
+            # v54: 主人空闲太久 → 不打扰
+            idle_min = self._read_idle_minutes()
+            if idle_min is not None and idle_min >= self.idle_skip_minutes:
+                log.info(
+                    "ProactiveBrain: 主人空闲 %.1f 分钟 (> %d), 跳过本轮主动搭话",
+                    idle_min, self.idle_skip_minutes,
+                )
+                return None, None
+            # v54: 会议窗口 → 自动静音 TTS + 不打扰
+            if self._is_in_meeting():
+                log.info(
+                    "ProactiveBrain: 检测到会议窗口, 自动静音 TTS %d 分钟",
+                    self.meeting_auto_mute_minutes,
+                )
+                try:
+                    from app.engine.tools._tts_mute import set_tts_mute_until_threadsafe
+                    set_tts_mute_until_threadsafe(self.meeting_auto_mute_minutes)
+                except Exception:  # noqa: BLE001
+                    log.exception("ProactiveBrain: 会议自动静音失败")
+                return None, None
+
             aw_context = self._build_aw_context()
             context = dict(context_base)
             context["aw_context"] = aw_context

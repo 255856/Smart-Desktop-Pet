@@ -65,6 +65,28 @@ def unmute_tts() -> str:
     return "已取消静音"
 
 
+def set_tts_mute_until_threadsafe(minutes: float = 0) -> str:
+    """线程安全版本：不回调 hook（hook 是 Qt 槽，跨线程调不安全）。
+
+    给 ProactiveBrain 的 worker 线程用。状态本身会更新；UI 下一次操作时
+    通过 is_muted() 自己感知新状态。如果当前没有 hook 被设置（仓库里
+    目前就没有），行为跟普通 set_tts_mute_until 完全一致。
+    """
+    if minutes is None or minutes == 0:
+        minutes = 30.0
+    try:
+        m = float(minutes)
+    except (TypeError, ValueError):
+        return f"错误：minutes 必须是数字（{minutes!r}）"
+    if m <= 0:
+        return "错误：minutes 必须 > 0"
+    m = min(m, 480)
+    global _mute_until_ts
+    with _lock:
+        _mute_until_ts = time.time() + m * 60
+    return f"已静音 TTS {m:g} 分钟（回复只显示气泡不朗读）"
+
+
 def get_tts_mute_status() -> str:
     """查询当前静音状态 / 剩余时间。"""
     global _mute_until_ts
@@ -133,4 +155,4 @@ def register(reg: ToolRegistry) -> None:
     reg.register(get_tts_mute_status)
 
 
-__all__ = ["register", "is_muted", "set_mute_hook"]
+__all__ = ["register", "is_muted", "set_mute_hook", "set_tts_mute_until_threadsafe"]
