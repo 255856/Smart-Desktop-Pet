@@ -241,13 +241,17 @@ def test_proactive_interval_range_matches_backend():
     body = _ast.dump(node)
     assert "spin_proactive_min" in body
     # 下限最少 5 分钟（后端会抬到 5），上限至少比下限多 5
-    assert "setRange(5, 720)" in src, "间隔下限范围没跟后端规则对齐"
-    assert "setRange(10, 720)" in src, "间隔上限范围没跟后端规则对齐"
+    assert "setRange(2, 720)" in src, "间隔下限范围不是 2~720"
+    assert "setRange(6, 720)" in src, "间隔上限范围不是 6~720"
 
     node = _func_node("app/ui/settings_window.py", "_emit_proactive")
     assert node is not None
     body = _ast.dump(node)
     assert "setValue" in body, "间隔被后端钳制后没回显 —— 面板显示的和实际跑的不是一回事"
+    # 后端同一套规则（主人要求: 下限最低 2, 上限最低 6）
+    backend = _src("app/brain/proactive.py")
+    assert "max(2, int(min_minutes))" in backend, "后端下限钳制不是 2"
+    assert "max(6, self.min_minutes, int(max_minutes))" in backend, "后端上限钳制不是 6"
 
 
 # ---------- API 预设 ----------
@@ -430,6 +434,10 @@ def test_avatar_picker_dialog_exists():
     assert "avatarSelected" in src
     # 上传走 QFileDialog
     assert "QFileDialog" in src
+    # setFixedSize 只收 (w, h) 两个 int —— 传两个 QSize 会 TypeError 崩
+    assert "setFixedSize(_size(" not in src, (
+        "setFixedSize 传了两个 QSize —— PyQt 签名只收 (int, int), 会崩"
+    )
 
 
 def test_settings_window_has_avatar_picker_entry():
@@ -481,9 +489,17 @@ def test_status_progressbar_uses_ellipse_radius():
     assert "QProgressBar::chunk" in src
     # radius 5 = 高度/2 (椭圆)
     assert "border-radius: 5px" in src, "进度条圆角没改 5px (高度 10 的一半)"
-    # 老的 8px 圆角不该再出现
-    assert "border-radius: 8px" not in src or "QProgressBar" not in src.split("border-radius: 8px")[0][-200:], (
-        "QProgressBar 还用 8px 圆角 (高度 10 时不椭圆)"
+    # stat_bar_qss 是内联样式 (会盖掉全局 QSS), 它也必须是 5px
+    node = _func_node("app/ui/ui_style.py", "stat_bar_qss")
+    assert node is not None, "ui_style.stat_bar_qss 缺失"
+    body = _ast.dump(node)
+    assert "border-radius:5px" in body.replace(" ", ""), (
+        "stat_bar_qss 圆角还是 8px —— 状态模块那 6 条会被内联样式盖成方块"
+    )
+    # 面板侧固定高度也要 10
+    settings_src = _src("app/ui/settings_window.py")
+    assert "setFixedHeight(10)" in settings_src, (
+        "状态条固定高度还是 14 —— 圆角 5 配 14 高不是椭圆"
     )
 
 
@@ -510,12 +526,13 @@ def test_tool_unlock_has_titlebar_window_chrome():
     现在加 QToolButton 标题栏 (─/▢/X) + 拖动支持, 跟 chat / settings 一致。
     """
     src = _src("app/ui/chat_window/tool_unlock_dialog.py")
-    # 标题栏
-    assert "unlock_titlebar" in src, "工具解锁缺自定义标题栏"
-    # 三个按钮对象名
-    for objname in ("title_btn_min", "title_btn_max", "title_btn_close"):
+    # 标题栏: 必须用 ui_style.TITLEBAR_QSS (渐变) + QToolButton#win_btn 样式,
+    # 自造 objectName 会没样式 → 渲染成系统默认灰色方块 (主人反馈的"灰色栏")
+    assert "TITLEBAR_QSS" in src, "标题栏没用 ui_style.TITLEBAR_QSS"
+    assert 'setObjectName("titlebar")' in src, "标题栏 objectName 不是 titlebar"
+    for objname in ("win_btn", "win_btn_close"):
         assert f'setObjectName("{objname}")' in src, (
-            f"标题栏缺 {objname} 按钮"
+            f"标题栏按钮没用 {objname} 样式 —— 会显示成系统默认灰方块"
         )
     # 关闭按钮接到 reject
     assert "btn_close.clicked.connect(dlg.reject)" in src

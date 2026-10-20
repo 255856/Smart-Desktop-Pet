@@ -157,7 +157,8 @@ class AvatarPickerDialog(QDialog):
         btn = QToolButton()
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setIconSize(_size(THUMB))
-        btn.setFixedSize(_size(THUMB + 8), _size(THUMB + 36))
+        # setFixedSize 收 (w, h) 两个 int, 不是两个 QSize —— 传错会 TypeError 崩
+        btn.setFixedSize(THUMB + 8, THUMB + 36)
         btn.setIcon(QIcon(str(path)))
         btn.setText(path.stem)
         # 缩略图超出图标显示范围时, label 文字会自动省略

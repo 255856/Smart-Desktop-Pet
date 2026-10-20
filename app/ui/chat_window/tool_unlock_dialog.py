@@ -360,36 +360,39 @@ def build_tool_unlock_dialog(
     root.setSpacing(0)
 
     # ---- 自定义标题栏 (无边框窗口没系统标题栏)
-    # 跟 chat_window / settings_window 一致: 标题 + 副标题 (左) | min/max/close (右)
-    # 也可按住拖动整窗
+    # 跟 chat_window / settings_window 完全同一套: ui_style.TITLEBAR_QSS 渐变标题栏
+    # + QToolButton#win_btn / #win_btn_close 样式 (用自定义 objectName 会没样式,
+    # 渲染成系统默认灰色方块 —— 主人反馈"顶部灰色栏"就是这个)。
     from app.ui.chat_window.chrome import _TitleBarDrag
+    from app.ui import ui_style as _ui_style
     titlebar = QFrame()
-    titlebar.setObjectName("unlock_titlebar")
+    titlebar.setObjectName("titlebar")
     titlebar.setFixedHeight(46)
+    titlebar.setStyleSheet(_ui_style.TITLEBAR_QSS)
     thbox = QHBoxLayout(titlebar)
-    thbox.setContentsMargins(18, 8, 6, 8)
-    thbox.setSpacing(8)
+    thbox.setContentsMargins(18, 6, 6, 6)
+    thbox.setSpacing(6)
 
     title_col = QVBoxLayout()
     title_col.setSpacing(0)
     title = QLabel("工具解锁")
-    title.setObjectName("header_title")
+    title.setObjectName("titlebar_title")
     title_col.addWidget(title)
     subtitle = QLabel("每升 1 级解锁新工具")
-    subtitle.setObjectName("header_subtitle")
+    subtitle.setObjectName("titlebar_subtitle")
     title_col.addWidget(subtitle)
     thbox.addLayout(title_col, 1)
 
     btn_min = QToolButton()
     btn_min.setText("─")
-    btn_min.setObjectName("title_btn_min")
+    btn_min.setObjectName("win_btn")
     btn_min.setToolTip("最小化")
     btn_min.setFixedSize(30, 28)
     btn_min.clicked.connect(dlg.showMinimized)
 
     btn_max = QToolButton()
     btn_max.setText("▢")
-    btn_max.setObjectName("title_btn_max")
+    btn_max.setObjectName("win_btn")
     btn_max.setToolTip("最大化")
     btn_max.setFixedSize(30, 28)
     def _toggle_max() -> None:
@@ -405,7 +408,7 @@ def build_tool_unlock_dialog(
 
     btn_close = QToolButton()
     btn_close.setText("X")
-    btn_close.setObjectName("title_btn_close")
+    btn_close.setObjectName("win_btn_close")
     btn_close.setToolTip("关闭")
     btn_close.setFixedSize(30, 28)
     btn_close.clicked.connect(dlg.reject)

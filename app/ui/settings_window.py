@@ -290,7 +290,8 @@ class SettingsWindow(QWidget):
                          ("health", self.bar_health), ("likability", self.bar_likability)):
             bar.setRange(0, 100)
             bar.setTextVisible(False)
-            bar.setFixedHeight(14)
+            # 高度 10 + 圆角 5 (= 高度一半) → 椭圆长条
+            bar.setFixedHeight(10)
             bar.setStyleSheet(ui_style.stat_bar_qss(*ui_style.STAT_BAR_COLORS[key]))
         labels_and_bars = [
             ("体力", self.bar_strength, "strength"),
@@ -1039,16 +1040,16 @@ class SettingsWindow(QWidget):
         gp.addWidget(self.cb_proactive, 0, 0, 1, 3)
         gp.addWidget(QLabel("间隔下限（分）"), 1, 0)
         self.spin_proactive_min = QSpinBox()
-        # 下限最小 5 分钟：ProactiveBrain 内部会把 <5 的值抬成 5，
+        # 下限最小 2 分钟：ProactiveBrain 内部会把 <2 的值抬成 2，
         # 面板下限照着来，用户才设不出"显示了却不是那个值"的选项
-        self.spin_proactive_min.setRange(5, 720)
+        self.spin_proactive_min.setRange(2, 720)
         self.spin_proactive_min.setValue(int(st_p.get("min_minutes", 25)))
         self.spin_proactive_min.valueChanged.connect(self._emit_proactive)
         gp.addWidget(self.spin_proactive_min, 1, 1)
         gp.addWidget(QLabel("上限（分）"), 2, 0)
         self.spin_proactive_max = QSpinBox()
-        # 上限至少要比下限多 5（ProactiveBrain 的规则），这里同步
-        self.spin_proactive_max.setRange(10, 720)
+        # 上限至少 6 分钟（ProactiveBrain 的规则），这里同步
+        self.spin_proactive_max.setRange(6, 720)
         self.spin_proactive_max.setValue(int(st_p.get("max_minutes", 45)))
         self.spin_proactive_max.valueChanged.connect(self._emit_proactive)
         gp.addWidget(self.spin_proactive_max, 2, 1)
@@ -2307,8 +2308,8 @@ class SettingsWindow(QWidget):
                 row.setVisible(on)
 
     def _emit_proactive(self) -> None:
-        lo = max(5, self.spin_proactive_min.value())
-        hi = max(lo + 5, self.spin_proactive_max.value())
+        lo = max(2, self.spin_proactive_min.value())
+        hi = max(6, lo, self.spin_proactive_max.value())
         # 回显实际生效值 —— ProactiveBrain 会按同样规则钳制，
         # 面板不跟着回显的话，用户看到的数和实际跑的不是一回事
         if self.spin_proactive_min.value() != lo:

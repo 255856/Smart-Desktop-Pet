@@ -800,9 +800,11 @@ QPushButton#close_btn:pressed {{ background: {ACCENT_DK}; }}
 
 
 def stat_bar_qss(light: str, dark: str) -> str:
+    # 高度 10px + 圆角 5px (= 高度一半) → 两端半圆, 视觉上是椭圆长条而不是方块
     return (
-        "QProgressBar { background:#ecebf3; border:1px solid #e4e3ee; border-radius:8px; }"
-        " QProgressBar::chunk { border-radius:8px; background:"
+        "QProgressBar { background:#ecebf3; border:1px solid #e4e3ee;"
+        " border-radius:5px; min-height:10px; }"
+        " QProgressBar::chunk { border-radius:5px; background:"
         "qlineargradient(x1:0,y1:0,x2:1,y2:0,"
         f" stop:0 {light}, stop:1 {dark}); }}"
     )

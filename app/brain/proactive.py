@@ -100,8 +100,9 @@ class ProactiveBrain(QObject):
         self.state = state
         self.memory = memory
         self.char_name = char_name
-        self.min_minutes = max(5, int(min_minutes))
-        self.max_minutes = max(self.min_minutes + 5, int(max_minutes))
+        # 间隔下限最少 2 分钟、上限最少 6 分钟（面板范围跟这里保持一致）
+        self.min_minutes = max(2, int(min_minutes))
+        self.max_minutes = max(6, self.min_minutes, int(max_minutes))
         self.is_sleeping = is_sleeping or (lambda: False)
         # 来自 config.yaml 的 chat.request_timeout_s；None 表示让 LLMClient 用 cfg.timeout
         self._request_timeout_s: int | None = (
@@ -133,8 +134,9 @@ class ProactiveBrain(QObject):
 
     def apply_interval(self, min_minutes: int, max_minutes: int) -> None:
         """设置面板：调整主动发言间隔（分钟）并重新排程。"""
-        self.min_minutes = max(5, int(min_minutes))
-        self.max_minutes = max(self.min_minutes + 5, int(max_minutes))
+        # 下限最少 2、上限最少 6（跟构造时同一套规则，面板显示才准）
+        self.min_minutes = max(2, int(min_minutes))
+        self.max_minutes = max(6, self.min_minutes, int(max_minutes))
         if self._timer is not None:
             self._timer.stop()
         self._schedule()
