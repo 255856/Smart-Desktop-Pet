@@ -22,6 +22,9 @@ from app.engine.state import PetState
 
 log = logging.getLogger(__name__)
 
+# 连续快速写的判定窗口（秒）：窗口内的写盘跳过 fsync + .bak 备份
+_RAPID_WRITE_WINDOW_S = 1.0
+
 
 def default_save_path() -> Path:
     """`~/.desktop-pet/save.json`，跨平台。"""
@@ -128,12 +131,23 @@ class SaveStore(QObject):
         """原子写：先写临时文件 + fsync，再原子替换。
 
         避免中途崩溃导致空文件。同时把上一份 copy 到 .bak。
+
+        连续快速写（开发者模式拖滑块时每个像素都写一次）会跳过 fsync 和
+        .bak 备份——fsync 是这里最贵的一步，而拖动过程中的中间值丢了也
+        无所谓（内容本身仍然是原子替换的，不会写坏文件）。
         """
         payload = state.to_dict()
         text = json.dumps(payload, ensure_ascii=False, indent=2)
 
-        # 备份旧文件（如果存在）
-        if self.path.is_file():
+        # 上一次写盘不到 1 秒 → 认为是「连续快速写」，走轻量路径
+        rapid = bool(
+            self._last_write_ts
+            and (time.time() - self._last_write_ts) < _RAPID_WRITE_WINDOW_S
+        )
+
+        # 备份旧文件（如果存在）—— 连续快速写时跳过：备份的是上一份，
+        # 连续写时它每次都被覆盖，留着「本次连续写之前的那份」更有用。
+        if not rapid and self.path.is_file():
             try:
                 shutil.copy2(self.path, self.path.with_suffix(".bak.json"))
             except Exception as e:  # noqa: BLE001
@@ -147,10 +161,11 @@ class SaveStore(QObject):
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except (OSError, ValueError, KeyError, TypeError) as e:
-                    log.debug("ignored: %s", e)
+                if not rapid:
+                    try:
+                        os.fsync(f.fileno())
+                    except (OSError, ValueError, KeyError, TypeError) as e:
+                        log.debug("ignored: %s", e)
             os.replace(tmp, self.path)
             self._dirty = False
             self._last_write_ts = time.time()    # 防抖

@@ -15,7 +15,17 @@ class TestTraceRecorder:
         self.rec = TraceRecorder(self.tmp.name)
 
     def teardown_method(self):
-        os.unlink(self.tmp.name)
+        # TraceRecorder 现在复用一条长连接（WAL + synchronous=NORMAL，
+        # 见 app/brain/trace.py），Windows 上文件被打开时不能删，
+        # 所以先 close() 再清文件。
+        try:
+            self.rec.close()
+        except Exception:  # noqa: BLE001
+            pass
+        for suffix in ("", "-wal", "-shm"):
+            path = self.tmp.name + suffix
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_begin_and_end_run(self):
         rid = self.rec.begin_run("测试目标", mode="react")

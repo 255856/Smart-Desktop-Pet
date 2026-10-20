@@ -38,3 +38,15 @@ class SettingsStore:
         """设置值并立即落盘。"""
         self._data[key] = value
         self._save()
+
+    def set_many(self, values: dict[str, Any]) -> None:
+        """批量设置 + **只落盘一次**。
+
+        设置面板一次改动往往涉及多个键（模型配置就是 7 个）。逐个 set()
+        会把整份 JSON 序列化重写 N 遍——输 40 字符 API key 就是 280 次
+        整文件写（实测把面板卡得打字都跟不上）。
+        """
+        if not values:
+            return
+        self._data.update(values)
+        self._save()

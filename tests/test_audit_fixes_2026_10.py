@@ -166,6 +166,29 @@ def test_zero_tool_claim_with_detected_intent_uses_retry_chain():
     assert "打开QQ啦" not in joined, f"伪造的报喜被放行了：{joined!r}"
 
 
+def test_force_retry_is_capped_at_one():
+    """M2：「该调工具却只给文字」的重试上限为 1 次。
+
+    原来能连重试 5 轮（MAX_TURNS=6），而第 2..6 次带的几乎是同一个请求
+    （强制提示由 LLMClient 统一注入，tool_choice 降级还按模型名缓存着），
+    等于把同一请求重复发 5 次——费钱且慢。
+    """
+    client = _TextOnlyClient(["已经帮主人打开QQ啦~"])
+    agent = AgentLoop(client=client, registry=_reg(), max_turns=6)
+    retries = []
+
+    async def drive():
+        async for ev, *rest in agent.run([{"role": "user", "content": "帮我打开QQ"}]):
+            if (ev == "meta" and isinstance(rest[0], dict)
+                    and rest[0].get("event") == "force_retry"):
+                retries.append(rest[0])
+
+    asyncio.run(drive())
+    assert len(retries) == 1, f"force_retry 最多 1 次，实际 {len(retries)} 次"
+    # 首次请求 + 1 次重试 = 2 次，不能更多
+    assert client.calls == 2, f"LLM 请求次数应为 2，实际 {client.calls}"
+
+
 def test_zero_tool_claim_without_intent_triggers_verify_retry():
     """意图正则没命中时（force_first_turn=False），零工具报喜要靠
     _claims_unbacked_action 兜住——原实现这里完全是盲区。"""

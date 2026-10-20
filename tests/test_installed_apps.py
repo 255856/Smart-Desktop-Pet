@@ -1,5 +1,6 @@
 """installed_apps 模块 + open_app 候选推荐 回归测试。"""
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -375,3 +376,230 @@ class TestRegistryResolveFallback:
             result = reg.resolve("totallynonexistentapp")
 
         assert result is None
+
+
+# ============================================================
+#  H8：TTL 必须真正生效（之前 _is_fresh 是死代码，缓存永不刷新）
+# ============================================================
+
+class TestCacheTTL:
+    """installed_apps 的 TTL 行为。"""
+
+    @staticmethod
+    def _wait_scan(cache, timeout: float = 5.0) -> None:
+        """等后台扫描线程结束。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with cache._lock:
+                if not cache._scanning and cache._scan_thread is None:
+                    return
+            time.sleep(0.02)
+
+    def test_ttl_expired_triggers_rescan(self, monkeypatch):
+        """TTL 过期后下次访问应触发重新扫描（修复前永远返回陈旧数据）。"""
+        calls: list[int] = []
+
+        def fake_scan():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(
+            "app.core.installed_apps._scan_installed_apps", fake_scan,
+        )
+
+        cache = InstalledAppsCache(ttl_seconds=300)
+        self._wait_scan(cache)
+        assert len(calls) == 1
+
+        # 把扫描时间挪到 TTL 之外
+        with cache._lock:
+            cache._result.scanned_at = time.time() - 3600
+
+        cache.get_all(wait=False)
+        self._wait_scan(cache)
+        assert len(calls) == 2, "TTL 过期后必须重新扫描"
+
+    def test_fresh_cache_does_not_rescan(self, monkeypatch):
+        """TTL 内不应重复扫描。"""
+        calls: list[int] = []
+
+        def fake_scan():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(
+            "app.core.installed_apps._scan_installed_apps", fake_scan,
+        )
+
+        cache = InstalledAppsCache(ttl_seconds=300)
+        self._wait_scan(cache)
+        assert len(calls) == 1
+
+        cache.get_all(wait=False)
+        cache.get_all(wait=True, timeout=0.5)
+        self._wait_scan(cache)
+        assert len(calls) == 1, "TTL 内不应重复扫描"
+
+    def test_empty_result_still_counts_as_fresh(self, monkeypatch):
+        """扫到 0 个应用也是有效的新鲜数据（否则每次调用都重扫系统）。"""
+        calls: list[int] = []
+
+        def fake_scan():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(
+            "app.core.installed_apps._scan_installed_apps", fake_scan,
+        )
+
+        cache = InstalledAppsCache(ttl_seconds=300)
+        self._wait_scan(cache)
+        assert cache._result.apps == []
+        assert cache._is_fresh()
+
+        cache.get_all(wait=False)
+        self._wait_scan(cache)
+        assert len(calls) == 1
+
+    def test_failed_scan_does_not_hot_retry(self, monkeypatch):
+        """扫描失败后进入冷却，不反复重试坏路径。"""
+        calls: list[int] = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("模拟扫描失败")
+
+        monkeypatch.setattr(
+            "app.core.installed_apps._scan_installed_apps", boom,
+        )
+
+        cache = InstalledAppsCache(ttl_seconds=300)
+        self._wait_scan(cache)
+        assert len(calls) == 1
+        assert cache._last_failure_at > 0
+
+        for _ in range(5):
+            cache.get_all(wait=False)
+            cache.get_all(wait=True, timeout=0.05)
+        self._wait_scan(cache)
+        assert len(calls) == 1, "失败冷却期内不应重复扫描"
+
+    def test_force_refresh_bypasses_failure_cooldown(self, monkeypatch):
+        """force_refresh 要能绕过失败冷却立刻重扫。"""
+        calls: list[int] = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("模拟扫描失败")
+
+        monkeypatch.setattr(
+            "app.core.installed_apps._scan_installed_apps", boom,
+        )
+
+        cache = InstalledAppsCache(ttl_seconds=300)
+        self._wait_scan(cache)
+        assert len(calls) == 1
+
+        cache.force_refresh()
+        self._wait_scan(cache)
+        assert len(calls) == 2
+
+
+# ============================================================
+#  H8：open_app 只应扫描一次系统
+# ============================================================
+
+class TestOpenAppSingleScan:
+    """open_app 不应把系统扫两遍（原来 resolve + _collect_suggestions 各一遍）。"""
+
+    def test_open_app_scans_installed_apps_once(self):
+        from app.engine.tools._core import ToolRegistry
+        from app.engine.tools._system import register
+        import unittest.mock as mock
+
+        reg = ToolRegistry()
+        register(reg)
+
+        calls: list[str] = []
+
+        def fake_find(query, *args, **kwargs):
+            calls.append(query)
+            return []
+
+        with mock.patch(
+            "app.core.installed_apps.find_similar_apps", side_effect=fake_find,
+        ):
+            result = reg.get("open_app").fn("暴雪娱乐公司客户端")
+
+        assert "未找到" in result
+        assert len(calls) == 1, f"open_app 应该只扫一次系统，实际 {len(calls)} 次"
+
+    def test_builtin_hit_skips_system_scan(self, tmp_path):
+        """命中内置映射时完全不必扫系统。"""
+        from app.engine.tools._core import ToolRegistry
+        from app.engine.tools._system import register
+        from app.core.app_registry import AppRegistry
+        import unittest.mock as mock
+
+        fake_exe = tmp_path / "mytool.exe"
+        fake_exe.write_bytes(b"MZ")
+
+        app_reg = AppRegistry()
+        app_reg.add_custom("mytool", str(fake_exe))
+
+        reg = ToolRegistry()
+        register(reg)
+
+        calls: list[str] = []
+
+        def fake_find(query, *args, **kwargs):
+            calls.append(query)
+            return []
+
+        with mock.patch(
+            "app.core.app_registry.get_registry", return_value=app_reg,
+        ), mock.patch(
+            "app.core.installed_apps.find_similar_apps", side_effect=fake_find,
+        ), mock.patch(
+            "app.engine.tools._system.os.startfile",
+        ) as mock_startfile:
+            result = reg.get("open_app").fn("mytool")
+
+        assert "已启动" in result
+        mock_startfile.assert_called_once()
+        assert calls == [], "内置映射命中时不该扫描系统"
+
+    def test_resolve_reuses_provided_candidates(self):
+        """resolve 传入候选时不再自己调 find_similar_apps。"""
+        from app.core.installed_apps import InstalledApp
+        import unittest.mock as mock
+
+        reg = AppRegistry()
+        candidates = [
+            (InstalledApp(
+                name="Notepad",
+                path="C:/Windows/notepad.exe",
+                source="app_paths",
+            ), 0.9),
+        ]
+        with mock.patch(
+            "app.core.installed_apps.find_similar_apps",
+            side_effect=AssertionError("不该再调 find_similar_apps"),
+        ):
+            result = reg.resolve(
+                "mytest_unique_name_xyz", installed_candidates=candidates,
+            )
+        assert result == "C:/Windows/notepad.exe"
+
+    def test_resolve_empty_candidates_skips_installed_apps(self):
+        """installed_candidates=[] 表示不走已装应用兜底。"""
+        import unittest.mock as mock
+
+        reg = AppRegistry()
+        with mock.patch(
+            "app.core.installed_apps.find_similar_apps",
+            side_effect=AssertionError("不该调 find_similar_apps"),
+        ):
+            assert reg.resolve(
+                "mytest_unique_name_xyz", installed_candidates=[],
+            ) is None

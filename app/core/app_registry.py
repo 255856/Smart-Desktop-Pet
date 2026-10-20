@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +273,14 @@ def _normalize_key(name: str) -> str:
     return re.sub(r"[\s\-_.（）()]+", "", name.lower())
 
 
+# 归一化 key → 原始显示名。
+# 预先算好：原来 _key_to_display 每次比较都跑一遍正则（~70 条 builtin 键
+# → 最多 4,900 次正则替换/次），而 find_similar_in_registry 每次调用都要遍历。
+_KEY_TO_DISPLAY: dict[str, str] = {}
+for _name in _BUILTIN_MAP:
+    _KEY_TO_DISPLAY.setdefault(_normalize_key(_name), _name)
+
+
 class AppRegistry:
     r"""应用程序路径映射注册表。
 
@@ -354,7 +362,11 @@ class AppRegistry:
             log.warning("保存 app_registry 失败：%s", e)
 
     #  查询 / 修改
-    def resolve(self, app_name: str) -> Optional[str]:
+    def resolve(
+        self,
+        app_name: str,
+        installed_candidates: Optional[list[tuple[Any, float]]] = None,
+    ) -> Optional[str]:
         """根据名称查找可执行文件路径。
 
         查找顺序：
@@ -362,6 +374,13 @@ class AppRegistry:
             2. 内置映射的模糊匹配（SequenceMatcher.ratio ≥ 0.7）
             3. 已安装应用相似度搜索（兜底）
             4. 都找不到 → 返回 None
+
+        installed_candidates:
+            外部已经查好的「已安装应用相似候选」[(InstalledApp, score), ...]。
+            传入时第 3 步直接用它，不再自己调 find_similar_apps——
+            同一次工具调用里可以把系统只扫一遍。
+            传 ``[]`` 表示「不走已安装应用兜底」（只查内置映射）。
+            None（默认）= 保持旧行为，自己调 find_similar_apps。
         """
         name = app_name.strip()
         if not name:
@@ -377,7 +396,7 @@ class AppRegistry:
                 if full and Path(full).is_file():
                     return full
             # 精确 key 存在但所有路径都失效 → 不再走内置模糊匹配，仍走已安装应用扫描
-            return self._resolve_from_installed_apps(name)
+            return self._resolve_from_installed_apps(name, installed_candidates)
 
         # 2) 内置模糊匹配
         from difflib import SequenceMatcher
@@ -398,20 +417,30 @@ class AppRegistry:
             return best_match[1]
 
         # 3) 已安装应用扫描（兜底）
-        return self._resolve_from_installed_apps(name)
+        return self._resolve_from_installed_apps(name, installed_candidates)
 
-    def _resolve_from_installed_apps(self, name: str) -> Optional[str]:
+    def _resolve_from_installed_apps(
+        self,
+        name: str,
+        installed_candidates: Optional[list[tuple[Any, float]]] = None,
+    ) -> Optional[str]:
         """扫描系统已装应用，按相似度匹配第一个相似度 ≥ 0.85 的。
 
         用 0.85 阈值（比内置映射的 0.7 高）—— 扫描结果噪声大，宁缺勿滥：
         用户说「vscode」时，宁可返回 None 让上层报告「找不到 + 推荐 top 5」，
         也不要错开别的 IDE。
+
+        installed_candidates 不为 None 时直接复用外部已扫好的候选，
+        不再重复调用 find_similar_apps。
         """
-        try:
-            from app.core.installed_apps import find_similar_apps
-        except ImportError:
-            return None
-        candidates = find_similar_apps(name, limit=3, min_ratio=0.85)
+        if installed_candidates is None:
+            try:
+                from app.core.installed_apps import find_similar_apps
+            except ImportError:
+                return None
+            candidates = find_similar_apps(name, limit=3, min_ratio=0.85)
+        else:
+            candidates = installed_candidates
         for app, score in candidates:
             if score >= 0.85 and Path(app.path).is_file():
                 return app.path
@@ -446,10 +475,7 @@ class AppRegistry:
 
     def _key_to_display(self, key: str) -> str:
         """归一化 key → 用户能看懂的显示名。"""
-        for original_name, paths in _BUILTIN_MAP.items():
-            if _normalize_key(original_name) == key:
-                return original_name
-        return key
+        return _KEY_TO_DISPLAY.get(key, key)
 
     def add_custom(self, name: str, path_or_paths: str | list[str]) -> None:
         """添加或覆盖一个自定义映射。"""

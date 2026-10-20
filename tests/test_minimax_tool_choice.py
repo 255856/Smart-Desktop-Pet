@@ -190,7 +190,10 @@ def test_force_applies_on_every_retry_turn_not_just_turn_zero():
         {"role": "user", "content": "查一下广州天气，提醒我明天带伞"},
     ])
 
-    assert len(client.force_flags) >= 3, "重试没发生，测试没打中真实路径"
+    # M2 起「该调工具却只给文字」的重试上限为 1 次（原来可以连重试 5 轮），
+    # 所以最少是「首轮 + 1 次重试」= 2 轮。>= 2 仍能保证重试真的发生过：
+    # 重试没发生时只有 1 轮，断言照样会挂。
+    assert len(client.force_flags) >= 2, "重试没发生，测试没打中真实路径"
     assert all(client.force_flags), \
         f"有轮次没开 force：{client.force_flags}"
 
@@ -207,7 +210,8 @@ def test_agent_loop_injects_no_fake_user_turns():
         {"role": "user", "content": "查一下广州天气，提醒我明天带伞"},
     ])
 
-    assert len(client.seen_messages) >= 3, "重试没发生，测试没打中真实路径"
+    # 同上：M2 之后重试上限为 1，最少「首轮 + 1 次重试」= 2 次请求。
+    assert len(client.seen_messages) >= 2, "重试没发生，测试没打中真实路径"
     for msgs in client.seen_messages:
         injected = [str(m.get("content") or "") for m in msgs
                     if str(m.get("content") or "").startswith(("[系统提醒]", "[系统指令]"))]

@@ -562,6 +562,31 @@ def _extract_reasoning_chunk(delta: dict) -> str:
     )
 
 
+def _answer_from_reasoning(reasoning: str) -> str:
+    """从推理模型的思考痕迹里捞最终答案。
+
+    推理模型（DeepSeek-R1 / MiniMax-M3 等）有时整轮只吐 reasoning_content
+    而不吐 content。这时**不需要重发一次请求**（那是第二次计费），
+    直接从已经收到的思考痕迹里取答案即可。
+
+    取法：优先取最后一段（模型习惯把答案写在思考末尾）；
+    太长（> 300 字，说明不是答案段）就整段返回，交给上层 sanitize。
+    """
+    reasoning = reasoning or ""
+    if not reasoning:
+        return ""
+    idx = reasoning.rfind("\n\n")
+    if idx > 0:
+        tail = reasoning[idx + 2:].strip()
+        if tail and len(tail) < 300:
+            return sanitize_text(tail)
+    return sanitize_text(reasoning)
+
+
+# 从思考痕迹里捞出来的答案，最长多少字才算「答案」而不是「整段自述」
+_MAX_REASONING_ANSWER_CHARS = 300
+
+
 def _build_full_system_prompt(persona: str) -> str:
     """拼接 persona + 中文输出约束。"""
     base = persona or ""
@@ -569,6 +594,10 @@ def _build_full_system_prompt(persona: str) -> str:
 
 
 class LLMClient:
+    # 「必须调工具」的 prompt 强制已经用了几次（同一轮对话内）。
+    # 类属性兜底：测试里常用 LLMClient.__new__(LLMClient) 绕过 __init__。
+    _force_attempts = 0
+
     def __init__(
         self,
         cfg: LLMConfig,
@@ -585,6 +614,10 @@ class LLMClient:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._request_timeout_s, connect=10.0),
         )
+        # 「必须调工具」的 prompt 强制已经用了几次（同一轮对话内）。
+        # 用它让重试的请求**真正不同于上一次**——否则第 2..N 次请求是
+        # 字节级相同的重复调用（费钱且慢）。模型真调了工具就清零。
+        self._force_attempts = 0
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -636,9 +669,18 @@ class LLMClient:
 
     async def _fetch_non_streaming(self, messages: list[ChatMessage]) -> str:
         """非流式 fallback：拿 Ollama 自动拆分后的 message.content。"""
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         payload = self._build_payload(messages)
-        payload["stream"] = False
+        return await self._fetch_non_streaming_payload(payload)
+
+    async def _fetch_non_streaming_payload(self, payload: dict) -> str:
+        """用现成的 payload 发一次非流式请求。
+
+        payload["messages"] 原样使用（**含 system 消息**，不做 [1:] 切片），
+        避免重试时把「人设 / 中文约束 / 工具规则」丢掉。
+        复用同一个 self._client，不新建连接。
+        """
+        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        payload = {**payload, "stream": False}
         headers = {
             "Authorization": f"Bearer {self.cfg.api_key}",
             "Content-Type": "application/json",
@@ -662,14 +704,7 @@ class LLMClient:
             return sanitize_text(content)
         # 退化：从 reasoning 末尾找 answer
         reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
-        if not reasoning:
-            return ""
-        idx = reasoning.rfind("\n\n")
-        if idx > 0:
-            tail = reasoning[idx + 2:].strip()
-            if tail and len(tail) < 300:
-                return sanitize_text(tail)
-        return sanitize_text(reasoning)
+        return _answer_from_reasoning(reasoning)
 
     async def chat_stream(
         self,
@@ -706,6 +741,7 @@ class LLMClient:
         }
 
         saw_content = False
+        reasoning_parts: list[str] = []   # 推理模型的思考痕迹（不 yield 给 UI）
         # v31: 攒 LLM API 返回的 usage 字段 (prompt/completion/total tokens)。
         # 多个 chunk 里同一字段会重复, 用 max() 取最后那次的值 (流式协议
         # 最后一条 SSE 通常带累计总量, 前面的可能只有部分增量)。
@@ -755,8 +791,13 @@ class LLMClient:
                     delta = choices[0].get("delta") or {}
 
                     # 跳过思考内容（reasoning_content / reasoning 字段）
-                    if _extract_reasoning_chunk(delta):
-                        continue   # 直接丢弃，不 yield
+                    reasoning_chunk = _extract_reasoning_chunk(delta)
+                    if reasoning_chunk:
+                        # 只丢弃「不 yield 给 UI」，但要留着——
+                        # 整轮只吐 reasoning 不吐 content 时可以直接从里面捞答案，
+                        # 不必再发一次（重复计费）的请求。
+                        reasoning_parts.append(reasoning_chunk)
+                        continue
 
                     # 取 content（只取最终回复）
                     content_chunk = _extract_text_chunk(delta)
@@ -797,9 +838,18 @@ class LLMClient:
                 except Exception:  # noqa: BLE001
                     pass
 
-        # Ollama reasoning 模型 fallback
+        # 推理模型 fallback
         if not saw_content:
-            log.info("LLMClient: 流式 content 为空，fallback 到非流式")
+            # 优先复用已经流式收到的 reasoning —— 重发一次是**第二次计费**，
+            # 而且慢一倍。整轮只吐 reasoning_content 不吐 content 时，
+            # 从思考痕迹里捞出的就是同一个答案。
+            answer = _answer_from_reasoning("".join(reasoning_parts))
+            if answer and len(answer) <= _MAX_REASONING_ANSWER_CHARS:
+                log.info("LLMClient: 流式 content 为空，从 reasoning 提取答案")
+                yield answer
+                return
+            # 一个字节都没收到 / 捞出来的只是一整段自述 → 重发一次非流式兜底
+            log.info("LLMClient: 流式无有效内容，fallback 到非流式")
             full = await self._fetch_non_streaming(messages)
             if full:
                 yield full
@@ -927,6 +977,10 @@ class LLMClient:
                 return
             # 其它错误：原样抛
             raise
+
+        # 模型真调了工具 → 强制提示的计数清零（下次再失败重新从 1 开始数）
+        if saw_tool_calls:
+            self._force_attempts = 0
 
         if (tool_choice and tools and not saw_tool_calls
                 and not (cancel_check and cancel_check())
@@ -1076,13 +1130,25 @@ class LLMClient:
 
             tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
             if not saw_content and not tool_calls:
-                # 模型没回任何 content（可能是流式丢包）→ fallback 到非流式
-                full_text = await self._fetch_non_streaming(
-                    [ChatMessage(role=m["role"], content=m.get("content") or "")
-                     for m in payload["messages"][1:]])  # 去掉 system
-                if full_text:
+                # 模型整轮只吐 reasoning 不吐 content → 直接从已收到的思考痕迹
+                # 里捞答案，**不再重发一次请求**（那是第二次计费）。
+                full_text = _answer_from_reasoning("".join(reasoning_parts))
+                if full_text and len(full_text) <= _MAX_REASONING_ANSWER_CHARS:
                     yield ("text", full_text)
                     content_parts.append(full_text)
+                else:
+                    # 流式一个字节都没吐（丢包）→ 才重发一次非流式兜底。
+                    # 用完整的 payload（含 system 消息），不切 [1:]——
+                    # 否则重试时人设 / 中文约束 / 工具规则全丢了。
+                    fallback_payload = {
+                        k: v for k, v in payload.items()
+                        if k not in ("tools", "tool_choice")
+                    }
+                    full_text = await self._fetch_non_streaming_payload(
+                        fallback_payload)
+                    if full_text:
+                        yield ("text", full_text)
+                        content_parts.append(full_text)
             # finish 事件带上 reasoning（如果非空）→ 上层可选择写到 Trace。
             # content 做一次最终规范（is_final=True）：保证任何不经过上层
             # _on_done 的消费方（子 agent / 路由之外的文本出口）拿到的也是干净文本。
@@ -1114,7 +1180,12 @@ class LLMClient:
 
         这条 user 提示会显著提升国产模型「看到 tools 但仍然直接回文本」
         时的工具调用命中率。
+
+        提示里带「第 N 次」标记：让重试的请求与上一次**真正不同**
+        （否则就是同一个请求重复发，既费钱又慢）。
         """
+        self._force_attempts += 1
+        attempt = self._force_attempts
         forced = list(messages)
         forced.append({
             "role": "user",
@@ -1122,6 +1193,11 @@ class LLMClient:
                 "[系统指令] 你**必须**调用上面 schema 里列出的工具来完成用户的需求，"
                 "**禁止**只用文本回复。请在这次响应里调用至少一个工具。"
                 "如果用户的要求不止一个，就在**同一次响应里把所有需要的工具都发出来**。"
+                + (
+                    f"（这是第 {attempt} 次要求：上一次你仍然只用文字回答了，"
+                    f"这次请直接发出工具调用，不要再输出任何说明文字。）"
+                    if attempt > 1 else ""
+                )
             ),
         })
         async for ev, data in self._stream_with_optional_force(

@@ -140,6 +140,44 @@ def test_history_to_lc_messages_empty():
     assert lc == []
 
 
+# ---------- checkpoint 不再重复累积 ----------
+def test_checkpoint_input_replaces_instead_of_appending():
+    """喂给 graph 的 messages 必须先 RemoveMessage 清空，否则历史会被一遍遍追加。
+
+    老实现每轮都把完整本地 history 塞进 graph，而 LangGraph 的 add_messages
+    是追加语义 → 同一段历史被一遍遍写进 checkpoint，
+    data/langchain_checkpoints.db 曾涨到 275 MB（单条 4,393 条消息）。
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
+
+    history = LangChainAgent._to_lc_history([
+        {"role": "user", "content": "u0"},
+        {"role": "assistant", "content": "a0"},
+    ])
+    payload = LangChainAgent._checkpoint_input(history)
+
+    # 第一条必须是 RemoveMessage(REMOVE_ALL_MESSAGES)
+    assert isinstance(payload[0], RemoveMessage)
+    assert payload[0].id == REMOVE_ALL_MESSAGES
+    # 后面紧跟本轮要保留的消息
+    assert [m.content for m in payload[1:]] == ["u0", "a0"]
+
+    # 用真实 reducer 验证：清空 + 写入 == 只有新写入的那些，不重复
+    old_state = [HumanMessage(content="old_u"), AIMessage(content="old_a")]
+    merged = add_messages(old_state, payload)
+    assert [m.content for m in merged] == ["u0", "a0"]
+
+
+def test_checkpoint_input_is_bounded_by_local_history():
+    """checkpoint 里的消息数应该等于本轮传入的历史条数（不被历史累积放大）。"""
+    history = LangChainAgent._to_lc_history([
+        {"role": "user", "content": f"u{i}"} for i in range(10)
+    ])
+    payload = LangChainAgent._checkpoint_input(history)
+    assert len(payload) == 11   # 1 个 RemoveMessage + 10 条历史
+
+
 # ---------- 用 mock astream 验证 event 协议 ----------
 def test_run_yields_event_protocol():
     """用 mock 替换 astream，验证 event tuple 类型与字段。"""

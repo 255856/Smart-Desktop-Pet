@@ -46,16 +46,31 @@ class _MockResponse:
         return None
 
 
+class _MockPostResponse:
+    """模拟非流式响应。"""
+
+    status_code = 200
+    text = ""
+
+    def json(self):
+        return {"choices": [{"message": {"content": "非流式兜底回答"}}]}
+
+
 class _MockHTTPClient:
     """按队列返回 mock 响应。"""
 
     def __init__(self):
         self.queue: list[_MockResponse] = []
         self.calls: list[dict] = []
+        self.post_calls: list[dict] = []
 
     def stream(self, *args, **kwargs):
         self.calls.append({"payload": kwargs.get("json")})
         return self.queue.pop(0)
+
+    async def post(self, *args, **kwargs):
+        self.post_calls.append({"payload": kwargs.get("json")})
+        return _MockPostResponse()
 
 
 def _make_chunk(delta: dict) -> str:
@@ -189,6 +204,137 @@ class TestLLMClientReasoningSeparation:
         assert _extract_reasoning_chunk({"reasoning_content": "r"}) == "r"
         assert _extract_reasoning_chunk({"content": "c"}) == ""
         assert _extract_reasoning_chunk({}) == ""
+
+
+# ============================================================================
+#  H9：非流式 fallback 不应重复计费，且重发时必须保留 system 消息
+# ============================================================================
+
+class TestNoDoubleBillFallback:
+    """流式没拿到 content 时，优先复用已收到的 reasoning，不重发请求。"""
+
+    def _make_client(self):
+        from app.brain.llm_client import LLMClient, LLMConfig
+        cfg = LLMConfig(
+            base_url="http://localhost:1/v1",
+            api_key="test", model="test", stream=True, timeout=5,
+        )
+        client = LLMClient.__new__(LLMClient)
+        client.cfg = cfg
+        client.system_prompt = "你是助手"
+        client._client = _MockHTTPClient()
+        return client
+
+    def test_chat_stream_reasoning_only_does_not_resend(self):
+        """chat_stream：整轮只有 reasoning → 从 reasoning 捞答案，不重发。"""
+        client = self._make_client()
+        chunks = [
+            _make_chunk({"reasoning_content": "用户在打招呼。"}),
+            _make_chunk({"reasoning_content": "\n\n晚上好主人~"}),
+            "data: [DONE]\n\n",
+        ]
+        client._client.queue = [_MockResponse(chunks)]
+        results: list[str] = []
+
+        async def drive():
+            async for tok in client.chat_stream(
+                    [type("Msg", (), {"role": "user", "content": "hi"})()]):
+                results.append(tok)
+
+        asyncio.run(drive())
+        text = "".join(results)
+        assert "晚上好主人~" in text
+        assert client._client.post_calls == [], (
+            "复用 reasoning 时不应再发一次（重复计费）请求"
+        )
+
+    def test_chat_stream_events_reasoning_only_does_not_resend(self):
+        """chat_stream_events：同样复用 reasoning，不重发。"""
+        client = self._make_client()
+        chunks = [
+            _make_chunk({"reasoning_content": "用户在打招呼。"}),
+            _make_chunk({"reasoning_content": "\n\n晚上好主人~"}),
+            "data: [DONE]\n\n",
+        ]
+        client._client.queue = [_MockResponse(chunks)]
+        events: list[tuple] = []
+
+        async def drive():
+            async for ev, data in client.chat_stream_events(
+                    [{"role": "user", "content": "hi"}]):
+                events.append((ev, data))
+
+        asyncio.run(drive())
+        text = "".join(ev[1] for ev in events if ev[0] == "text")
+        assert "晚上好主人~" in text
+        assert client._client.post_calls == [], (
+            "复用 reasoning 时不应再发一次（重复计费）请求"
+        )
+
+    def test_chat_stream_fallback_keeps_system_message(self):
+        """流式一个字节都没收到 → 重发兜底时必须带上 system 消息。"""
+        client = self._make_client()
+        client._client.queue = [_MockResponse([])]
+        results: list[str] = []
+
+        async def drive():
+            async for tok in client.chat_stream(
+                    [type("Msg", (), {"role": "user", "content": "hi"})()]):
+                results.append(tok)
+
+        asyncio.run(drive())
+        assert len(client._client.post_calls) == 1
+        payload = client._client.post_calls[0]["payload"]
+        roles = [m.get("role") for m in payload["messages"]]
+        assert roles[0] == "system", f"重发请求必须保留 system，实际 {roles}"
+        assert payload["messages"][0].get("content") == "你是助手"
+        assert "".join(results) == "非流式兜底回答"
+
+    def test_chat_stream_events_fallback_keeps_system_message(self):
+        """events 路径重发兜底时同样必须带上 system 消息。"""
+        client = self._make_client()
+        client._client.queue = [_MockResponse([])]
+        events: list[tuple] = []
+
+        async def drive():
+            async for ev, data in client.chat_stream_events(
+                    [{"role": "user", "content": "hi"}]):
+                events.append((ev, data))
+
+        asyncio.run(drive())
+        assert len(client._client.post_calls) == 1
+        payload = client._client.post_calls[0]["payload"]
+        roles = [m.get("role") for m in payload["messages"]]
+        assert roles[0] == "system", f"重发请求必须保留 system，实际 {roles}"
+        assert payload["messages"][0].get("content") == "你是助手"
+
+    def test_long_monologue_is_not_treated_as_answer(self):
+        """一整段很长的思考自述不该当答案吐给用户（应走重发兜底）。"""
+        client = self._make_client()
+        long_reasoning = "啰嗦的思考。" * 200      # > 300 字
+        chunks = [
+            _make_chunk({"reasoning_content": long_reasoning}),
+            "data: [DONE]\n\n",
+        ]
+        client._client.queue = [_MockResponse(chunks)]
+        results: list[str] = []
+
+        async def drive():
+            async for tok in client.chat_stream(
+                    [type("Msg", (), {"role": "user", "content": "hi"})()]):
+                results.append(tok)
+
+        asyncio.run(drive())
+        assert "啰嗦的思考" not in "".join(results)
+        assert len(client._client.post_calls) == 1
+
+    def test_answer_from_reasoning_prefers_last_paragraph(self):
+        """思考痕迹里优先取最后一段（模型习惯把答案写在末尾）。"""
+        from app.brain.llm_client import _answer_from_reasoning
+        assert _answer_from_reasoning("前面在想\n\n最终答案") == "最终答案"
+        assert _answer_from_reasoning("") == ""
+        # 没有空行分隔时整段返回
+        assert _answer_from_reasoning("只有一段") == "只有一段"
 
 
 # ============================================================================

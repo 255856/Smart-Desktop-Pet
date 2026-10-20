@@ -6,6 +6,7 @@ import re
 import urllib.parse
 from typing import Optional
 
+from . import _http
 from ._core import ToolRegistry
 from ._decorator import tool
 
@@ -115,10 +116,10 @@ def _tavily_search(query: str, n: int, api_key: str, timeout_s: float) -> list[d
         "topic": "general",
         "days": 30,
     }
-    with httpx.Client(timeout=timeout_s) as client:
-        r = client.post("https://api.tavily.com/search", json=payload)
-        r.raise_for_status()
-        obj = r.json()
+    client = _http.get_client(timeout_s)
+    r = client.post("https://api.tavily.com/search", json=payload)
+    r.raise_for_status()
+    obj = r.json()
     raw = obj.get("results") or []
     out = []
     for it in raw[:n]:

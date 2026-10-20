@@ -130,13 +130,19 @@ def extract_json(text: str) -> Optional[dict]:
             return None
 
 
-async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 90.0):
-    """带并发限流、单次超时与 529/429 过载退避的 LLM 调用。
+async def _llm_call_with_limits(semaphore, per_call_timeout: float, factory):
+    """带并发限流、单次超时与 529/429 过载退避的通用包装。
 
     - semaphore：全局 asyncio.Semaphore（由 Director 注入），限制同时请求数；
     - per_call_timeout：单次请求超时（含流式生成），超时按可重试处理；
     - 服务端过载/限流/超时退避重试最多 3 次；
-    - asyncio.CancelledError 必须直接抛出（关闭线程时中断用）。
+    - asyncio.CancelledError 必须直接抛出（关闭线程时中断用）；
+    - factory：无参可调用，返回 awaitable（每次重试都会重新调用）。
+
+    抽出来是为了让「非流式」（_llm_chat）和「流式工具调用」（_tool_call）
+    共用同一套保护 —— 原来 _tool_call 完全绕过了限流和退避，
+    投票/竞选阶段 8 路 NPC 同时流式请求，直接把限流（LLM_CONCURRENCY=4）打穿，
+    服务端一过载就集体退化成脚本台词。
     """
     import httpx
     last_exc = None
@@ -144,8 +150,8 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 90.0):
         async def _do():
             if semaphore is not None:
                 async with semaphore:
-                    return await client.chat_once(msgs)
-            return await client.chat_once(msgs)
+                    return await factory()
+            return await factory()
         try:
             return await asyncio.wait_for(_do(), timeout=per_call_timeout)
         except asyncio.CancelledError:
@@ -166,6 +172,18 @@ async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 90.0):
                 continue
             raise
     raise last_exc
+
+
+async def _llm_chat(client, msgs, semaphore, per_call_timeout: float = 90.0):
+    """带并发限流、单次超时与 529/429 过载退避的 LLM 调用。
+
+    - semaphore：全局 asyncio.Semaphore（由 Director 注入），限制同时请求数；
+    - per_call_timeout：单次请求超时（含流式生成），超时按可重试处理；
+    - 服务端过载/限流/超时退避重试最多 3 次；
+    - asyncio.CancelledError 必须直接抛出（关闭线程时中断用）。
+    """
+    return await _llm_call_with_limits(
+        semaphore, per_call_timeout, lambda: client.chat_once(msgs))
 
 def _perspective_text(view: dict) -> str:
     lines = []
@@ -241,6 +259,8 @@ class WerewolfAgent:
         self.name = persona["name"]
         self.client = client          # LLMClient（在 Director 的事件循环里创建）
         self.semaphore = None  # 全局并发限流信号量（Director 注入）
+        # 单次 LLM 调用超时（跟 _llm_chat 的默认值一致）
+        self._per_call_timeout = 90.0
         self.rng = random.Random(1000 + seat)
 
     @property
@@ -302,18 +322,30 @@ class WerewolfAgent:
 
     async def _tool_call(self, instruction: str, tools: List[dict]):
         """让模型基于场内信息自主思考并调用一个工具。
-        返回 {"name":..., "arguments": dict}；无 client / 失败 / 未调用返回 None。"""
+        返回 {"name":..., "arguments": dict}；无 client / 失败 / 未调用返回 None。
+
+        走 _llm_call_with_limits：和 _llm_chat 一样受全局信号量限流、
+        有单次超时、遇到 529/429 会退避重试。
+        原来这里是裸调 chat_stream_events —— 限流被完全绕过，
+        投票/竞选阶段 8 路 NPC 同时发流式请求，正好把限流打穿。
+        """
         if self.client is None:
             return None
         # 每次调用都刷新 system prompt，确保拿到最新的玩家状态与发言
         self.client.system_prompt = self._system()
         try:
             messages = [{"role": "user", "content": instruction}]
-            final_calls = None
-            async for ev, data in self.client.chat_stream_events(
-                    messages, tools=tools, force_tool_use=True):
-                if ev == "finish":
-                    final_calls = data.get("tool_calls")
+
+            async def _stream_once():
+                final_calls = None
+                async for ev, data in self.client.chat_stream_events(
+                        messages, tools=tools, force_tool_use=True):
+                    if ev == "finish":
+                        final_calls = data.get("tool_calls")
+                return final_calls
+
+            final_calls = await _llm_call_with_limits(
+                self.semaphore, self._per_call_timeout, _stream_once)
             if final_calls:
                 tc = final_calls[0]
                 try:

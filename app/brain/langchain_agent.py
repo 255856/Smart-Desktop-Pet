@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional
 
@@ -13,31 +12,64 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     HumanMessage,
+    RemoveMessage,
     ToolMessage,
 )
 from langchain_core.tools import StructuredTool
-
-try:
-    from langchain.agents import create_agent
-except ImportError as e:  # pragma: no cover
-    raise ImportError(
-        "请先安装 langchain>=1.0: pip install langchain langchain-openai langgraph langgraph-checkpoint-sqlite"
-    ) from e
-
-try:
-    from langchain_openai import ChatOpenAI
-except ImportError as e:  # pragma: no cover
-    raise ImportError("langchain-openai 未安装") from e
-
-try:
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-except ImportError as e:  # pragma: no cover
-    raise ImportError("langgraph-checkpoint-sqlite 未安装") from e
 
 from app.brain.llm_client import LLMConfig, sanitize_text
 from app.engine.tools import Tool, ToolRegistry
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 重量级依赖延迟导入
+#
+# create_agent / ChatOpenAI / AsyncSqliteSaver 三个 import 实测：
+#   langchain_openai                1.84 s
+#   langchain.agents (create_agent) 1.00 s
+#   langgraph.checkpoint.sqlite.aio 0.01 s
+#
+# 而它们只在**真的要用 standard 后端**时才需要。聊天窗原来在模块级 import 了
+# 本模块 → 每次启动桌宠（哪怕用 lightweight 后端）都要白付这 ~1.1~1.8 秒。
+#
+# 现在改成「在用到的地方 import」：模块本身只留轻量的 langchain_core.messages
+# （isinstance 判断 / 构造消息要用）。真正用到的三个函数里各自 import，
+# 第一次调用之后 Python 会缓存模块，第二次起就没有额外开销了。
+#
+# 但 create_agent 以前是**模块级属性**，测试和手动验证脚本会用
+# mock.patch("app.brain.langchain_agent.create_agent") 拦截 agent 创建。
+# 为了不破坏这个约定，这里用 PEP 562 的模块级 __getattr__ 把这几个重依赖
+# 按需暴露成模块属性：模块导入时不会真加载 langchain（启动不受影响），
+# 第一次真正访问该属性时才导入并缓存进模块命名空间。
+# ---------------------------------------------------------------------------
+
+_LAZY_ATTRS = {
+    "create_agent": ("langchain.agents", "create_agent"),
+    "ChatOpenAI": ("langchain_openai", "ChatOpenAI"),
+    "AsyncSqliteSaver": ("langgraph.checkpoint.sqlite.aio", "AsyncSqliteSaver"),
+}
+
+
+def __getattr__(name: str):
+    """PEP 562：重依赖按需暴露成模块属性（保持旧的 mock.patch 约定）。"""
+    target = _LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    mod_name, attr = target
+    try:
+        value = getattr(importlib.import_module(mod_name), attr)
+    except ImportError as e:  # pragma: no cover - 环境没装 langchain
+        raise ImportError(
+            "请先安装 langchain>=1.0: pip install langchain langchain-openai "
+            "langgraph langgraph-checkpoint-sqlite"
+        ) from e
+    # 缓存进模块命名空间：后续访问直接命中，不再走 __getattr__
+    globals()[name] = value
+    return value
 
 
 # 派生 session_id 前缀（chat_window 按人设派生："char:<人设名>:main"）。
@@ -70,13 +102,10 @@ def convert_tools_for_level(registry: ToolRegistry, level: int) -> list[Structur
 
 
 # 主类
-@dataclass
-class LangChainAgentConfig:
-    """LangChain 后端运行参数（从 brain.langchain 段读取）。"""
-    enable_checkpointer: bool = True
-    checkpoint_db: str = "data/langchain_checkpoints.db"
-    max_iterations: int = 10
-    return_intermediate_steps: bool = False
+# LangChainAgentConfig 住在轻量模块 app/brain/langchain_config.py，
+# 这里再导出一次，老的 `from app.brain.langchain_agent import LangChainAgentConfig`
+# 写法继续可用（见本文件末尾 __all__）。
+from app.brain.langchain_config import LangChainAgentConfig  # noqa: E402
 
 
 class _PersistentLoop:
@@ -349,8 +378,13 @@ class LangChainAgent:
 
         return factory
 
-    def _build_model(self) -> ChatOpenAI:
+    def _build_model(self) -> "ChatOpenAI":
         """OpenAI 兼容协议（DeepSeek / minimax / Ollama / 任何 base_url）。"""
+        # 延迟 import：langchain_openai 实测 1.84 s（见文件头说明）
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("langchain-openai 未安装") from e
         kwargs = dict(
             base_url=self.llm_cfg.base_url,
             api_key=self.llm_cfg.api_key or "EMPTY",     # Ollama 接受任意非空字符串
@@ -382,6 +416,11 @@ class LangChainAgent:
         if not self.cfg.enable_checkpointer:
             return None
         Path(self.cfg.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
+        # 延迟 import：langgraph.checkpoint.sqlite.aio 见文件头说明
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("langgraph-checkpoint-sqlite 未安装") from e
         # AsyncSqliteSaver.from_conn_string 是 @asynccontextmanager
         self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self.cfg.checkpoint_db)
         self._checkpointer = await self._checkpointer_cm.__aenter__()
@@ -399,6 +438,48 @@ class LangChainAgent:
 
         # 保留 _model 不变（不再重建 → 后续 _ensure_agent 走 fast-path 复用）
         self._agent = None
+
+    async def _prune_bloated_checkpoint(self, max_bytes: int = 512 * 1024) -> None:
+        """清掉「历史遗留」的臃肿 checkpoint 行。
+
+        背景：老实现每轮都把完整本地 history 塞进 graph，而 add_messages 是
+        追加语义 → 同一段历史被一遍遍写进 checkpoint。
+        实测 data/langchain_checkpoints.db 涨到 **275 MB**（510 条 checkpoint，
+        单条最大 1.26 MB / 4,393 条消息，同一句「帮我锁屏」重复 213 次）。
+
+        现在改成 RemoveMessage 覆盖式写入（见 _checkpoint_input），新写的
+        checkpoint 很小。但**历史遗留的那些大行还在**（saver 每次 aput 是
+        插新行，不是覆盖旧行），所以这里在构建 agent 时检查一下：
+        本 thread 最新一条 checkpoint 超过 max_bytes 就把本 thread 的历史行清掉。
+
+        清掉是安全的 —— 下一轮会用本地 history 把状态重新种回去
+        （_checkpoint_input 里带 RemoveMessage，状态本来就是覆盖式的）。
+        """
+        if self._checkpointer is None or not self.thread_id:
+            return
+        cfg = {"configurable": {"thread_id": self.thread_id}}
+        try:
+            tup = await self._checkpointer.aget_tuple(cfg)
+        except Exception as e:  # noqa: BLE001
+            log.debug("读 checkpoint 失败，跳过清理: %s", e)
+            return
+        if tup is None:
+            return
+        try:
+            blob = getattr(tup, "checkpoint", None)
+            size = len(blob) if isinstance(blob, (bytes, bytearray)) else 0
+            if not size:
+                return
+            if size <= max_bytes:
+                return
+            await self._checkpointer.adelete_thread(self.thread_id)
+            log.info(
+                "LangChainAgent: thread=%s 的 checkpoint 过大（%d 字节），"
+                "已清理历史行（下一轮会用本地 history 重新种状态）",
+                self.thread_id, size,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("清理臃肿 checkpoint 失败: %s", e)
 
     def close(self) -> None:
         """同步 close（向后兼容 QThread 信号回调路径，实际关闭在 _release_checkpointer 里跑）。
@@ -473,6 +554,8 @@ class LangChainAgent:
         if self._checkpointer is None and self.cfg.enable_checkpointer:
             await self._build_checkpointer()
         checkpointer = self._checkpointer
+        # 历史遗留的臃肿 checkpoint 清理（详见 _prune_bloated_checkpoint）
+        await self._prune_bloated_checkpoint()
 
         # 抗幻觉 middleware（dynamic_prompt + risky tool logger + confirm interceptor）
         try:
@@ -525,6 +608,11 @@ class LangChainAgent:
         except Exception as e:  # noqa: BLE001
             log.warning("MemoryStore.system_block 失败,跳过: %s", e)
 
+        # 延迟 import：langchain.agents 实测 1.00 s（见文件头说明）。
+        # 先看模块属性（测试可能用 mock.patch 替换过），没有再走 __getattr__ 懒加载。
+        create_agent = globals().get("create_agent")
+        if create_agent is None:
+            create_agent = __getattr__("create_agent")
         self._agent = create_agent(
             model=self._model,
             tools=tools,
@@ -551,6 +639,35 @@ class LangChainAgent:
                 out.append(AIMessage(content=content))
             # system / tool: 跳过
         return out
+
+    @staticmethod
+    def _checkpoint_input(lc_msgs: list) -> list:
+        """构造喂给 graph 的 messages：**先清空** checkpoint 里的旧消息，再放本轮要留的。
+
+        为什么不能直接把完整历史塞进去：
+        LangGraph 的 add_messages reducer 是**追加**语义 —— 传进去的消息会接到
+        checkpoint 状态后面。原来每轮都把完整本地 history 塞进去，于是同一段历史
+        被一遍遍写进 checkpoint：
+          - data/langchain_checkpoints.db 实测涨到 275 MB（510 条 checkpoint）
+          - 单条 checkpoint 4,393 条消息，同一句「帮我锁屏」重复 213 次
+          - 模型每轮都要重读这堆重复内容（上下文窗口被撑爆）
+
+        现在用 RemoveMessage(REMOVE_ALL_MESSAGES) 先把 checkpoint 的消息清空，
+        再放本轮真正要保留的（= 已被 _trim_history 裁过的本地历史 + 本轮新增）：
+          - 模型看到的上下文 = 本地裁剪后的历史，和设计意图一致（不再是重复膨胀版）
+          - checkpoint 大小有界，不会随轮数无限增长
+          - 每轮写入量恒定，不再 O(n²)
+
+        RemoveMessage 是 langchain>=1.0 / langgraph 的标准做法：
+        add_messages 遇到它会清空已有消息，后续消息照常追加。
+        """
+        try:
+            # 延迟 import：langgraph.graph.message（见文件头说明）
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+            return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *lc_msgs]
+        except Exception as e:  # noqa: BLE001
+            log.warning("构造 checkpoint 输入失败，退回追加模式: %s", e)
+            return lc_msgs
 
     async def _prefetch_aw_results(self, user_text: str) -> list:
         """同步调 AW 工具，返 LangChain messages 序列，插入历史模拟 LLM 自己调过。
@@ -599,13 +716,18 @@ class LangChainAgent:
             log.debug("_call_aw import failed: %s", e)
             return []
         try:
+            # ActivityWatch 客户端是同步 urllib（内部 3 次阻塞 urlopen，
+            # 超时 2+4+6 秒）。这里是 async 函数，直接调会把这个持久 loop
+            # 整个卡住 —— 该 loop 上所有 agent 操作/工具调用/流式输出一起等。
+            # 丢到线程池里跑，loop 不被阻塞。
             if tool_name == "aw_get_recent_activities":
-                content = get_recent_activities_summary(
+                content = await asyncio.to_thread(
+                    get_recent_activities_summary,
                     minutes=int(args.get("minutes", 30)),
                     limit=int(args.get("limit", 15)),
                 )
             elif tool_name == "aw_get_current_window":
-                content = get_current_window_one_liner()
+                content = await asyncio.to_thread(get_current_window_one_liner)
             else:
                 return []
         except Exception as e:
@@ -679,7 +801,7 @@ class LangChainAgent:
         lc_msgs.extend(injected_tool_msgs)
         lc_msgs.append(HumanMessage(content=last_user))
 
-        input_payload: dict[str, Any] = {"messages": lc_msgs}
+        input_payload: dict[str, Any] = {"messages": self._checkpoint_input(lc_msgs)}
         config = {"configurable": {"thread_id": self.thread_id}}
 
         try:

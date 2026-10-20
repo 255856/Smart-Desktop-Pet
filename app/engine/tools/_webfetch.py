@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import _http
 from ._core import ToolRegistry, is_safe_url
 from ._decorator import tool
 
@@ -72,14 +73,14 @@ def register(reg: ToolRegistry) -> None:
             if not _resolve_and_check(host):
                 return "错误：域名解析到私有 / 环回 / 保留地址，已拒"
         try:
-            with httpx.Client(
-                timeout=15.0,
+            c = _http.get_client(
+                15.0,
                 follow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (Smart-Desktop-Pet)"},
-            ) as c:
-                r = c.get(url)
-                r.raise_for_status()
-                html = r.text
+            )
+            r = c.get(url)
+            r.raise_for_status()
+            html = r.text
         except httpx.HTTPError as e:
             return f"错误：抓取失败：{e}"
         # readability 提取

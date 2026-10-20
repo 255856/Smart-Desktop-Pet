@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import List, Optional, Tuple
 
 import cchess
@@ -121,6 +122,23 @@ class XiangqiGame:
         self._search_depth = 0      # >0 = AI 搜索进行中(跳过胜负判定)
 
     # ---------------------------------------------------------- 便捷查询
+    def clone(self) -> "XiangqiGame":
+        """复制当前局面。
+
+        AI 搜索要放到子线程跑（深度 3 约 1 秒、深度 4 约 14 秒，
+        在 GUI 线程会冻住整只桌宠）。搜索过程会 play/undo 同一个棋盘，
+        所以子线程必须搜**副本**，不能跟 GUI 线程抢同一个 XiangqiGame。
+        """
+        g = XiangqiGame()
+        fen = self._board.to_fen()
+        g._board = ChessBoard(fen)
+        g._fen_stack = [fen]
+        g.history = list(self.history)
+        g.winner = self.winner
+        g.result = self.result
+        g.repetition = self.repetition
+        return g
+
     def _read_board(self) -> List[int]:
         """把 cchess 棋盘读成 90 长度的扁平数组(项目编码)。"""
         out: List[int] = []
@@ -578,6 +596,21 @@ class XiangqiAI:
         self._depth_override = depth
         self._rng = random.Random()
         self.nodes = 0
+        # 搜索预算：到点 / 到节点数就停，用当前最优（见 _budget_exceeded）
+        self._deadline = 0.0
+
+    # 搜索预算。没有预算的话 hard 档（深度 4）实测要 14 秒，
+    # 棋盘+桌宠会整个冻住；有预算后到点就返回当前最优，优雅降级。
+    TIME_BUDGET_S = 3.0
+    NODE_BUDGET = 80000
+
+    def _budget_exceeded(self) -> bool:
+        """搜索预算是否用完（时间或节点数）。"""
+        if self.nodes >= self.NODE_BUDGET:
+            return True
+        if self._deadline and time.monotonic() >= self._deadline:
+            return True
+        return False
 
     @property
     def depth(self) -> int:
@@ -598,7 +631,7 @@ class XiangqiAI:
     def _search(self, game: XiangqiGame, depth: int, alpha: int, beta: int,
                 side: int) -> int:
         self.nodes += 1
-        if depth <= 0:
+        if depth <= 0 or self._budget_exceeded():
             return evaluate(game.board, side)
         moves = game.legal_moves(side)
         if not moves:
@@ -641,6 +674,7 @@ class XiangqiAI:
         alpha = -10 ** 9
         # 搜索期间:跳过胜负判定(play 不置 winner),结束后必须完全还原
         game._search_depth += 1
+        self._deadline = time.monotonic() + self.TIME_BUDGET_S
         try:
             for mv in self._ordered_moves(game, moves):
                 game.play_move(mv)
@@ -655,7 +689,11 @@ class XiangqiAI:
                     best_moves.append(mv)
                 if score > alpha:
                     alpha = score
+                # 预算用完就不再看剩下的走法了（保留已找到的最优）
+                if self._budget_exceeded():
+                    break
         finally:
+            self._deadline = 0.0
             game._search_depth -= 1
             # 搜索不得改变对外可见的对局状态
             game.winner = 0

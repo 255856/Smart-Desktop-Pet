@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 _CACHE_TTL_SECONDS = 300    # 5 分钟过期
 _SCAN_TIMEOUT = 10          # 扫描超时（秒）
+_RETRY_COOLDOWN = 60        # 扫描失败后的重试冷却（秒），避免每次调用都重扫
 
 
 @dataclass
@@ -50,14 +51,33 @@ class InstalledAppsCache:
         self._scanning = False
         self._scan_thread: Optional[threading.Thread] = None
         self._ttl = ttl_seconds
+        self._last_failure_at = 0.0   # 上次扫描失败的时刻（0 = 没失败过）
         # 首次访问时异步触发后台扫描
         self._maybe_start_scan()
 
     def _is_fresh(self) -> bool:
-        return (
-            self._result.apps
-            and (time.time() - self._result.scanned_at) < self._ttl
-        )
+        """缓存是否新鲜（TTL 内，且确实扫过至少一次）。
+
+        注意：判断依据是「扫描时间」而不是「扫到几个应用」——
+        机器上一个应用都没装时，扫描结果为空但依然是有效的新鲜数据，
+        否则会每次调用都重扫一遍系统。
+        """
+        if not self._result.scanned_at:
+            return False
+        return (time.time() - self._result.scanned_at) < self._ttl
+
+    def _should_rescan(self) -> bool:
+        """是否需要重新扫描（新鲜度 + 失败冷却 + 是否已有扫描在跑）。"""
+        if self._is_fresh():
+            return False
+        if self._scanning or self._scan_thread is not None:
+            return False
+        # 上次扫描失败 → 冷却期内不重扫，避免每次调用都重试一遍坏路径
+        if self._last_failure_at and (
+            time.time() - self._last_failure_at
+        ) < _RETRY_COOLDOWN:
+            return False
+        return True
 
     def _maybe_start_scan(self) -> None:
         """后台线程首次扫描。"""
@@ -84,6 +104,8 @@ class InstalledAppsCache:
                 len(apps), duration_ms,
             )
         except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._last_failure_at = time.time()
             log.warning("InstalledAppsCache 扫描失败：%s", e)
         finally:
             self._scanning = False
@@ -93,27 +115,32 @@ class InstalledAppsCache:
         """强制重新扫描（用户点了「刷新应用列表」之类时用）。"""
         with self._lock:
             self._result = _ScanResult()
+            self._last_failure_at = 0.0   # 绕过失败冷却，立即重扫
         self._maybe_start_scan()
 
     def get_all(self, wait: bool = False, timeout: float = 3.0) -> list[InstalledApp]:
-        """返回当前缓存的所有应用（可能为空——扫描还没完成）。"""
-        # 先尝试同步触发扫描（如果还没启动）
+        """返回当前缓存的所有应用（可能为空——扫描还没完成）。
+
+        TTL 过期后会**后台**重新扫描；wait=True 时会等一次新的扫描结果
+        （最多 timeout 秒），等不到就返回现有（可能陈旧）的数据。
+        """
+        # 先判断新鲜度：过期就异步触发一次重扫（不阻塞调用方）
         with self._lock:
-            if not self._result.apps and not self._scanning:
+            if self._should_rescan():
                 self._maybe_start_scan()
 
         if not wait:
             with self._lock:
                 return list(self._result.apps)
 
-        # wait=True：阻塞等扫描线程完成
+        # wait=True：等到缓存新鲜（或超时）
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
-                if self._result.apps:
+                if self._is_fresh():
                     return list(self._result.apps)
                 if not self._scanning and self._scan_thread is None:
-                    # 扫描失败或已完成但没结果
+                    # 扫描失败或冷却中 —— 没有新数据可用，返回现有缓存
                     break
             time.sleep(0.05)
         with self._lock:
@@ -207,6 +234,29 @@ def _scan_installed_apps() -> list[InstalledApp]:
     return list(out.values())
 
 
+# COM Shell 对象缓存：每个 .lnk 新建一次 WScript.Shell 要 3.4 ms，
+# 实测 248 个快捷方式 = 843 ms（占 1,238 ms 扫描的 68%）。复用同一个即可。
+#
+# 必须**按线程**缓存：COM 对象绑定创建它的线程（apartment），跨线程使用
+# 会直接崩（0xC0000005）。扫描跑在后台线程（InstalledAppsCache）里，
+# 主线程也可能自己扫一遍 —— 各线程各留一个，互不干扰。
+_SHELL_LOCAL = threading.local()
+
+
+def _get_shell():
+    """拿（并缓存）本线程的 COM WScript.Shell 对象。失败返回 None。"""
+    shell = getattr(_SHELL_LOCAL, "shell", None)
+    if shell is not None:
+        return shell
+    try:
+        import win32com.client  # type: ignore[import-not-found]
+        shell = win32com.client.Dispatch("WScript.Shell")
+    except Exception:  # noqa: BLE001
+        return None
+    _SHELL_LOCAL.shell = shell
+    return shell
+
+
 def _resolve_lnk(lnk_path: Path) -> Optional[str]:
     """解析 .lnk 指向的 exe 路径。
 
@@ -214,9 +264,10 @@ def _resolve_lnk(lnk_path: Path) -> Optional[str]:
     退化为：直接把 .lnk 路径丢给 os.startfile（Windows 也能解析）。
     """
     try:
-        # 优先 pywin32（最可靠）
-        import win32com.client  # type: ignore[import-not-found]
-        shell = win32com.client.Dispatch("WScript.Shell")
+        # 复用同一个 COM 对象（每个 .lnk 新建一次要 3.4 ms）
+        shell = _get_shell()
+        if shell is None:
+            return None
         shortcut = shell.CreateShortCut(str(lnk_path))
         target = shortcut.Targetpath
         if target and Path(target).is_file():

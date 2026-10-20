@@ -230,6 +230,9 @@ class PetWindow(QWidget):
         self._bubble_until: float = 0.0
         self._streaming_bubble: bool = False
         self._bubble_stream_last: float = 0.0
+        # 流式气泡的增量空白折叠缓存（见 show_streaming_bubble）
+        self._bubble_ws_src: str = ""   # 上次收到的累积原文
+        self._bubble_ws_out: str = ""   # 折叠空白后的累积结果
         # 气泡自动隐藏定时器（独立于渲染模式，帧动画 / Live2D 都生效）
         self._bubble_timer = QTimer(self)
         self._bubble_timer.setInterval(250)
@@ -387,13 +390,28 @@ class PetWindow(QWidget):
     def show_streaming_bubble(self, text: str) -> None:
         """流式输出气泡：展示模型正在生成的文本（最多 120 字），不自动隐藏。"""
         self._streaming_bubble = True
-        # 折叠换行和多余空白，避免气泡里出现大段空白
-        display = re.sub(r'\s+', '', text).strip()
+        # 折叠换行和多余空白，避免气泡里出现大段空白。
+        # 累积文本每来一个 token 就整段 re.sub 一遍 → O(n²)。
+        # 这里改成增量：把「\s+ 替换成空串」拆成可分解的两段
+        # （a 结尾的空白与 b 开头的空白各自成组，整体结果与整段替换一致），
+        # 只有累积文本不是前缀延续时（正常不会发生）才整段重算。
+        if text.startswith(self._bubble_ws_src):
+            if len(text) > len(self._bubble_ws_src):
+                self._bubble_ws_out += re.sub(
+                    r'\s+', '', text[len(self._bubble_ws_src):])
+            self._bubble_ws_src = text
+        else:
+            self._bubble_ws_out = re.sub(r'\s+', '', text)
+            self._bubble_ws_src = text
+        display = self._bubble_ws_out
         if len(display) > 120:
             display = display[:117] + "…"
-        self._bubble_text = display
         self._bubble_stream_last = time.time()
         self._bubble_until = time.time() + 9999.0  # 不自动隐藏
+        # 显示内容没变就不重排（setText + adjustSize 在长文本下不便宜）
+        if display == self._bubble_text and self._bubble_label.isVisible():
+            return
+        self._bubble_text = display
         self._bubble_label.setText(display)
         self._place_bubble()
         self._bubble_label.show()
@@ -402,6 +420,9 @@ class PetWindow(QWidget):
     def stop_streaming_bubble(self) -> None:
         """流式输出结束：隐藏气泡，或保留 3 秒后自动消失。"""
         self._streaming_bubble = False
+        # 下一轮流式从空文本重新开始 → 增量折叠缓存也要重置
+        self._bubble_ws_src = ""
+        self._bubble_ws_out = ""
         if self._bubble_text:
             # 保留最后内容 3 秒
             self._bubble_until = time.time() + 3.0

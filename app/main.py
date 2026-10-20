@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -389,20 +390,49 @@ def _port_listening(port: int) -> bool:
         return False
 
 
+# TTS 服务「拉起中」的进程级互斥。
+# 逐句 TTS 是「每句一个线程」，api_v2 挂掉时所有线程会同时撞 ConnectError。
+# 靠 _port_listening 守卫不住（新服务要 ~30 秒加载模型，期间端口一直关着），
+# 所以这里用锁 + 时间戳保证同一时间只有一个线程真的去拉起服务。
+_TTS_API_START_LOCK = threading.Lock()
+_TTS_API_START_AT = 0.0          # 上次发起拉起的时间戳（0 = 没在拉起）
+_TTS_API_START_TIMEOUT = 120.0   # 超过这么久还没起来，允许再拉一次
+
+
 def start_tts_api_subprocess(root: Path, port: int = 9880) -> int | None:
     """后台启动 GPT-SoVITS TTS 服务（api_v2），返回 PID 或 None。
 
     整合包目录不存在 → None；端口已有服务（含本函数或手动启动）→ -1。
     服务与桌宠进程解耦：桌宠退出后服务保留，下次启动秒就绪。
+
+    并发保护：主动发言/逐句 TTS 是「每句一个线程」，api_v2 挂掉时所有线程
+    会在同一毫秒窗口内一起撞上 ConnectError。原来每个线程都独立调本函数，
+    而下面的 _port_listening 检查是 TOCTOU（新服务要 ~30 秒加载模型，
+    期间端口一直是关的）→ 会同时拉起 N 个 api_v2 进程，每个都加载数 GB 模型。
+    现在用进程级锁 + 时间戳保证同一时间只有一个线程去拉起，
+    其余线程直接返回 -1（表示「已经在拉起，别重复来」）。
     """
+    global _TTS_API_START_AT
     import subprocess
+    import time as _time
     pkg_dir = root / "GPT-SoVITS-v2pro-20250604-nvidia50"
     runtime_py = pkg_dir / "runtime" / "python.exe"
     if not runtime_py.is_file():
         log.info("GPT-SoVITS 整合包不存在（%s），跳过 TTS 服务启动", pkg_dir)
         return None
     if _port_listening(port):
+        # 服务已经在跑（或者已经起来了）→ 复位标志
+        with _TTS_API_START_LOCK:
+            _TTS_API_START_AT = 0.0
         return -1
+    now = _time.time()
+    with _TTS_API_START_LOCK:
+        if (_TTS_API_START_AT
+                and (now - _TTS_API_START_AT) < _TTS_API_START_TIMEOUT):
+            log.info("TTS 服务正在拉起中（%.0f 秒前发起），跳过重复启动",
+                     now - _TTS_API_START_AT)
+            return -1
+        _TTS_API_START_AT = now
     log_file = root / "data" / "tts_api.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -418,6 +448,8 @@ def start_tts_api_subprocess(root: Path, port: int = 9880) -> int | None:
         )
         return proc.pid
     except Exception as e:  # noqa: BLE001
+        with _TTS_API_START_LOCK:
+            _TTS_API_START_AT = 0.0
         log.warning("TTS 服务启动失败：%s", e)
         return None
 

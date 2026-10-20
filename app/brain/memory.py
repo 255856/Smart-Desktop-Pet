@@ -328,6 +328,8 @@ class MemoryStore:
         self._items: list[MemoryItem] = []
         self._lock = threading.RLock()
         self._dirty = False
+        # 向量索引是否标脏（标脏后延迟到检索前重建，见 _ensure_backend_fresh）
+        self._index_dirty = False
         # 最近一次落盘是否成功（remember_fact 据此决定能不能报「已记住」）
         self.last_save_ok = True
         self._load()
@@ -336,6 +338,16 @@ class MemoryStore:
     def _connect(self) -> sqlite3.Connection:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.data_file))
+        # synchronous=NORMAL：默认 synchronous=FULL 每次 commit 都 fsync，
+        # 实测单条 insert+commit 要 6.6 ms（整段 add 的耗时几乎全在这）。
+        # 记忆库是可丢的本地数据（丢了只是主人少记了几件事），
+        # 不值得为每次写入付 fsync。
+        # 注意：不加 journal_mode=WAL —— 每次连接都执行这条 pragma 反而更慢
+        #（要加锁 + 查文件头），而记忆库没有跨进程读者，用不上 WAL。
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:  # pragma: no cover - 老 SQLite 不支持
+            pass
         conn.executescript(_MEMORY_SCHEMA)
         conn.commit()
         return conn
@@ -413,10 +425,13 @@ class MemoryStore:
             log.warning("载入记忆失败:%s", e)
 
     def _save(self) -> bool:
-        """落盘。返回是否成功。
+        """整表重写。返回是否成功。
 
         原来只 log.warning 吞掉异常,调用方(remember_fact 工具)无从得知,
         于是磁盘只读/写满时,桌宠照样对主人说「已记住」——重启即消失。
+
+        注意：单条增删走 _insert_item / _delete_item（只动一行），
+        这里留给「批量清理 / 合并」这类一次性重写。
         """
         try:
             conn = self._connect()
@@ -437,6 +452,89 @@ class MemoryStore:
         except Exception as e:  # noqa: BLE001
             log.warning("保存记忆失败:%s", e)
             return False
+
+    def _insert_item(self, item: MemoryItem) -> bool:
+        """只 INSERT 这一条。
+
+        原来每次 add() 都 DELETE 全表 + 全量 re-INSERT（O(N) 写），
+        实测累积成本 0.39s@50 → 2.01s@200 → 5.37s@400（超线性）。
+        """
+        try:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO memories"
+                    "(id, content, category, importance, created_at, "
+                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (item.id, item.content, item.category, item.importance,
+                     item.created_at, item.last_access_ts, item.access_count),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("保存记忆失败:%s", e)
+            return False
+
+    def _delete_item(self, mid: str) -> bool:
+        """只 DELETE 这一条。"""
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM memories WHERE id=?", (mid,))
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("删除记忆失败:%s", e)
+            return False
+
+    def _update_items(self, ids: list[str]) -> bool:
+        """只 UPDATE 命中的几行（访问热度）。
+
+        原来每次检索（touch 之后）都整表重写一遍。
+        """
+        if not ids:
+            return True
+        try:
+            conn = self._connect()
+            try:
+                by_id = {i.id: i for i in self._items}
+                rows = []
+                for mid in ids:
+                    it = by_id.get(mid)
+                    if it is None:
+                        continue
+                    rows.append((it.last_access_ts, it.access_count, it.id))
+                if not rows:
+                    return True
+                conn.executemany(
+                    "UPDATE memories SET last_access_ts=?, access_count=? "
+                    "WHERE id=?", rows,
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("更新记忆访问热度失败:%s", e)
+            return False
+
+    def _ensure_backend_fresh(self) -> None:
+        """索引标脏时重建一次（延迟到真正要用之前）。
+
+        原来每次 add() 都立刻 _refit_backend()：重新分词 + 重建 N×V 稠密
+        向量（tfidf 后端下 O(N·V) 纯 Python 点积）。连着加 10 条就是重建
+        10 次。改成「标脏 + 用之前才重建」：检索结果与原来完全一致
+        （search 之前一定会先刷新），但连着加 N 条只重建 1 次。
+        """
+        with self._lock:
+            if not self._index_dirty:
+                return
+            self._refit_backend()
+            self._index_dirty = False
 
     def _refit_backend(self) -> None:
         """重新拟合向量后端（在 load / add / remove 之后调用）。"""
@@ -459,6 +557,7 @@ class MemoryStore:
             self.backend = make_backend(backend_name)
             self.backend_name = backend_name
             self._refit_backend()
+            self._index_dirty = False
 
     def add(self, content: str, category: str = "other",
             importance: float = 0.5) -> MemoryItem:
@@ -480,8 +579,10 @@ class MemoryStore:
                 self.last_save_ok = True   # 已存在，无需再写盘
                 return item
             self._items.append(item)
-            self.last_save_ok = self._save()
-            self._refit_backend()
+            # 只写这一行（原来 DELETE 全表 + 全量 re-INSERT）
+            self.last_save_ok = self._insert_item(item)
+            # 索引标脏：延迟到下次检索前再重建（见 _ensure_backend_fresh）
+            self._index_dirty = True
         log.info("记忆新增 [%s] importance=%.2f: %s", category, importance, content[:60])
         return item
 
@@ -491,8 +592,8 @@ class MemoryStore:
             self._items = [i for i in self._items if i.id != mid]
             removed = len(self._items) != before
             if removed:
-                self._save()
-                self._refit_backend()
+                self._delete_item(mid)
+                self._index_dirty = True
         return removed
 
     def all(self) -> list[MemoryItem]:
@@ -531,6 +632,8 @@ class MemoryStore:
             limit: 返回条数
             use_semantic: False 时退回子串匹配（更快，CPU 友好）
         """
+        # 索引标脏时先重建（否则 scores 与 items 长度对不上，会错位）
+        self._ensure_backend_fresh()
         with self._lock:
             items = list(self._items)
         if not items:
@@ -543,9 +646,11 @@ class MemoryStore:
         if not kw:
             # 空关键词 → 按 importance×时新度 排序
             results = sorted(items, key=lambda i: self._score(i, 0.0), reverse=True)
+            touched = []
             for r in results[:limit]:
                 r.touch()
-            self._maybe_save_dirty()
+                touched.append(r.id)
+            self._maybe_save_dirty(touched)
             return results[:limit]
 
         # 关键词非空：先算相似度
@@ -583,9 +688,11 @@ class MemoryStore:
 
         # 取 top
         top = [i for _, i in scored[:limit]]
+        touched = []
         for r in top:
             r.touch()
-        self._maybe_save_dirty()
+            touched.append(r.id)
+        self._maybe_save_dirty(touched)
         return top
 
     def _score(self, item: MemoryItem, semantic: float) -> float:
@@ -599,11 +706,20 @@ class MemoryStore:
         hot = 1.0 + min(0.5, item.access_count * 0.05)
         return (semantic + 0.01) * cat_w * recency * imp * hot
 
-    def _maybe_save_dirty(self) -> None:
+    def _maybe_save_dirty(self, touched_ids: Optional[list[str]] = None) -> None:
+        """把访问热度落盘。
+
+        给了 touched_ids 就只 UPDATE 这几行（原来每次检索都整表重写）；
+        没给（外部 mark_dirty）就整表重写。
+        """
         with self._lock:
-            if self._dirty:
+            if not self._dirty:
+                return
+            if touched_ids:
+                self._update_items(touched_ids)
+            else:
                 self._save()
-                self._dirty = False
+            self._dirty = False
 
     def mark_dirty(self) -> None:
         with self._lock:
@@ -635,6 +751,8 @@ class MemoryStore:
         Returns:
             list of (item, similarity_score)
         """
+        # 索引标脏时先重建（否则 _doc_vecs 与 items 长度对不上，会错位）
+        self._ensure_backend_fresh()
         with self._lock:
             items = list(self._items)
         if not items or isinstance(self.backend, SubstringBackend):
@@ -676,7 +794,7 @@ class MemoryStore:
             removed = before - len(self._items)
             if removed:
                 self._save()
-                self._refit_backend()
+                self._index_dirty = True   # 索引延迟重建
         return removed
 
     def merge_similar(self, threshold: float = 0.95) -> int:
@@ -709,7 +827,7 @@ class MemoryStore:
                 if merged:
                     self._items = keep
                     self._save()
-                    self._refit_backend()
+                    self._index_dirty = True   # 索引延迟重建
                 return merged
             except Exception as e:  # noqa: BLE001
                 log.warning("merge_similar 失败：%s", e)

@@ -56,6 +56,10 @@ class UIController(QObject):
         # 面板的 _set_developer_mode emit developer_mode_changed 会在 _on_developer_mode_changed 同步过来
         self.developer_mode = False
         self._chat_window = None
+        # retune（帧时长重命名）子进程 worker —— 保留引用防 GC
+        self._retune_worker = None
+        # 端口探测 worker（等 demo / trace 子进程就绪）—— 保留引用防 GC
+        self._port_waiter = None
         self._last_food_warn = 0.0
 
         _sticker_on = True
@@ -1026,21 +1030,48 @@ class UIController(QObject):
 
     #  帧持久化
     def _do_retune_frames(self, ms: int) -> None:
-        """用户点了「应用帧时长」按钮 —— 重命名所有 PNG + 重新加载 atlas。"""
+        """用户点了「应用帧时长」按钮 —— 重命名所有 PNG + 重新加载 atlas。
+
+        重命名脚本是个 subprocess（原来直接在 GUI 线程跑，timeout=60），
+        桌宠会整个冻住最长 60 秒。现在丢到 worker 线程跑，
+        跑完再回主线程刷新 atlas / 改状态。
+        """
         if not self._is_sprite():
             self.settings_window._set_status("帧时长仅 sprite 模式可用（Live2D 无帧图）")
             return
-        import subprocess
         from pathlib import Path as _P
+        from app.core.qt_compat import QThread
+
+        script = _P(__file__).resolve().parent.parent / "tools" / "_legacy" / "rename_to_vpet.py"
+
+        class _RetuneWorker(QThread):
+            finished_ok = Signal(int, str, str)
+
+            def __init__(self, cmd):
+                super().__init__()
+                self._cmd = cmd
+
+            def run(self):
+                import subprocess
+                try:
+                    r = subprocess.run(self._cmd, capture_output=True, text=True,
+                                       timeout=60)
+                    self.finished_ok.emit(r.returncode, r.stdout or "", r.stderr or "")
+                except Exception as e:  # noqa: BLE001
+                    self.finished_ok.emit(-1, "", repr(e))
+
+        self.settings_window._set_status("正在重命名帧文件…")
+        cmd = ["python", str(script), "--retune-ms", str(ms)]
+        worker = _RetuneWorker(cmd)
+        worker.finished_ok.connect(
+            lambda code, out, err: self._on_retune_done(ms, code, out, err))
+        self._retune_worker = worker   # 保留引用防 GC
+        worker.start()
+
+    def _on_retune_done(self, ms: int, code: int, out: str, err: str) -> None:
+        """retune 子进程结束（主线程）：刷新 atlas + 改帧时长 + 更新状态。"""
+        log.info("retune 退出码 %d, stdout=%s stderr=%s", code, out[:300], err[:300])
         try:
-            sprite_dir = self.pet.atlas.sprite_dir
-            cmd = ["python", str(_P(__file__).resolve().parent.parent
-                                 / "tools" / "_legacy" / "rename_to_vpet.py"),
-                   "--retune-ms", str(ms)]
-            result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=60)
-            log.info("retune 退出码 %d, stdout=%s stderr=%s",
-                     result.returncode, result.stdout[:300], result.stderr[:300])
             # 走 SpriteRenderer 自带的 reload_atlas（保留同一个 renderer/player/label 实例，
             # 只换内部 atlas 引用，避免新旧 atlas/animator 双实例不同步的 bug）
             self.pet.reload_atlas(fallback_image=self.cfg.sprite.fallback)
@@ -1048,8 +1079,11 @@ class UIController(QObject):
             self.pet.atlas.override_frame_duration_ms(ms)
             # 让新 duration 立即生效
             self.pet._start_frame_timer()
-            self.settings_window._set_status(
-                f"已 retune 到 {ms} ms（{1000/ms:.1f} fps），atlas 已重新加载")
+            if code == 0:
+                self.settings_window._set_status(
+                    f"已 retune 到 {ms} ms（{1000/ms:.1f} fps），atlas 已重新加载")
+            else:
+                self.settings_window._set_status(f"retune 失败（退出码 {code}）：{err[:200]}")
         except Exception as e:  # noqa: BLE001
             log.error("retune 失败：%s", e)
             self.settings_window._set_status(f"retune 失败：{e}")
@@ -1123,6 +1157,43 @@ class UIController(QObject):
         sw.raise_()
         sw.activateWindow()
 
+    def _wait_port_async(self, port: int, timeout: float, slot) -> None:
+        """在 worker 线程里等端口就绪。
+
+        原来是在 GUI 线程上 socket 轮询 + time.sleep(0.2)，
+        桌宠会整个冻住 6~8 秒。现在丢到 worker 线程，
+        结果通过信号回到主线程再处理（slot 必须是本对象的方法，
+        这样才是 queued 连接，回主线程执行）。
+        """
+        from app.core.qt_compat import QThread
+
+        class _PortWaiter(QThread):
+            ready = Signal(bool)
+
+            def __init__(self, p, t):
+                super().__init__()
+                self._port = p
+                self._timeout = t
+
+            def run(self):
+                import socket
+                import time
+                deadline = time.time() + self._timeout
+                while time.time() < deadline:
+                    try:
+                        with socket.create_connection(("127.0.0.1", self._port),
+                                                     timeout=0.5):
+                            self.ready.emit(True)
+                            return
+                    except OSError:
+                        time.sleep(0.2)
+                self.ready.emit(False)
+
+        w = _PortWaiter(port, timeout)
+        w.ready.connect(slot)
+        self._port_waiter = w   # 保留引用防 GC
+        w.start()
+
     def _open_demo(self) -> None:
         """打开纯静态 Live2D Demo（本地 8765）：优先用 App 入口，否则直接启子进程。"""
         app = self._find_app()
@@ -1136,7 +1207,12 @@ class UIController(QObject):
         if start_demo_subprocess(root, port=DEMO_PORT) is None:
             self.pet.show_bubble("Live2D Demo 启动失败", duration_ms=3000)
             return
-        if wait_dashboard_ready(port=DEMO_PORT, timeout=6.0):
+        self._wait_port_async(DEMO_PORT, 6.0, self._on_demo_ready)
+
+    def _on_demo_ready(self, ok: bool) -> None:
+        """Live2D Demo 端口探测结束（主线程）。"""
+        if ok:
+            from app.main import open_in_browser, DEMO_PORT
             open_in_browser(f"http://127.0.0.1:{DEMO_PORT}/")
         else:
             self.pet.show_bubble("Live2D Demo 启动超时", duration_ms=3000)
@@ -1154,7 +1230,12 @@ class UIController(QObject):
         if start_dashboard_subprocess(root, port=TRACE_PORT) is None:
             self.pet.show_bubble("Agent Trace 启动失败", duration_ms=3000)
             return
-        if wait_dashboard_ready(port=TRACE_PORT, timeout=8.0):
+        self._wait_port_async(TRACE_PORT, 8.0, self._on_trace_ready)
+
+    def _on_trace_ready(self, ok: bool) -> None:
+        """Agent Trace 端口探测结束（主线程）。"""
+        if ok:
+            from app.main import open_in_browser, TRACE_PORT
             open_in_browser(f"http://127.0.0.1:{TRACE_PORT}")
         else:
             self.pet.show_bubble("Agent Trace 启动超时", duration_ms=3000)

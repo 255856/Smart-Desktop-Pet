@@ -6,9 +6,13 @@ import os
 import subprocess
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 from ._core import ToolRegistry
 from ._decorator import tool
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注
+    from app.core.installed_apps import InstalledApp
 
 # cmd.exe / POSIX shell 的元字符。open_app 的兜底 PATH 搜索不允许出现这些字符，
 # 否则会被 shell 当成命令分隔符 / 引号逃逸，形成命令注入
@@ -16,10 +20,34 @@ from ._decorator import tool
 _SHELL_METACHARS = frozenset('&|<>^"\'%!()\n\r`$*?;#')
 
 
-def _collect_suggestions(query: str, limit: int = 5) -> list[tuple[str, str, float]]:
+def _find_installed_candidates(
+    query: str, limit: int = 5,
+) -> list[tuple["InstalledApp", float]]:
+    """扫描一次系统已装应用，返回相似候选。
+
+    同一次 open_app 里，「解析启动路径」和「列出候选建议」共用这一份结果——
+    否则会把系统扫两遍（冷缓存时原本要先阻塞 3 s、再阻塞 3 s）。
+    """
+    try:
+        from app.core.installed_apps import find_similar_apps
+        return find_similar_apps(
+            query, limit=limit * 2, min_ratio=0.55, wait=True, timeout=3.0,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _collect_suggestions(
+    query: str,
+    limit: int = 5,
+    installed_candidates: Optional[list[tuple["InstalledApp", float]]] = None,
+) -> list[tuple[str, str, float]]:
     """收集「内置映射相似」+「已装应用相似」的 top-N 候选。
 
     Returns: [(display_name, exe_path, score), ...]，按 score 降序，去重。
+
+    installed_candidates: 外部已经查好的「已装应用相似候选」，传入则复用，
+        不再重复调用 find_similar_apps。
     """
     out: dict[str, tuple[str, str, float]] = {}    # path(lowercase) -> (display, path, score)
 
@@ -36,7 +64,7 @@ def _collect_suggestions(query: str, limit: int = 5) -> list[tuple[str, str, flo
         # 内置 key 相似候选（这是「名字对名字」，已装应用是「名字对显示名」）
         for display, score in reg.find_similar_in_registry(query, limit=limit * 2):
             # 把 display 反向归一化找到对应路径
-            full = reg.resolve(display)
+            full = reg.resolve(display, installed_candidates=installed_candidates)
             if full:
                 _add(display, full, score)
     except Exception:  # noqa: BLE001
@@ -45,10 +73,9 @@ def _collect_suggestions(query: str, limit: int = 5) -> list[tuple[str, str, flo
     # 2) 已装应用扫描相似候选（wait=True 等扫描完成，最多 3 秒）
     #    阈值 0.55：低于这个会返回太多噪声（如 "totallyfake" → Tailscale 50%）
     try:
-        from app.core.installed_apps import find_similar_apps
-        for app, score in find_similar_apps(
-            query, limit=limit * 2, min_ratio=0.55, wait=True, timeout=3.0,
-        ):
+        if installed_candidates is None:
+            installed_candidates = _find_installed_candidates(query, limit=limit)
+        for app, score in installed_candidates:
             _add(app.name, app.path, score)
     except Exception:  # noqa: BLE001
         pass
@@ -143,8 +170,21 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
             )
 
         # 3) 内置注册表（+ 已装应用扫描兜底）
+        #    先只查内置映射（installed_candidates=[] = 不走已装应用兜底），
+        #    这样命中内置时不必等系统扫描。
         registry = get_registry()
-        found = registry.resolve(name)
+        found = registry.resolve(name, installed_candidates=[])
+        if found:
+            try:
+                os.startfile(found)  # noqa: S606
+                return f"已启动 {name}（{found}）"
+            except Exception as e:  # noqa: BLE001
+                return f"错误：启动失败 {found}：{e}"
+
+        # 3b) 内置没命中 → 扫一次已装应用；这一份结果同时喂给
+        #     「解析启动路径」和「列出候选建议」，系统只扫一遍。
+        candidates = _find_installed_candidates(name, limit=5)
+        found = registry.resolve(name, installed_candidates=candidates)
         if found:
             try:
                 os.startfile(found)  # noqa: S606
@@ -153,7 +193,9 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
                 return f"错误：启动失败 {found}：{e}"
 
         # 4) 没找到：返回 top 5 相似候选（内置映射 + 已装应用）
-        suggestions = _collect_suggestions(name, limit=5)
+        suggestions = _collect_suggestions(
+            name, limit=5, installed_candidates=candidates,
+        )
         if suggestions:
             lines = [
                 f"未找到应用「{name}」。你可能想打开以下应用之一：",
@@ -424,8 +466,21 @@ def open_app(app_name: str) -> str:
         )
 
     # 3) 内置注册表（+ 已装应用扫描兜底）
+    #    先只查内置映射（installed_candidates=[] = 不走已装应用兜底），
+    #    这样命中内置时不必等系统扫描。
     registry = get_registry()
-    found = registry.resolve(name)
+    found = registry.resolve(name, installed_candidates=[])
+    if found:
+        try:
+            os.startfile(found)  # noqa: S606
+            return f"已启动 {name}（{found}）"
+        except Exception as e:  # noqa: BLE001
+            return f"错误：启动失败 {found}：{e}"
+
+    # 3b) 内置没命中 → 扫一次已装应用；这一份结果同时喂给
+    #     「解析启动路径」和「列出候选建议」，系统只扫一遍。
+    candidates = _find_installed_candidates(name, limit=5)
+    found = registry.resolve(name, installed_candidates=candidates)
     if found:
         try:
             os.startfile(found)  # noqa: S606
@@ -434,7 +489,9 @@ def open_app(app_name: str) -> str:
             return f"错误：启动失败 {found}：{e}"
 
     # 4) 没找到：返回 top 5 相似候选（内置映射 + 已装应用）
-    suggestions = _collect_suggestions(name, limit=5)
+    suggestions = _collect_suggestions(
+        name, limit=5, installed_candidates=candidates,
+    )
     if suggestions:
         lines = [
             f"未找到应用「{name}」。你可能想打开以下应用之一：",

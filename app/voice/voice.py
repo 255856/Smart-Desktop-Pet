@@ -185,8 +185,10 @@ class TTS:
         # 串行化：不要并发调用 speak() 抢同一个 mixer channel
         self._play_lock = threading.Lock()
         # 句子队列：所有 speak() 入队，由一个 daemon worker 顺序消费
+        # 上限 20 条：狼人杀 + 聊天同时说话时会积压，宠物会补播一堆过期台词
+        # （主人听到的是三分钟前的话）。满了丢最老的，不阻塞调用方。
         import queue as _queue
-        self._speak_queue: _queue.Queue = _queue.Queue()
+        self._speak_queue: _queue.Queue = _queue.Queue(maxsize=self._SPEAK_QUEUE_MAX)
         self._speak_worker: Optional[threading.Thread] = None
         self._speak_worker_started = False
         self._speak_worker_lock = threading.Lock()
@@ -196,21 +198,28 @@ class TTS:
     def _clean_expired_cache(self, max_age_days: int = 7,
                              max_total_mb: int = 80) -> None:
         """清理 TTS 缓存。两道闸：
-          1) 删 max_age_days 天前的 mp3（旧的同一句话也基本不会被再用到）
+          1) 删 max_age_days 天前的缓存文件（旧的同一句话也基本不会被再用到）
           2) 总大小超 max_total_mb 时按 mtime 删最老的一半，LRU 风格截断
+
+        注意：必须按 **self.cache_ext** 匹配，不能写死 "*.mp3"。
+        GPT-SoVITS 引擎的 cache_ext 是 ".wav"（见 gptsovits_tts.py），
+        写死 mp3 的话 wav 缓存永远清不掉 —— 实测 assets/tts_cache 攒到
+        733 个 wav / 238 MB，而 max_total_mb=80 的预算形同虚设。
         """
         try:
             import time as _t
             cutoff = _t.time() - max_age_days * 86400
             removed = 0
-            for f in self.cache_dir.glob("*.mp3"):
+            pattern = f"*{self.cache_ext}"
+            for f in self.cache_dir.glob(pattern):
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
                     removed += 1
             if removed:
                 log.info("TTS 缓存清理：删除 %d 个过期文件", removed)
             # 总大小截断：超 max_total_mb 时砍掉最老的一半
-            files = sorted(self.cache_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            files = sorted(self.cache_dir.glob(pattern),
+                           key=lambda p: p.stat().st_mtime)
             total = sum(p.stat().st_size for p in files)
             if total > max_total_mb * 1024 * 1024 and len(files) > 4:
                 keep = len(files) // 2    # 砍掉一半最老的，保留 50%
@@ -231,19 +240,35 @@ class TTS:
     # 缓存文件后缀：edge-tts 默认 mp3；GPT-SoVITS / MiniMax 返回 wav 需覆盖为 .wav
     cache_ext: str = ".mp3"
 
+    # 朗读队列上限：狼人杀 + 聊天同时说话时会积压，宠物会补播过期台词
+    _SPEAK_QUEUE_MAX = 20
+
     def speak(self, text: str) -> None:
         """把 text 按当前默认音色入朗读队列；worker 顺序合成 + 播放。"""
         if not self._enabled or not text.strip():
             return
-        self._speak_queue.put((text, None))
+        self._enqueue_speak(text, None)
         self._ensure_speak_worker()
 
     def speak_as(self, text: str, profile=None) -> None:
         """用指定音色（VoiceProfile）朗读；profile=None 即当前默认音色。"""
         if profile is None or not self._enabled or not text.strip():
             return self.speak(text)
-        self._speak_queue.put((text, profile))
+        self._enqueue_speak(text, profile)
         self._ensure_speak_worker()
+
+    def _enqueue_speak(self, text: str, profile) -> None:
+        """入队。队列满时丢最老的一条（不阻塞调用方，也不积压过期台词）。"""
+        import queue as _queue
+        try:
+            self._speak_queue.put_nowait((text, profile))
+        except _queue.Full:
+            try:
+                self._speak_queue.get_nowait()      # 丢最老的一条
+                self._speak_queue.task_done()
+                self._speak_queue.put_nowait((text, profile))
+            except Exception:  # noqa: BLE001
+                pass
 
     def _ensure_speak_worker(self) -> None:
         """懒启动唯一 daemon worker 消费队列。"""
@@ -457,7 +482,10 @@ class TTS:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-                stderr_file.flush()
+                finally:
+                    # 必须 close：原来只 flush 不 close，每句泄漏一个 fd
+                    stderr_file.flush()
+                    stderr_file.close()
                 with open(log_stderr_path, "rb") as f:
                     err = f.read()
                 if err:

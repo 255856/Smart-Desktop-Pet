@@ -557,6 +557,10 @@ class XiangqiWindow(QDialog):
         self.over = False
         self._last_comment = ""
         self._ready = False
+        # AI 搜索 worker（子线程跑 alpha-beta）+ 代号：
+        # 换代（再来一局）时代号递增，在飞的旧搜索结果直接丢弃。
+        self._ai_worker = None
+        self._ai_generation = 0
         # 第一次开窗(不是「再来一局」):桌宠主动说一句开战白并切到 happy 表情
         self._first_open = True
         self._build_ui()
@@ -718,6 +722,8 @@ class XiangqiWindow(QDialog):
     # ------------------------------------------------------------ 游戏流程
     def _new_game(self) -> None:
         self._ai_timer.stop()
+        # 换代：代号递增，在飞的旧 AI 搜索结果回来时会被丢弃
+        self._ai_generation += 1
         self.game_session_active.emit(True)
         self.game = XiangqiGame()
         self.ai = XiangqiAI(self.difficulty, BLACK)
@@ -924,13 +930,59 @@ class XiangqiWindow(QDialog):
         return None
 
     def _ai_move(self) -> None:
+        """轮到 AI 落子。
+
+        AI 的 alpha-beta 搜索是纯 CPU 的（深度 3 约 1 秒、深度 4 约 14 秒），
+        原来直接在 GUI 线程跑 → 棋盘和桌宠整个冻住。
+        现在丢到子线程：子线程在**局面副本**上搜（不跟 GUI 线程抢同一个
+        XiangqiGame），搜完用信号回主线程落子。
+        """
         if self.over or self.game.winner != 0 or self.game.to_move != BLACK:
             return
-        try:
-            mv = self.ai.choose_move(self.game, self.rng)
-        except Exception:  # noqa: BLE001
-            log.exception("象棋 AI 落子失败")
-            mv = None
+        if self._ai_worker is not None and self._ai_worker.isRunning():
+            return    # 已经在算了，别重复触发
+        from app.core.qt_compat import QThread
+
+        class _AiWorker(QThread):
+            done = Signal(object, int)   # (Move 或 None, generation)
+            failed = Signal(str, int)
+
+            def __init__(self, ai, game, rng, gen):
+                super().__init__()
+                self._ai = ai
+                self._game = game
+                self._rng = rng
+                self._gen = gen
+
+            def run(self):
+                try:
+                    self.done.emit(self._ai.choose_move(self._game, self._rng),
+                                   self._gen)
+                except Exception as e:  # noqa: BLE001
+                    self.failed.emit(repr(e), self._gen)
+
+        self.board.set_interactive(False)
+        gen = self._ai_generation
+        worker = _AiWorker(self.ai, self.game.clone(), random.Random(), gen)
+        worker.done.connect(self._on_ai_move)
+        worker.failed.connect(self._on_ai_failed)
+        self._ai_worker = worker   # 保留引用防 GC
+        worker.start()
+
+    def _on_ai_failed(self, err: str, gen: int) -> None:
+        """AI 搜索异常（主线程）。"""
+        if gen != self._ai_generation:
+            return    # 已经换代了，这次结果作废
+        log.error("象棋 AI 落子失败：%s", err)
+        self._apply_ai_move(None)
+
+    def _on_ai_move(self, mv, gen: int) -> None:
+        """AI 搜索完成（主线程）：落子 + 刷新。"""
+        if gen != self._ai_generation:
+            return    # 已经换代了，旧局面的走法不能落到新局面上
+        self._apply_ai_move(mv)
+
+    def _apply_ai_move(self, mv) -> None:
         if mv is not None:
             self.game.play_move(mv)
         self.board.update()

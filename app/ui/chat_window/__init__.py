@@ -66,7 +66,11 @@ from app.core.config import CharacterConfig, LLMConfig
 from app.core.api_keys import is_placeholder_key
 from app.brain.llm_client import ChatMessage, LLMClient
 from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
-from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
+# LangChainAgent 本体**不**在这里 import：它会连带拉起 langchain.agents /
+# langchain_openai（实测 1.84 s + 1.00 s），而 lightweight 后端根本用不到。
+# 需要时在 _kickoff_llm 里延迟 import（见该函数）。
+# 配置 dataclass 是零依赖的，从轻量模块拿。
+from app.brain.langchain_config import LangChainAgentConfig
 from app.engine.tools import ToolRegistry
 from app.voice.asr import SpeechRecognizer, asr_available
 from app.engine.chat_store import ChatStore
@@ -253,6 +257,10 @@ class ChatWindow(QWidget):
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
         self._mic_busy = False
+        # 流式清洗的节流步长（字符）：每累积这么多字才重算一次整段清洗。
+        # 32 字 ≈ 3~4 个 token ≈ 每秒 10 次更新，肉眼无感，
+        # 但把 sanitize_text 的调用次数降到 1/5（总开销 O(n²) 的常数因子大降）。
+        self._SAN_STEP = 32
         # v31: 按角色隔离 — 切人设重启后, 各自一份独立历史, 不串味
         self.chat_store = ChatStore(character_name=self.char_cfg.name)  # 聊天历史持久化
 
@@ -315,7 +323,13 @@ class ChatWindow(QWidget):
         # 富文本圆形头像（QTextBrowser 对 document 资源在 clear() 后会失效，
         # 改用自包含的 data URI：<img src="data:image/png;base64,...">）
         self._avatar_data_bot: str = ""
-        # 桌宠头像保留 (chat_cfg.bot_avatar_path)
+        # 本地图片 → data URL 的记忆化缓存。
+        # _msg_html 被 380 ms 的 _typing_timer 驱动 → 流式期间每秒约 2.6 次
+        # 重新读盘 + 重新 base64（单文件上限 8 MiB）。按 (路径, mtime, size)
+        # 缓存编码结果，重复渲染直接命中。
+        self._img_data_url_cache: dict[tuple, str] = {}
+        # 文档里是否嵌过 base64 图片：决定关图片弹窗时要不要整份重建文档
+        self._doc_has_inline_images = False        # 桌宠头像保留 (chat_cfg.bot_avatar_path)
         self._bot_avatar_path: str = (
             chat_cfg.bot_avatar_path if chat_cfg is not None else ""
         ) or ""
@@ -339,6 +353,25 @@ class ChatWindow(QWidget):
         self._tts_seq_next = 0
         self._tts_seq_drain = 0
         self._pending_speak: dict[int, str] = {}
+        # 已启动但尚未回报完成的 prepare worker 数。
+        # worker 的 done 信号先于 finished 到达,所以不能靠 _sentence_workers 判断是否还有活的。
+        self._tts_prepare_inflight = 0
+        # 收尾延后状态：还有 prepare 没回来时,回复的「正式收尾」推迟到最后一个
+        # prepare 完成时再做（见 _wait_all_sentence_workers / _finalize_reply）。
+        # 原实现在这里同步自旋等待,最长卡住主线程 120 秒,整只桌宠冻住。
+        self._finalize_pending = False
+        self._finalize_parsed = None
+        # 兜底 watchdog：prepare 永远不回来时也要收尾（对应原来的超时放弃等待）
+        self._finalize_watchdog = QTimer(self)
+        self._finalize_watchdog.setSingleShot(True)
+        self._finalize_watchdog.timeout.connect(self._on_finalize_watchdog)
+        # trace 的 token 事件攒批：原来每个 token 写一行 sqlite（6.5 ms/token，
+        # 含 commit 的 fsync），流式时纯白占 GUI 线程。改成攒起来定时批量写。
+        self._trace_text_buf: list[str] = []
+        self._trace_flush_timer = QTimer(self)
+        self._trace_flush_timer.setSingleShot(True)
+        self._trace_flush_timer.setInterval(500)
+        self._trace_flush_timer.timeout.connect(self._flush_trace_text)
         self._typing_frame = 0
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(380)
@@ -1117,9 +1150,13 @@ class ChatWindow(QWidget):
         """在聊天区追加一条系统消息（灰色提示）。"""
         self._render_message(Message(role="system", content=text))
 
+    # 本地图片 data URL 的记忆化缓存上限
+    # （base64 后体积 ×1.33，所以只缓存小图 + 限制条目数）
+    _IMG_CACHE_MAX_BYTES = 2 * 1024 * 1024
+    _IMG_CACHE_MAX_ENTRIES = 6
+
     # 【幻觉检测】匹配「已 XX」类断言性话术
-    _HALLUCINATION_PATTERNS = [
-        (r"已打开\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "open"),
+    _HALLUCINATION_PATTERNS = [        (r"已打开\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "open"),
         (r"已经打开\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "open"),
         (r"已启动\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "start"),
         (r"已经启动\s*[\"「]?([^\s」。,\.]+?)[\"」]?", "start"),
@@ -2361,14 +2398,28 @@ class ChatWindow(QWidget):
             skill_prompt = self._active_skill_prompt()
         if skill_prompt:
             system_prompt = system_prompt + skill_prompt
-        client = LLMClient(
-            self.llm_cfg, system_prompt,
-            request_timeout_s=self._chat_timeout_s,
+        # standard 后端走 LangChainAgent（自带 ChatOpenAI），根本用不到这个
+        # LLMClient —— 每轮白建一个 httpx 连接池。轻量后端 / 无工具才需要。
+        _need_llm_client = not (
+            self.registry is not None and self.registry.names()
+            and self.backend == "standard"
         )
+        client = None
+        if _need_llm_client:
+            client = LLMClient(
+                self.llm_cfg, system_prompt,
+                request_timeout_s=self._chat_timeout_s,
+            )
 
         # 占位气泡：插入一个占位 div 并记下 cursor 作为 streaming patch anchor
         self._current_bot_msg = Message(role="assistant", content="")
         self._streaming_raw = ""   # 流式原始累积（最终规范前），供逐帧清洗显示
+        # 流式清洗的节流状态：sanitize_text 是 O(累积长度)，每 token 都整段重算
+        # 会让总开销变成 O(n²)（实测 2088 字回复累计 199 ms GUI 占用，
+        # 4176 字 785 ms）。改成按「累积增长量」节流：同一个函数、同一个输入，
+        # 只是更新点变稀（默认每 _SAN_STEP 字一次，约 10 次/秒，肉眼无感）。
+        self._san_len = 0        # 上次清洗时的累积长度
+        self._streaming_san = ""  # 上次清洗的结果
         self._streaming_anchor_pos = self._insert_placeholder(self._current_bot_msg)
         # 重试类提示每轮只弹一次。模型偶发忽略 tool_choice 时会连着重试好几轮
         # （实测带历史时可达 5 轮 / 12 秒），每轮都追加一张卡片会把聊天区刷满
@@ -2394,6 +2445,10 @@ class ChatWindow(QWidget):
         if self.registry is not None and self.registry.names():
             # 根据 backend 选择 Agent：手写轻量级 或 LangChain 标准实现
             if self.backend == "standard":
+                # 延迟 import：LangChain 那一坨依赖（langchain.agents /
+                # langchain_openai）很重，模块级 import 会拖慢启动
+                # （见 app/brain/langchain_agent.py 的延迟导入说明）。
+                from app.brain.langchain_agent import LangChainAgent
                 lc_agent = LangChainAgent(
                     llm_cfg=self.llm_cfg,
                     registry=self.registry,
@@ -2663,11 +2718,18 @@ class ChatWindow(QWidget):
         dlg.show()
 
     def _on_image_popup_closed(self, *_args) -> None:
-        """图片预览关闭后强制 chat_view 重绘,避免文档资源释放导致空白。"""
+        """图片预览关闭后强制 chat_view 重绘,避免文档资源释放导致空白。
+
+        含 base64 图片的文档：仍然整份重建（setHtml(toHtml())）——这是
+        「资源被释放后整块擦白」的兜底，不能省。
+        纯文字文档：直接重绘即可。原来无条件做整份往返，文档里带图片时
+        是几 MB 的序列化 + 重新解析，全在 GUI 线程上。
+        """
         try:
             if hasattr(self, "chat_view") and self.chat_view is not None:
+                if getattr(self, "_doc_has_inline_images", False):
+                    self.chat_view.document().setHtml(self.chat_view.toHtml())
                 self.chat_view.viewport().update()
-                self.chat_view.document().setHtml(self.chat_view.toHtml())
         except Exception:  # noqa: BLE001
             pass
 
@@ -2994,22 +3056,51 @@ class ChatWindow(QWidget):
         self._streaming_raw = (self._streaming_raw or "") + tok
         # 流式渲染统一走最终规范：聊天窗也不闪现 CoT / 规则复读 / 英文思考。
         # 占位气泡的 content 直接存清洗后的显示文本（CoT 阶段保持空 → 三点动画）。
-        sanitized = sanitize_text(self._streaming_raw).strip()
+        #
+        # 清洗整段累积文本是 O(累积长度)；每个 token 都做一遍 → 总开销 O(n²)。
+        # 改成按累积增长量节流：值跟以前完全一样（同一个函数、同一个输入），
+        # 只是更新点变稀。第一块 token 必算（气泡要立刻有内容）。
+        if (len(self._streaming_raw) - self._san_len) >= self._SAN_STEP or self._san_len == 0:
+            self._san_len = len(self._streaming_raw)
+            sanitized = sanitize_text(self._streaming_raw).strip()
+            self._streaming_san = sanitized
+        else:
+            sanitized = self._streaming_san
         # 累积 content 但**不**实时刷 chat_view ——等 TTS prepare 完成才显示
         # （实现「文字与语音同步」：声音准备好后文字才一起出现）
         self._current_bot_msg.content = sanitized
         # chat_view 保持「准备语音…」占位（_refresh_streaming_message 故意不调）
-        # Trace：累计的原始文本（每 chunk 一次），便于调试时看到模型原始输出
+        # Trace：累计的原始文本。原先每个 token 写一行（一次 sqlite commit + fsync，
+        # 实测 6.5 ms/token → 40 tok/s 时每秒白占 260 ms GUI 线程）。
+        # 现在攒批 + 定时 flush：Dashboard 只取最后一条 accumulated
+        # （app/web/dashboard.py:409 遍历 text 事件取最后一个 accumulated），
+        # 所以中途合并不影响显示效果。
         if self.trace is not None and self._trace_run_id and tok:
-            self.trace.record(self._trace_run_id, "text", {
-                "delta": tok,
-                "accumulated": self._streaming_raw[:500],
-            })
+            self._trace_text_buf.append(tok)
+            if not self._trace_flush_timer.isActive():
+                self._trace_flush_timer.start()
         # 同步桌宠头顶气泡（与聊天窗同一份清洗后文本，口型同步也用它）
         if sanitized:
             self.streaming_chunk.emit(sanitized)
             # **逐句 prepare**：每收完一句话立即启动后台 QThread 准备 TTS
             self._tts_drain_sentences(sanitized)
+
+    def _flush_trace_text(self) -> None:
+        """把攒下的 token 批量写成一条 trace 事件（一次 commit 顶 N 次）。"""
+        self._trace_flush_timer.stop()
+        if not self._trace_text_buf:
+            return
+        delta = "".join(self._trace_text_buf)
+        self._trace_text_buf = []
+        if self.trace is None or not self._trace_run_id:
+            return
+        try:
+            self.trace.record(self._trace_run_id, "text", {
+                "delta": delta,
+                "accumulated": (self._streaming_raw or "")[:500],
+            })
+        except Exception:  # noqa: BLE001
+            log.debug("trace flush text 失败", exc_info=True)
 
     # 中文/英文/数字标点都算句末边界。GPT-SoVITS 一次合成一句短句的体感最自然
     _TTS_SENT_END = re.compile(r"[。！？!?\n;；]+")
@@ -3072,6 +3163,7 @@ class ChatWindow(QWidget):
         # 保留引用防 GC，等线程结束自动清理
         self._sentence_workers.append(w)
         w.finished.connect(lambda ww=w: self._sentence_workers.remove(ww))
+        self._tts_prepare_inflight += 1
         w.start()
 
     def _on_sentence_ready(self, seq: int, sentence: str) -> None:
@@ -3079,6 +3171,10 @@ class ChatWindow(QWidget):
         self._committed_text = (self._committed_text or "") + sentence
         self._pending_speak[seq] = sentence
         self._drain_speak_queue()
+        self._tts_prepare_inflight = max(0, self._tts_prepare_inflight - 1)
+        # 最后一个 prepare 回来了 → 收尾（若之前被延后）
+        if self._finalize_pending and self._tts_prepare_inflight <= 0:
+            self._finalize_reply()
 
     def _drain_speak_queue(self) -> None:
         """按 _seq 顺序把 _pending_speak 里「连续编号」的句子依次 speak。
@@ -3108,23 +3204,93 @@ class ChatWindow(QWidget):
         self._tts_sent_tail = 0
 
     def _wait_all_sentence_workers(self, timeout_s: float = 120.0) -> None:
-        """阻塞等所有 sentence prepare worker 完成（或完成 + 失败）。
+        """等所有 sentence prepare 完成 —— 但**不阻塞主线程**。
 
-        阻塞主线程一段时间换取「文字等语音」体验：等所有句子 prepare 完成后
-        _on_done 才把回复正式写入 history / chat_view / chat_view 渲染。
-        超时则放弃等待（避免 TTS 服务挂掉时桌宠卡死）。
+        原来的实现在这里用 processEvents()+sleep 自旋,最长卡 120 秒:
+        桌宠动画 / 气泡 / 托盘 / 输入框全部冻住（而且 processEvents 会重入
+        事件循环,让 _on_chunk 插进 _on_done 执行途中）。
+
+        现在改成：
+          - 没有 prepare 在跑 → 立刻收尾（和原来一样）
+          - 还有 prepare 在跑 → 记下待收尾状态,等最后一个 prepare 回来
+            （_on_sentence_ready）时再收尾,「文字等语音」的观感不变
+          - 同时挂 watchdog：prepare 永远不回来时也能收尾（对应原来的超时放弃）
         """
-        import time
-        deadline = time.monotonic() + timeout_s
-        while self._sentence_workers and time.monotonic() < deadline:
-            # 处理 Qt 事件循环，避免 _on_chunk 等 callback 卡死
-            QApplication = _safe_qapp()
-            if QApplication is not None:
-                QApplication.processEvents()
-            time.sleep(0.05)
-        if self._sentence_workers:
-            log.warning("TTS prepare 超时（%d 个 worker 未完成），放弃等待",
-                        len(self._sentence_workers))
+        if self._tts_prepare_inflight <= 0:
+            self._finalize_reply()
+            return
+        self._finalize_pending = True
+        self._finalize_watchdog.start(int(max(1.0, timeout_s) * 1000))
+
+    def _on_finalize_watchdog(self) -> None:
+        """watchdog：prepare 迟迟不回来 → 放弃等待,照常收尾。"""
+        if not self._finalize_pending:
+            return
+        log.warning("TTS prepare 超时（%d 个 worker 未完成），放弃等待",
+                    self._tts_prepare_inflight)
+        self._finalize_reply()
+
+    def _finalize_reply(self) -> None:
+        """回复收尾：正式写入 history / chat_store / chat_view / trace。
+
+        原本这段紧跟在「等 TTS prepare 完成」之后同步执行；现在可能被延后到
+        最后一个 prepare 完成时（_on_sentence_ready）才调用，对用户表现一致。
+        """
+        parsed = self._finalize_parsed
+        if parsed is None:
+            return
+        self._finalize_pending = False
+        self._finalize_parsed = None
+        self._finalize_watchdog.stop()
+        if self._current_bot_msg is None:
+            return
+        try:
+            self._do_finalize_reply(parsed)
+        except Exception:  # noqa: BLE001
+            log.exception("回复收尾失败")
+
+    def _do_finalize_reply(self, parsed) -> None:
+        """_finalize_reply 的实际收尾逻辑（原来内联在 _on_done 里）。"""
+        self.history.append(self._current_bot_msg)
+        self._trim_history()
+        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
+        # 持久化用 msg.content(已 re-inject),不是 parsed.text;否则历史看不到图
+        self.chat_store.add(
+            "assistant", self._current_bot_msg.content or "",
+            emotion=parsed.emotion.value if parsed.emotion else "",
+            tools=tools_list,
+        )
+        self._refresh_streaming_message(finished=True,
+                                         emotion=parsed.emotion.value if parsed.emotion else "")
+
+        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
+
+        # Trace：先把攒着的 token 冲掉，再写 finish（flush 依赖 _trace_run_id）
+        self._flush_trace_text()
+        # Trace：完成 run
+        if self.trace is not None and self._trace_run_id:
+            try:
+                self.trace.record(self._trace_run_id, "finish", {
+                    "emotion": parsed.emotion.value if parsed.emotion else "",
+                    "tool_count": len(self._current_bot_msg.tools),
+                })
+                self.trace.end_run(self._trace_run_id, parsed.text, status="success")
+            except Exception:  # noqa: BLE001
+                pass
+            self._trace_run_id = None
+        self._generating = False
+        self.send_btn.setEnabled(True)
+        self.stop_btn.setVisible(False)
+        # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
+        self.thinking_stopped.emit()
+        self.streaming_done.emit()
+        # 通知外部（pet 窗口）切表情。TTS 由本类逐句链路负责（流式期间逐句
+        # prepare+speak + _flush_tts_tail_to_prepare 补尾部），这里必须传 False：
+        # 若传 True，ui_controller 会把整段文本再 speak 一遍 → 重复播报。
+        self.reply_ready.emit(parsed.text, parsed.emotion, False)
+        # 清理状态
+        self._current_bot_msg = None
+        self._streaming_anchor_pos = None
 
     def _on_done(self, full: str) -> None:
         # LangChain 标准后端：释放 SqliteSaver 连接
@@ -3169,48 +3335,17 @@ class ChatWindow(QWidget):
         # 把 multimodal URL 重新拼到 content 末尾(扛住上面 content=parsed.text 的覆盖)
         self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._flush_tts_tail_to_prepare()  # 启动尾部 prepare
-        self._wait_all_sentence_workers(timeout_s=120.0)  # 阻塞等全部 prepare 完
-
-        self.history.append(self._current_bot_msg)
-        self._trim_history()
-        tools_list = [list(t) for t in self._current_bot_msg.tools] if self._current_bot_msg.tools else []
-        # 持久化用 msg.content(已 re-inject),不是 parsed.text;否则历史看不到图
-        self.chat_store.add(
-            "assistant", self._current_bot_msg.content or "",
-            emotion=parsed.emotion.value if parsed.emotion else "",
-            tools=tools_list,
-        )
-        self._refresh_streaming_message(finished=True,
-                                         emotion=parsed.emotion.value if parsed.emotion else "")
-
-        self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
-
-        # Trace：完成 run
-        if self.trace is not None and self._trace_run_id:
-            try:
-                self.trace.record(self._trace_run_id, "finish", {
-                    "emotion": parsed.emotion.value if parsed.emotion else "",
-                    "tool_count": len(self._current_bot_msg.tools),
-                })
-                self.trace.end_run(self._trace_run_id, parsed.text, status="success")
-            except Exception:  # noqa: BLE001
-                pass
-            self._trace_run_id = None
-        self._generating = False
-        self.send_btn.setEnabled(True)
-        self.stop_btn.setVisible(False)
-        # 通知桌宠：思考结束 + 流式结束（桌宠气泡停止）
-        self.thinking_stopped.emit()
-        self.streaming_done.emit()
-        # 通知外部（pet 窗口）切表情。TTS 由本类逐句链路负责（流式期间逐句
-        # prepare+speak + _flush_tts_tail_to_prepare 补尾部），这里必须传 False：
-        # 若传 True，ui_controller 会把整段文本再 speak 一遍 → 重复播报。
-        self.reply_ready.emit(parsed.text, parsed.emotion, False)
-        # 清理状态
-        self._current_bot_msg = None
-        self._streaming_anchor_pos = None
+        # 收尾（写 history / 渲染 / 通知桌宠）。若还有 prepare 没回来，
+        # 这里不阻塞主线程，改由 _finalize_reply 延后执行。
+        self._finalize_parsed = parsed
+        self._wait_all_sentence_workers(timeout_s=120.0)
 
     def _on_failed(self, err: str) -> None:
+        # 作废可能还挂着的延后收尾（_on_done 已经排上、但还没等到 prepare 回来），
+        # 避免失败分支和延后收尾各渲染一次
+        self._finalize_pending = False
+        self._finalize_parsed = None
+        self._finalize_watchdog.stop()
         # LangChain 标准后端：释放 SqliteSaver 连接
         if self.backend == "standard" and getattr(self, "_lc_agent", None) is not None:
             try:
@@ -3223,6 +3358,8 @@ class ChatWindow(QWidget):
         # 即使失败也尝试把 multimodal 产物补回来
         self._reinject_multimodal_from_tools(self._current_bot_msg)
         self._refresh_streaming_message(finished=True, emotion="sad")
+        # Trace：失败（先把攒着的 token 冲掉）
+        self._flush_trace_text()
         # Trace：失败
         if self.trace is not None and self._trace_run_id:
             try:
@@ -3696,10 +3833,21 @@ class ChatWindow(QWidget):
                 # 文件丢失给清晰提示,不再空白
                 return f"*[图片已丢失: {p.name}]*"
             try:
-                if p.stat().st_size > 8 * 1024 * 1024:
-                    return m.group(0)
+                st = p.stat()
             except OSError:
+                return f"*[图片读取失败: {p.name}]*"
+            if st.st_size > 8 * 1024 * 1024:
                 return m.group(0)
+            # 记忆化：同一张图在流式期间会被反复编码（每秒 ~2.6 次），
+            # 按 (路径, mtime, size) 命中缓存就不用再读盘 + base64。
+            try:
+                cache_key = (str(p.resolve()), st.st_mtime_ns, st.st_size)
+            except OSError:
+                cache_key = (str(p), st.st_mtime_ns, st.st_size)
+            cached = self._img_data_url_cache.get(cache_key)
+            if cached is not None:
+                self._doc_has_inline_images = True
+                return f"![{alt}]({cached})"
             try:
                 data = p.read_bytes()
             except OSError:
@@ -3714,7 +3862,14 @@ class ChatWindow(QWidget):
                 "webp": "image/webp",
             }.get(ext, "application/octet-stream")
             b64 = _b64.b64encode(data).decode("ascii")
-            return f"![{alt}](data:{mime};base64,{b64})"
+            data_url = f"data:{mime};base64,{b64}"
+            # 只缓存小图（base64 后体积翻倍），条目数也封顶，别把内存吃光
+            if len(data) <= self._IMG_CACHE_MAX_BYTES:
+                if len(self._img_data_url_cache) >= self._IMG_CACHE_MAX_ENTRIES:
+                    self._img_data_url_cache.clear()
+                self._img_data_url_cache[cache_key] = data_url
+            self._doc_has_inline_images = True
+            return f"![{alt}]({data_url})"
 
         return pattern.sub(_replace, text)
 

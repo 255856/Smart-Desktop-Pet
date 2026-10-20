@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from . import _http
 from ._core import ToolRegistry, is_safe_url
 from ._decorator import tool
 
@@ -37,10 +38,10 @@ def _geocode(location: str) -> tuple[float, float, str]:
         log.warning("geocoding url blocked by safety check")
         return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, fallback_name
     try:
-        with httpx.Client(timeout=8.0) as c:
-            r = c.get(url)
-            r.raise_for_status()
-            data = r.json()
+        c = _http.get_client(8.0)
+        r = c.get(url)
+        r.raise_for_status()
+        data = r.json()
         results = data.get("results") or []
         if not results:
             return DEFAULT_LONGITUDE, DEFAULT_LATITUDE, fallback_name
@@ -110,10 +111,10 @@ def register(reg: ToolRegistry) -> None:
         if not is_safe_url(url, allowed_hosts={_OPENMETEO_HOST}):
             return "错误：天气查询 endpoint 被安全策略拒绝"
         try:
-            with httpx.Client(timeout=10.0) as c:
-                r = c.get(url)
-                r.raise_for_status()
-                data = r.json()
+            c = _http.get_client(10.0)
+            r = c.get(url)
+            r.raise_for_status()
+            data = r.json()
         except Exception as e:  # noqa: BLE001
             log.warning("weather request failed: %s", e)
             return f"错误：天气查询失败：{e}"

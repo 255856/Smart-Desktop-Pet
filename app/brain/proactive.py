@@ -19,13 +19,17 @@ class _ChatOnceWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, llm_cfg, system_prompt, messages,
-                 request_timeout_s: int | None = None):
+                 request_timeout_s: int | None = None, prepare=None):
         super().__init__()
         # 每次独立构造 LLMClient + httpx.AsyncClient，避免连接绑在已 close 的子 loop 上
         self.llm_cfg = llm_cfg
         self.system_prompt = system_prompt
         self.messages = messages
         self.request_timeout_s = request_timeout_s
+        # prepare: 可选的回调，在**子线程**里返回 (system_prompt, messages)。
+        # 主动发言用它把阻塞的 ActivityWatch 抓取挪出 GUI 线程
+        # （原来是 GUI 线程上最多 6 次 urlopen，超时 2+4+6 秒 → 整只桌宠冻 24 秒）。
+        self._prepare = prepare
         self._cancelled = threading.Event()
 
     def request_stop(self) -> None:
@@ -34,16 +38,20 @@ class _ChatOnceWorker(QThread):
     def run(self) -> None:
         client = None
         try:
+            if self._prepare is not None:
+                system_prompt, messages = self._prepare()
+            else:
+                system_prompt, messages = self.system_prompt, self.messages
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             from app.brain.llm_client import LLMClient
-            client = LLMClient(self.llm_cfg, self.system_prompt,
+            client = LLMClient(self.llm_cfg, system_prompt,
                                request_timeout_s=self.request_timeout_s)
 
             async def drive() -> str:
                 if self._cancelled.is_set():
                     return ""
-                return await client.chat_once(self.messages)
+                return await client.chat_once(messages)
 
             text = loop.run_until_complete(drive())
             self.done.emit(text)
@@ -213,48 +221,59 @@ class ProactiveBrain(QObject):
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
         mem = self.memory.recent(10)
-        # ActivityWatch 活动 context（主人开了才查，aw-server 不在就跳过）
-        aw_context = self._build_aw_context()
-        context = {
+        # 下面这些是纯内存/轻量读取，放 GUI 线程没关系。
+        context_base = {
             "now": now.strftime(f"%Y-%m-%d %H:%M 星期{wd}"),
             "is_night": is_night(now.timestamp()),
             "time_hint": _get_time_context(now),
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
             "recent_remarks": self._last_remarks_by_char.get(self.char_name, [])[-3:],
-            "aw_context": aw_context,
         }
-        # 第 6 条规则只在 AW 实际有数据时挂上，避免 prompt 噪声
-        aw_rule = ""
-        if aw_context and "未运行" not in aw_context and "无数据" not in aw_context:
-            aw_rule = (
-                "\n6. 若 `aw_context` 里有数据, 可以结合主人当下在做的事"
-                "（写代码 / 刷视频 / 看文档 等）挑更贴切的切入口, "
-                "比如「看了半天 VSCode, 休息一下吧」; "
-                "对敏感标题（私人聊天/银行）只概括类别不复读标题。"
+
+        def _prepare():
+            """在 worker 线程里准备 system_prompt / messages。
+
+            ActivityWatch 抓取是阻塞 HTTP（最多 6 次 urlopen，超时 2+4+6 秒）。
+            原来在 GUI 线程做 → 桌宠动画/气泡/托盘/输入全部冻住（最长 24 秒）。
+            现在整个 prompt 组装都放进 worker 线程，GUI 线程只负责调度。
+            """
+            aw_context = self._build_aw_context()
+            context = dict(context_base)
+            context["aw_context"] = aw_context
+            # 第 6 条规则只在 AW 实际有数据时挂上，避免 prompt 噪声
+            aw_rule = ""
+            if aw_context and "未运行" not in aw_context and "无数据" not in aw_context:
+                aw_rule = (
+                    "\n6. 若 `aw_context` 里有数据, 可以结合主人当下在做的事"
+                    "（写代码 / 刷视频 / 看文档 等）挑更贴切的切入口, "
+                    "比如「看了半天 VSCode, 休息一下吧」; "
+                    "对敏感标题（私人聊天/银行）只概括类别不复读标题。"
+                )
+            system = (
+                self.persona
+                + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
+                  "规则：\n"
+                  "1. 只输出一句话（40 字以内），像自然地冒出来的一句话："
+                  "可以是关心、闲聊、提起记忆里的事、或根据时间/状态作出的提醒；\n"
+                  f"2. 时间段提示：{context['time_hint']}\n"
+                  "3. 不要重复 recent_remarks 里说过的内容；\n"
+                  "4. 如果此刻真的没什么好说的，只输出 [skip]；\n"
+                  "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
+                  "情绪由语气自然表达即可。"
+                  + aw_rule
             )
-        system = (
-            self.persona
-            + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
-              "规则：\n"
-              "1. 只输出一句话（40 字以内），像自然地冒出来的一句话："
-              "可以是关心、闲聊、提起记忆里的事、或根据时间/状态作出的提醒；\n"
-              f"2. 时间段提示：{context['time_hint']}\n"
-              "3. 不要重复 recent_remarks 里说过的内容；\n"
-              "4. 如果此刻真的没什么好说的，只输出 [skip]；\n"
-              "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
-              "情绪由语气自然表达即可。"
-              + aw_rule
-        )
-        user = json.dumps(context, ensure_ascii=False)
+            from app.brain.llm_client import ChatMessage
+            user = json.dumps(context, ensure_ascii=False)
+            return system, [ChatMessage(role="user", content=user)]
 
         # 每次新建 worker（独立 httpx 客户端，绑定本次子 loop）—— 见 _ChatOnceWorker 注释
-        from app.brain.llm_client import ChatMessage
         worker = _ChatOnceWorker(
             llm_cfg=self.llm_cfg,
-            system_prompt=system,
-            messages=[ChatMessage(role="user", content=user)],
+            system_prompt="",
+            messages=[],
             request_timeout_s=self._request_timeout_s,
+            prepare=_prepare,
         )
         worker.done.connect(self._on_done)
         worker.failed.connect(

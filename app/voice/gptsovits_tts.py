@@ -87,11 +87,15 @@ class GPTSoVITSTTS(TTS):
                     try:
                         from app.main import start_tts_api_subprocess
                         from pathlib import Path
-                        start_tts_api_subprocess(
+                        pid = start_tts_api_subprocess(
                             Path(__file__).resolve().parent.parent.parent,
                             port=9880)
                         import asyncio
-                        await asyncio.sleep(8)
+                        # 自己拉起的等 8 秒；别人已经在拉起（pid <= 0）就等久一点
+                        # —— api_v2 加载模型要 ~30 秒，等久一点才有戏。
+                        # 无论哪种情况都只有**一个**线程会去拉起服务
+                        # （见 app/main.py 的 _TTS_API_START_LOCK）。
+                        await asyncio.sleep(8 if (pid or 0) > 0 else 20)
                         continue
                     except Exception as e2:  # noqa: BLE001
                         raise RuntimeError(f"GPT-SoVITS 自愈失败: {e2}") from e

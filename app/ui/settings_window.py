@@ -8,7 +8,7 @@ from typing import Optional
 from app.core.qt_compat import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
-    QSize, QSlider, QTabWidget, QVBoxLayout,
+    QSize, QSlider, QTabWidget, QTimer, QVBoxLayout,
     QWidget, Signal, Qt, QFrame, QColor, QEvent, QGraphicsDropShadowEffect,
     QToolButton, QObject, QScrollArea, QWheelEvent, event_global_pos,
 )
@@ -171,6 +171,13 @@ class SettingsWindow(QWidget):
             "hide_watermark": bool(st.get("hide_watermark", True)),
             "character": st.get("character", {}),
         }
+        # 模型配置落盘去抖：原来每敲一个键就把整份 settings.json 重写 7 遍
+        # （输 40 字符 API key = 280 次整文件写）。改成静止 300 ms 才写一次。
+        # 必须在 _build_ui / _wire_signals 之前建好——控件建的时候就会发信号。
+        self._model_cfg_timer = QTimer(self)
+        self._model_cfg_timer.setSingleShot(True)
+        self._model_cfg_timer.setInterval(300)
+        self._model_cfg_timer.timeout.connect(self._apply_model_config)
         self._build_ui()
         self._wire_signals()
         # 参数控件禁滚轮改值（面板滚动时容易误触）—— 滚轮转给 QScrollArea
@@ -2094,19 +2101,47 @@ class SettingsWindow(QWidget):
         self.settings_changed.emit()
 
     def _on_model_config_changed(self) -> None:
-        """用户修改了模型配置，发出信号并持久化。"""
+        """用户修改了模型配置：**去抖 300 ms** 后再落盘 + 发信号。
+
+        原来每敲一个键就直接落盘：模型配置一次要写 7 个键，每个键都把
+        整份 settings.json 序列化重写一遍——输 40 字符 API key = 280 次
+        整文件写，滑块拖动更是逐像素触发。改成去抖后，静止 300 ms 才写一次。
+        """
+        if self._model_cfg_timer is not None:
+            self._model_cfg_timer.start()
+
+    def _apply_model_config(self) -> None:
+        """真正落盘 + 发信号（去抖之后调用一次）。"""
         cfg = self.get_model_config()
-        # 持久化
-        self.settings_store.set("model_base_url", cfg["base_url"])
-        self.settings_store.set("model_api_key", cfg["api_key"])
-        self.settings_store.set("model_name", cfg["model"])
-        self.settings_store.set("model_temperature", cfg["temperature"])
-        self.settings_store.set("model_max_tokens", cfg["max_tokens"])
-        self.settings_store.set("model_timeout", cfg["timeout"])
-        self.settings_store.set("model_stream", cfg["stream"])
+        # 持久化：一次写盘（原来 7 次 set() = 7 次整文件写）
+        self.settings_store.set_many({
+            "model_base_url": cfg["base_url"],
+            "model_api_key": cfg["api_key"],
+            "model_name": cfg["model"],
+            "model_temperature": cfg["temperature"],
+            "model_max_tokens": cfg["max_tokens"],
+            "model_timeout": cfg["timeout"],
+            "model_stream": cfg["stream"],
+        })
         # 发信号
         self.model_config_changed.emit(cfg)
         self._set_status(f"模型配置已更新：{cfg['model']} @ {cfg['base_url'][:40]}...")
+
+    def _flush_model_config(self) -> None:
+        """把还挂着的去抖立刻落盘（关窗口 / 预设 / 重置时用）。"""
+        if self._model_cfg_timer is None:
+            return
+        if self._model_cfg_timer.isActive():
+            self._model_cfg_timer.stop()
+            self._apply_model_config()
+
+    def closeEvent(self, ev) -> None:
+        """关窗口前把还挂着的去抖立刻落盘（别丢掉主人刚敲的 API Key）。"""
+        try:
+            self._flush_model_config()
+        except Exception:  # noqa: BLE001
+            pass
+        super().closeEvent(ev)
 
     def _on_temperature_changed(self, v: int) -> None:
         self.lbl_temperature.setText(f"{v / 100:.2f}")
@@ -2135,7 +2170,9 @@ class SettingsWindow(QWidget):
         self.edt_api_key.blockSignals(True)
         self.edt_api_key.clear()
         self.edt_api_key.blockSignals(False)
+        # 预设是「一次性动作」：立刻落盘，别等去抖
         self._on_model_config_changed()
+        self._flush_model_config()
         self._set_status(f"已应用预设：{btn.text()} —— 请填该厂商的 API Key")
 
     def _on_voice_changed(self, voice: str) -> None:
@@ -2184,8 +2221,9 @@ class SettingsWindow(QWidget):
         # 模型参数回默认并落到 cfg.llm —— _load_defaults 里是 blockSignals 的，
         # 这里显式发一次，主程序才会真的改 cfg
         self._on_model_config_changed()
+        self._flush_model_config()   # 立刻落盘，别等去抖
         self.snapshot_to_store()
-        self._set_status(f"语音已切换：{voice}")
+        self._set_status("已重置为默认设置")
 
     def _on_tts_enabled_changed(self, enabled: bool) -> None:
         """用户切换了 TTS 开关，持久化。"""

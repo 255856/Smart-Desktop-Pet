@@ -36,6 +36,22 @@ def _failure_message(exc: BaseException) -> str:
     return repr(exc)
 
 
+async def _close_llm_client(client) -> None:
+    """本轮结束后关掉 LLMClient 的 httpx 连接池。
+
+    每轮 asyncio.run() 都是一个新 event loop：loop 关掉后，连接池里那些
+    绑在旧 loop 上的连接就废了。不显式 close() 的话，每轮都会泄漏一个
+    连接 + 一个 fd（LLMClient 之前全仓库没有任何 close() 调用点）。
+    """
+    close = getattr(client, "close", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class _AgentWorker(QThread):
     """Agent 循环 worker：流式正文 + 工具调用（Function Calling）。"""
 
@@ -89,28 +105,32 @@ class _AgentWorker(QThread):
                 async def drive(done_box: list[str],
                                 reasoning_box: list[str]) -> None:
                     """驱动 agent.run 异步迭代。"""
-                    async for ev in self.agent.run(
-                            self.messages, cancel_check=self.cancel_event.is_set):
-                        kind = ev[0]
-                        if kind == "text":
-                            full.append(ev[1])
-                            self.chunk.emit(ev[1])
-                        elif kind == "tool":
-                            self.tool_used.emit(ev[1], ev[2], ev[3])
-                        elif kind == "meta":
-                            # ev = ("meta", dict)
-                            meta_payload = ev[1] if len(ev) > 1 else {}
-                            # reasoning meta 累积到 reasoning_box（一次性 trace）
-                            if isinstance(meta_payload, dict) and \
-                                    meta_payload.get("event") == "reasoning_delta":
-                                reasoning_box.append(meta_payload.get("content", ""))
-                            self.meta.emit("meta", meta_payload)
-                        elif kind in ("plan", "reflection"):
-                            self.meta.emit(kind, ev[1] if len(ev) > 1 else {})
-                        elif kind == "done":
-                            # 防御：记录 done payload 作为兜底文本
-                            if len(ev) > 1 and ev[1]:
-                                done_box.append(str(ev[1]))
+                    try:
+                        async for ev in self.agent.run(
+                                self.messages, cancel_check=self.cancel_event.is_set):
+                            kind = ev[0]
+                            if kind == "text":
+                                full.append(ev[1])
+                                self.chunk.emit(ev[1])
+                            elif kind == "tool":
+                                self.tool_used.emit(ev[1], ev[2], ev[3])
+                            elif kind == "meta":
+                                # ev = ("meta", dict)
+                                meta_payload = ev[1] if len(ev) > 1 else {}
+                                # reasoning meta 累积到 reasoning_box（一次性 trace）
+                                if isinstance(meta_payload, dict) and \
+                                        meta_payload.get("event") == "reasoning_delta":
+                                    reasoning_box.append(meta_payload.get("content", ""))
+                                self.meta.emit("meta", meta_payload)
+                            elif kind in ("plan", "reflection"):
+                                self.meta.emit(kind, ev[1] if len(ev) > 1 else {})
+                            elif kind == "done":
+                                # 防御：记录 done payload 作为兜底文本
+                                if len(ev) > 1 and ev[1]:
+                                    done_box.append(str(ev[1]))
+                    finally:
+                        # 本轮结束：关掉 LLMClient 的连接池（每轮都漏一个 fd）
+                        await _close_llm_client(getattr(self.agent, "client", None))
 
                 done_box: list[str] = []
                 reasoning_box: list[str] = []
@@ -156,15 +176,19 @@ class _StreamWorker(QThread):
             full: list[str] = []
 
             async def drive() -> None:
-                async for tok in self.client.chat_stream(
-                    self.messages,
-                    cancel_check=self.cancel_event.is_set,
-                ):
-                    full.append(tok)
-                    self.chunk.emit(tok)
-                    if self.cancel_event.is_set():
-                        # 已收到部分 token；断开 stream 跳出循环
-                        break
+                try:
+                    async for tok in self.client.chat_stream(
+                        self.messages,
+                        cancel_check=self.cancel_event.is_set,
+                    ):
+                        full.append(tok)
+                        self.chunk.emit(tok)
+                        if self.cancel_event.is_set():
+                            # 已收到部分 token；断开 stream 跳出循环
+                            break
+                finally:
+                    # 本轮结束：关掉 LLMClient 的连接池（每轮都漏一个 fd）
+                    await _close_llm_client(self.client)
 
             loop.run_until_complete(drive())
             loop.run_until_complete(asyncio.sleep(0))   # 给 aclose 一个机会落地

@@ -357,6 +357,8 @@ class Live2DRenderer(PetRenderer):
         # 挂机随机表情定时器（模型 ready 后才真正开始触发）
         self._random_enabled = bool(self.profile.random_enabled)
         self._random_busy = False
+        # 贴纸目录列表缓存：(目录, mtime) -> [Path, ...]
+        self._sticker_files_cache: Optional[tuple] = None
         self._random_timer = QTimer()
         self._random_timer.setSingleShot(True)
         self._random_timer.timeout.connect(self._on_random_timeout)
@@ -602,6 +604,9 @@ class Live2DRenderer(PetRenderer):
         """模型表情包贴纸配置；无配置或目录不存在返回 None。
 
         返回 {"files": [绝对路径], "min_s", "max_s", "duration_s", "size"}。
+
+        目录列表按 (目录, mtime) 缓存：原来每次展示都 iterdir() + sorted()
+        （纯重复磁盘 I/O，值几乎不变）。
         """
         if not self.profile.stickers_dir:
             return None
@@ -611,9 +616,18 @@ class Live2DRenderer(PetRenderer):
         if not d.is_dir():
             log.info("Live2D 表情包目录不存在: %s", d)
             return None
-        files = sorted(
-            p for p in d.iterdir()
-            if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+        try:
+            dir_key = (str(d), d.stat().st_mtime)
+        except OSError:
+            dir_key = (str(d), 0.0)
+        cached = self._sticker_files_cache
+        if cached is not None and cached[0] == dir_key:
+            files = cached[1]
+        else:
+            files = sorted(
+                p for p in d.iterdir()
+                if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+            self._sticker_files_cache = (dir_key, files)
         if not files:
             return None
         return {

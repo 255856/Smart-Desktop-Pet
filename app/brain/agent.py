@@ -22,6 +22,12 @@ DANGEROUS_TOOLS = {"lock_screen", "kill_process", "run_script",
 # 连续多少轮纯调工具（无文字）后强制进入 final 阶段
 MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3
 
+# 「该调工具却只给文字」的重试上限（最多重试几次）
+# 原来可以连重试 5 轮（MAX_TURNS=6）：第 2..6 次带的几乎是同一个请求
+# （强制提示由 LLMClient 统一注入，tool_choice 降级还按模型名缓存了），
+# 等于把同一个请求重复发 5 次——费钱且慢（实测带历史时可达 5 轮 / 12 秒）。
+_MAX_FORCE_RETRIES = 1
+
 # 同一个工具连续失败多少次后，本轮对话内不再提供它
 _MAX_SAME_TOOL_FAIL = 2
 
@@ -604,6 +610,7 @@ class AgentLoop:
         executed_tools: list[tuple[str, str, str]] = []
         verify_corrections = 0   # 「工具失败却报喜」的纠正次数（最多 1 次）
         partial_retries = 0     # 「多步任务只做一半」的纠正次数（最多 1 次）
+        force_retries = 0       # 「该调工具却只给文字」的重试次数（最多 1 次）
         # 同一工具连续失败次数（跨轮次）
         failed_tools: dict[str, int] = {}
         # 模型的原始输出被清洗规则全部剥掉（过度清洗）时置 True
@@ -708,8 +715,13 @@ class AgentLoop:
             # 关键：tools_used == 0 才算「该调没调」，调过工具后给文字就是最终总结
             if (force_first_turn and not tool_calls and tools_used == 0
                     and not (cancel_check and cancel_check())):
-                # 剩余轮数不足（最后一轮），放弃
-                if turn + 1 >= self.max_turns:
+                # 重试上限：最多 _MAX_FORCE_RETRIES 次。
+                # 原来能连重试 5 轮（MAX_TURNS=6），而第 2..6 次带的几乎是
+                # 同一个请求（强制提示由 LLMClient 统一注入，tool_choice 降级
+                # 还按模型名缓存着）——等于把同一请求重复发 5 次（费钱且慢）。
+                if (force_retries >= _MAX_FORCE_RETRIES
+                        or turn + 1 >= self.max_turns):
+                    # 剩余轮数不足（最后一轮）或重试已用完 → 放弃
                     log.warning(
                         "AgentLoop: 已 %d 轮仍调不到工具，放弃（意图=%s）", turn + 1, intent)
                     if final_text:
@@ -718,6 +730,7 @@ class AgentLoop:
                             final_text = _NO_TOOL_FALLBACK
                         yield "text", final_text
                     break
+                force_retries += 1
                 log.warning(
                     "AgentLoop: 第 %d 轮仍未调工具（意图=%s），重试", turn + 1, intent)
                 yield ("meta", {"event": "force_retry",
