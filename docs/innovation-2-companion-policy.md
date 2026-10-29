@@ -29,7 +29,8 @@
 | `app/core/companion_config.yaml` | 数值公式 + 范围 + 钩子权重（yaml 驱动，免硬编码） |
 | `app/brain/hallucination_guard.py` | `_RISKY_TOOLS` 改从 `_risk` 派生 + `RiskyToolConfirm.set_companion_state()` + `grounding_dynamic_prompt` 加策略层 + `PostLLMStateGuard` post-LLM 拦截器 |
 | `app/brain/langchain_agent.py` | `set_companion_state()` 同步 `_companion_state` + `_confirm_ctrl` + `_post_llm_guard` + `_finish_run_with_outcome()` |
-| `app/ui/settings_window.py` | 开发者模式（控制 Tab）+ sliders + 决策预览 + 策略层预览（状态 Tab） |
+| `app/core/pet_settings.py` | 设置项清单 + 读写 + 立即生效（控制台的「设置」Tab 靠它） |
+| `app/core/pet_control.py` | 桌宠进程的控制端口（控制台改设置 / 驱动桌宠动作都走它） |
 | `app/ui/ui_controller.py` | 接 `dev_state_pushed` signal → 同步 4 个持有者 + `write_sync` 立即落盘（绕 5s 防抖） |
 | `app/main.py` + `app/ui/chat_window/__init__.py` | `state_provider=lambda: core.state` 注入（双路径都必须传） |
 

@@ -160,7 +160,7 @@ sequenceDiagram
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  UI: app/ui/{pet_window, chat_window, settings_window, ui_controller} │
+│  UI: app/ui/{pet_window, chat_window, ui_controller} │
 ├──────────────────────────────────────────────────────────┤
 │  Animation: app/animation/{sprite_renderer, live2d_renderer, factory} │
 ├──────────────────────────────────────────────────────────┤

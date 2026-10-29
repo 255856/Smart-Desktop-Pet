@@ -1,279 +1,106 @@
-"""SettingsWindow 开发者模式单元测试。"""
+# -*- coding: utf-8 -*-
+"""开发者模式：手改桌宠状态验决策。
+
+设置面板删了之后，这条能力搬到了控制台 —— 控制台的「设置」Tab 能改
+开发者模式开关，主程序收到 `dev_state` 动作就改 PetState。
+"""
+import sys
+from pathlib import Path
+
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
+# ── 开发者模式开关 ─────────────────────────────────────────────────────────
+def test_developer_mode_is_a_setting():
+    """开发者模式是一个设置项（控制台能勾）。"""
+    from app.core.pet_settings import SETTING_SCHEMA
+    spec = SETTING_SCHEMA.get("developer_mode")
+    assert spec is not None, "开发者模式不在设置项清单里"
+    assert spec["type"] == "bool"
+    assert spec["group"] == "行为"
 
 
-@pytest.fixture
-def settings_window(qapp, monkeypatch, tmp_path):
-    """构造一个最小可用的 SettingsWindow (省略 chat_cfg / pet_window 这些可选 deps).
-
-    settings.json 隔离到临时目录 —— 否则真机上存下来的 developer_mode
-    会让"默认关闭"这类断言随机挂。
-    """
-    import app.ui.settings_window as sw_mod
+def test_developer_mode_persists(tmp_path):
+    """勾了要能保持（重启别又关掉）。"""
+    from app.core.pet_settings import SettingsService
     from app.core.settings_store import SettingsStore
-
-    def _isolated_store(path="settings.json"):
-        return SettingsStore(tmp_path / "settings.json")
-
-    monkeypatch.setattr(sw_mod, "SettingsStore", _isolated_store)
-
-    from app.ui.settings_window import SettingsWindow
-    # SettingsWindow 需要一些非空 cfg; 我们给最小 None char_cfg,
-    # 让它走 _build_tab_visual 等分支需要的 None fallback.
-    sw = SettingsWindow(parent=None, char_cfg=None,
-                        renderer=None, sticker_enabled=False,
-                        always_on_top=False, live2d_state=None)
-    yield sw
-    sw.close()
-    sw.deleteLater()
+    store = SettingsStore(tmp_path / "settings.json")
+    svc = SettingsService(store)
+    svc.update({"developer_mode": True})
+    assert store.get("developer_mode") is True
 
 
-def test_signals_exist(qapp):
-    """developer_mode_changed + dev_state_pushed 信号应在 SettingsWindow 上。"""
-    from app.ui.settings_window import SettingsWindow
-    sw = SettingsWindow(parent=None, char_cfg=None, renderer=None,
-                        sticker_enabled=False, always_on_top=False,
-                        live2d_state=None)
-    # PyQt Signal 不能用 hasattr, 用属性访问
-    assert hasattr(SettingsWindow, "developer_mode_changed")
-    assert hasattr(SettingsWindow, "dev_state_pushed")
-    sw.close()
-    sw.deleteLater()
-    print("[OK] developer_mode_changed + dev_state_pushed signals exist")
+def test_developer_mode_change_is_applied(tmp_path):
+    """改了设置 → 主程序要知道（开发者模式是主程序的运行时状态）。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    store = SettingsStore(tmp_path / "settings.json")
+    svc = SettingsService(store)
+    applied = []
+    svc.apply_hook = lambda values: applied.append(dict(values))
+    svc.update({"developer_mode": True})
+    assert applied == [{"developer_mode": True}]
 
 
-def test_developer_mode_starts_disabled(settings_window):
-    """默认 developer_mode = False (关)."""
-    assert settings_window.developer_mode is False
-    print("[OK] SettingsWindow.developer_mode defaults False")
+# ── 手改状态（dev_state 动作） ───────────────────────────────────────────
+def _ctrl_with_state():
+    """一个够用 UIController：只借 _on_dev_state_pushed 与 _control_action。"""
+    from app.ui.ui_controller import UIController
+
+    class _Ctrl(UIController):
+        def __init__(self):  # noqa: D107 - 只借方法，不跑 Qt 初始化
+            self.developer_mode = False
+            self.state = type("_S", (), {
+                "on_change": None,
+                "normalize": lambda self: None,
+                "level": 1,
+                "strength": 100.0,
+                "strength_food": 100.0,
+                "strength_drink": 100.0,
+                "feeling": 80.0,
+                "health": 100.0,
+                "likability": 0.0,
+            })()
+            self.state_mgr = None
+            self.brain = None
+    return _Ctrl()
 
 
-def test_chk_developer_mode_checkbox_exists(settings_window):
-    """控制 Tab 应有 chk_developer_mode 控件, 默认 uncheck + 初始 False。"""
-    sw = settings_window
-    assert hasattr(sw, "chk_developer_mode")
-    assert sw.chk_developer_mode.isChecked() is False
-    print("[OK] chk_developer_mode present + unchecked")
+def test_dev_state_action_reaches_the_state():
+    """控制台推一组状态数值 → PetState 真被改了。"""
+    ctrl = _ctrl_with_state()
+    result = ctrl._control_action("dev_state", {
+        "snapshot": {"feeling": 95, "strength_food": 30, "level": 12}})
+    assert result["ok"] is True
+    assert ctrl.state.feeling == 95
+    assert ctrl.state.strength_food == 30
+    assert ctrl.state.level == 12
 
 
-def test_setting_developer_mode_true_enables_dev_panel(settings_window):
-    """_set_developer_mode(True) 显示 _dev_panel + 调用 preview + emit。"""
-    sw = settings_window
-    # 听 emit dev_state_pushed
-    captured = {}
-    sw.dev_state_pushed.connect(
-        lambda snap: captured.setdefault("snap", snap)
-    )
-    sw._set_developer_mode(True)
-    assert sw.developer_mode is True
-    assert hasattr(sw, "_dev_panel")
-    assert sw._dev_panel.isVisibleTo(sw), (
-        "dev_panel should be visible after _set_developer_mode(True)"
-    )
-    # dev_state_pushed 应 emit 一次 (默认 snapshot)
-    assert "snap" in captured, (
-        "_set_developer_mode(True) 应调 _emit_dev_state"
-    )
-    snap = captured["snap"]
-    for key in ("strength", "strength_food", "strength_drink",
-                "feeling", "health", "likability", "level"):
-        assert key in snap, f"dev_state snapshot 应包含 {key}"
-    print(f"[OK] _set_developer_mode(True) shows panel + emits (snap keys={list(snap.keys())})")
+def test_dev_state_action_without_snapshot_fails():
+    """没给快照要报错（别静默成功）。"""
+    ctrl = _ctrl_with_state()
+    result = ctrl._control_action("dev_state", {})
+    assert result["ok"] is False
+    assert "状态快照" in result["error"]
 
 
-def test_setting_developer_mode_false_hides_dev_panel(settings_window):
-    """_set_developer_mode(False) 隐藏 _dev_panel。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    assert sw._dev_panel.isVisibleTo(sw)
-    sw._set_developer_mode(False)
-    assert sw.developer_mode is False
-    assert not sw._dev_panel.isVisibleTo(sw), (
-        "_set_developer_mode(False) 应隐藏 _dev_panel"
-    )
-    print("[OK] _set_developer_mode(False) hides panel")
+def test_unknown_action_is_reported():
+    """不认识的要说清楚，别装成功。"""
+    ctrl = _ctrl_with_state()
+    result = ctrl._control_action("没有这个动作", {})
+    assert result["ok"] is False
+    assert "未知动作" in result["error"]
 
 
-def test_dev_preview_shows_quantize_and_decisions(settings_window):
-    """_refresh_dev_preview 应更新量化标签 + 决策预览。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    # 模拟 HIGH/HIGH/HIGH
-    sliders = sw._dev_sliders
-    sliders["feeling"].setValue(90)
-    sliders["strength_food"].setValue(90)
-    sliders["level"].setValue(18)
-    # 触发 preview (slider 已自动 emit + refresh, 这里再 refresh 一次稳)
-    sw._refresh_dev_preview()
-    text_quant = sw.lbl_dev_quantize.text()
-    text_dec = sw.lbl_dev_decisions.text()
-    assert "HIGH" in text_quant, (
-        f"应有 HIGH 量化. 实际: {text_quant}"
-    )
-    assert "lock_screen" in text_dec, (
-        f"决策预览应含常见工具 lock_screen. 实际: {text_dec}"
-    )
-    assert "→" in text_dec, (
-        f"决策预览应有 → 箭头. 实际: {text_dec}"
-    )
-    print(f"[OK] _refresh_dev_preview 量化='{text_quant}', 决策预览含 ... lock_screen")
-
-
-def test_preset_button_changes_sliders_and_emits(settings_window):
-    """预设按钮 (满状态 / 低状态 / 中状态 等) 改 sliders + emit。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    captured = []
-    sw.dev_state_pushed.connect(lambda snap: captured.append(snap))
-    # 模拟点击 "满状态" 预设 (button index = 0)
-    # 找按钮文字匹配
-    from app.ui.settings_window import QPushButton
-    btn = None
-    for child in sw.findChildren(QPushButton):
-        if child.text() == "满状态":
-            btn = child
-            break
-    assert btn is not None, "找不到 '满状态' 预设按钮"
-    btn.click()
-    assert len(captured) >= 1, "预设按钮应 emit dev_state_pushed"
-    snap = captured[-1]
-    assert snap["feeling"] == 90
-    assert snap["strength_food"] == 90
-    assert snap["level"] == 18
-    # slider value 同步
-    assert sw._dev_sliders["feeling"].value() == 90
-    assert sw._dev_sliders["strength_food"].value() == 90
-    assert sw._dev_sliders["level"].value() == 18
-    print(f"[OK] 满状态预设: sliders={90}/{90}/18 + emit OK")
-
-
-def test_slider_drag_emits_state_with_snapshot(settings_window):
-    """直接改 slider value (模拟拖动) → emit dev_state_pushed。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    captured = []
-    sw.dev_state_pushed.connect(lambda snap: captured.append(snap))
-    sw._dev_sliders["feeling"].setValue(50)
-    sw._dev_sliders["strength_food"].setValue(50)
-    sw._dev_sliders["level"].setValue(8)
-    assert len(captured) >= 3
-    last = captured[-1]
-    assert last["feeling"] == 50
-    assert last["strength_food"] == 50
-    assert last["level"] == 8
-    print("[OK] slider 拖动 emit snapshot")
-
-
-def test_settings_update_state_view_keeps_dev_panel_in_sync(settings_window):
-    """_update_state_view(state) 应同步 progress bar + (开发者模式下) sliders。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    from app.engine.state import PetState
-    ps = PetState()
-    ps.feeling = 70
-    ps.strength_food = 60
-    ps.level = 5
-    sw._update_state_view(ps)
-    # sliders 跟 state 同步
-    assert sw._dev_sliders["feeling"].value() == 70
-    assert sw._dev_sliders["strength_food"].value() == 60
-    assert sw._dev_sliders["level"].value() == 5
-    # value labels 同步
-    assert sw._dev_value_labels["feeling"].text() == "70"
-    assert sw._dev_value_labels["strength_food"].text() == "60"
-    print("[OK] _update_state_view 同步 sliders + value labels")
-
-
-def test_v226_strategy_preview_panel_exists(settings_window):
-    """dev_panel 应有 strategy 预览 label。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    assert hasattr(sw, "lbl_dev_strategy"), (
-        "v22-6 应加 lbl_dev_strategy label"
-    )
-    print("[OK] v22-6: lbl_dev_strategy 控件存在")
-
-
-def test_v226_strategy_preview_updates_with_sliders(settings_window):
-    """拖 slider 时策略预览应跟上 (跟 _strategy_guidance 输出一致)。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    # HIGH sat+mid mood → "状态好" 探索段
-    sw._dev_sliders["feeling"].setValue(85)
-    sw._dev_sliders["strength_food"].setValue(85)
-    sw._dev_sliders["level"].setValue(10)
-    txt_high = sw.lbl_dev_strategy.text()
-    assert "策略预览" in txt_high, f"应有策略预览头. 实际: {txt_high}"
-    assert "状态好" in txt_high or "主动建议" in txt_high, (
-        f"HIGH sat+mood 应有探索段. 实际: {txt_high}"
-    )
-
-    # LOW sat+low mood → 保守段
-    sw._dev_sliders["feeling"].setValue(20)
-    sw._dev_sliders["strength_food"].setValue(20)
-    sw._dev_sliders["level"].setValue(2)
-    txt_low = sw.lbl_dev_strategy.text()
-    assert "情绪低落" in txt_low or "简短" in txt_low, (
-        f"LOW mood 应有保守段. 实际: {txt_low}"
-    )
-
-    # 平稳态 (MID sat + MID mood) → (无 — 状态平稳无策略注入)
-    sw._dev_sliders["feeling"].setValue(50)
-    sw._dev_sliders["strength_food"].setValue(50)
-    sw._dev_sliders["level"].setValue(8)
-
-
-# ---- trace 页 3 段 UI ----
-
-def test_v237_trace_panel_exists(settings_window):
-    """dev_panel 应有 trace 视图 (调前/调后 2 段色块)。"""
-    sw = settings_window
-    sw._set_developer_mode(True)
-    assert hasattr(sw, "_dev_trace_view"), "v23-7 应有 _dev_trace_view"
-    assert hasattr(sw, "_dev_trace_scroll"), "v23-7 应有 _dev_trace_scroll (QScrollArea)"
-    print("[OK] v23-7: trace 视图控件存在")
-
-
-def test_v237_trace_panel_renders_decision_and_outcome(tmp_path, monkeypatch, settings_window):
-    """trace 视图从 companion_log.txt 读 + 渲染 decision/outcome 块。"""
-    import json
-    from app.brain._companion_log import trace_decision, trace_outcome
-
-    # 重定向 trace 路径到 tmp
-    log_path = tmp_path / "trace.log"
-    monkeypatch.setattr(
-        "app.brain._companion_log._default_log_path",
-        lambda: log_path,
-    )
-
-    # 写一条 decision + 一条 outcome
-    trace_decision(
-        thread_id="t", tool="set_brightness", risk=2, decision="REFUSE",
-        sat="LOW", mood="LOW", level="LOW",
-    )
-    trace_outcome(
-        thread_id="t", outcome="success", tool="set_brightness",
-        feeling_delta=8.0, food_delta=0.0, favor_delta=1.0, exp_delta=20.0,
-        level_before=1, level_after=2, success=True,
-    )
-
-    sw = settings_window
-    sw._set_developer_mode(True)
-    sw._refresh_dev_trace()
-
-    html = sw._dev_trace_view.text()
-    assert "set_brightness" in html, f"trace 应有工具名. 实际: {html}"
-    assert "REFUSE" in html, f"decision 应展示. 实际: {html}"
-    # outcome 块绿边框
-    assert "#3a8c4d" in html, f"outcome 应有绿边框. 实际: {html}"
-    # decision 块蓝边框
-    assert "#2e6da4" in html, f"decision 应有蓝边框. 实际: {html}"
-    print("[OK] v23-7: trace 渲染 decision + outcome 块")
+def test_dashboard_exposes_dev_state_action():
+    """控制台的设置 Tab 要能发运行时动作（dev_state 走这条通道）。"""
+    src = (ROOT / "app" / "web" / "dashboard.py").read_text(encoding="utf-8")
+    assert "/api/settings/action" in src
+    # 动作名由前端传，主程序那边认得 dev_state
+    assert "action" in src
+    ctrl_src = (ROOT / "app" / "ui" / "ui_controller.py").read_text(encoding="utf-8")
+    assert "dev_state" in ctrl_src, "主程序不认 dev_state 动作"

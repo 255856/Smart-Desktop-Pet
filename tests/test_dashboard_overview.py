@@ -559,19 +559,19 @@ class TestDataDirUntouched:
 
 
 # --------------------------------------------------------------------------
-# 前端：8 个 Tab
+# 前端：9 个 Tab
 # --------------------------------------------------------------------------
 class TestFrontendTabs:
-    def test_page_has_eight_tabs(self, panel):
+    def test_page_has_nine_tabs(self, panel):
         html = _request(panel["app"], "GET", "/").text
         tabs = re.findall(r'data-tab="([^"]+)"', html)
         assert tabs == ["runs", "cost", "memory", "decision", "tools",
-                        "config", "state", "health"], tabs
+                        "settings", "config", "state", "health"], tabs
 
     def test_page_has_tab_labels(self, panel):
         html = _request(panel["app"], "GET", "/").text
-        for label in ("运行", "成本", "记忆", "决策", "工具", "配置", "状态",
-                      "健康与维护"):
+        for label in ("运行", "成本", "记忆", "决策", "工具", "设置", "配置",
+                      "状态", "健康与维护"):
             assert label in html, label
 
     def test_page_has_no_external_dependencies(self, panel):

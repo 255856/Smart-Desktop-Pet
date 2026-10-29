@@ -17,7 +17,6 @@ app = QApplication.instance() or QApplication(sys.argv)
 
 from app.core.config import CharacterConfig
 from app.ui.chat_window import ChatWindow, Message, _html_escape, _format_time_short
-from app.ui.settings_window import SettingsWindow
 from app.voice.character import Emotion
 
 
@@ -486,50 +485,34 @@ def test_input_key_press_ctrl_enter_newline():
     print("[OK] Ctrl+Enter inserts newline (does not send)")
 
 
-def test_settings_window_char_cfg_default_none():
-    """SettingsWindow 不传 char_cfg 时默认值是 None（向后兼容）。"""
-    sw = SettingsWindow()
-    assert sw.char_cfg is None, "char_cfg default should be None"
-    print("[OK] SettingsWindow char_cfg defaults to None")
-
-
-def test_settings_window_char_cfg_passed():
-    """SettingsWindow 接收 char_cfg 时应能正确使用角色名。"""
-    from app.ui.settings_window import SettingsWindow
-    char_cfg = CharacterConfig(name="鲸鱼娘")
-    sw = SettingsWindow(char_cfg=char_cfg)
-    assert sw.char_cfg is char_cfg
-    assert sw.char_cfg.name == "鲸鱼娘"
-    print("[OK] SettingsWindow stores passed char_cfg")
-
-
-def test_settings_window_preview_voice_no_crash_without_cfg():
-    """没有 char_cfg 时，「试听」按钮不能崩（之前 self.cfg.name 触发 AttributeError）。"""
-    import unittest.mock as mock
-    sw = SettingsWindow()
-    # 替换 TTS 避免真实播放
-    with mock.patch("app.voice.voice.TTS") as mock_tts:
-        mock_tts.return_value.speak = mock.MagicMock()
-        sw._on_preview_voice()
-        # 应该没抛异常
-    print("[OK] SettingsWindow._on_preview_voice doesn't crash without char_cfg")
-
-
-def test_settings_window_preview_voice_uses_char_name():
-    """试听时拼接的角色名应来自 char_cfg。
+def test_preview_voice_uses_char_name():
+    """试听时拼接的角色名应来自角色配置。
 
     试听不再自己 new 一个 edge-tts（那样引擎是 gptsovits/minimax 时
     听到的根本不是你配的音色），改成把文本发给主程序，用当前引擎实例播。
     """
+    from app.ui.ui_controller import UIController
+
     char_cfg = CharacterConfig(name="测试娘")
-    sw = SettingsWindow(char_cfg=char_cfg)
-    sent: list = []
-    sw.preview_voice_requested.connect(sent.append)
-    sw._on_preview_voice()
-    assert sent, "试听没有发出 preview_voice_requested 信号"
-    assert "测试娘" in sent[0], (
-        f"preview text should contain character name, got {sent[0]!r}")
-    print("[OK] SettingsWindow preview voice uses character name from char_cfg")
+    spoken: list = []
+
+    class _Ctrl(UIController):
+        def __init__(self):  # noqa: D107 - 只借方法，不跑 Qt 初始化
+            self.cfg = type("_C", (), {"character": char_cfg})()
+            self.tts = type("_T", (), {
+                "enabled": True,
+                "set_enabled": lambda self, v: None,
+                "speak": lambda self, text: spoken.append(text),
+            })()
+
+    ctrl = _Ctrl()
+    # 控制台不传文本时，主程序用角色名拼一句
+    result = ctrl._control_action("preview_voice", {})
+    assert result["ok"] is True
+    assert spoken, "试听没有播报"
+    assert "测试娘" in spoken[0], (
+        f"preview text should contain character name, got {spoken[0]!r}")
+    print("[OK] preview voice uses character name from char_cfg")
 
 
 if __name__ == "__main__":
@@ -546,10 +529,7 @@ if __name__ == "__main__":
     test_input_key_press_enter_sends()
     test_input_key_press_shift_enter_newline()
     test_input_key_press_ctrl_enter_newline()
-    test_settings_window_char_cfg_default_none()
-    test_settings_window_char_cfg_passed()
-    test_settings_window_preview_voice_no_crash_without_cfg()
-    test_settings_window_preview_voice_uses_char_name()
+    test_preview_voice_uses_char_name()
     test_custom_avatar_loaded_from_path()
     test_custom_avatar_fallback_when_missing()
     test_set_custom_avatar_copies_and_persists()
@@ -3334,43 +3314,18 @@ def test_v26_state_to_emotion_mapping():
 
 
 def test_v26_ast_guard_settings_trace_has_thread_combo():
-    """AST 守卫: 设置面板 trace 应 per-conversation 过滤 (_build_dev_trace_block + _refresh_dev_trace)。"""
-    import ast as _ast
+    """AST 守卫: trace 应 per-conversation 过滤。
+
+    设置面板已删，控制台「决策」Tab 负责看 trace —— 那里要能按 thread_id 显示。
+    """
     src_path = (Path(__file__).resolve().parent.parent
-                / "app" / "ui" / "settings_window.py")
+                / "app" / "web" / "dashboard.py")
     src = src_path.read_text(encoding="utf-8")
-    tree = _ast.parse(src)
-    # 1) 找到 _build_dev_trace_block
-    build_fn = next(
-        (n for n in _ast.walk(tree)
-         if isinstance(n, _ast.FunctionDef) and n.name == "_build_dev_trace_block"),
-        None,
+    assert "function renderDecision(" in src, "控制台的决策视图找不到"
+    assert "thread_id" in src, (
+        "v26 regression: 控制台的决策视图必须按 thread_id 显示"
     )
-    assert build_fn is not None, "_build_dev_trace_block 找不到"
-    build_src = ' '.join(_ast.dump(s) for s in build_fn.body)
-    assert "_dev_trace_thread_combo" in build_src, (
-        "v26 regression: _build_dev_trace_block 必须创建 _dev_trace_thread_combo "
-        "让主人能按 thread_id 过滤. 实际: " + build_src[:200]
-    )
-    # 2) 找到 _refresh_dev_trace
-    refresh_fn = next(
-        (n for n in _ast.walk(tree)
-         if isinstance(n, _ast.FunctionDef) and n.name == "_refresh_dev_trace"),
-        None,
-    )
-    assert refresh_fn is not None, "_refresh_dev_trace 找不到"
-    refresh_src = ' '.join(_ast.dump(s) for s in refresh_fn.body)
-    # 必须有 selected_thread 局部变量
-    assert "selected_thread" in refresh_src, (
-        "v26 regression: _refresh_dev_trace 内部必须按 selected_thread 过滤. "
-        f"实际: {refresh_src[:200]}"
-    )
-    # 必须有 thread_id 收集逻辑 (seen_threads / seen_set)
-    assert "seen_threads" in refresh_src, (
-        "v26 regression: _refresh_dev_trace 必须从 companion_log 收集所有 "
-        "出现过的 thread_id 填到 combobox. 实际: " + refresh_src[:200]
-    )
-    print("[OK] v26 AST 守卫: settings trace per-conversation 过滤存在")
+    print("[OK] v26 AST 守卫: 控制台决策视图按 thread_id 过滤")
 
 
 def test_v27_ast_guard_chat_window_has_state_provider_param():

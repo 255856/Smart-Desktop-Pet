@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -362,17 +363,22 @@ def memory_sidecar_url() -> str:
     return default_base_url()
 
 
-def start_dashboard_subprocess(root: Path, port: int = TRACE_PORT) -> int | None:
+def start_dashboard_subprocess(root: Path, port: int = TRACE_PORT,
+                              pet_control_url: str = "") -> int | None:
     """后台启动 FastAPI Agent Trace 进程，返回 PID 或 None。"""
     import subprocess
     log_file = root / "data" / "dashboard.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, "-m", "app.web.dashboard",
+           "--port", str(port),
+           "--trace-db", str(root / "data" / "traces.db"),
+           "--sidecar-url", memory_sidecar_url()]
+    if pet_control_url:
+        # 桌宠进程的控制端口 —— 控制台改设置要靠它实时驱动桌宠
+        cmd += ["--pet-control-url", pet_control_url]
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "app.web.dashboard",
-             "--port", str(port),
-             "--trace-db", str(root / "data" / "traces.db"),
-             "--sidecar-url", memory_sidecar_url()],
+            cmd,
             cwd=str(root),
             stdout=open(log_file, "ab"),
             stderr=subprocess.STDOUT,
@@ -768,35 +774,81 @@ class App:
     def _start_dashboard(self) -> bool:
         """启动 FastAPI Agent Trace 子进程（开发者用，端口 8766）。"""
         port = TRACE_PORT
-        log.info("启动 Agent Trace (port=%d)…", port)
-        pid = start_dashboard_subprocess(self.root, port=port)
+        log.info("启动开发者控制台 (port=%d)…", port)
+        control_url = getattr(self.ui, "control_url", "") if self.ui else ""
+        pid = start_dashboard_subprocess(self.root, port=port,
+                                         pet_control_url=control_url)
         if pid is None:
-            self.banner.fail("Agent Trace 启动失败", "查看 data/dashboard.log")
+            self.banner.fail("控制台启动失败", "查看 data/dashboard.log")
             return False
         self._dashboard_pid = pid
         if wait_dashboard_ready(port=port, timeout=8.0):
             url = f"http://127.0.0.1:{port}"
-            self.banner.ok("Agent Trace", f"{url}  (pid={pid})")
+            self.banner.ok("控制台", f"{url}  (pid={pid})")
             self.banner.info("浏览器已自动打开",
-                            "也可用托盘菜单『Agent Trace（开发）』随时打开")
+                            "也可用托盘菜单『控制台（开发）』随时打开")
             QTimer.singleShot(500, lambda: open_in_browser(url))
             return True
         else:
-            self.banner.warn("Agent Trace 启动超时", "查看 data/dashboard.log")
+            self.banner.warn("控制台启动超时", "查看 data/dashboard.log")
             return False
 
     def open_dashboard(self) -> bool:
-        """给 UI 调用的『打开 Agent Trace』：先看是否已启动，没启动就拉一个。"""
+        """给 UI 调用的『打开控制台』：先看是否已启动，没启动就拉一个。"""
         port = TRACE_PORT
         import socket
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                # 已启动
+                # 已启动 —— 但可能是旧版起的（没有控制端口，设置改不了）
+                control_url = getattr(self.ui, "control_url", "") if self.ui else ""
+                if control_url and not self._control_port_alive(control_url):
+                    log.info("控制台在跑但没连上桌宠控制端口，重启它")
+                    self._restart_dashboard()
+                    return True
                 open_in_browser(f"http://127.0.0.1:{port}")
                 return True
         except OSError:
             pass
         # 没启动：拉一个
+        return self._start_dashboard()
+
+    @staticmethod
+    def _control_port_alive(control_url: str) -> bool:
+        """桌宠控制端口通不通。"""
+        import socket
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(control_url)
+            port = int(parsed.port or 0)
+            if not port:
+                return False
+            with socket.create_connection((parsed.hostname or "127.0.0.1", port),
+                                         timeout=0.3):
+                return True
+        except (OSError, ValueError):
+            return False
+
+    def _restart_dashboard(self) -> bool:
+        """重启控制台子进程（让它带上最新的控制端口）。"""
+        if self._dashboard_pid:
+            try:
+                import psutil
+                psutil.Process(self._dashboard_pid).terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            self._dashboard_pid = None
+        # 等端口腾出来 —— 立刻重起会撞 "address already in use"
+        import socket
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", TRACE_PORT),
+                                             timeout=0.2):
+                    time.sleep(0.2)
+                    continue
+            except OSError:
+                break
+            time.sleep(0.2)
         return self._start_dashboard()
 
     @property
@@ -821,8 +873,14 @@ class App:
         return self.brain.proactive
 
     @property
-    def settings_window(self):
-        return self.ui.settings_window
+    def settings(self):
+        """设置中枢（读写 settings.json + 应用到桌宠）。"""
+        return self.ui.settings
+
+    @property
+    def control_url(self) -> str:
+        """桌宠控制服务地址（控制台连它改设置）。"""
+        return getattr(self.ui, "control_url", "")
 
     @property
     def tray(self):

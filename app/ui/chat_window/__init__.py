@@ -702,10 +702,10 @@ class ChatWindow(QWidget):
         self.btn_unlock.clicked.connect(self._open_tool_unlock)
         hl.addWidget(self.btn_unlock)
 
-        # 设置按钮 —— 跳到 settings_window
-        self.btn_settings = QPushButton("设置")
+        # 控制台按钮 —— 打开浏览器控制台（设置都在里面）
+        self.btn_settings = QPushButton("控制台")
         self.btn_settings.setObjectName("ghost_btn")
-        self.btn_settings.setToolTip("设置（头像 / 提示词 / TTS / 多模态等）")
+        self.btn_settings.setToolTip("在浏览器打开控制台（设置 / 记忆 / 调试都在里面）")
         self.btn_settings.clicked.connect(self._open_settings)
         hl.addWidget(self.btn_settings)
 
@@ -1014,15 +1014,12 @@ class ChatWindow(QWidget):
         self._memory_dlg.activateWindow()
 
     def _open_settings(self) -> None:
-        """chat 顶部「设置」按钮 —— 跳到 settings_window（头像改在那改）。"""
-        app = self._find_app()
-        if app is not None and hasattr(app, "settings_window"):
-            sw = app.settings_window
-            sw.show()
-            sw.raise_()
-            sw.activateWindow()
-            return
-        self.pick_bot_avatar(self)
+        """chat 顶部「控制台」按钮 —— 在浏览器打开控制台。
+
+        设置（头像 / 模型 / TTS / Live2D 外观…）都搬进控制台了，
+        这里不再有设置窗口要弹。
+        """
+        self._open_dashboard()
 
     def _on_dev_level_changed(self, new_level: int) -> None:
         """开发者模式改了 level → 刷新 LLM 工具可见性。
@@ -1136,7 +1133,7 @@ class ChatWindow(QWidget):
             self._append_system_msg("Live2D Demo 启动失败，查看 data/demo.log")
 
     def _open_dashboard(self) -> None:
-        """打开 FastAPI Agent Trace（开发者，8766）。"""
+        """打开开发者控制台（8766）：设置 / 记忆 / 调试都在里面。"""
         app = self._find_app()
         if app is not None and hasattr(app, "open_dashboard"):
             app.open_dashboard()
@@ -1147,9 +1144,9 @@ class ChatWindow(QWidget):
         pid = start_dashboard_subprocess(Path.cwd(), port=TRACE_PORT)
         if pid is not None and wait_dashboard_ready(port=TRACE_PORT, timeout=8.0):
             open_in_browser(f"http://127.0.0.1:{TRACE_PORT}")
-            self._append_system_msg("Agent Trace 已打开 (http://127.0.0.1:8766)")
+            self._append_system_msg("控制台已打开 (http://127.0.0.1:8766)")
         else:
-            self._append_system_msg("Agent Trace 启动失败，查看 data/dashboard.log")
+            self._append_system_msg("控制台启动失败，查看 data/dashboard.log")
 
     def _find_app(self):
         qa = QApplication.instance()

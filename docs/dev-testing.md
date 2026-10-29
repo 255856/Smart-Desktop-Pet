@@ -87,6 +87,15 @@ python -m app.web.dashboard --port 8765
 
 每次 Agent 运行都会落 `data/traces.db`，可在 Dashboard 看完整链路。创新点 2 决策另落 `data/companion_log.txt`，Dashboard `/api/companion` 端点读。
 
+### 改桌宠设置
+
+设置在开发者控制台的「设置」Tab 里（不再有独立的 Qt 设置窗口）：
+桌宠右键「控制台」/ 聊天窗顶部「控制台」/ 托盘「控制台...」都能打开。
+
+改完点「保存全部」，桌宠立刻生效。控制台通过桌宠进程开的本地控制端口
+（`app/core/pet_control.py`）驱动桌宠 —— 端口地址由主程序启动控制台时传进去
+（`--pet-control-url`）。桌宠没在跑时设置改不了，页面会提示「桌宠没连上」。
+
 ### 单独跑 Live2D 真实渲染
 
 `tools/verify_live2d.py` 已在 _legacy，新接入建议直接看 `tests/test_live2d_renderer.py` 的真实渲染段（已带 model3.json fixture）。

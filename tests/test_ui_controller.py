@@ -83,11 +83,11 @@ def _make_motion():
 
 
 @pytest.fixture
-def controller(qapp):
+def controller(qapp, tmp_path):
     """构造 UIController，所有依赖 mock 掉。
 
-    SettingsWindow / PetWindow 不构造真实实例（offscreen Qt 复杂），
-    而是用 patch 让它们返回 MagicMock。
+    设置面板已删 —— 设置中枢（SettingsService）用真的，只是把落盘
+    指到临时目录；TrayController 不构造真实实例（offscreen Qt 复杂）。
     """
     root = Path(".")
     cfg = _make_cfg()
@@ -97,9 +97,15 @@ def controller(qapp):
     brain = _make_brain()
     motion = _make_motion()
 
-    with patch("app.ui.ui_controller.SettingsWindow", return_value=MagicMock()), \
-         patch("app.ui.ui_controller.TrayController", return_value=MagicMock()), \
-         patch("app.ui.ui_controller.QTimer") as mock_timer_cls:
+    from app.core.settings_store import SettingsStore
+    real_init = SettingsStore.__init__
+
+    def _tmp_init(self, path="settings.json"):
+        real_init(self, tmp_path / "settings.json")
+
+    with patch("app.ui.ui_controller.TrayController", return_value=MagicMock()), \
+         patch("app.ui.ui_controller.QTimer") as mock_timer_cls, \
+         patch.object(SettingsStore, "__init__", _tmp_init):
         mock_timer = MagicMock()
         mock_timer_cls.return_value = mock_timer
 

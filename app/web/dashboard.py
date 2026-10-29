@@ -344,17 +344,17 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .cs-row .track::after{content:"";position:absolute;inset:0;border-radius:6px;pointer-events:none;
     background:linear-gradient(90deg,transparent,rgba(110,150,245,.20),transparent);
     background-size:42% 100%;background-repeat:no-repeat;
-    animation:trackShine 3.8s linear infinite;animation-delay:var(--d,0s);}
+    animation:trackShine 9s linear infinite;animation-delay:var(--d,0s);}
   .cs-row .fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;
     color:#fff;font-size:11px;font-weight:700;padding-right:7px;min-width:34px;transition:width .5s;
-    position:relative;overflow:hidden;animation:barBreath 3.4s ease-in-out infinite;
+    position:relative;overflow:hidden;animation:barBreath 7s ease-in-out infinite;
     animation-delay:var(--d,0s);}
   /* 填充里一道来回扫的高光 */
   .cs-row .fill::after{content:"";position:absolute;top:0;bottom:0;left:0;width:34%;
     background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,.78),rgba(255,255,255,0));
-    transform:translateX(-130%);animation:barShine 2.9s ease-in-out infinite;
-    animation-delay:calc(var(--d,0s) + .35s);pointer-events:none;}
-  @keyframes barBreath{0%,100%{filter:brightness(1);}50%{filter:brightness(1.16);}}
+    transform:translateX(-130%);animation:barShine 6.5s ease-in-out infinite;
+    animation-delay:calc(var(--d,0s) + 1.2s);pointer-events:none;}
+  @keyframes barBreath{0%,100%{filter:brightness(1);}50%{filter:brightness(1.12);}}
   @keyframes barShine{0%{transform:translateX(-130%);}55%,100%{transform:translateX(330%);}}
   @keyframes trackShine{0%{background-position:-42% 0;}100%{background-position:142% 0;}}
   @media (prefers-reduced-motion:reduce){
@@ -400,6 +400,31 @@ _HTML_PAGE = r"""<!DOCTYPE html>
     cursor:pointer;user-select:none;}
   .switch input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;}
 
+  /* 设置 Tab */
+  .set-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;}
+  .set-card{background:var(--surface-sunken);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
+  .set-card h4{margin:0 0 9px;font-size:13px;font-weight:700;color:var(--accent-d);}
+  .set-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+  .set-row .lbl{flex:1;font-size:12.5px;color:var(--sub);}
+  .set-row .lbl .restart{display:inline-block;margin-left:5px;font-size:10px;color:#b45309;}
+  .set-row input[type=text],.set-row input[type=password],.set-row input[type=number],
+  .set-row select{border:1px solid var(--border);border-radius:8px;padding:5px 9px;font-size:12.5px;
+    font-family:inherit;color:var(--text);background:#fff;min-width:110px;}
+  .set-row input[type=range]{width:130px;accent-color:var(--accent);}
+  .set-row .num{font-family:Consolas,monospace;font-size:12px;color:var(--text);
+    min-width:52px;text-align:right;font-variant-numeric:tabular-nums;}
+  .set-chips{display:flex;flex-wrap:wrap;gap:7px;}
+  .set-chip{border:1px solid var(--border);background:#fff;border-radius:8px;padding:4px 10px;
+    font-size:12px;font-family:inherit;color:var(--text);cursor:pointer;transition:.15s;}
+  .set-chip:hover{border-color:var(--accent-lt);color:var(--accent-d);background:var(--accent-bg);}
+  .set-chip.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-d);font-weight:600;}
+  .set-chip small{display:block;font-size:10px;color:var(--faint);}
+  .set-avatars{display:flex;flex-wrap:wrap;gap:9px;}
+  .set-avatar{width:62px;height:62px;border-radius:10px;border:2px solid var(--line);
+    background:#fff center/cover no-repeat;cursor:pointer;padding:0;}
+  .set-avatar.on{border-color:var(--accent);}
+  .set-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;}
+
   ::-webkit-scrollbar{width:9px;height:9px;}
   ::-webkit-scrollbar-track{background:transparent;}
   ::-webkit-scrollbar-thumb{background:#cdd4e0;border-radius:6px;border:2px solid var(--bg);}
@@ -427,6 +452,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <div class="nav-label">系统</div>
   <nav class="nav">
     <button type="button" class="tab" data-tab="tools" data-view="tools" data-icon="wrench" title="工具统计：61 内置 + 7 MCP 清单 / 风险等级 / 解锁等级 / 文档对账差异">工具</button>
+    <button type="button" class="tab" data-tab="settings" data-view="settings" data-icon="zap" title="桌宠设置：视觉 / 行为 / 语音 / 模型（改完立刻生效）">设置</button>
     <button type="button" class="tab" data-tab="config" data-view="config" data-icon="info">配置</button>
     <button type="button" class="tab" data-tab="state" data-view="state" data-icon="heart">状态</button>
     <button type="button" class="tab" data-tab="health" data-view="health" data-icon="alert">健康与维护</button>
@@ -566,6 +592,25 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div class="tbl-wrap"><table class="tbl" id="toolTable"></table></div>
       <div class="sub-head">对账结果（文档 ↔ 注册表）</div>
       <div id="reconBox"></div>
+    </div>
+  </div>
+
+  <!-- ============ Tab 设置 ============ -->
+  <div class="view" id="view-settings">
+    <div class="panel" style="padding:18px;">
+      <div class="sub-head" style="margin-top:0;" data-icon="zap">桌宠设置 <span id="settingsTag" class="mini-tag"></span></div>
+      <div id="settingsErr"></div>
+      <div class="set-bar">
+        <button type="button" class="btn" id="settingsSave">保存全部</button>
+        <button type="button" class="btn" id="settingsReset">恢复默认</button>
+        <button type="button" class="btn" id="settingsReload">重新读取</button>
+        <span class="hint" style="margin:0;">改动点「保存」后立刻在桌宠上生效。</span>
+      </div>
+      <div id="settingsGroups" class="set-grid"></div>
+      <div class="sub-head">Live2D 外观</div>
+      <div id="settingsAppearance"></div>
+      <div class="sub-head">桌宠头像</div>
+      <div id="settingsAvatars"></div>
     </div>
   </div>
 
@@ -1332,7 +1377,7 @@ const MemNet = (function(){
   function setBuf(b,d){if(!b)b=gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,d,gl.DYNAMIC_DRAW);return b;}
 
-  /* 选中节点时把它的语义近邻点亮，其余淡下去 —— 一眼看出「这两张卡为什么挨着」 */
+  /* 选中节点时把它和它的近邻点亮，其余节点保持原样 */
   function uploadNodes(){
     const hub=layoutKind!=="semantic";
     const total=nodes.length+(hub?1:0);
@@ -1350,11 +1395,11 @@ const MemNet = (function(){
       col[i*4]=c[0];col[i*4+1]=c[1];col[i*4+2]=c[2];
       col[i*4+3]=n.size*(i===selected?1.5:1);
       let g=n.glow*(i===selected?1.6:1);
-      if(sel&&i!==selected&&!near[n.id])g*=0.2;
+      if(sel&&i!==selected&&near[n.id])g*=1.25;
       glow[i]=g;});
     if(hub){
       const ci=nodes.length;
-      col[ci*4]=0.72;col[ci*4+1]=0.84;col[ci*4+2]=1.0;col[ci*4+3]=34;glow[ci]=sel?0.15:1;
+      col[ci*4]=0.72;col[ci*4+1]=0.84;col[ci*4+2]=1.0;col[ci*4+3]=34;glow[ci]=1;
     }
     nbPos=setBuf(nbPos,pos);nbCol=setBuf(nbCol,col);nbGlow=setBuf(nbGlow,glow);
     nodeCount=total;
@@ -1372,7 +1417,8 @@ const MemNet = (function(){
         if(s.link.a===sel||s.link.b===sel){
           a=Math.min(1,a*2.4+0.25);
           r=Math.min(1,r+0.22);g=Math.min(1,g+0.22);b=Math.min(1,b+0.22);
-        }else a=0;          /* 选中之后，只留跟它相连的线 */
+        }
+        /* 选中之后，其它线保持原样（只是不额外加亮） */
       }
       for(let k=0;k<6;k++){
         const vi=i*6+k;
@@ -1554,7 +1600,7 @@ const MemNet = (function(){
       : '按类别摆位，没有向量可用';
     document.getElementById("memLegend").innerHTML=rows
       +'<div class="lg-note">'+note+'<br>拖拽旋转 · 滚轮缩放 · 点击节点看近邻'
-      +'<br>选中节点只看它的连线，点空白恢复全部'
+      +'<br>选中节点时它的连线会更亮'
       +'<br>指针停在画布上时暂停自转</div>';
   }
   function screenPoints(){
@@ -1735,6 +1781,155 @@ function renderTools(inv, recon){
 }
 
 /* ------------------------------------------------------------------
+ * Tab 设置：/api/settings（走桌宠进程的控制端口，改完立刻生效）
+ * ------------------------------------------------------------------ */
+const SETTINGS = {schema:[], values:{}, appearance:{}, avatars:[], dirty:{}};
+
+function _setRowControl(item, value){
+  const id="set_"+item.key;
+  if(item.type==="bool"){
+    return '<label class="switch"><input type="checkbox" id="'+id+'" data-set="'+esc(item.key)+'"'+(value?" checked":"")+'></label>';
+  }
+  if(item.type==="int"||item.type==="float"){
+    const step=item.step||1;
+    return '<input type="range" id="'+id+'" data-set="'+esc(item.key)+'"'+
+      ' min="'+(item.min!=null?item.min:0)+'" max="'+(item.max!=null?item.max:100)+'"'+
+      ' step="'+step+'" value="'+esc(value)+'">'+
+      '<span class="num" id="'+id+'_n">'+esc(value)+'</span>';
+  }
+  if(item.type==="secret"){
+    return '<input type="password" id="'+id+'" data-set="'+esc(item.key)+'"'+
+      ' placeholder="留空 = 不改" value="">';
+  }
+  if(item.options&&item.options.length){
+    return '<select id="'+id+'" data-set="'+esc(item.key)+'">'+
+      item.options.map(function(o){
+        return '<option value="'+esc(o)+'"'+(String(value)===String(o)?" selected":"")+'>'+esc(o)+'</option>';
+      }).join("")+'</select>';
+  }
+  return '<input type="text" id="'+id+'" data-set="'+esc(item.key)+'" value="'+esc(value)+'">';
+}
+
+function renderSettings(){
+  const groups={};
+  SETTINGS.schema.forEach(function(item){
+    (groups[item.group]=groups[item.group]||[]).push(item);
+  });
+  const order=[];
+  SETTINGS.schema.forEach(function(item){ if(order.indexOf(item.group)<0)order.push(item.group); });
+  $("#settingsGroups").innerHTML=order.map(function(g){
+    const rows=(groups[g]||[]).map(function(item){
+      const v=SETTINGS.values[item.key];
+      return '<div class="set-row"><span class="lbl">'+esc(item.label)+
+        (item.restart?'<span class="restart">重启生效</span>':'')+'</span>'+
+        _setRowControl(item,v)+'</div>';
+    }).join("");
+    return '<div class="set-card"><h4>'+esc(g)+'</h4>'+rows+'</div>';
+  }).join("");
+
+  // 外观（Live2D 分类 chip）
+  const ap=SETTINGS.appearance||{};
+  if(!ap.available){
+    $("#settingsAppearance").innerHTML='<div class="hint">当前不是 Live2D 渲染器，'+
+      '外观分类由桌宠右键菜单切换。</div>';
+  }else{
+    const active=ap.active||[];
+    $("#settingsAppearance").innerHTML=(ap.groups||[]).map(function(g){
+      const chips=(g.items||[]).map(function(it){
+        const on=active.indexOf(it[0])>=0;
+        return '<button type="button" class="set-chip'+(on?" on":"")+'" data-l2d="'+esc(g.id)+'" data-l2d-item="'+esc(it[0])+'">'+
+          esc(it[1])+'</button>';
+      }).join("");
+      return '<div class="set-card" style="margin-bottom:12px;"><h4>'+esc(g.label)+'</h4>'+
+        '<div class="set-chips">'+chips+'</div></div>';
+    }).join("")+
+      '<button type="button" class="btn" data-l2d-reset="1">复位全部外观</button>';
+  }
+
+  // 头像
+  const av=SETTINGS.avatars||[];
+  $("#settingsAvatars").innerHTML=av.length
+    ? '<div class="set-avatars">'+av.map(function(a){
+        return '<button type="button" class="set-avatar" data-avatar="'+esc(a.path)+'"'+
+          ' title="'+esc(a.group+" · "+a.name)+'"'+
+          ' style="background-image:url(\'/api/avatar?path='+encodeURIComponent(a.path)+'\')"></button>';
+      }).join("")+'</div>'
+    : '<div class="hint">没有可用头像。</div>';
+}
+
+function _collectSettings(){
+  const out={};
+  $$("[data-set]").forEach(function(el){
+    const key=el.dataset.set;
+    // 开关要一直发（包括 false）—— 只发 true 的话，关掉的开关永远改不掉
+    if(el.type==="checkbox"){ out[key]=el.checked; return; }
+    if(el.type==="range"){ out[key]=Number(el.value); return; }
+    if(el.type==="password"){ if(el.value)out[key]=el.value; return; }
+    out[key]=el.value;
+  });
+  return out;
+}
+
+async function loadSettings(note){
+  const tag=$("#settingsTag");
+  try{
+    const data=await api("/api/settings");
+    SETTINGS.schema=data.schema||[];
+    SETTINGS.values=data.values||{};
+    SETTINGS.appearance=data.appearance||{};
+    SETTINGS.avatars=data.avatars||[];
+    tag.textContent=data.connected?"桌宠已连上":"桌宠没连上";
+    tag.className="mini-tag"+(data.connected?"":" warn");
+    if(!data.connected){
+      $("#settingsErr").innerHTML='<div class="hint warn" style="margin-bottom:10px;">'+icon("alert")+
+        ' 桌宠进程没连上（控制端口 '+(data.controlUrl||"未知")+'）—— 设置改了不会生效。'+
+        '启动桌宠后点「重新读取」。</div>';
+    }else{
+      $("#settingsErr").innerHTML=note?'<div class="hint ok" style="margin-bottom:10px;">'+icon("check")+' '+esc(note)+'</div>':"";
+    }
+    renderSettings();
+  }catch(e){
+    tag.textContent="读取失败";
+    tag.className="mini-tag warn";
+    $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+esc(e.message)+'</div>';
+  }
+}
+
+async function saveSettings(){
+  const btn=$("#settingsSave");
+  btn.disabled=true;
+  try{
+    const r=await apiRaw("/api/settings",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({changes:_collectSettings()})});
+    if(r&&r.ok){
+      const restart=(r.restart||[]).length;
+      await loadSettings("已生效"+(restart?("（"+restart+" 项要重启桌宠才生效）"):""));
+    }else{
+      $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+
+        esc((r&&(r.error||"保存失败"))||"保存失败")+'</div>';
+    }
+  }catch(e){
+    $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+esc(e.message)+'</div>';
+  }finally{
+    btn.disabled=false;
+  }
+}
+
+async function settingsAction(action, params){
+  try{
+    const r=await apiRaw("/api/settings/action",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({action:action,params:params||{}})});
+    if(r&&r.ok)await loadSettings();
+    else $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+
+      esc((r&&r.error)||"操作失败")+'</div>';
+  }catch(e){
+    $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+esc(e.message)+'</div>';
+  }
+}
+
+/* ------------------------------------------------------------------
  * Tab 配置：/api/config（API key 只显示 configured / length / valid）
  * ------------------------------------------------------------------ */
 function renderConfig(cfg){
@@ -1789,7 +1984,7 @@ function renderState(st){
   $("#stateBars").innerHTML=rows.map(function(row,i){
     const name=row[0], v=row[1], cls=row[2], max=row[3];
     const p=Math.max(0,Math.min(100,Number(v||0)/max*100));
-    return '<div class="cs-row" style="--d:-'+(i*0.34)+'s"><div class="name">'+name+'</div>'
+    return '<div class="cs-row" style="--d:-'+(i*1.1)+'s"><div class="name">'+name+'</div>'
       + '<div class="track"><div class="fill '+cls+'" style="width:'+p+'%">'
       + Number(v||0).toFixed(1)+'</div></div>'
       + '<div class="v">'+Number(v||0).toFixed(1)+'</div></div>';
@@ -1797,7 +1992,7 @@ function renderState(st){
 
   const up=st.unlock_progress||{};
   $("#stateUnlock").innerHTML=
-      '<div class="cs-row" style="--d:-1.7s"><div class="name">解锁进度</div>'
+      '<div class="cs-row" style="--d:-5.5s"><div class="name">解锁进度</div>'
     + '<div class="track"><div class="fill level" style="width:'+Number(up.percent||0)+'%">'
     + Number(up.percent||0).toFixed(1)+'%</div></div>'
     + '<div class="v">'+(up.unlocked_tools||0)+'/'+(up.total_tools||0)+'</div></div>'
@@ -1971,6 +2166,9 @@ const TAB_LOADERS = {
   async config(){
     renderConfig(await api("/api/config"));
   },
+  async settings(){
+    await loadSettings();
+  },
   async state(){
     renderState(await api("/api/state"));
   },
@@ -2089,6 +2287,37 @@ $("#liveBox").onclick=function(){
 $("#maintSwitch").addEventListener("change",function(e){
   state.maintOn=!!e.target.checked;
   $$(".danger .danger-btn").forEach(function(b){b.disabled=!state.maintOn;});
+});
+
+/* 设置 Tab：保存 / 重读 / 恢复默认 / 滑块实时数值 */
+$("#settingsSave").addEventListener("click",saveSettings);
+$("#settingsReload").addEventListener("click",function(){loadSettings();});
+$("#settingsReset").addEventListener("click",function(){
+  if(!window.confirm("把所有设置恢复成默认？\n\n（模型配置不动 —— 那是特意填的）"))return;
+  settingsAction("reset_defaults");
+});
+document.addEventListener("input",function(e){
+  const el=e.target;
+  if(!el||!el.dataset||!el.dataset.set)return;
+  if(el.type==="range"){
+    const n=document.getElementById(el.id+"_n");
+    if(n)n.textContent=el.value;
+  }
+});
+document.addEventListener("click",function(e){
+  const el=e.target.closest?e.target.closest("[data-l2d],[data-l2d-reset],[data-avatar]"):null;
+  if(!el)return;
+  if(el.dataset.l2dReset){
+    settingsAction("live2d_reset");
+    return;
+  }
+  if(el.dataset.l2d){
+    settingsAction("live2d_activate",{group_id:el.dataset.l2d,item_id:el.dataset.l2dItem});
+    return;
+  }
+  if(el.dataset.avatar){
+    settingsAction("set_avatar",{path:el.dataset.avatar});
+  }
 });
 
 /* 记忆：神经网络 / 列表 切换 */
@@ -2362,6 +2591,12 @@ def _memory_sidecar(base_url: Optional[str] = None, timeout: float = 2.0):
     """指向记忆 sidecar 的客户端（面板是独立进程 —— 只能走 HTTP）。"""
     from app.brain.memory_client import MemoryClient
     return MemoryClient(base_url or "", timeout=timeout)
+
+
+def _pet_control(base_url: Optional[str] = None, timeout: float = 8.0):
+    """指向桌宠进程控制端口的客户端（设置都走它）。"""
+    from app.web.pet_control_client import PetControlClient
+    return PetControlClient(base_url or "", timeout=timeout)
 
 
 def _memory_payload(base_url: Optional[str] = None) -> dict:
@@ -3210,11 +3445,15 @@ def _backup_stamp() -> str:
 
 
 def create_app(trace_db: str | Path,
-               sidecar_url: Optional[str | Path] = None):
+               sidecar_url: Optional[str | Path] = None,
+               pet_control_url: Optional[str | Path] = None):
     """构造 FastAPI app。
 
     sidecar_url：记忆 sidecar 的地址（面板是独立进程，记忆只走 HTTP 读它）。
     传 None / 空串就用默认地址（http://127.0.0.1:8788，端口可被环境变量覆盖）。
+
+    pet_control_url：桌宠进程的控制端口（设置都搬进控制台了，改设置要靠它
+    实时驱动运行中的桌宠）。传 None / 空串就是「桌宠没连上」。
     """
     try:
         from fastapi import FastAPI, HTTPException
@@ -3256,6 +3495,9 @@ def create_app(trace_db: str | Path,
     _sleep_service = MemorySleepService(
         _data_dir, sidecar_url=str(sidecar_url or ""), project_root=_root,
     )
+
+    # 桌宠进程的控制端口：设置 Tab 靠它实时驱动运行中的桌宠。
+    _control_url = str(pet_control_url or "")
 
     # API key 兜底脱敏：即使某个端点不小心把 key 写进了响应体，
     # 这个中间件也会把它替换掉（PLAN.md 5.2：配置 Tab 里看不到 API key 内容）。
@@ -3468,6 +3710,55 @@ def create_app(trace_db: str | Path,
     def reconciliation():
         """工具 Tab：文档 <-> 注册表的对账差异（复用 check_tool_docs.py）。"""
         return _reconciliation_summary(_reconciliation_result())
+
+    # -- 设置（走桌宠进程的控制端口） ------------------------------------
+    @app.get("/api/settings")
+    def settings_overview():
+        """设置 Tab：设置项清单 + 当前值 + 桌宠是否连上。"""
+        client = _pet_control(_control_url)
+        return {
+            "ok": True,
+            "connected": bool(client.base_url) and bool(client.health().get("ok")),
+            "controlUrl": client.base_url,
+            "schema": client.schema().get("schema") or [],
+            "values": client.settings().get("values") or {},
+            "appearance": client.appearance().get("appearance") or {},
+            "avatars": client.avatars().get("avatars") or [],
+        }
+
+    @app.post("/api/settings")
+    def settings_update(payload: Optional[dict] = None):
+        """设置 Tab：改设置（桌宠上立即生效）。"""
+        payload = payload or {}
+        changes = payload.get("changes")
+        if not isinstance(changes, dict):
+            changes = {k: v for k, v in payload.items() if k != "ok"}
+        return _pet_control(_control_url).update_settings(changes)
+
+    @app.post("/api/settings/action")
+    def settings_action(payload: Optional[dict] = None):
+        """设置 Tab：运行时动作（换 Live2D 外观 / 试听语音 / 换头像）。"""
+        payload = payload or {}
+        action = str(payload.get("action") or "")
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            params = {k: v for k, v in payload.items() if k != "action"}
+        return _pet_control(_control_url).action(action, **params)
+
+    @app.get("/api/avatar")
+    def avatar_preview(path: str = ""):
+        """头像缩略图（只给 assets/avatars 目录里的图片）。"""
+        from fastapi.responses import FileResponse
+        base = (_root / "assets" / "avatars").resolve()
+        try:
+            target = Path(path).resolve()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="路径不对")
+        if base not in target.parents or target.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            raise HTTPException(status_code=400, detail="只能看 assets/avatars 里的图片")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="头像文件没了")
+        return FileResponse(str(target))
 
     @app.get("/api/config")
     def config_overview():
@@ -3698,6 +3989,8 @@ def main():
     parser.add_argument("--trace-db", default="data/traces.db")
     parser.add_argument("--sidecar-url", default="",
                         help="记忆 sidecar 地址（默认 http://127.0.0.1:8788）")
+    parser.add_argument("--pet-control-url", default="",
+                        help="桌宠进程的控制端口（设置 Tab 靠它实时驱动桌宠）")
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
@@ -3705,7 +3998,8 @@ def main():
     trace_db = Path(args.trace_db)
     if not trace_db.is_absolute():
         trace_db = Path.cwd() / trace_db
-    app = create_app(trace_db, args.sidecar_url or None)
+    app = create_app(trace_db, args.sidecar_url or None,
+                     args.pet_control_url or None)
     try:
         import uvicorn
     except ImportError:
@@ -3714,6 +4008,7 @@ def main():
     print(f"Dashboard 启动: http://{args.host}:{args.port}")
     print(f"   trace db: {trace_db}")
     print(f"   memory:   sidecar {args.sidecar_url or '（默认 127.0.0.1:8788）'}")
+    print(f"   桌宠控制: {args.pet_control_url or '（没连上，设置改不了）'}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

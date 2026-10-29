@@ -36,19 +36,18 @@ def _attrs(node) -> set:
 # ---------- 渲染引擎：显示真实生效值 ----------
 
 def test_renderer_ui_shows_real_value_not_store():
-    """面板必须显示 config.yaml 的真实渲染器，不能显示 store 里的旧值。"""
+    """控制台要显示 config.yaml 的真实渲染器，不能显示 store 里的旧值。"""
     src = _src("app/ui/ui_controller.py")
     assert '"renderer": _store0.get("renderer"' not in src, (
-        "面板又改回读 store 的 renderer —— 会显示用户选的、实际跑另一个"
+        "又改回读 store 的 renderer —— 会显示用户选的、实际跑另一个"
     )
-    assert '"renderer": _renderer_cfg' in src, "面板没显示真实生效的 renderer"
 
 
 def test_renderer_tip_explains_config_priority():
-    """提示文案要说明"以 config.yaml 为准"，否则用户以为面板能改。"""
-    src = _src("app/ui/settings_window.py")
-    assert "pet.renderer" in src, (
-        "渲染引擎提示没说明以 config.yaml 为准"
+    """提示文案要说明"以 config.yaml 为准"，否则用户以为能改。"""
+    src = _src("app/core/pet_settings.py")
+    assert "restart" in src, (
+        "渲染引擎切换没标「重启生效」—— 用户以为改了立刻就换了"
     )
 
 
@@ -72,20 +71,21 @@ def test_sprite_idle_respects_lock():
 
 def test_lock_first_idle_hidden_for_live2d():
     """Live2D 没有帧序列，这个选项对它是死的 —— 不该显示。"""
-    node = _func_node("app/ui/settings_window.py", "_build_tab_visual")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "cb_lock_first_idle" in body
-    assert "_renderer_type" in body, "没按渲染器类型显隐锁第一帧选项"
+    src = _src("app/core/pet_settings.py")
+    assert "lock_first_idle" in src, "锁第一帧选项没了"
+    src = _src("app/ui/ui_controller.py")
+    assert "_is_sprite" in src, "没按渲染器类型判断锁第一帧是否有效"
 
 
 def test_sprite_only_tabs_gated_by_renderer():
     """帧率预设 / 帧时长细调 / 淡入淡出都只对 sprite 有效。"""
-    node = _func_node("app/ui/settings_window.py", "_build_tab_fps")
-    assert node is not None
-    assert "_renderer_type" in _ast.dump(node), (
-        "帧时长 Tab 没按渲染器类型显隐（Live2D 下点了没反应）"
+    src = _src("app/ui/ui_controller.py")
+    assert "_is_sprite" in src, (
+        "帧时长相关设置没按渲染器类型分流（Live2D 下点了没反应）"
     )
+    node = _func_node("app/ui/ui_controller.py", "_override_frame_ms_now")
+    assert node is not None
+    assert "_is_sprite" in _ast.dump(node), "帧时长覆盖没先判是不是 sprite"
 
 
 def test_sprite_lock_first_idle_behaviour(qapp):
@@ -179,75 +179,64 @@ def test_lock_first_idle_restored_on_startup():
 
 def test_developer_mode_persisted():
     """开发者模式：勾了要能保持（之前不存，重启就关）。"""
-    src = _src("app/ui/settings_window.py")
-    assert "developer_mode" in src
-    node = _func_node("app/ui/settings_window.py", "_set_developer_mode")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "settings_store" in body, "开发者模式没持久化"
+    src = _src("app/core/pet_settings.py")
+    assert "developer_mode" in src, "开发者模式没进设置项清单"
+    src = _src("app/ui/ui_controller.py")
+    assert "developer_mode" in src, "主程序没读开发者模式"
 
 
 def test_developer_mode_changed_signal_is_wired():
-    """developer_mode_changed signal 必须真发出 + 主程序真接。"""
-    node = _func_node("app/ui/settings_window.py", "_set_developer_mode")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "developer_mode_changed" in body, (
-        "切换开发者模式时没 emit developer_mode_changed —— 又是死信号"
-    )
-
+    """开发者模式改完，主程序要真的知道。"""
     src = _src("app/ui/ui_controller.py")
-    assert "_on_developer_mode_changed" in src, "主程序没接这个 signal"
-    assert "developer_mode_changed.connect" in src, "信号没连上"
+    assert "_on_developer_mode_changed" in src, "主程序没处理开发者模式变化"
+    node = _func_node("app/ui/ui_controller.py", "_apply_settings_changed")
+    assert node is not None, "缺设置应用分发"
+    assert "developer_mode" in _ast.dump(node), (
+        "开发者模式没走统一的应用分发 —— 改了系统零反应"
+    )
 
 
 # ---------- TTS：音色下拉 / 试听 ----------
 
 def test_voice_options_follow_engine():
-    """语音音色下拉只有 edge 认 —— 切到 gptsovits/minimax 时不该还杵在那儿。"""
-    node = _func_node("app/ui/settings_window.py", "_update_tts_engine_visibility")
-    assert node is not None, "缺 _update_tts_engine_visibility"
+    """语音音色只有 edge 认 —— 切到 gptsovits/minimax 时不该还杵在那儿。"""
+    src = _src("app/core/pet_settings.py")
+    for key in ("tts_voice", "tts_engine", "current_voice", "minimax_voice_id"):
+        assert key in src, f"设置项清单少了 {key}"
+    src = _src("app/ui/ui_controller.py")
+    node = _func_node("app/ui/ui_controller.py", "_on_tts_config_changed")
+    assert node is not None
     body = _ast.dump(node)
-    assert "_row_edge_voice" in body, "edge 音色行没按引擎显隐"
-    assert "_row_default_voice" in body
-    assert "_row_gsv_ref" in body
-    assert "_row_minimax" in body
+    assert "_update_tts_engine_visibility" not in body
+    assert "tts_engine" in body, "TTS 引擎变化没往下传"
 
 
 def test_preview_voice_uses_live_engine_instance():
     """试听要走主程序当前的引擎实例，不能自己 new 一个 edge-tts。"""
-    node = _func_node("app/ui/settings_window.py", "_on_preview_voice")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "preview_voice_requested" in body, (
-        "面板没把试听请求发给主程序 —— 用的还是固定 edge-tts"
-    )
-    assert "TTS(" not in body, "面板不该自己 new TTS 实例"
-
     src = _src("app/ui/ui_controller.py")
     node = _func_node("app/ui/ui_controller.py", "_on_preview_voice_requested")
     assert node is not None, "主程序没接试听请求"
     body = _ast.dump(node)
     assert "tts" in body, "试听没走当前引擎的 TTS 实例"
+    assert "TTS(" not in body, "不该自己 new TTS 实例"
+
+    # 控制台的试听动作要走控制服务 → 主程序这条链
+    src = _src("app/ui/ui_controller.py")
+    node = _func_node("app/ui/ui_controller.py", "_control_action")
+    assert node is not None
+    assert "preview_voice" in _ast.dump(node), "控制台没接试听动作"
 
 
 # ---------- 主动关心间隔 ----------
 
 def test_proactive_interval_range_matches_backend():
-    """面板的间隔范围要跟 ProactiveBrain 的钳制规则一致。"""
-    src = _src("app/ui/settings_window.py")
-    node = _func_node("app/ui/settings_window.py", "_build_tab_control")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "spin_proactive_min" in body
-    # 下限最少 5 分钟（后端会抬到 5），上限至少比下限多 5
-    assert "setRange(2, 720)" in src, "间隔下限范围不是 2~720"
-    assert "setRange(6, 720)" in src, "间隔上限范围不是 6~720"
+    """设置项的间隔范围要跟 ProactiveBrain 的钳制规则一致。"""
+    src = _src("app/core/pet_settings.py")
+    assert '"proactive_min_minutes"' in src
+    # 下限最少 2 分钟（后端会抬到 2），上限至少 6 分钟
+    assert '"min": 2, "max": 720' in src, "间隔下限范围不是 2~720"
+    assert '"min": 6, "max": 720' in src, "间隔上限范围不是 6~720"
 
-    node = _func_node("app/ui/settings_window.py", "_emit_proactive")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "setValue" in body, "间隔被后端钳制后没回显 —— 面板显示的和实际跑的不是一回事"
     # 后端同一套规则（主人要求: 下限最低 2, 上限最低 6）
     backend = _src("app/brain/proactive.py")
     assert "max(2, int(min_minutes))" in backend, "后端下限钳制不是 2"
@@ -257,13 +246,17 @@ def test_proactive_interval_range_matches_backend():
 # ---------- API 预设 ----------
 
 def test_api_preset_clears_key():
-    """换厂商必须换 Key —— 留着旧 Key 必然 401。"""
-    node = _func_node("app/ui/settings_window.py", "_on_preset_clicked")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "edt_api_key" in body and "clear" in body, (
-        "切 API 预设没清 Key —— 换厂商带着旧 Key 必然 401"
+    """换厂商必须换 Key —— 留着旧 Key 必然 401。
+
+    控制台没有「一键预设」按钮了（面板删了），但密钥是掩码回显的：
+    掩码值不能被当成新 Key 写回去。
+    """
+    from app.core.pet_settings import coerce
+    assert coerce("model_api_key", "sk-abc12345678") == "sk-abc12345678"
+    assert coerce("model_api_key", "******5678") is None, (
+        "掩码被当成新 Key 写回去了 —— 真 key 会被冲掉"
     )
+    assert coerce("model_api_key", "") is None, "空密钥不该被当成「清空」"
 
 
 # ---------- 超时时间 ----------
@@ -279,35 +272,36 @@ def test_proactive_follows_llm_timeout():
 # ---------- 保存设置 / 重置默认值 ----------
 
 def test_snapshot_to_store_covers_all_groups():
-    """「保存设置」要真落盘 —— 之前只存了 scale/opacity/置顶几个。"""
-    node = _func_node("app/ui/settings_window.py", "snapshot_to_store")
-    assert node is not None, "缺 snapshot_to_store"
-    body = _ast.dump(node)
-    for key in ("crossfade_enabled", "motion_", "fps_monitor", "frame_ms",
+    """「保存设置」要真落盘 —— 设置项清单要覆盖所有分组。"""
+    from app.core.pet_settings import SETTING_SCHEMA
+    for key in ("crossfade_enabled", "motion_idle_s", "motion_walk_s",
+                "motion_decide_s", "fps_monitor", "frame_ms",
                 "lock_first_idle", "developer_mode", "proactive_enabled",
                 "tts_engine", "scale", "opacity"):
-        assert key in body, f"snapshot_to_store 没覆盖 {key}"
+        assert key in SETTING_SCHEMA, f"设置项清单没覆盖 {key}"
 
 
 def test_reset_writes_store_and_model_config():
-    """「重置默认值」要写 store 并落到模型配置（之前只重置 UI）。"""
-    node = _func_node("app/ui/settings_window.py", "reset_to_defaults")
-    assert node is not None, "缺 reset_to_defaults"
+    """「重置默认值」要写 store 并立即生效（之前只重置 UI）。"""
+    from app.core.pet_settings import SettingsService
+    node = _func_node("app/core/pet_settings.py", "reset_defaults")
+    assert node is not None, "缺 reset_defaults"
     body = _ast.dump(node)
-    assert "snapshot_to_store" in body, "重置后没写 store —— 重启又被旧值盖回来"
-    assert "_on_model_config_changed" in body, "重置后模型配置没落到 cfg"
+    assert "update" in body, "重置后没写 store —— 重启又被旧值盖回来"
 
     src = _src("app/ui/ui_controller.py")
-    assert "reset_to_defaults" in src, "重置按钮走的还是旧的 _load_defaults"
+    assert "reset_defaults" in src, "重置动作没走设置中枢"
+    assert "_apply_settings_changed" in src, "重置后没走统一的应用分发"
 
 
 def test_load_defaults_does_not_write_store():
-    """_load_defaults 是纯 UI 重置（__init__ 里也在用）—— 不能写 store。"""
-    node = _func_node("app/ui/settings_window.py", "_load_defaults")
-    assert node is not None
-    body = _ast.dump(node)
-    assert "snapshot_to_store" not in body, (
-        "_load_defaults 写 store 的话，每次启动都会把主人存的设置刷成默认"
+    """恢复默认只动非模型项 —— 模型配置是主人特意填的，不能被刷掉。"""
+    from app.core.pet_settings import SETTING_SCHEMA
+    model_keys = [k for k in SETTING_SCHEMA if k.startswith("model_")]
+    assert model_keys, "模型配置不在设置项清单里？"
+    src = _src("app/core/pet_settings.py")
+    assert 'if key.startswith("model_")' in src, (
+        "重置逻辑没区分模型配置 —— 会把主人填的模型名冲掉"
     )
 
 
@@ -442,16 +436,17 @@ def test_avatar_picker_dialog_exists():
 
 
 def test_settings_window_has_avatar_picker_entry():
-    """设置面板「模型配置」tab 有头像入口: 按钮 + signal + 路径显示。"""
-    src = _src("app/ui/settings_window.py")
-    assert "bot_avatar_changed" in src, (
-        "缺 bot_avatar_changed signal —— 选了头像后主程序没法知道"
-    )
-    assert "_open_avatar_picker" in src, "设置面板缺头像按钮入口"
-    assert "选择头像" in src
-    # ui_controller 必须接这个 signal
-    assert "_on_bot_avatar_changed" in _src("app/ui/ui_controller.py")
-    assert "bot_avatar_changed.connect" in _src("app/ui/ui_controller.py")
+    """控制台有头像入口：列头像 + 选了就换。"""
+    src = _src("app/ui/ui_controller.py")
+    assert "_control_avatars" in src, "控制服务没提供头像列表"
+    assert "_on_bot_avatar_changed" in src, "主程序没处理换头像"
+    node = _func_node("app/ui/ui_controller.py", "_control_action")
+    assert node is not None
+    assert "set_avatar" in _ast.dump(node), "控制台没接换头像动作"
+    # 控制台前端要有头像选择控件
+    web = _src("app/web/dashboard.py")
+    assert "settingsAvatars" in web, "控制台没渲染头像区"
+    assert "set_avatar" in web, "控制台没发换头像请求"
 
 
 # ---------- 贴纸/食物图片被 mask 遮罩挡住 ----------
@@ -482,81 +477,136 @@ def test_sticker_show_forces_mask_update():
 # ---------- 状态进度条改椭圆 ----------
 
 def test_status_progressbar_uses_ellipse_radius():
-    """状态模块的进度条改椭圆 (height 10px, border-radius 5px = 高度/2)。"""
-    src = _src("app/ui/ui_style.py")
-    # min-height 10 + border-radius 5 → 视觉上两端半圆
-    assert "min-height: 10px" in src, "进度条高度没改成 10px (椭圆要看高度/2)"
-    # chunk 同步 (不然填充跟外框圆角不一致)
-    assert "QProgressBar::chunk" in src
-    # radius 5 = 高度/2 (椭圆)
-    assert "border-radius: 5px" in src, "进度条圆角没改 5px (高度 10 的一半)"
-    # stat_bar_qss 是内联样式 (会盖掉全局 QSS), 它也必须是 5px
-    node = _func_node("app/ui/ui_style.py", "stat_bar_qss")
-    assert node is not None, "ui_style.stat_bar_qss 缺失"
-    body = _ast.dump(node)
-    assert "border-radius:5px" in body.replace(" ", ""), (
-        "stat_bar_qss 圆角还是 8px —— 状态模块那 6 条会被内联样式盖成方块"
-    )
-    # 面板侧固定高度也要 10
-    settings_src = _src("app/ui/settings_window.py")
-    assert "setFixedHeight(10)" in settings_src, (
-        "状态条固定高度还是 14 —— 圆角 5 配 14 高不是椭圆"
+    """状态模块的进度条改椭圆 (圆角 = 高度/2)。"""
+    # 设置面板删了，状态条挪到桌宠窗口（pet_window）里
+    src = _src("app/ui/pet_window.py")
+    assert "QProgressBar::chunk" in src, "桌宠状态条没画 chunk 样式"
+    assert "border-radius" in src, "桌宠状态条没设圆角"
+    # 圆角 3px 配 6px 高 = 椭圆（高度的一半）
+    assert "border-radius: 3px" in src, "状态条圆角与高度不配（该是高度的一半）"
+    assert "height: 6px" in src or "setFixedHeight(6)" in src, (
+        "状态条高度变了但圆角没跟着改 —— 就不是椭圆了"
     )
 
 
 # ---------- 删控制模块的快捷入口和切换表情 ----------
 
 def test_control_tab_dropped_shortcut_and_emotion_panel():
-    """主人要求: 设置面板「控制」模块的快捷入口 + 切换表情整块删。
-
-    这两块对主人是冗余的 (右键桌宠、Live2D 标签页都能用), 删了更清爽。
-    """
-    src = _src("app/ui/settings_window.py")
-    for name in ("btn_chat", "btn_sleep", "btn_wake", "emo_btns",
-                 "chat_requested", "sleep_requested", "idle_requested",
-                 "emotion_requested", "_on_emotion_clicked"):
-        assert name not in src, f"控制 tab 还残留 {name} —— 主人要求删干净"
-    # signal 声明也要清 (4 个)
-    assert "快捷入口" not in src, "快捷入口的 GroupBox 文本还在"
-    assert "切换表情" not in src, "切换表情的 GroupBox 文本还在"
+    """设置面板已删 —— 桌宠的快捷操作都在右键菜单里。"""
+    src = _src("app/ui/pet_window.py")
+    for name in ("切换表情", "切换发型"):
+        assert name in src, f"右键菜单少了「{name}」—— 面板删了得在这儿能用"
+    # 设置项清单里不该有这些动作型的东西（它们是右键菜单的事）
+    from app.core.pet_settings import SETTING_SCHEMA
+    for name in ("btn_chat", "btn_sleep", "emo_btns"):
+        assert name not in SETTING_SCHEMA, f"设置项清单混进了 {name}"
 
 
-# ---------- 参数控件禁滚轮 ----------
+# ---------- 设置中枢：校验 / 落盘 / 应用 ----------
 
-def test_param_widgets_ignore_wheel(qapp, isolated_store):
-    """滚轮停在 spinbox / slider 上不该改数值。
-
-    主人反馈: 面板装在 QScrollArea 里, 滚动设置时鼠标正好压在参数上,
-    数值就被滚轮改掉了 —— 很容易误触。
-    """
-    from app.core.qt_compat import QApplication, QPoint, QWheelEvent, Qt
-    from app.ui.settings_window import SettingsWindow
-
-    sw = SettingsWindow(parent=None, char_cfg=None, renderer=None)
-    try:
-        # spinbox: 滚一下不该变
-        sb = sw.spin_proactive_min
-        before = sb.value()
-        ev = QWheelEvent(
-            QPoint(1, 1), QPoint(1, 1), QPoint(0, 0), QPoint(0, 120),
-            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
-            Qt.ScrollPhase.NoScrollPhase, Qt.MouseEventSource.MouseEventNotSynthesized)
-        QApplication.sendEvent(sb, ev)
-        assert sb.value() == before, (
-            f"滚轮把 spinbox 改了: {before} → {sb.value()}")
-    finally:
-        sw.close()
-        sw.deleteLater()
+def test_settings_schema_covers_all_groups():
+    """每个分组都要有设置项，且每项都得有标签和类型。"""
+    from app.core.pet_settings import GROUP_ORDER, SETTING_SCHEMA
+    groups = {spec["group"] for spec in SETTING_SCHEMA.values()}
+    for g in GROUP_ORDER:
+        assert g in groups, f"分组 {g} 一个设置项都没有"
+    for key, spec in SETTING_SCHEMA.items():
+        assert spec.get("label"), f"{key} 没标签"
+        assert spec.get("type") in ("bool", "int", "float", "str", "secret"), \
+            f"{key} 的类型不对：{spec.get('type')}"
 
 
-def test_wheel_filter_installed_on_param_widgets():
-    """所有参数控件 (spinbox / slider / combo) 都要装禁滚轮过滤器。"""
-    src = _src("app/ui/settings_window.py")
-    assert "_NoWheelOnParams" in src, "缺禁滚轮过滤器"
-    assert "installEventFilter(self._no_wheel)" in src
-    # 覆盖 spin / double-spin / slider / combo 四类
-    for cls in ("QSpinBox", "QDoubleSpinBox", "QSlider", "QComboBox"):
-        assert cls in src, f"禁滚轮没覆盖 {cls}"
+def test_settings_values_mask_the_api_key():
+    """控制台不能拿到 API Key 原文。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        store = SettingsStore(Path(td) / "settings.json")
+        store.set("model_api_key", "sk-secret-value-1234")
+        svc = SettingsService(store)
+        shown = svc.values()["model_api_key"]
+        assert "sk-secret" not in shown, "API Key 原文漏回控制台了"
+        assert shown.endswith("1234"), "掩码应保留末尾几位便于辨认"
+
+
+def test_settings_update_persists_and_calls_apply_hook():
+    """改设置要落盘 + 立即应用到桌宠。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "settings.json"
+        store = SettingsStore(path)
+        svc = SettingsService(store)
+        seen = {}
+        svc.apply_hook = lambda values: seen.update(values)
+        result = svc.update({"scale": 0.8, "opacity": 0.9})
+        assert result["ok"] is True
+        assert set(result["applied"]) == {"scale", "opacity"}
+        assert seen == {"scale": 0.8, "opacity": 0.9}, "没走到应用钩子"
+        # 落盘了
+        assert abs(float(store.get("scale")) - 0.8) < 0.01
+
+
+def test_settings_update_clamps_out_of_range():
+    """越界的值要夹回合法范围，不能照单全收。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        store = SettingsStore(Path(td) / "settings.json")
+        svc = SettingsService(store)
+        svc.update({"scale": 99.0, "opacity": 0.1})
+        assert float(store.get("scale")) <= 1.0
+        assert float(store.get("opacity")) >= 0.7
+
+
+def test_settings_update_rejects_unknown_keys():
+    """不认识的键要拒掉（别把乱七八糟的东西写进 settings.json）。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        store = SettingsStore(Path(td) / "settings.json")
+        svc = SettingsService(store)
+        result = svc.update({"没有这个键": 1})
+        assert result["ok"] is False
+        assert "没有这个键" in result["rejected"]
+
+
+def test_settings_reset_keeps_model_config():
+    """恢复默认不动模型配置 —— 那是主人特意填的。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        store = SettingsStore(Path(td) / "settings.json")
+        store.set("model_name", "my-model")
+        store.set("scale", 0.5)
+        svc = SettingsService(store)
+        svc.reset_defaults()
+        assert store.get("model_name") == "my-model", "模型名被恢复默认冲掉了"
+        assert float(store.get("scale")) != 0.5, "缩放没恢复默认"
+
+
+def test_settings_schema_lists_ranges_for_panel():
+    """面板要能渲染滑块 —— 范围必须给出去。"""
+    from app.core.pet_settings import SettingsService
+    from app.core.settings_store import SettingsStore
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        svc = SettingsService(SettingsStore(Path(td) / "settings.json"))
+        items = {i["key"]: i for i in svc.schema()}
+        assert "min" in items["scale"] and "max" in items["scale"]
+        assert items["renderer"]["options"] == ["sprite", "live2d"]
+        assert items["renderer"]["restart"] is True, "切渲染器要重启，提示得标出来"
 
 def test_tool_unlock_has_titlebar_window_chrome():
     """工具解锁窗口无边框, 主人要求加 min/max/close 跟其他窗口一致。
@@ -605,59 +655,30 @@ def test_popup_windows_share_frameless_shell():
     assert "WA_TranslucentBackground" in shell, "外壳没开透明背景（圆角阴影会露白边）"
 
 
-# ---------- TTS 行显隐：真控件验证 ----------
+# ---------- TTS：引擎切换时只留该引擎认的字段 ----------
 
-@pytest.fixture
-def isolated_store(monkeypatch, tmp_path):
-    """settings.json 隔离到临时目录 —— 真机上存的值不该影响断言。"""
-    import app.ui.settings_window as sw_mod
-    from app.core.settings_store import SettingsStore
+def test_tts_settings_follow_engine():
+    """切引擎时, 只有该引擎认的字段该留在控制台上。
 
-    monkeypatch.setattr(
-        sw_mod, "SettingsStore",
-        lambda path="settings.json": SettingsStore(tmp_path / "settings.json"))
+    控制台是网页表单（没有「显隐行」这回事），但主程序侧要按引擎
+    分流：edge 音色只对 edge 生效，GPT-SoVITS 的参考音频只对 gptsovits 生效。
+    """
+    from app.core.pet_settings import SETTING_SCHEMA
+    for key in ("tts_voice", "current_voice", "gptsovits_ref_audio",
+                "gptsovits_prompt_text", "minimax_voice_id"):
+        assert key in SETTING_SCHEMA, f"设置项清单少了 {key}"
 
-
-def _tts_rows(qapp, engine: str) -> dict:
-    """建设置面板切到某引擎，返回各行的可见状态。"""
-    from app.core.qt_compat import Qt
-    from app.ui.settings_window import SettingsWindow
-
-    sw = SettingsWindow(parent=None, char_cfg=None, renderer=None)
-    idx = sw.cmb_tts_engine.findData(engine)
-    if idx >= 0:
-        sw.cmb_tts_engine.setCurrentIndex(idx)
-    qapp.processEvents()
-
-    def shown(row):
-        if row is None:
-            return False
-        return not row.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
-
-    out = {
-        "edge_voice": shown(getattr(sw, "_row_edge_voice", None)),
-        "default_voice": shown(getattr(sw, "_row_default_voice", None)),
-        "minimax": shown(getattr(sw, "_row_minimax", None)),
-        "gsv_url": shown(getattr(sw, "_row_gsv_url", None)),
-        "gsv_ref": shown(getattr(sw, "_row_gsv_ref", None)),
-        "gsv_prompt": shown(getattr(sw, "_row_gsv_prompt", None)),
-    }
-    sw.deleteLater()
-    return out
+    src = _src("app/ui/ui_controller.py")
+    node = _func_node("app/ui/ui_controller.py", "_on_tts_config_changed")
+    assert node is not None
+    body = _ast.dump(node)
+    assert "tts_engine" in body, "引擎没往下传"
+    assert "gptsovits_ref_audio" in body, "GPT-SoVITS 参考音频没同步到 cfg"
+    assert "minimax_voice_id" in body, "MiniMax voice_id 没同步到 cfg"
 
 
-def test_tts_rows_switch_with_engine(qapp, isolated_store):
-    """切引擎时, 只有该引擎认的字段留在面板上。"""
-    edge = _tts_rows(qapp, "edge")
-    assert edge["edge_voice"] is True, "edge 引擎下该显示音色下拉"
-    assert edge["gsv_ref"] is False, "edge 引擎下不该显示 GPT-SoVITS 的参考音频"
-
-    gsv = _tts_rows(qapp, "gptsovits")
-    assert gsv["gsv_ref"] is True, "gptsovits 引擎下该显示参考音频"
-    assert gsv["gsv_prompt"] is True
-    assert gsv["edge_voice"] is False, "gptsovits 下不该显示 edge 音色下拉"
-    assert gsv["minimax"] is False, "gptsovits 下不该显示 minimax 的 voice_id"
-
-    mm = _tts_rows(qapp, "minimax")
-    assert mm["minimax"] is True, "minimax 引擎下该显示 voice_id"
-    assert mm["gsv_url"] is False
+def test_tts_engine_options_are_listed():
+    """引擎下拉要有三个选项，不然换不了厂商。"""
+    from app.core.pet_settings import SETTING_SCHEMA
+    assert SETTING_SCHEMA["tts_engine"]["options"] == \
+        ["edge", "gptsovits", "minimax"]

@@ -186,33 +186,31 @@ def test_renderer_capabilities_drops_missing_sticker_dir():
     assert "has_stickers" in body
 
 
-# ---------- 能力矩阵：UI 层（AST 守卫） ----------
+# ---------- 能力矩阵：设置项分流 ----------
 
-def test_settings_window_gates_live2d_widgets_on_capabilities():
-    """设置面板 Live2D Tab：三类控件必须按 caps 显隐，不能无条件摆进布局。"""
-    node = _func_node("app/ui/settings_window.py", "_build_tab_live2d")
-    assert node is not None, "_build_tab_live2d 缺失"
+def test_settings_only_offer_live2d_options_when_capable():
+    """Live2D 专属的设置项要按渲染器能力给出去，不能无条件摆出来。"""
+    node = _func_node("app/ui/ui_controller.py", "_control_appearance")
+    assert node is not None, "_control_appearance 缺失"
     attrs = _attrs(node)
-    assert "capabilities" in attrs, "面板没读渲染器能力矩阵"
-    for attr in ("has_random_expressions", "has_stickers", "has_watermark"):
-        assert attr in attrs, f"面板没用 caps.{attr} 做显隐判断"
-    # 控件仍然要创建（属性恒在，别处引用不能 AttributeError），
-    # 但摆进布局必须走条件
-    for name in ("cb_random_exp", "cb_random_sticker", "cb_hide_watermark"):
-        assert name in attrs, f"{name} 没创建"
+    assert "capabilities" in attrs or "get_menu_groups" in attrs, (
+        "控制台没读渲染器能力矩阵"
+    )
+    # sprite 渲染器没有分类外观 → 控制台该显示「用右键菜单切」的提示
+    src = _src("app/ui/ui_controller.py")
+    assert "available" in src, "控制台没区分「有没有外观可切」"
 
 
-def test_settings_window_creates_widgets_regardless_of_capability():
-    """控件对象恒创建、恒在布局里 —— 显隐靠 setVisible，不靠"不 addWidget"。
-
-    不 addWidget 的话 PyQt 会把没有 parent 的控件连带着删掉，
-    之后访问会撞 "object has been deleted"。
-    """
-    node = _func_node("app/ui/settings_window.py", "_build_tab_live2d")
-    for attr in ("has_random_expressions", "has_stickers", "has_watermark"):
-        assert _setvisible_with_attr(node, attr), (
-            f"caps.{attr} 没接进 setVisible（控件会无条件显示或被删掉）"
-        )
+def test_settings_sprite_only_options_are_gated():
+    """淡入淡出 / 帧时长只对 sprite 有效 —— Live2D 下点了没反应。"""
+    node = _func_node("app/ui/ui_controller.py", "_apply_settings_changed")
+    assert node is not None
+    src = _src("app/ui/ui_controller.py")
+    # 这些设置项在应用时要先问渲染器类型
+    for name in ("_on_crossfade_changed", "_override_frame_ms_now"):
+        fn = _func_node("app/ui/ui_controller.py", name)
+        assert fn is not None, f"缺 {name}"
+        assert "_is_sprite" in _ast.dump(fn), f"{name} 没先判是不是 sprite"
 
 
 def test_scene_dialog_optional_combo_rows():
@@ -232,19 +230,8 @@ def test_scene_dialog_optional_combo_rows():
 
 # ---------- 真控件验证（offscreen 建真窗口, 不只靠 AST 断言） ----------
 
-@pytest.fixture
-def isolated_store(monkeypatch, tmp_path):
-    """把 settings.json 隔离到临时目录 —— 真机上存的值不该影响显隐断言。"""
-    import app.ui.settings_window as sw_mod
-    from app.core.settings_store import SettingsStore
-
-    monkeypatch.setattr(
-        sw_mod, "SettingsStore",
-        lambda path="settings.json": SettingsStore(tmp_path / "settings.json"))
-
-
 class _FakeRenderer:
-    """假的 Live2D 渲染器：只提供设置面板要用到的接口。"""
+    """假的 Live2D 渲染器：只提供控制服务要用的接口。"""
 
     def __init__(self, caps, rtype="live2d"):
         self._caps = caps
@@ -256,6 +243,15 @@ class _FakeRenderer:
     def get_menu_groups(self):
         return [{"id": "face", "label": "表情", "kind": "emotion",
                  "mode": "exclusive", "items": [("a", "开心")]}]
+
+    def get_active_items(self):
+        return set()
+
+    def activate_menu_item(self, group_id, item_id, toggle_off=True):
+        return None
+
+    def reset_all_appearance(self):
+        return None
 
     def get_renderer_type(self):
         return self._rtype
@@ -283,93 +279,35 @@ class _FakeRenderer:
         return []
 
 
-def _visible_widgets(qapp, caps, rtype="live2d"):
-    """建一个真设置面板，返回各控件的"面板上有没有" + 分组标题集合。
+def _appearance(caps, rtype="live2d"):
+    """跑一遍控制服务的「外观」handler，返回它报出来的内容。"""
+    from app.animation.pet_renderer import ModelCapabilities  # noqa: F401
+    from app.ui.ui_controller import UIController
 
-    判定用 WA_WState_Hidden（"被显式隐藏"标志），不依赖窗口是否 show，
-    也不切 tab —— 切 tab + 进事件循环在整套测试里跑会触发 Qt 段错误。
-    """
-    from app.core.qt_compat import QGroupBox, Qt
-    from app.ui.settings_window import SettingsWindow
+    class _Ctrl(UIController):
+        def __init__(self):  # noqa: D107 - 只借方法，不跑 Qt 初始化
+            self.pet = type("_P", (), {"renderer": _FakeRenderer(caps, rtype)})()
 
-    sw = SettingsWindow(parent=None, char_cfg=None,
-                        renderer=_FakeRenderer(caps, rtype))
-
-    def shown(w):
-        # 没进布局（parent 为 None）= 面板上根本没这个控件；
-        # 进布局但被显式隐藏 = 面板上不显示
-        if w is None or w.parent() is None:
-            return False
-        return not w.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
-
-    def group_shown(title):
-        """分组容器的显隐（组里的子控件跟随父，自身标志不反映）。"""
-        for g in sw.findChildren(QGroupBox):
-            if g.title() == title:
-                return not g.testAttribute(Qt.WidgetAttribute.WA_WState_Hidden)
-        return None
-
-    out = {
-        "random_exp": shown(sw.cb_random_exp),
-        "sticker": shown(sw.cb_random_sticker),
-        "watermark": shown(sw.cb_hide_watermark),
-        "lock_first_idle": group_shown("动画切换优化"),
-        "crossfade": group_shown("动画切换优化"),
-        "fps_presets": group_shown("帧率预设"),
-        "frame_ms": group_shown("帧时长细调"),
-        "sticker_group": group_shown("表情包贴纸"),
-    }
-    sw.deleteLater()
-    return out
+    return _Ctrl()._control_appearance()
 
 
-def test_widgets_visibility_for_model_without_stickers(qapp, isolated_store):
-    """模型没有随机表情 / 没有贴纸 → 对应控件不该出现在面板上。"""
-    from app.animation.pet_renderer import ModelCapabilities
-
-    caps = ModelCapabilities(has_emotion_group=True, has_hairstyle_group=True,
-                              has_watermark=True, has_actions=True)
-    v = _visible_widgets(qapp, caps)
-    assert v["random_exp"] is False, "模型不支持挂机随机，勾选框却显示了"
-    assert v["sticker"] is False, "模型没有表情包，勾选框却显示了"
-    assert v["sticker_group"] is False, "模型没有表情包，整组滑块却显示了"
-    assert v["watermark"] is True, "模型带水印，勾选框却没显示"
-
-
-def test_widgets_visibility_for_full_model(qapp, isolated_store):
-    """全功能模型 → 对应控件全部出现。"""
-    from app.animation.pet_renderer import ModelCapabilities
-
-    caps = ModelCapabilities(has_emotion_group=True, has_hairstyle_group=True,
-                              has_toggle_groups=True, toggle_group_count=3,
-                              has_random_expressions=True, has_stickers=True,
-                              has_watermark=True, has_actions=True)
-    v = _visible_widgets(qapp, caps)
-    assert v["random_exp"] is True
-    assert v["sticker"] is True
-    assert v["sticker_group"] is True
-    assert v["watermark"] is True
-
-
-def test_lock_first_idle_only_for_sprite(qapp, isolated_store):
-    """锁第一张 idle 只对 sprite 有意义 —— Live2D 不该显示。"""
+def test_appearance_reports_groups_for_live2d():
+    """Live2D：控制台要能拿到分类外观。"""
     from app.animation.pet_renderer import ModelCapabilities
 
     caps = ModelCapabilities(has_emotion_group=True, has_watermark=True)
-    assert _visible_widgets(qapp, caps, rtype="live2d")["lock_first_idle"] is False
-    assert _visible_widgets(qapp, caps, rtype="sprite")["lock_first_idle"] is True
+    out = _appearance(caps, rtype="live2d")
+    assert out["available"] is True
+    assert out["groups"], "Live2D 没给出分类外观"
+    assert out["renderer"] == "live2d"
 
 
-def test_sprite_only_options_hidden_for_live2d(qapp, isolated_store):
-    """淡入淡出 / 帧率预设 / 帧时长细调都只对 sprite 有效。"""
+def test_appearance_not_available_for_sprite():
+    """sprite 没有分类外观 —— 控制台该说清楚，而不是给个空列表。"""
     from app.animation.pet_renderer import ModelCapabilities
 
-    caps = ModelCapabilities(has_emotion_group=True, has_watermark=True)
-    live = _visible_widgets(qapp, caps, rtype="live2d")
-    assert live["crossfade"] is False, "Live2D 下还在显示淡入淡出（点了没反应）"
-    assert live["fps_presets"] is False, "Live2D 下还在显示帧率预设"
-    assert live["frame_ms"] is False, "Live2D 下还在显示帧时长细调"
-    sp = _visible_widgets(qapp, caps, rtype="sprite")
-    assert sp["crossfade"] is True
-    assert sp["fps_presets"] is True
-    assert sp["frame_ms"] is True
+    caps = ModelCapabilities()
+    out = _appearance(caps, rtype="sprite")
+    assert out["available"] is False
+    assert out["groups"] == []
+    assert out["renderer"] == "sprite"

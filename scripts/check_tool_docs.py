@@ -142,7 +142,7 @@ ALLOWLIST: dict[str, dict[str, str]] = {
 # 幽灵工具名 -> 已知还在引用它们的位置（只报告，不阻断）
 PHANTOM_REFS: dict[str, tuple[str, ...]] = {
     "send_email": ("app/engine/tools/_risk.py", "app/brain/hallucination_guard.py",
-                   "app/ui/settings_window.py", "app/engine/tools/_subagent.py"),
+                   "app/engine/tools/_subagent.py"),
     "shutdown_computer": ("app/brain/agent.py", "app/brain/hallucination_guard.py",
                           "app/ui/chat_window/utils.py"),
 }

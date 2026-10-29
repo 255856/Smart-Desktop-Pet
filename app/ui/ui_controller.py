@@ -8,7 +8,6 @@ from pathlib import Path
 from app.core.qt_compat import QObject, QTimer, Qt, Signal
 from .chat_window import ChatWindow
 from app.ui.pet_window import PetWindow
-from .settings_window import SettingsWindow
 from app.engine.state_manager import StateManager
 from app.engine.state import is_night
 from app.core.tray import TrayController
@@ -62,36 +61,11 @@ class UIController(QObject):
         self._port_waiter = None
         self._last_food_warn = 0.0
 
-        _sticker_on = True
-        _pet = getattr(self, "pet", None)
-        if _pet is not None and hasattr(_pet, "is_random_stickers_enabled"):
-            try:
-                _sticker_on = _pet.is_random_stickers_enabled()
-            except Exception:  # noqa: BLE001
-                _sticker_on = True
-        # Live2D 参数初始值：模型/渲染器默认 ← settings.json 已存值覆盖
-        from app.core.settings_store import SettingsStore as _Store
-        _store0 = _Store()
-        if _pet is not None and hasattr(_pet, "get_sticker_options"):
-            _st = _pet.get_sticker_options()
-        else:
-            _st = {"size": 120, "rotation": 45, "min_s": 40,
-                   "max_s": 120, "duration_s": 4}
-        for _k, _skey in (("size", "sticker_size"), ("rotation", "sticker_rotation"),
-                          ("min_s", "sticker_min_s"), ("max_s", "sticker_max_s"),
-                          ("duration_s", "sticker_duration_s")):
-            _v = _store0.get(_skey, None)
-            if _v is not None:
-                _st[_k] = int(_v)
-        _r0 = getattr(_pet, "renderer", None)
-        _ri_min = int(_store0.get("random_min_s", 20))
-        _ri_max = int(_store0.get("random_max_s", 50))
-        _mf = int(_store0.get("max_fps",
-                              getattr(_r0, "max_fps", 30) if _r0 else 30))
-        _renderer_cfg = getattr(self.cfg.pet, "renderer", "sprite")
-        _hw_cfg = bool(getattr(self.cfg.pet.live2d, "hide_watermark", True))
-        # 启动时用 settings.json 里的 activitywatch 值覆盖 cfg（必须在 SettingsWindow 之前）
-        _store_pre = None
+        # 设置中枢：读写 settings.json + 把改动应用到运行中的桌宠。
+        # 控制台（浏览器）改设置走它 —— 主程序开本地控制端口接请求。
+        from app.core.pet_settings import SettingsService
+        from app.core.settings_store import SettingsStore as _SS
+        # 启动时用 settings.json 里的 activitywatch 值覆盖 cfg
         try:
             from app.core.settings_store import SettingsStore
             _store_pre = SettingsStore()
@@ -105,50 +79,12 @@ class UIController(QObject):
                             _cast(_store_pre.get(_key)))
         except Exception:
             log.exception("apply stored aw cfg")
-        self.settings_window = SettingsWindow(
-            char_cfg=self.cfg.character,
-            renderer=getattr(_pet, "renderer", None),
-            sticker_enabled=_sticker_on,
-            always_on_top=bool(getattr(self.cfg.window, "always_on_top", True)),
-            live2d_state={
-                "sticker": _st,
-                "random_interval": (_ri_min, _ri_max),
-                "max_fps": _mf,
-                "tts": {
-                    "engine": _store0.get("tts_engine", getattr(self.cfg.character, "tts_engine", "edge")),
-                    "minimax_voice_id": _store0.get("minimax_voice_id", getattr(self.cfg.character, "minimax_voice_id", "")),
-                    "gptsovits_url": _store0.get("gptsovits_url", getattr(self.cfg.character, "gptsovits_url", "http://127.0.0.1:9880")),
-                    "ref_audio": _store0.get("gptsovits_ref_audio", getattr(self.cfg.character, "gptsovits_ref_audio", "")),
-                    "prompt_text": _store0.get("gptsovits_prompt_text", getattr(self.cfg.character, "gptsovits_prompt_text", "")),
-                },
-                "proactive": {
-                    "enabled": _store0.get("proactive_enabled", getattr(self.cfg.brain, "proactive_enabled", True)),
-                    "min_minutes": _store0.get("proactive_min_minutes", getattr(self.cfg.brain, "proactive_min_minutes", 25)),
-                    "max_minutes": _store0.get("proactive_max_minutes", getattr(self.cfg.brain, "proactive_max_minutes", 45)),
-                },
-                # 渲染器以 config.yaml 为准（main.py 启动时就是 yaml 优先），
-                # 这里必须显示真实生效值 —— 之前读 store 会让面板显示用户选的、
-                # 实际跑另一个，勾了等于没勾。
-                "renderer": _renderer_cfg,
-                "hide_watermark": _store0.get("hide_watermark", _hw_cfg),
-            },
-        )
-        # 启动时把 cfg.activitywatch 灌进 settings_window
-        try:
-            self.settings_window.set_aw_config(getattr(self.cfg, "activitywatch", None))
-        except Exception:
-            log.exception("init aw settings ui")
-        self.settings_window.attach_state(self.state)
+        self.settings_store = _SS()
+        self.settings = SettingsService(self.settings_store, cfg=self.cfg,
+                                        project_root=root)
+        self.settings.apply_hook = self._apply_settings_changed
         self.pet.food_money_fn = lambda: self.state.money
         self.pet.pet_name_fn = lambda: self.cfg.character.name
-
-        # 开发者模式信号接线
-        self.settings_window.developer_mode_changed.connect(
-            self._on_developer_mode_changed
-        )
-        self.settings_window.dev_state_pushed.connect(
-            self._on_dev_state_pushed
-        )
 
         # 真实升级(EXP 累积)回调:气泡祝贺 + 解锁提示
         # dev mode 拖 slider 走的路径不触发这里,只有真实升级才祝贺
@@ -184,49 +120,77 @@ class UIController(QObject):
         self._setup_lipsync()
         # 启动时应用 settings.json 里保存的窗口类设置（缩放/透明度/置顶/随机开关）
         self._apply_stored_window_settings()
+        # 控制服务：控制台（浏览器）改设置走它
+        self._start_control_server()
         # 闲置 30 分钟 / 深夜时段的 Live2D 场景
         self._setup_env_scenes()
         # 语音唤醒在 chat_window 创建后再启动（见 _show_chat_window）
 
+    #  控制服务
+    def _start_control_server(self) -> None:
+        """开本地控制端口：控制台改设置 / 驱动桌宠动作都走它。
+
+        HTTP 线程不能直接碰 Qt 控件（会崩）—— 所有 handler 都经
+        ``_main_call`` 投递回主线程执行。
+        """
+        try:
+            from app.core.pet_control import PetControlServer
+            from app.core.main_thread import MainThreadInvoker
+            self._main_invoker = MainThreadInvoker(self)
+            self.control_server = PetControlServer(
+                get_settings=lambda: self._main_call(self.settings.values),
+                get_schema=lambda: self._main_call(self.settings.schema),
+                update_settings=self._update_settings,
+                get_appearance=lambda: self._main_call(self._control_appearance),
+                list_avatars=lambda: self._main_call(self._control_avatars),
+                do_action=lambda action, params: self._main_call(
+                    self._control_action, action, params),
+            )
+            self.control_server.start()
+        except Exception:  # noqa: BLE001
+            log.exception("桌宠控制服务启动失败")
+
+    def _update_settings(self, changes: dict) -> dict:
+        """改设置：落盘在当前线程，应用回主线程（碰 Qt 的活儿）。"""
+        prepared = self.settings.prepare(changes)
+        if not prepared["accepted"]:
+            return {"ok": prepared["ok"], "applied": [],
+                    "rejected": prepared["rejected"],
+                    "skipped": prepared["skipped"], "restart": []}
+        try:
+            self._main_call(self.settings.apply, prepared["accepted"])
+        except Exception as e:  # noqa: BLE001
+            log.exception("应用设置失败")
+            return {"ok": False, "applied": [], "rejected": prepared["rejected"],
+                    "skipped": prepared["skipped"], "restart": [],
+                    "error": str(e)}
+        return {"ok": True,
+                "applied": sorted(prepared["accepted"].keys()),
+                "rejected": prepared["rejected"],
+                "skipped": prepared["skipped"],
+                "restart": prepared["restart"]}
+
+    def _main_call(self, fn, *args, **kwargs):
+        """把调用丢回主线程执行（Qt 控件只能主线程碰）。"""
+        invoker = getattr(self, "_main_invoker", None)
+        if invoker is None:
+            return fn(*args, **kwargs)
+        return invoker.call(lambda: fn(*args, **kwargs))
+
+    @property
+    def control_url(self) -> str:
+        """控制服务地址（控制台连它）。"""
+        srv = getattr(self, "control_server", None)
+        return srv.url() if srv is not None else ""
+
     #  信号连接
     def _wire_all_signals(self) -> None:
-        sw = self.settings_window
-        sw.settings_changed.connect(self._apply_visual_settings_with_rescale)
-        sw.persist_frames_requested.connect(self._do_retune_frames)
-        sw.retune_frames_requested.connect(self._do_retune_frames)
-        sw.override_frame_ms_requested.connect(self._override_frame_ms_now)
-        sw.fps_monitor_toggled.connect(self._on_fps_monitor_toggled)
-        sw.developer_mode_changed.connect(self._on_developer_mode_changed)
-        sw.lock_first_idle_changed.connect(self.pet.animator.set_lock_first_idle)
-        sw.crossfade_changed.connect(self._on_crossfade_changed)
-        sw.preview_voice_requested.connect(self._on_preview_voice_requested)
-        sw.bot_avatar_changed.connect(self._on_bot_avatar_changed)
-        sw.reset_to_defaults_requested.connect(self._reset_to_default_settings)
-        sw.model_config_changed.connect(self._on_model_config_changed)
-        sw.voice_changed.connect(self._on_voice_changed)
-        if hasattr(sw, "live2d_item_activated"):
-            sw.live2d_item_activated.connect(self._on_live2d_item_activated)
-            sw.live2d_reset_requested.connect(self._on_live2d_reset)
-            sw.random_exp_changed.connect(self._on_random_exp_changed)
-            sw.random_sticker_changed.connect(self._on_random_sticker_changed)
-        sw.sticker_options_changed.connect(self._on_sticker_options_changed)
-        sw.random_interval_changed.connect(self._on_random_interval_changed)
-        sw.max_fps_changed.connect(self._on_max_fps_changed)
-        sw.tts_config_changed.connect(self._on_tts_config_changed)
-        sw.proactive_changed.connect(self._on_proactive_changed)
-        sw.aw_config_changed.connect(self._on_aw_config_changed)
-        sw.renderer_changed.connect(self._on_renderer_changed)
-        sw.hide_watermark_changed.connect(self._on_hide_watermark_changed)
-        # v30: character_changed 已删 (人设改读 yaml, 不在设置面板改)
-        sw.always_on_top_changed.connect(self._on_always_on_top_changed)
-        sw.save_settings_requested.connect(self._on_save_settings)
-
         self.pet.quit_requested.connect(self._quit)
         self.tray.act_quit.triggered.connect(self._quit)
         self.tray.act_hide.triggered.connect(self.pet.hide)
         self.tray.act_show.triggered.connect(self.pet.show)
         self.tray.act_chat.triggered.connect(self._show_chat_window)
-        self.tray.act_settings.triggered.connect(self._show_settings)
+        self.tray.act_console.triggered.connect(self._open_dashboard)
         self.tray.act_demo.triggered.connect(self._open_demo)
         self.tray.act_trace.triggered.connect(self._open_trace)
         self.tray.act_memory.triggered.connect(self._show_memory_popup)
@@ -294,13 +258,9 @@ class UIController(QObject):
         self._fire_alarm(text, kind=kind)
 
     def _on_developer_mode_changed(self, enabled: bool) -> None:
-        """开发者模式开关变化（slot 让 settings.signal 连通）。"""
+        """开发者模式开关变化。"""
         log.info("developer mode = %s", enabled)
-        try:
-            # 同步回 settings (开/关信号)
-            self.settings_window._set_developer_mode(enabled)
-        except Exception:  # noqa: BLE001
-            pass
+        self.developer_mode = bool(enabled)
 
     def _on_dev_state_pushed(self, snapshot: dict) -> None:
         """滑块改动发来 → 改 PetState + 同步 RiskyToolConfirm。
@@ -335,11 +295,6 @@ class UIController(QObject):
                 ctrl = getattr(lc, "_confirm_ctrl", None) if lc else None
                 if ctrl is not None:
                     ctrl.set_companion_state(self.state)
-            # 回灌 settings 自己显示
-            try:
-                self.settings_window._update_state_view(self.state)
-            except Exception:  # noqa: BLE001
-                pass
             # 触发 on_change 让 pet/Live2D 同步（走 _combined → mark_dirty）
             try:
                 if self.state.on_change:
@@ -395,11 +350,6 @@ class UIController(QObject):
                     self.tts.speak(msg)
             except Exception:  # noqa: BLE001
                 log.debug("祝贺 TTS 播报失败(非致命)", exc_info=True)
-            # 刷设置面板状态 tab
-            try:
-                self.settings_window._update_state_view(self.state)
-            except Exception:  # noqa: BLE001
-                pass
             log.info("桌宠升级至 Lv.%d,已发祝贺", new_level)
         except Exception as e:  # noqa: BLE001
             log.warning("_on_pet_level_up 失败: %s", e)
@@ -834,21 +784,25 @@ class UIController(QObject):
         self.pet.animator.set_idle()
 
     #  视觉设置
+    def _setting(self, key, default=None):
+        """读一个设置项的当前值。"""
+        val = self.settings_store.get(key, None)
+        return default if val is None else val
+
     def _apply_visual_settings(self) -> None:
         """应用视觉设置（缩放、透明度、行为节拍）。"""
-        sw = self.settings_window
         # scale：实时 resize 桌宠窗（sprite 重缩放帧图 / live2d 重 fit 模型）
-        new_scale = sw.get_scale()
+        new_scale = float(self._setting("scale", self.pet._scale))
         if abs(new_scale - self.pet._scale) > 0.001:
             self.pet.apply_display_size(new_scale)
         # 透明度：70% - 100% → setWindowOpacity
-        op = sw.get_opacity()
+        op = float(self._setting("opacity", 1.0))
         self.pet.setWindowOpacity(op)
         # 行为：motion 节拍
         self.motion.apply_settings(
-            idle_seconds=sw.get_idle_seconds(),
-            walk_seconds=sw.get_walk_seconds(),
-            decide_seconds=sw.get_decide_seconds(),
+            idle_seconds=int(self._setting("motion_idle_s", 45)),
+            walk_seconds=int(self._setting("motion_walk_s", 10)),
+            decide_seconds=int(self._setting("motion_decide_s", 30)),
         )
 
     def _is_sprite(self) -> bool:
@@ -901,27 +855,17 @@ class UIController(QObject):
         self.pet._start_frame_timer()
 
     def _on_pet_scale_changed(self, new_scale: float) -> None:
-        """桌宠缩放变化 → 持久化 + 同步设置面板。
+        """桌宠缩放变化 → 持久化。
 
-        缩放来源：设置面板的滑块 / 预设按钮（主入口）。
+        缩放来源：控制台的缩放设置。
         窗口尺寸调整已由 PetWindow.apply_display_size 完成（先 resize 再 emit，
         所以此处 pet._scale 通常已是新值，不能用「_scale 是否变化」早退）。
-        这里负责：sprite 帧重缩放、写 settings.json、同步滑块/标签/预设高亮。
         """
         new_scale = round(float(new_scale), 2)
         if abs(self.pet._scale - new_scale) > 0.001:
             self.pet.apply_display_size(new_scale)
         self._rescale_sprite_pixmaps()
-        sw = self.settings_window
-        # 与设置面板滑块拖动用同一个键，重启后保持
-        sw.settings_store.set("scale", float(new_scale))
-        val = int(round(new_scale * 100))
-        if sw.scale_slider.value() != val:
-            sw.scale_slider.blockSignals(True)
-            sw.scale_slider.setValue(val)
-            sw.scale_label.setText(f"{new_scale:.2f}x")
-            sw.scale_slider.blockSignals(False)
-            sw._highlight_scale_preset(new_scale)
+        self.settings_store.set("scale", float(new_scale))
 
     def _on_preview_voice_requested(self, text: str) -> None:
         """试听：用**当前引擎的真实 TTS 实例**播。
@@ -930,9 +874,8 @@ class UIController(QObject):
         听到的压根不是你配的音色。
         """
         tts = getattr(self, "tts", None)
-        sw = self.settings_window
         if tts is None:
-            sw._set_status("试听失败：语音引擎还没初始化")
+            log.warning("试听失败：语音引擎还没初始化")
             return
         # speak() 在关闭状态下会直接丢弃 —— 试听时临时打开一下
         was_on = bool(getattr(tts, "enabled", False))
@@ -942,12 +885,10 @@ class UIController(QObject):
             tts.speak(text)
         except Exception as e:  # noqa: BLE001
             log.warning("试听失败: %s", e)
-            sw._set_status(f"试听失败：{e}")
             return
         finally:
             if not was_on:
                 tts.set_enabled(False)
-        sw._set_status("正在试听…")
 
     def _on_crossfade_changed(self, enabled: bool, ms: int) -> None:
         """淡入淡出设置变化。"""
@@ -961,17 +902,11 @@ class UIController(QObject):
             return  # sprite 专属
         self.pet.atlas.override_frame_duration_ms(ms)
         self.pet._start_frame_timer()
-        # 同步 settings_window UI
-        try:
-            self.settings_window.set_frame_ms_ui(ms)
-        except Exception:  # noqa: BLE001
-            pass
         fps = 1000.0 / ms if ms > 0 else 0
-        self.settings_window._set_status(
-            f"帧时长已切换：{ms} ms / 帧（{fps:.1f} fps）")
+        log.info("帧时长已切换：%s ms / 帧（%s fps）", ms, round(fps, 1))
 
     def _on_fps_monitor_toggled(self, on: bool) -> None:
-        """FPS 气泡调试开关：两边保持一致。"""
+        """FPS 气泡调试开关。"""
         self.pet._fps_enabled = bool(on)
         if on:
             self.pet._fps_count = 0
@@ -979,16 +914,11 @@ class UIController(QObject):
             self.pet.show_bubble("FPS 监测开启", duration_ms=2000)
         else:
             self.pet.show_bubble("FPS 监测关闭", duration_ms=1500)
-        # 同步 settings_window 复选框
-        try:
-            self.settings_window.set_fps_monitor(on)
-        except Exception:  # noqa: BLE001
-            pass
 
     def _on_bot_avatar_changed(self, path: str) -> None:
         """桌宠头像换好：写 cfg.character.bot_avatar_path + 让 chat 刷新头像。
 
-        settings_window 弹窗选完只发个信号过来, 这俩写回主配置 + 通知
+        控制台选完头像传过来, 这俩写回主配置 + 通知
         已开的聊天窗重置头像缓存 / chat 气泡头像（下次新消息用）。
         """
         try:
@@ -1004,29 +934,21 @@ class UIController(QObject):
         log.info("桌宠头像已更新：%s", path)
 
     def _on_developer_mode_changed(self, enabled: bool) -> None:
-        """开发者模式开关：记下状态供 dashboard / chat_window 查询。
-
-        之前这个 signal 声明了但没人连、也没人 emit —— 是死信号。
-        现在面板在 _set_developer_mode 里真发出来了，主程序能跟上。
-        """
+        """开发者模式开关：记下状态供 dashboard / chat_window 查询。"""
         self.developer_mode = bool(enabled)
         log.info("开发者模式: %s", "开" if enabled else "关")
 
-    def _reset_to_default_settings(self) -> None:
-        """重置所有设置为默认值。
-
-        走 settings_window.reset_to_defaults() —— 它除了重置 UI，
-        还会把默认值真正写进 settings.json 并落到 cfg.llm。
-        之前只调 _load_defaults（纯 UI），重启又被旧值盖回来。
-        """
-        self.settings_window.reset_to_defaults()
+    def _reset_to_default_settings(self) -> dict:
+        """重置所有设置为默认值（写进 settings.json 并立即应用）。"""
+        result = self.settings.reset_defaults()
         self._apply_visual_settings_with_rescale()
         self.pet.animator.set_lock_first_idle(False)
         if self._is_sprite():
             self.pet.player.set_crossfade_ms(0)
             self._override_frame_ms_now(50)
         self.pet._fps_enabled = False
-        self.settings_window._set_status("已重置默认值（含 settings.json 与模型配置）")
+        log.info("已重置默认值")
+        return result
 
     #  帧持久化
     def _do_retune_frames(self, ms: int) -> None:
@@ -1037,7 +959,7 @@ class UIController(QObject):
         跑完再回主线程刷新 atlas / 改状态。
         """
         if not self._is_sprite():
-            self.settings_window._set_status("帧时长仅 sprite 模式可用（Live2D 无帧图）")
+            log.info("帧时长仅 sprite 模式可用（Live2D 无帧图）")
             return
         from pathlib import Path as _P
         from app.core.qt_compat import QThread
@@ -1060,7 +982,7 @@ class UIController(QObject):
                 except Exception as e:  # noqa: BLE001
                     self.finished_ok.emit(-1, "", repr(e))
 
-        self.settings_window._set_status("正在重命名帧文件…")
+        log.info("正在重命名帧文件…")
         cmd = ["python", str(script), "--retune-ms", str(ms)]
         worker = _RetuneWorker(cmd)
         worker.finished_ok.connect(
@@ -1080,13 +1002,12 @@ class UIController(QObject):
             # 让新 duration 立即生效
             self.pet._start_frame_timer()
             if code == 0:
-                self.settings_window._set_status(
-                    f"已 retune 到 {ms} ms（{1000/ms:.1f} fps），atlas 已重新加载")
+                log.info("已 retune 到 %s ms（%s fps），atlas 已重新加载",
+                         ms, round(1000 / ms, 1))
             else:
-                self.settings_window._set_status(f"retune 失败（退出码 {code}）：{err[:200]}")
+                log.warning("retune 失败（退出码 %s）：%s", code, err[:200])
         except Exception as e:  # noqa: BLE001
             log.error("retune 失败：%s", e)
-            self.settings_window._set_status(f"retune 失败：{e}")
 
     #  聊天窗口
     def _show_chat_window(self) -> None:
@@ -1147,15 +1068,27 @@ class UIController(QObject):
         if cw is not None:
             cw._quick_send(text)
 
-    #  设置窗口
+    #  控制台
     def _show_settings(self) -> None:
-        """打开设置窗口。"""
-        sw = self.settings_window
-        if sw.windowState() & Qt.WindowState.WindowMinimized:
-            sw.setWindowState(sw.windowState() & ~Qt.WindowState.WindowMinimized)
-        sw.show()
-        sw.raise_()
-        sw.activateWindow()
+        """打开控制台（设置搬进浏览器控制台了，这里直接开页面）。"""
+        self._open_dashboard()
+
+    def _open_dashboard(self) -> None:
+        """在浏览器打开开发者控制台（设置都在里面）。"""
+        app = self._find_app()
+        if app is not None and hasattr(app, "open_dashboard"):
+            try:
+                app.open_dashboard()
+                return
+            except Exception:  # noqa: BLE001
+                log.debug("app.open_dashboard 失败", exc_info=True)
+        from app.main import (start_dashboard_subprocess, wait_dashboard_ready,
+                               TRACE_PORT)
+        from pathlib import Path as _P
+        pid = start_dashboard_subprocess(_P(self.root), port=TRACE_PORT)
+        if pid is not None and wait_dashboard_ready(port=TRACE_PORT, timeout=8.0):
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{TRACE_PORT}")
 
     def _wait_port_async(self, port: int, timeout: float, slot) -> None:
         """在 worker 线程里等端口就绪。
@@ -1285,49 +1218,55 @@ class UIController(QObject):
             self.tts.set_enabled(False)
             log.info("TTS 已关闭")
 
-    #  Live2D 专属（设置窗口「Live2D」Tab）
+    #  Live2D 专属（控制台「Live2D 外观」区）
     def _live2d_renderer(self):
+        """当前是不是 Live2D 渲染器（sprite 没有分类外观）。"""
         r = getattr(self.pet, "renderer", None)
-        return r if r is not None and hasattr(r, "activate_menu_item") else None
+        if r is None or not hasattr(r, "activate_menu_item"):
+            return None
+        try:
+            if r.get_renderer_type() != "live2d":
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        return r
 
     def _on_live2d_item_activated(self, group_id: str, item_id: str) -> None:
-        """Live2D Tab：应用一个分类条目（特殊/发型/配件/手势/表情）。"""
+        """Live2D：应用一个分类条目（特殊/发型/配件/手势/表情）。"""
         r = self._live2d_renderer()
         if r is not None:
             r.activate_menu_item(group_id, item_id)
-            self.settings_window._set_status(f"Live2D 外观已切换：{item_id}")
+            log.info("Live2D 外观已切换：%s", item_id)
 
     def _on_live2d_reset(self) -> None:
-        """Live2D Tab：复位全部外观。"""
+        """Live2D：复位全部外观。"""
         r = self._live2d_renderer()
         if r is not None:
             r.reset_all_appearance()
-            self.settings_window._set_status("Live2D 外观已全部复位")
+            log.info("Live2D 外观已全部复位")
 
     def _on_random_exp_changed(self, enabled: bool) -> None:
-        """Live2D Tab：挂机随机表情开关。"""
+        """Live2D：挂机随机表情开关。"""
         r = self._live2d_renderer()
         if r is not None:
             r.set_random_expressions(bool(enabled))
-            self.settings_window.settings_store.set(
-                "random_exp_enabled", bool(enabled))
+            self.settings_store.set("random_exp_enabled", bool(enabled))
             log.info("挂机随机表情：%s", "开" if enabled else "关")
 
     def _on_random_sticker_changed(self, enabled: bool) -> None:
-        """Live2D Tab：随机表情包贴纸开关。"""
+        """Live2D：随机表情包贴纸开关。"""
         fn = getattr(self.pet, "set_random_stickers", None)
         if callable(fn):
             fn(bool(enabled))
-            self.settings_window.settings_store.set(
-                "random_sticker_enabled", bool(enabled))
+            self.settings_store.set("random_sticker_enabled", bool(enabled))
             log.info("随机表情包贴纸：%s", "开" if enabled else "关")
 
     def _on_sticker_options_changed(self, opts: dict) -> None:
-        """Live2D Tab：贴纸参数（大小/角度/间隔/时长），即时生效并持久化。"""
+        """Live2D：贴纸参数（大小/角度/间隔/时长），即时生效并持久化。"""
         fn = getattr(self.pet, "set_sticker_options", None)
         if callable(fn):
             fn(**opts)
-            store = self.settings_window.settings_store
+            store = self.settings_store
             for key, skey in (("size", "sticker_size"), ("rotation", "sticker_rotation"),
                               ("min_s", "sticker_min_s"), ("max_s", "sticker_max_s"),
                               ("duration_s", "sticker_duration_s")):
@@ -1335,24 +1274,24 @@ class UIController(QObject):
                     store.set(skey, int(opts[key]))
 
     def _on_random_interval_changed(self, lo: int, hi: int) -> None:
-        """Live2D Tab：挂机随机间隔。"""
+        """Live2D：挂机随机间隔。"""
         r = self._live2d_renderer()
         if r is not None and hasattr(r, "set_random_interval"):
             r.set_random_interval(int(lo), int(hi))
-            store = self.settings_window.settings_store
+            store = self.settings_store
             store.set("random_min_s", int(lo))
             store.set("random_max_s", int(hi))
 
     def _on_max_fps_changed(self, fps: int) -> None:
-        """Live2D Tab：渲染帧率上限。"""
+        """Live2D：渲染帧率上限。"""
         r = self._live2d_renderer()
         if r is not None and hasattr(r, "set_max_fps"):
             r.set_max_fps(int(fps))
-            self.settings_window.settings_store.set("max_fps", int(fps))
+            self.settings_store.set("max_fps", int(fps))
 
     def _on_tts_config_changed(self, cfgd: dict) -> None:
         """TTS 引擎与参数：持久化 + 后台线程重建引擎（热切换）。"""
-        store = self.settings_window.settings_store
+        store = self.settings_store
         keymap = {"tts_enabled": "tts_enabled", "engine": "tts_engine",
                   "minimax_voice_id": "minimax_voice_id",
                   "gptsovits_url": "gptsovits_url",
@@ -1374,7 +1313,7 @@ class UIController(QObject):
         import threading
         threading.Thread(target=self._rebuild_tts_blocking, daemon=True,
                          name="tts-rebuild").start()
-        self.settings_window._set_status("语音引擎配置已保存，正在切换…")
+        log.info("语音引擎配置已保存，正在切换…")
 
     def _rebuild_tts_blocking(self) -> None:
         """按 cfg 重建 TTS 引擎（后台线程；minimax 首次克隆可能耗时）。"""
@@ -1391,8 +1330,8 @@ class UIController(QObject):
             log.exception("TTS 引擎重建失败，保留原引擎")
 
     def _on_proactive_changed(self, cfgd: dict) -> None:
-        """控制 Tab：主动关心开关与间隔。"""
-        store = self.settings_window.settings_store
+        """主动关心开关与间隔。"""
+        store = self.settings_store
         store.set("proactive_enabled", bool(cfgd.get("enabled", True)))
         store.set("proactive_min_minutes", int(cfgd.get("min_minutes", 25)))
         store.set("proactive_max_minutes", int(cfgd.get("max_minutes", 45)))
@@ -1415,11 +1354,11 @@ class UIController(QObject):
             elif not enabled and hasattr(p, "stop"):
                 p.stop()
         else:
-            self.settings_window._set_status("主动关心将在重启后生效（当前未启用）")
+            log.info("主动关心将在重启后生效（当前未启用）")
         log.info("主动关心：%s", cfgd)
 
     def _on_aw_config_changed(self, cfgd: dict) -> None:
-        """v24: 活动感知 Tab — 主人改了 enabled / server URL / 回看 / 数量, 立刻
+        """活动感知：主人改了 enabled / server URL / 回看 / 数量, 立刻
         同步给 ProactiveBrain.apply_aw_config (下次 _fire 就生效)。也持久化
         到 settings_store + config.yaml (跟 chat_overrides 一样, 不重写全 yaml)。
         """
@@ -1430,7 +1369,7 @@ class UIController(QObject):
 
         # 1) 持久化: settings_store + config.yaml
         try:
-            store = self.settings_window.settings_store
+            store = self.settings_store
             store.set("activitywatch_enabled", enabled)
             store.set("activitywatch_server_url", server_url)
             store.set("activitywatch_lookback", lookback)
@@ -1447,8 +1386,7 @@ class UIController(QObject):
         # 2) 推给 ProactiveBrain
         p = getattr(self.brain, "proactive", None)
         if p is None:
-            self.settings_window._set_status(
-                "主动关心未启用, AW 配置已存, 重启后生效")
+            log.info("主动关心未启用, AW 配置已存, 重启后生效")
             return
         # 构造一个轻量 cfg-like 对象给 proactive (避免新增模型类)
         from types import SimpleNamespace
@@ -1462,40 +1400,33 @@ class UIController(QObject):
             p.apply_aw_config(aw_cfg)
         else:
             p._aw_cfg = aw_cfg
-        self.settings_window._set_status(
-            "活动感知: " + ("启用" if enabled else "关闭") +
-            f" (回看 {lookback} 分钟, 最多 {max_events} 条)"
-        )
         log.info("aw cfg 更新: %s", cfgd)
 
     def _on_renderer_changed(self, renderer: str) -> None:
-        """视觉 Tab：渲染器切换（持久化，重启生效）。"""
-        self.settings_window.settings_store.set("renderer", str(renderer))
-        self.settings_window._set_status(f"渲染器已设为 {renderer}，重启桌宠后生效")
+        """渲染器切换（持久化，重启生效）。"""
+        self.settings_store.set("renderer", str(renderer))
+        log.info("渲染器已设为 %s，重启桌宠后生效", renderer)
 
     def _on_hide_watermark_changed(self, on: bool) -> None:
-        """Live2D Tab：隐藏水印开关（持久化，重启生效）。"""
-        self.settings_window.settings_store.set("hide_watermark", bool(on))
-        self.settings_window._set_status("水印设置已保存，重启桌宠后生效")
+        """隐藏水印开关（持久化，重启生效）。"""
+        self.settings_store.set("hide_watermark", bool(on))
+        log.info("水印设置已保存，重启桌宠后生效")
 
     # v30: _on_character_changed 已删 — 人设改读 characters/<file>.yaml,
     # 不在设置面板运行时改。重启用 load_config 读最新 yaml。
 
     def _on_always_on_top_changed(self, enabled: bool) -> None:
-        """视觉 Tab：窗口置顶开关（立即生效并持久化）。"""
+        """窗口置顶开关（立即生效并持久化）。"""
         fn = getattr(self.pet, "set_always_on_top", None)
         if callable(fn):
             fn(bool(enabled))
-        self.settings_window.settings_store.set("always_on_top", bool(enabled))
+        self.settings_store.set("always_on_top", bool(enabled))
         log.info("窗口置顶：%s", "开" if enabled else "关")
 
     def _on_save_settings(self) -> None:
-        """「保存设置」按钮：把当前配置快照写入 settings.json（重启后自动应用）。"""
-        sw = self.settings_window
-        store = sw.settings_store
+        """把运行中的实际值回写 settings.json（渲染器 / 贴纸这类由运行时决定）。"""
+        store = self.settings_store
         try:
-            # 面板自己知道每个控件对应哪个键 —— 快照交给它做，别在这儿手抄一遍
-            sw.snapshot_to_store()
             r = self._live2d_renderer()
             if r is not None:
                 store.set("random_exp_enabled",
@@ -1515,15 +1446,13 @@ class UIController(QObject):
                                   ("max_s", "sticker_max_s"),
                                   ("duration_s", "sticker_duration_s")):
                     store.set(skey, int(opts[key]))
-            sw._set_status("✓ 设置已保存，重启后自动生效")
             log.info("设置已手动保存")
         except Exception:  # noqa: BLE001
             log.exception("保存设置失败")
-            sw._set_status("✕ 保存失败，详见日志")
 
     def _apply_stored_window_settings(self) -> None:
         """启动时应用 settings.json 里保存的窗口类设置（保存按钮/自动保存写入）。"""
-        store = self.settings_window.settings_store
+        store = self.settings_store
         try:
             aot = store.get("always_on_top", None)
             if aot is not None:
@@ -1603,18 +1532,213 @@ class UIController(QObject):
             log.exception("启动应用已保存设置失败")
 
     def _init_model_config_ui(self) -> None:
-        """启动时把 cfg.llm 的值加载到设置面板 UI。"""
-        self.settings_window.set_model_config_ui({
-            "base_url": self.cfg.llm.base_url,
-            "api_key": self.cfg.llm.api_key,
-            "model": self.cfg.llm.model,
-            "temperature": self.cfg.llm.temperature,
-            "max_tokens": self.cfg.llm.max_tokens,
-            "timeout": self.cfg.llm.timeout,
-            "stream": self.cfg.llm.stream,
-            "voice": self.cfg.character.tts_voice,
-            "tts_enabled": self.cfg.character.tts_enabled,
+        """启动时把 cfg.llm 的值灌进设置中枢（控制台读的是这份）。"""
+        self.settings_store.set_many({
+            "model_base_url": self.cfg.llm.base_url,
+            "model_api_key": self.cfg.llm.api_key,
+            "model_name": self.cfg.llm.model,
+            "model_temperature": self.cfg.llm.temperature,
+            "model_max_tokens": self.cfg.llm.max_tokens,
+            "model_timeout": self.cfg.llm.timeout,
+            "model_stream": self.cfg.llm.stream,
         })
+
+    #  控制服务：把控制台改的设置应用到运行中的桌宠
+    def _apply_settings_changed(self, changes: dict) -> None:
+        """一批设置改完了 → 立即应用到桌宠。
+
+        设置中枢已经落盘了，这里只管「让桌宠真的变」。
+        """
+        changes = changes or {}
+        if not changes:
+            return
+
+        # -- 视觉 --------------------------------------------------------
+        if "scale" in changes:
+            self._on_pet_scale_changed(float(changes["scale"]))
+        if "opacity" in changes:
+            self.pet.setWindowOpacity(float(changes["opacity"]))
+        if "always_on_top" in changes:
+            self._on_always_on_top_changed(bool(changes["always_on_top"]))
+        if "crossfade_enabled" in changes or "crossfade_ms" in changes:
+            enabled = bool(self._setting(
+                "crossfade_enabled", True))
+            ms = int(self._setting("crossfade_ms", 200))
+            self._on_crossfade_changed(enabled, ms)
+        if "lock_first_idle" in changes:
+            setter = getattr(self.pet.animator, "set_lock_first_idle", None)
+            if callable(setter):
+                setter(bool(changes["lock_first_idle"]))
+
+        # -- 帧时长 ------------------------------------------------------
+        if "frame_ms" in changes:
+            self._override_frame_ms_now(int(changes["frame_ms"]))
+        if "fps_monitor" in changes:
+            self._on_fps_monitor_toggled(bool(changes["fps_monitor"]))
+        if "max_fps" in changes:
+            self._on_max_fps_changed(int(changes["max_fps"]))
+
+        # -- 行为 --------------------------------------------------------
+        if any(k in changes for k in ("motion_idle_s", "motion_walk_s",
+                                      "motion_decide_s")):
+            self.motion.apply_settings(
+                idle_seconds=int(self._setting("motion_idle_s", 45)),
+                walk_seconds=int(self._setting("motion_walk_s", 10)),
+                decide_seconds=int(self._setting("motion_decide_s", 30)),
+            )
+        if any(k in changes for k in ("proactive_enabled",
+                                      "proactive_min_minutes",
+                                      "proactive_max_minutes")):
+            self._on_proactive_changed({
+                "enabled": bool(self._setting("proactive_enabled", True)),
+                "min_minutes": int(self._setting("proactive_min_minutes", 25)),
+                "max_minutes": int(self._setting("proactive_max_minutes", 45)),
+            })
+        if any(k.startswith("activitywatch_") for k in changes):
+            self._on_aw_config_changed({
+                "enabled": bool(self._setting("activitywatch_enabled", False)),
+                "server_url": str(self._setting(
+                    "activitywatch_server_url", "http://127.0.0.1:5600")),
+                "proactive_lookback_minutes": int(
+                    self._setting("activitywatch_lookback", 30)),
+                "proactive_max_events": int(
+                    self._setting("activitywatch_max_events", 15)),
+            })
+        if "developer_mode" in changes:
+            self._on_developer_mode_changed(bool(changes["developer_mode"]))
+
+        # -- Live2D ------------------------------------------------------
+        if "random_exp_enabled" in changes:
+            self._on_random_exp_changed(bool(changes["random_exp_enabled"]))
+        if "random_sticker_enabled" in changes:
+            self._on_random_sticker_changed(bool(changes["random_sticker_enabled"]))
+        if any(k.startswith("sticker_") for k in changes):
+            self._on_sticker_options_changed({
+                "size": int(self._setting("sticker_size", 120)),
+                "rotation": int(self._setting("sticker_rotation", 45)),
+                "min_s": int(self._setting("sticker_min_s", 40)),
+                "max_s": int(self._setting("sticker_max_s", 120)),
+                "duration_s": int(self._setting("sticker_duration_s", 4)),
+            })
+        if "random_min_s" in changes or "random_max_s" in changes:
+            self._on_random_interval_changed(
+                int(self._setting("random_min_s", 20)),
+                int(self._setting("random_max_s", 50)))
+
+        # -- 语音 --------------------------------------------------------
+        if any(k.startswith("tts_") or k in ("current_voice", "minimax_voice_id",
+                                            "gptsovits_url",
+                                            "gptsovits_ref_audio",
+                                            "gptsovits_prompt_text")
+               for k in changes):
+            self._on_tts_config_changed({
+                "tts_enabled": bool(self._setting("tts_enabled", True)),
+                "engine": str(self._setting("tts_engine", "edge")),
+                "minimax_voice_id": str(self._setting("minimax_voice_id", "")),
+                "gptsovits_url": str(self._setting(
+                    "gptsovits_url", "http://127.0.0.1:9880")),
+                "ref_audio": str(self._setting("gptsovits_ref_audio", "")),
+                "prompt_text": str(self._setting("gptsovits_prompt_text", "")),
+                "current_voice": str(self._setting("current_voice", "")),
+            })
+        if "tts_voice" in changes:
+            self._on_voice_changed(str(changes["tts_voice"]))
+
+        # -- 模型 --------------------------------------------------------
+        if any(k.startswith("model_") for k in changes):
+            self._on_model_config_changed({
+                "base_url": str(self._setting("model_base_url", "")),
+                "api_key": str(self._setting("model_api_key", "")),
+                "model": str(self._setting("model_name", "")),
+                "temperature": float(self._setting("model_temperature", 0.8)),
+                "max_tokens": int(self._setting("model_max_tokens", 4096)),
+                "timeout": int(self._setting("model_timeout", 60)),
+                "stream": bool(self._setting("model_stream", True)),
+            })
+
+        # -- 渲染器 / 水印（重启生效，只落盘） -----------------------------
+        if "renderer" in changes:
+            self.settings_store.set("renderer", str(changes["renderer"]))
+        if "hide_watermark" in changes:
+            self.settings_store.set("hide_watermark", bool(changes["hide_watermark"]))
+
+    #  控制服务：运行时动作
+    def _control_action(self, action: str, params: dict) -> dict:
+        """控制台点的那些「一次性动作」。"""
+        action = str(action or "")
+        params = params or {}
+        if action == "live2d_activate":
+            group_id = str(params.get("group_id") or "")
+            item_id = str(params.get("item_id") or "")
+            r = self._live2d_renderer()
+            if r is None:
+                return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+            r.activate_menu_item(group_id, item_id)
+            return {"ok": True, "active": sorted(r.get_active_items())}
+        if action == "live2d_reset":
+            r = self._live2d_renderer()
+            if r is None:
+                return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+            r.reset_all_appearance()
+            return {"ok": True, "active": []}
+        if action == "preview_voice":
+            text = str(params.get("text") or "").strip()
+            if not text:
+                name = getattr(self.cfg.character, "name", "") or "桌宠"
+                text = f"你好呀，我是{name}，很高兴见到你。"
+            self._on_preview_voice_requested(text)
+            return {"ok": True, "text": text}
+        if action == "set_avatar":
+            path = str(params.get("path") or "")
+            if not path:
+                return {"ok": False, "error": "没给头像路径"}
+            self._on_bot_avatar_changed(path)
+            return {"ok": True, "path": path}
+        if action == "reset_defaults":
+            return self._reset_to_default_settings()
+        if action == "dev_state":
+            snapshot = params.get("snapshot")
+            if not isinstance(snapshot, dict):
+                return {"ok": False, "error": "没给状态快照"}
+            self._on_dev_state_pushed(snapshot)
+            return {"ok": True}
+        if action == "retune_frames":
+            try:
+                ms = int(params.get("ms") or 50)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "帧时长不是数字"}
+            self._do_retune_frames(ms)
+            return {"ok": True}
+        return {"ok": False, "error": "未知动作：%s" % action}
+
+    def _control_appearance(self) -> dict:
+        """Live2D 外观分类（控制台渲染成 chip 网格）。"""
+        r = self._live2d_renderer()
+        if r is None:
+            return {"available": False, "groups": [], "active": [],
+                    "renderer": "sprite"}
+        try:
+            groups = r.get_menu_groups()
+        except Exception:  # noqa: BLE001
+            groups = []
+        try:
+            active = sorted(r.get_active_items())
+        except Exception:  # noqa: BLE001
+            active = []
+        return {"available": True, "groups": groups, "active": active,
+                "renderer": "live2d"}
+
+    def _control_avatars(self) -> list:
+        """可选头像（预设 + 用户上传）。"""
+        out = []
+        root = Path(self.root) / "assets" / "avatars"
+        for folder, label in (("presets", "预设"), ("uploads", "上传")):
+            d = root / folder
+            if not d.is_dir():
+                continue
+            for p in sorted(d.glob("*.png")):
+                out.append({"path": str(p), "name": p.stem, "group": label})
+        return out
 
     #  退出
     def _on_about_to_quit(self) -> None:

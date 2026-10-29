@@ -128,7 +128,6 @@ def build_state_strategy(state) -> str:
 def _strategy_guidance(state) -> str:
     """[兼容别名] 旧私有名 → build_state_strategy。
 
-    app/ui/settings_window.py 的「策略预览」还在 import 这个名字；
     真正的实现只有 build_state_strategy 一处（Stage 1.5 把三份副本合并成一份）。
     """
     return build_state_strategy(state)

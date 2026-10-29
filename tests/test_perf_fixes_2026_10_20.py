@@ -67,26 +67,36 @@ class TestSettingsStoreBatch:
         assert data["a"] == 1 and data["b"] == 2
 
     def test_model_config_write_is_debounced(self, tmp_path, qapp):
-        """_on_model_config_changed 不应立刻落盘（要等去抖）。"""
+        """模型配置改动不该每次都整份重写 settings.json。
+
+        模型配置归 config.yaml 管（跟主配置在一起），settings.json 不碰它 ——
+        一次改动 = 一次 yaml 写盘，不是逐键 set()。
+        """
+        import yaml
         from app.core.settings_store import SettingsStore
-        from app.ui.settings_window import SettingsWindow
+        from app.core.pet_settings import SettingsService
         store = SettingsStore(tmp_path / "s.json")
-        sw = SettingsWindow(
-            parent=None, char_cfg=None, renderer=None,
-            sticker_enabled=False, always_on_top=False, live2d_state=None,
-        )
-        sw.settings_store = store
-        try:
-            sw.edt_api_key.setText("sk-test-1234")
-            sw._on_model_config_changed()
-            # 还没到去抖时间 → 不应写盘
-            assert store.get("model_api_key") is None, "去抖期间不应写盘"
-            # 手动 flush（模拟 300 ms 后触发 / 关窗口）
-            sw._flush_model_config()
-            assert store.get("model_api_key") == "sk-test-1234"
-        finally:
-            sw.close()
-            sw.deleteLater()
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.safe_dump({"llm": {"model": "old"}}),
+                       encoding="utf-8")
+        svc = SettingsService(store, project_root=tmp_path)
+        writes = []
+        original = store._save
+
+        def _counting_save():
+            writes.append(1)
+            original()
+
+        store._save = _counting_save
+        svc.update({
+            "model_base_url": "https://api.example.com/v1",
+            "model_api_key": "sk-test-1234",
+            "model_name": "demo-model",
+        })
+        assert not writes, "模型配置不该反复重写 settings.json"
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert data["llm"]["model"] == "demo-model"
+        assert data["llm"]["api_key"] == "sk-test-1234"
 
 
 # ============================================================

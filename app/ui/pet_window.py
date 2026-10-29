@@ -1529,9 +1529,10 @@ class PetWindow(QWidget):
         menu.addAction(a1)
         menu.addSeparator()
 
-        act_settings = QAction("设置面板", self)
-        act_settings.triggered.connect(self._emit_open_settings)
-        menu.addAction(act_settings)
+        act_console = QAction("控制台", self)
+        act_console.setToolTip("在浏览器打开控制台（设置 / 记忆 / 调试都在里面）")
+        act_console.triggered.connect(self._emit_open_settings)
+        menu.addAction(act_console)
 
         menu.addSeparator()
 

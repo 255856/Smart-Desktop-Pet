@@ -46,7 +46,7 @@ hidden = [
     # 添加 app 包的所有模块，确保子模块也能被打包
     "app.qt_compat", "app.config", "app.characters", "app.pet_window",
     "app.tray", "app.reminder", "app.save", "app.state", "app.motion",
-    "app.llm_client", "app.voice", "app.settings_window", "app.sprite_atlas",
+    "app.llm_client", "app.voice", "app.sprite_atlas",
     "app.animations", "app.asr", "app.chat_window", "app.character",
     "app.works", "app.pyinstaller-hooks.hook_preimport",
 ]
