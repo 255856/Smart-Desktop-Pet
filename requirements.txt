@@ -110,16 +110,26 @@ ddgs>=9.0.0
 #    is not yet supported in Transformers")。
 #    所以凡是 import transformers / sentence_transformers 的地方，**必须先**
 #    os.environ.setdefault("USE_TF", "0")。
-#    app/brain/vector_index.py 在模块导入时就设好了（项目本身从不 import transformers，
-#    所以在这里设是安全的）。
+#    memory_sidecar/store.py 在模块导入时就设好了（桌宠主进程本身从不 import
+#    transformers —— 模型只在 sidecar 里加载，所以在这里设是安全的）。
 #
 # 模型 id 与缓存位置（**模型不随仓库走**）：
 #   * 向量模型：BAAI/bge-small-zh-v1.5   （512 维，91.9 MB）
-#   * 重排模型：BAAI/bge-reranker-base    （cross-encoder，1081.8 MB）
+#   * 重排模型（cross-encoder，**两个 id，按设备自动选一个**）：
+#       - BAAI/bge-reranker-v2-m3  （约 2.27 GB）→ **有 CUDA 时用它**：
+#           GPU 上 16 对重排 41ms、语义用例分离度 2.7x
+#       - BAAI/bge-reranker-base   （约 1.08 GB）→ **没有 CUDA 时用它**：
+#           CPU 上 291ms；同一件事 v2-m3 在 CPU 要 1016ms（反而更慢），而且它
+#           GPU 209ms / 分离度只有 1.28x（几乎分不开）
+#     选择规则写在 memory_sidecar/store.py 的 resolve_rerank_model()：
+#       torch.cuda.is_available() → v2-m3，否则 → base；
+#       DESKTOP_PET_MEMORY_RERANK 一旦设了就听它的（自动选择只在没设时生效）。
+#     启动时会打一行日志说明「选了哪个、为什么」。
 #   * 缓存在 HuggingFace 默认缓存目录（Windows 上就是用户目录下的）：
 #       %USERPROFILE%/.cache/huggingface/hub
-#     里面的目录名是 models--BAAI--bge-small-zh-v1.5 / models--BAAI--bge-reranker-base。
-#   * **运行时默认不自己下载**（合计 1.15 GiB）：聊天路径上悄悄下模型会跟聊天抢
+#     里面的目录名是 models--BAAI--bge-small-zh-v1.5 /
+#     models--BAAI--bge-reranker-v2-m3 / models--BAAI--bge-reranker-base。
+#   * **运行时默认不自己下载**：聊天路径上悄悄下模型会跟聊天抢
 #     磁盘 / CPU / 带宽，主人的体感是「桌宠变笨了」而不是「模型在下载」。
 #     要开语义检索就**显式**跑一次（幂等，带进度和校验）：
 #         python scripts/prefetch_models.py          # 下载 + 校验
@@ -138,6 +148,22 @@ ddgs>=9.0.0
 sentence-transformers>=4.41,<6
 transformers>=4.41,<5
 chromadb>=1.0
+
+# ── 记忆 sidecar（memory_sidecar/）额外用到的两个包 ─────────────────────────
+# 这两个包**只影响检索质量，不影响能不能跑**（它们不在 torch 那条重链上，很轻）：
+#   * bm25s —— 关键词腿（BM25 稀疏索引）。
+#     **缺了 → 自动降级**：sidecar 只走向量检索，/health 里 bm25="degraded"，
+#     degraded=true；tests/test_memory_sidecar*.py 在 bm25s 缺失时整体 skip。
+#   * jieba  —— 中文分词（叠加在「字 + 字 bigram」之上，专名 / 短语命中更准）。
+#     **缺了 → 自动降级**：退化成零依赖的字 + 字 bigram 分词，中文照样能检索。
+bm25s>=0.3
+jieba>=0.42
+
+# ⚠️ 上面两行以前只写在注释里（本机装了、但没声明），现在补齐成真依赖：
+#    本地环境早就有（bm25s 0.3.16 / jieba 0.42），**没有引入任何新的第三方依赖**。
+#
+# ⚠️ memory_sidecar/store.py 一样必须在 import transformers 之前
+#    os.environ.setdefault("USE_TF", "0")（原因见上面「USE_TF=0」那段）。
 
 # ================= [开发 / CI] =================
 pytest>=8.0.0
