@@ -9,6 +9,17 @@
 * **写卡不等模型**（索引是派生的，所以没理由等）：upsert / delete / supersede 只写
   JSON（外加不碰模型的 BM25），向量索引交给「挂起队列」记账，下一次 search、
   预热结束、或显式 sync_index() 时补齐。冷启动时模型要加载十几秒，写卡不能被它拖住。
+* **检索也不等模型**：模型那一路（补向量索引 + 查向量 + 冷精排）有 0.8s 预算
+  （DESKTOP_PET_MEMORY_MODEL_BUDGET），跑不完就先拿词面结果回答 —— 挂起队列里的卡
+  会先用同一套分词做**词面兜底**进候选，所以「刚写完立刻搜」永远看得见那张卡；
+  模型追上来只让排序更准。聊天路径的读超时是 2s，预算必须明显小于它。
+* **相关度闸门**：够不着的问句一条都不给（见 _gate）—— 余弦门禁（绝对，
+  min_similarity）+ 补位行门槛（相对，min_score_ratio）+ 语义保命符
+  （dense_keep_ratio：复合问句的另外一半别被精排裁掉）。阈值都是量出来的，
+  曲线见 docs/memory-sidecar.md 4.1。
+* **运行时绝不联网下模型**：默认只读本地 HF 缓存（local_files_only=True），缺模型
+  立刻失败并把 prefetch 脚本指给主人；要放开就设
+  DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1。/health 的 models.* 会区分 missing / degraded。
 * 两条粗排腿（向量 / 关键词）各自独立降级，精排（cross-encoder）再独立降级：
   任何一条腿挂了 sidecar 都照常回答，只是 /health 会说自己降级了。
 * 模型**懒加载 + 串行化**：本机实测两个 transformers 模型并发加载会炸
@@ -59,6 +70,86 @@ COLLECTION_NAME = "desktop_pet_memory"
 
 EMBED_MODEL = os.environ.get("DESKTOP_PET_MEMORY_EMBED") or "BAAI/bge-small-zh-v1.5"
 
+# ── 模型下载策略：运行时**绝不偷偷下载** ──────────────────────────────────
+# 模型是 1.1GB 级的资产：悄悄去 HuggingFace 下 2GB 会抢磁盘 / 带宽，离线机器上
+# 还会长时间挂着；主人完全不知道发生了什么。所以默认**只读本地缓存**，
+# 缺模型就立刻失败并说清「跑哪条命令去备好」。
+# 确实想让 sidecar 自己备模型（和当年 app/brain/vector_index.py 同一个口径）：
+#     DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1
+ALLOW_DOWNLOAD_ENV = "DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD"
+#: 出错时指给主人的那条命令（prefetch 脚本不在 sidecar 的边界里，这里只做提示）
+PREFETCH_HINT = "先跑一次 python scripts/prefetch_models.py 把模型备好"
+
+
+def allow_runtime_download():
+    """运行时允许联网下载模型吗？默认**不允许**。"""
+    return str(os.environ.get(ALLOW_DOWNLOAD_ENV, "")).strip().lower() in (
+        "1", "on", "yes", "true")
+
+
+def hf_cache_dir():
+    """HuggingFace 缓存目录（**只算磁盘路径**，不导入 huggingface_hub）。
+
+    口径和 huggingface_hub 一致：HF_HUB_CACHE > HF_HOME/hub >
+    XDG_CACHE_HOME/huggingface/hub > ~/.cache/huggingface/hub。
+    自己算的理由：hub 的常量是**导入时**算的，导入之后再改 HF_HOME 就不生效了。
+    """
+    explicit = os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return Path(os.path.expandvars(os.path.expanduser(explicit)))
+    home = os.environ.get("HF_HOME")
+    if home:
+        return Path(os.path.expandvars(os.path.expanduser(home))) / "hub"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(os.path.expanduser(xdg)) if xdg else Path.home() / ".cache"
+    return base / "huggingface" / "hub"
+
+
+def model_in_cache(model_id):
+    """这个模型在本地缓存里吗？（**只查磁盘，绝不联网**）"""
+    model_id = str(model_id or "").strip()
+    if not model_id:
+        return False
+    if os.path.isdir(model_id):  # 直接给了本地路径
+        return True
+    root = hf_cache_dir() / ("models--" + model_id.replace("/", "--"))
+    snaps = root / "snapshots"
+    if not snaps.is_dir():
+        return False
+    try:
+        return any(p.is_dir() for p in snaps.iterdir())
+    except OSError:
+        return False
+
+
+class ModelUnavailable(RuntimeError):
+    """模型用不了。code="missing"（不在本地缓存）/ "failed"（加载出错）。
+
+    /health 靠这个区分「没下载」和「下载了但加载失败」—— 两种情况主人要做的事不一样。
+    """
+
+    def __init__(self, message, code="failed"):
+        super().__init__(message)
+        self.code = code
+
+
+def model_missing_error(role, model_id):
+    return ModelUnavailable(
+        "%s不在本地缓存：%s（运行时不会联网下载）。%s；"
+        "或者设 %s=1 允许 sidecar 自己下载。" % (
+            role, model_id, PREFETCH_HINT, ALLOW_DOWNLOAD_ENV),
+        code="missing",
+    )
+
+
+def model_failed_error(role, model_id, exc):
+    return ModelUnavailable(
+        "%s加载失败：%s：%s。%s（或 python scripts/prefetch_models.py --force 重新下载）。"
+        % (role, model_id, exc, PREFETCH_HINT),
+        code="failed",
+    )
+
+
 # ── 精排模型：按设备自动选（实测数据见 resolve_rerank_model 的注释） ────────
 RERANK_MODEL_ENV = "DESKTOP_PET_MEMORY_RERANK"
 RERANK_MODEL_GPU = "BAAI/bge-reranker-v2-m3"
@@ -82,6 +173,33 @@ DEFAULT_HALF_LIFE = 90
 MOOD_BONUS = 1.15
 RRF_K = 60
 CANDIDATE_N = 30
+
+# ── 检索的两个旋钮（构造函数 / 环境变量都能改） ────────────────────────────
+#: 「模型那一路」（补向量索引 + 查向量 + 冷精排）的时间预算（秒）。
+#: 聊天路径的读超时是 2s —— 预算必须明显小于它：跑不完就先拿词面结果回答，
+#: 索引/精排在后台补齐，下一次检索自然是热的。
+#: 0 = 不限时（老行为：检索会一直等模型）。
+MODEL_BUDGET_ENV = "DESKTOP_PET_MEMORY_MODEL_BUDGET"
+DEFAULT_MODEL_BUDGET = 0.8
+
+#: 相关度闸门 ①：最终分低于「最高分 × 比例」的尾巴丢掉（补位行门槛）。
+MIN_SCORE_RATIO_ENV = "DESKTOP_PET_MEMORY_MIN_SCORE_RATIO"
+DEFAULT_MIN_SCORE_RATIO = 0.12
+#: 相关度闸门 ②（门禁）：query 与**最像的那条卡**的余弦相似度低于它 →
+#: 这一问跟记忆库没有关系，一条都不给。
+#: 0.42 是量出来的（bge-small-zh-v1.5 + 评测台 32 条语料 / 20 条问句）：
+#:   有答案的问句，最像那条的相似度**下限** = 0.456；
+#:   四条无答案问句的相似度**上限** = 0.376
+#: → 0.42 落在中间，两边各留 0.036 / 0.044。曲线见 docs/memory-sidecar.md 4.1。
+MIN_SIMILARITY_ENV = "DESKTOP_PET_MEMORY_MIN_SIMILARITY"
+DEFAULT_MIN_SIMILARITY = 0.42
+#: 补位行的「语义保命符」：字面/语义上明显是同一件事（cos ≥ 顶行 × 该系数）
+#: 的行即使精排分低也不丢 —— 复合问句的另外一半经常是这个下场。
+DENSE_KEEP_RATIO_ENV = "DESKTOP_PET_MEMORY_DENSE_KEEP_RATIO"
+DEFAULT_DENSE_KEEP_RATIO = 0.75
+#: 绝对下限：连最高分都不到它 → 整轮一条都不给（0 = 不设，默认靠 ①② 两条规则）。
+MIN_SCORE_FLOOR_ENV = "DESKTOP_PET_MEMORY_MIN_SCORE_FLOOR"
+DEFAULT_MIN_SCORE_FLOOR = 0.0
 
 STATUS_ACTIVE = "active"
 STATUS_SUPERSEDED = "superseded"
@@ -137,6 +255,19 @@ def tokenize(text):
         except Exception:
             pass
     return toks
+
+
+def lexical_score(query_tokens, text_tokens):
+    """查询与一段文本的**词面重合度**（给「还没进向量索引的卡」兜底用）。
+
+    只认多字词项（CJK 字 bigram / jieba 词 / 英文单词）：单字重合太容易成立
+    （「我」「的」「了」满地都是），拿它当相关等于把无关的卡硬塞进来。
+    返回 0 = 不相关；命中几个词项就是几分（重复命中不重复计分）。
+    """
+    strong = {t for t in query_tokens if len(t) >= 2}
+    if not strong:
+        return 0.0
+    return float(len(strong & set(text_tokens)))
 
 
 # ── 模型（懒加载 + 串行化） ────────────────────────────────────────────────
@@ -203,12 +334,26 @@ class TransformersEmbedder:
         return self._model is not None
 
     def load(self):
+        """加载向量模型。**只读本地缓存**（缺模型立刻失败，不去 HuggingFace 下）。"""
         with _HF_LOCK:
             if self._model is not None:
                 return self._model
+            download = allow_runtime_download()
+            # 先查磁盘再 import：缺模型时连 transformers 都不必加载（毫秒级失败）
+            if not download and not model_in_cache(self.model_name):
+                raise model_missing_error("向量模型", self.model_name)
             from sentence_transformers import SentenceTransformer
 
-            model = SentenceTransformer(self.model_name, device=self.device or _pick_device())
+            try:
+                model = SentenceTransformer(
+                    self.model_name,
+                    device=self.device or _pick_device(),
+                    local_files_only=not download,  # True = 只读本地缓存，不联网
+                )
+            except Exception as e:
+                if not download:
+                    raise model_failed_error("向量模型", self.model_name, e) from e
+                raise
             try:
                 # sentence-transformers 5.7 把方法改名了，先试新的再退回旧的
                 getter = getattr(model, "get_embedding_dimension", None) or getattr(
@@ -254,14 +399,26 @@ class TransformersReranker:
         return self._model is not None
 
     def load(self):
+        """加载精排模型。同样**只读本地缓存**（缺模型立刻失败，不联网）。"""
         with _HF_LOCK:
             if self._model is not None:
                 return self._model
+            download = allow_runtime_download()
+            if not download and not model_in_cache(self.model_name):
+                raise model_missing_error("精排模型", self.model_name)
             from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(
-                self.model_name, device=self.device or _pick_device(), max_length=self.max_length
-            )
+            try:
+                self._model = CrossEncoder(
+                    self.model_name,
+                    device=self.device or _pick_device(),
+                    max_length=self.max_length,
+                    local_files_only=not download,  # True = 只读本地缓存，不联网
+                )
+            except Exception as e:
+                if not download:
+                    raise model_failed_error("精排模型", self.model_name, e) from e
+                raise
             return self._model
 
     def score(self, query, texts):
@@ -306,6 +463,22 @@ def _clamp01(v):
         return 0.5
 
 
+def _env_float(name, default):
+    """读一个浮点环境变量；没设 / 不是数字都退回默认值（环境变量不该把服务搞挂）。"""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _env_or(value, name, default):
+    """显式参数 > 环境变量 > 默认值（三个旋钮统一走这条优先级）。"""
+    return float(value) if value is not None else _env_float(name, default)
+
+
 # ── 存储 ──────────────────────────────────────────────────────────────────
 class MemoryStore:
     """记忆卡存储：JSON 真值 + Chroma / BM25 双路索引。
@@ -346,6 +519,11 @@ class MemoryStore:
         collection=COLLECTION_NAME,
         candidate_n=CANDIDATE_N,
         retry_cooldown=30.0,
+        model_budget=None,
+        min_score_ratio=None,
+        min_score_floor=None,
+        min_similarity=None,
+        dense_keep_ratio=None,
     ):
         self.data_dir = str(data_dir or DEFAULT_DATA_DIR)
         self.cards_path = os.path.join(self.data_dir, CARDS_FILE)
@@ -353,6 +531,17 @@ class MemoryStore:
         self.collection_name = collection or COLLECTION_NAME
         self.candidate_n = max(1, int(candidate_n))
         self.retry_cooldown = max(0.0, float(retry_cooldown))
+        # 检索里「模型那一路」的预算（秒）：0 = 不限时
+        self.model_budget = max(0.0, _env_or(model_budget, MODEL_BUDGET_ENV, DEFAULT_MODEL_BUDGET))
+        # 相关度闸门：相对比例（0 = 不裁尾巴）+ 绝对下限（0 = 不设下限）+ 语义门禁
+        self.min_score_ratio = _clamp01(
+            _env_or(min_score_ratio, MIN_SCORE_RATIO_ENV, DEFAULT_MIN_SCORE_RATIO))
+        self.min_score_floor = max(
+            0.0, _env_or(min_score_floor, MIN_SCORE_FLOOR_ENV, DEFAULT_MIN_SCORE_FLOOR))
+        self.min_similarity = _clamp01(
+            _env_or(min_similarity, MIN_SIMILARITY_ENV, DEFAULT_MIN_SIMILARITY))
+        self.dense_keep_ratio = _clamp01(
+            _env_or(dense_keep_ratio, DENSE_KEEP_RATIO_ENV, DEFAULT_DENSE_KEEP_RATIO))
         self.embed_model = embed_model
         # 精排模型：没指定就按设备自动选（有 CUDA → v2-m3，否则 base）
         self.rerank_model, self.rerank_reason = resolve_rerank_model(rerank_model)
@@ -402,13 +591,19 @@ class MemoryStore:
         self._vector_error = None
         self._chroma_error = None
         self._embed_error = None
+        self._embed_missing = False   # 模型不在本地缓存（区别于「加载失败」）
         self._embed_ready = False
         self._embed_failed_at = 0.0
         self._rerank_error = None
+        self._rerank_missing = False
         self._rerank_ready = False
         self._rerank_failed_at = 0.0
         self._load_error = None
         self.last_search_ms = 0
+        #: 上一轮「模型那一路」的线程（还活着 = 模型正在补索引/加载，这一轮别排第二个）
+        self._model_thread = None
+        #: 有多少次检索没在预算内等到模型（/health、/stats 里能看出来）
+        self.model_timeouts = 0
 
     # -- 生命周期 --------------------------------------------------------
     def init(self):
@@ -494,12 +689,18 @@ class MemoryStore:
             )
 
     def _public_card(self, card):
-        """对外暴露的卡片字段（/search 与 /list 同一套口径）。"""
+        """对外暴露的卡片字段（/search 与 /list 同一套口径）。
+
+        ``category`` 是调用方写卡时塞进来的「老的内容类型」（preference /
+        shared / ...）：面板的类别筛、主动发言的「共同经历」都要它。**永远
+        带这个键**（没写就是空字符串），调用方不用再回读 cards.json 去补。
+        """
         return {
             "id": card["id"],
             "key": card["key"],
             "kind": card["kind"],
             "text": card["text"],
+            "category": str(card.get("category") or ""),
             "mood": card["mood"],
             "importance": card["importance"],
             "status": card["status"],
@@ -563,6 +764,127 @@ class MemoryStore:
 
     def _bm25_dirty(self):
         return self._cards_gen != self._bm25_gen
+
+    def _pending_candidates(self, query):
+        """挂起队列里的卡（已落盘、还没进向量索引）用**词面**兜底捞一遍。
+
+        写卡不等模型 → 真值里总有一小批卡「JSON 有了、向量还没有」。检索如果
+        只看派生索引，这批卡就「刚说完就忘了」。这里只对**挂起的那几条**做一次
+        廉价字面重合（和 BM25 同一套分词），并进候选集 —— 模型追上来之后只是把
+        排序调得更准，永远不会让刚写的卡从结果里消失。
+        """
+        if not self.use_vector:
+            return {}  # 向量腿关着就不存在「欠索引」这回事（BM25 已经覆盖全部卡）
+        with self._pending_lock:
+            ids = [cid for cid, op in self._pending_vectors.items() if op == "upsert"]
+        if not ids:
+            return {}
+        qt = tokenize(query)
+        if not any(len(t) >= 2 for t in qt):
+            return {}
+        with self._cards_lock:
+            cards = [
+                self._cards[cid] for cid in ids
+                if cid in self._cards
+                and self._cards[cid]["status"] == STATUS_ACTIVE
+                and self._cards[cid]["text"]
+            ]
+        out = {}
+        for card in cards:
+            score = lexical_score(qt, tokenize(card["text"] + " " + card["kind"]))
+            if score > 0:
+                out[card["id"]] = score
+        if len(out) > self.candidate_n:
+            out = dict(sorted(out.items(), key=lambda kv: -kv[1])[: self.candidate_n])
+        return out
+
+    # -- 「模型那一路」的时间预算 ------------------------------------------
+    def _vector_phase(self, query):
+        """补齐向量索引 + 算查询向量 + 查一次（只在 _run_in_budget 的线程里跑）。"""
+        with self._index_lock:
+            try:
+                self.sync_index()
+            except Exception:
+                pass
+            try:
+                self.ensure_vector_index()
+            except Exception:
+                pass
+            return self._vector_search_locked(query, self.candidate_n)
+
+    def _run_in_budget(self, fn):
+        """在预算内跑 fn()；跑不完返回 None，线程留着继续跑。
+
+        为什么用线程而不是先估一下「这一步慢不慢」：模型是懒加载的，估不出来。
+        索引与向量都是**派生数据** → 补它慢一点没有理由挡在回答前面；跑不完就把
+        线程放生，它补完的索引下一次检索直接用得上（所以只会越检索越准）。
+        """
+        if self.model_budget <= 0:      # 不限时 = 老行为
+            return fn()
+        prev = self._model_thread
+        if prev is not None and prev.is_alive():
+            # 上一轮还在跑：模型是串行的，再排一个线程也只是排队等它
+            self.model_timeouts += 1
+            return None
+        box = {}
+
+        def work():
+            try:
+                box["value"] = fn()
+            except Exception as e:      # 派生索引补不上不算检索失败
+                box["error"] = str(e)
+
+        th = threading.Thread(target=work, name="memory-sidecar-model", daemon=True)
+        self._model_thread = th
+        th.start()
+        th.join(max(0.0, self.model_budget))
+        if th.is_alive():
+            self.model_timeouts += 1
+            return None
+        return box.get("value")
+
+    def _gate(self, scored, sims=None):
+        """相关度闸门：这一问够不着就别硬塞（老实现有，迁到 sidecar 时丢了）。
+
+        规则（阈值全部**标定出来的**，曲线见 docs/memory-sidecar.md 4.1）：
+
+        ① 门禁（绝对，看余弦相似度）：最像的那条卡都不够像 → 这一问跟记忆库没
+           关系，一条都不给。为什么不用「最终分」当门禁：最终分是**重排分 × 衰减
+           × 重要度**，同一条问句换个说法就差一个数量级（实测无关问句的最高分
+           0.000~0.110，而有答案的问句里「我不能吃什么」只有 0.034）—— 拿它当
+           绝对门槛必然要么放噪声、要么裁掉真答案。
+        ② 补位行门槛（相对，看最终分）：低于「顶行 × min_score_ratio」的尾巴
+           丢掉；但语义/字面明显是同一件事（cos ≥ 顶行 × dense_keep_ratio）的行
+           保留 —— 复合问句的另外一半常被交叉编码器判低。
+        ③ 顶行永远保留，最高分 <= 0（一条正分都没有）则整轮不给。
+
+        闸门只做减法：它不会把任何一行排到前面，也不改行内顺序。
+        """
+        if not scored:
+            return []
+        sims = sims or {}
+        top = float(scored[0][0])
+        if top <= 0 or top < self.min_score_floor:
+            return []
+        top_sim = max(sims.values()) if sims else None
+        if top_sim is not None and self.min_similarity > 0 and top_sim < self.min_similarity:
+            return []
+        if self.min_score_ratio <= 0:
+            return list(scored)
+        cut = top * self.min_score_ratio
+        sim_cut = top_sim * self.dense_keep_ratio if top_sim is not None else None
+        kept = []
+        for row in scored:
+            if not kept:                      # 顶行永远在
+                kept.append(row)
+                continue
+            if float(row[0]) >= cut:
+                kept.append(row)
+                continue
+            sim = sims.get(row[1]["id"])
+            if sim is not None and sim_cut is not None and sim >= sim_cut:
+                kept.append(row)              # 语义上就是同一件事：别裁
+        return kept
 
     def sync_index(self):
         """把两个**派生索引**追平真值：BM25（脏了就重建）+ 挂起的向量变更。
@@ -651,10 +973,14 @@ class MemoryStore:
         self._mark_pending(gone, "delete")
         # 删向量不需要模型：collection 已经打开就顺手删掉（毫秒级），
         # 没打开就留在挂起队列里，别为了删索引去付「打开 Chroma」的钱。
-        with self._index_lock:
-            if self.use_vector and self._col is not None:
+        # 索引锁正被「模型那一路」占着（在补索引）时**不等它**：挂起队列记着呢，
+        # sync_index 迟早会删掉 —— 删除没有理由排在一把模型锁后面。
+        if self.use_vector and self._col is not None and self._index_lock.acquire(timeout=0.05):
+            try:
                 if self._vector_delete(gone) >= len(gone):
                     self._clear_pending(gone)
+            finally:
+                self._index_lock.release()
         return len(gone)
 
     def supersede(self, old_id, new_card):
@@ -764,6 +1090,7 @@ class MemoryStore:
             vecs = self._embedder.embed([str(t) for t in texts])
         except Exception as e:
             self._embed_error = str(e)
+            self._embed_missing = getattr(e, "code", "") == "missing"
             self._embed_failed_at = time.time()
             raise
         if not vecs or len(vecs) != len(texts):
@@ -772,9 +1099,21 @@ class MemoryStore:
             self._embed_failed_at = time.time()
             raise RuntimeError(err)
         self._embed_error = None
+        self._embed_missing = False
         self._embed_failed_at = 0.0
         self._embed_ready = True
         return [[float(x) for x in row] for row in vecs]
+
+    def _rerank_in_budget(self, query, texts):
+        """精排打分，返回 (分数 | None, 这次是否走了预算)。
+
+        已经加载好的精排**同步**跑：那几百毫秒是回答质量的一部分，不该被裁。
+        还没加载（冷启动要十几秒）才走预算 —— 超时这一轮先用 RRF 粗排回答，
+        模型在后台线程里继续加载，下一个问题就用上了。
+        """
+        if not self.use_rerank or self._reranker is None or self._rerank_ready:
+            return self._rerank(query, texts), False
+        return self._run_in_budget(lambda: self._rerank(query, texts)), True
 
     def _rerank(self, query, texts):
         """精排打分。失败返回 None（退回粗排），并把精排标记成 degraded。"""
@@ -786,6 +1125,7 @@ class MemoryStore:
             raw = self._reranker.score(query, list(texts))
         except Exception as e:
             self._rerank_error = str(e)
+            self._rerank_missing = getattr(e, "code", "") == "missing"
             self._rerank_failed_at = time.time()
             return None
         if not raw or len(raw) != len(texts):
@@ -793,6 +1133,7 @@ class MemoryStore:
             self._rerank_failed_at = time.time()
             return None
         self._rerank_error = None
+        self._rerank_missing = False
         self._rerank_failed_at = 0.0
         self._rerank_ready = True
         return [float(x) for x in raw]
@@ -994,13 +1335,8 @@ class MemoryStore:
         return out
 
     # -- 向量检索 --------------------------------------------------------
-    def _vector_search(self, query, k):
-        if not self.use_vector:
-            return {}
-        with self._index_lock:
-            return self._vector_search_locked(query, k)
-
     def _vector_search_locked(self, query, k):
+        """向量检索（**调用方必须已经持有 _index_lock**，见 _vector_phase）。"""
         hit = self._vector_search_once(query, k)
         if hit is not None:
             return hit
@@ -1039,6 +1375,8 @@ class MemoryStore:
         reasons = []
         if not self.use_vector:
             reasons.append("向量腿已关闭（--no-vector）")
+        elif self._embed_missing:
+            reasons.append("向量腿降级：向量模型不在本地缓存（%s）" % PREFETCH_HINT)
         elif self._embed_error or self._vector_error:
             reasons.append("向量腿降级：%s" % (self._embed_error or self._vector_error))
         if not self.use_bm25:
@@ -1047,6 +1385,8 @@ class MemoryStore:
             reasons.append("BM25 降级：%s" % self._bm25_error)
         if not self.use_rerank:
             reasons.append("精排已关闭（--no-rerank）")
+        elif self._rerank_missing:
+            reasons.append("精排降级：精排模型不在本地缓存（%s）" % PREFETCH_HINT)
         elif self._rerank_error:
             reasons.append("精排降级：%s" % self._rerank_error)
         if self._chroma_error:
@@ -1054,139 +1394,160 @@ class MemoryStore:
         return reasons
 
     def search(self, query, top_k=8, mood=None, kind=None, kinds=None, key=None):
-        """粗排（RRF 融合）→ 精排（cross-encoder）→ 时间 / 情绪 / 重要度加权。
+        """粗排（RRF 融合）→ 精排（cross-encoder）→ 时间 / 情绪 / 重要度加权 → 相关度闸门。
 
-        返回 dict：{'results': [...], 'path': ..., 'degraded': bool, 'error': str|None}。
-        path 说明这次是谁给的候选：hybrid / vector / bm25 / fallback / none。
+        返回 dict：{'results': [...], 'path': ..., 'degraded': bool, 'error': str|None,
+                    'gate': {...}, 'modelPending': bool|None}。
+        path 说明这次是谁给的候选：hybrid / vector / bm25 / pending / fallback / none。
         两条粗排腿全挂时返回空结果 + 明确的 error（绝不抛给 HTTP 层变 500）。
+
+        **检索不排队等模型**：答案的源头是 JSON 卡本身（真值），不是派生索引 ——
+          ① BM25：脏了就先重建（纯本地计算，一步都不碰模型）；
+          ② 挂起队列：还没进向量索引的卡用词面兜底并进候选（刚写的卡立刻看得见）；
+          ③ 向量腿 / 冷精排：给一个时间预算（model_budget），跑不完先拿①②回答，
+             模型在后台补索引 —— 所以模型只会让排序**变准**，不会让卡**消失**。
         """
         result = {"results": [], "path": "none", "degraded": False, "error": None}
         q = str(query or "").strip()
         if not q:
             return result
-        with self._index_lock:
-            t0 = time.time()
-            pool = [
-                c
-                for c in self._active_cards()
-                if (not kind or c["kind"] == kind)
-                and (not kinds or c["kind"] in kinds)
-                and (not key or c["key"] == key)
-            ]
-            if not pool:
-                return result
-            allowed = {c["id"] for c in pool}
-            by_id = {c["id"]: c for c in pool}
+        t0 = time.time()
+        pool = [
+            c
+            for c in self._active_cards()
+            if (not kind or c["kind"] == kind)
+            and (not kinds or c["kind"] in kinds)
+            and (not key or c["key"] == key)
+        ]
+        if not pool:
+            return result
+        allowed = {c["id"] for c in pool}
+        by_id = {c["id"]: c for c in pool}
 
-            # ① 派生索引追平真值：BM25（脏了才重建）+ 挂起的向量变更
-            #    —— 写卡不等模型，等的是这里；所以「写完立刻搜」也一定看得到新卡
+        # ① BM25：脏了就先重建（本地计算，不等模型）
+        if self._bm25_dirty():
             try:
-                self.sync_index()
+                self._rebuild_bm25()
             except Exception:
                 pass
-            # ② 索引可能是空的（第一次跑 / 目录被删 / 之前降级）→ 从 JSON 卡补齐
-            if self.use_vector:
-                try:
-                    self.ensure_vector_index()
-                except Exception:
-                    pass
+        bm = self._bm25_search(q, self.candidate_n)
+        # ② 词面兜底：写卡不等模型，所以总有几条卡「已落盘、还没进向量索引」
+        pend = self._pending_candidates(q)
+        # ③ 模型那一路（补向量索引 + 查一次）：预算内跑完才合并进候选
+        vec = self._run_in_budget(lambda: self._vector_phase(q)) if self.use_vector else {}
+        result["modelPending"] = bool(self.use_vector and vec is None)
+        vec = vec or {}
 
-            bm = self._bm25_search(q, self.candidate_n)
-            vec = self._vector_search(q, self.candidate_n)
-
-            fused = {}
-            for rank, (cid, _) in enumerate(sorted(bm.items(), key=lambda kv: -kv[1])):
-                if cid in allowed:
-                    fused[cid] = fused.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
-            for rank, (cid, _) in enumerate(sorted(vec.items(), key=lambda kv: -kv[1])):
+        fused = {}
+        for leg in (bm, vec, pend):
+            for rank, (cid, _) in enumerate(sorted(leg.items(), key=lambda kv: -kv[1])):
                 if cid in allowed:
                     fused[cid] = fused.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
 
-            if bm and vec:
-                result["path"] = "hybrid"
-            elif vec:
-                result["path"] = "vector"
-            elif bm:
-                result["path"] = "bm25"
+        if vec and (bm or pend):
+            result["path"] = "hybrid"
+        elif vec:
+            result["path"] = "vector"
+        elif bm:
+            result["path"] = "bm25"
+        elif pend:
+            result["path"] = "pending"
 
-            reasons = self._degradation()
-            result["degraded"] = bool(reasons)
+        reasons = self._degradation()
+        result["degraded"] = bool(reasons)
 
-            # 两条粗排腿都不可用 → 空结果 + 明确 error（而不是 500）
-            bm_unusable = (
-                (not self.use_bm25) or bool(self._bm25_error) or self._bm25 is None
-            )
-            vec_unusable = (
-                (not self.use_vector) or bool(self._embed_error) or bool(self._vector_error)
-            )
-            if bm_unusable and vec_unusable:
-                detail = "；".join(reasons) or "向量与 BM25 均不可用"
-                result["error"] = "记忆检索不可用：%s" % detail
-                result["path"] = "none"
-                result["degraded"] = True
-                return result
-
-            if not fused:  # 两路都没命中 → 退回全量让精排挑
-                fused = {c["id"]: 1.0 for c in pool[: self.candidate_n]}
-                result["path"] = "fallback"
-            cands = sorted(fused.items(), key=lambda kv: -kv[1])[: self.candidate_n]
-
-            rerank_scores = {}
-            cands = [(cid, base) for cid, base in cands if cid in by_id]
-            raw = self._rerank(q, [by_id[cid]["text"] for cid, _ in cands])
-            if raw is not None:
-                rerank_scores = {cid: s for (cid, _), s in zip(cands, raw, strict=False)}
-            # 精排刚刚可能才降级 → 降级标记必须在它之后再算一次
-            result["degraded"] = bool(self._degradation())
-
-            now = _now_ms()
-            scored = []
-            for cid, base in cands:
-                card = by_id[cid]
-                logit = rerank_scores.get(cid)
-                if logit is not None:
-                    # logit 压到 (-1, 1)：直接拿可为负的 logit 乘衰减会把老的不相关记忆顶上来
-                    clamped = max(-30.0, min(30.0, logit))
-                    rel = 2.0 / (1.0 + math.exp(-clamped)) - 1.0
-                    primary = rel
-                else:
-                    primary = min(1.0, base * 10.0)
-                age_days = max(0.0, (now - card["updatedAt"]) / 86400000.0)
-                half_life = HALF_LIFE_DAYS.get(card["kind"], DEFAULT_HALF_LIFE)
-                decay = 0.5 ** (age_days / max(0.5, half_life))
-                m = MOOD_BONUS if (mood and card.get("mood") and card["mood"] == mood) else 1.0
-                imp = 0.5 + 0.5 * card.get("importance", 0.5)
-                if primary > 0:
-                    final = primary * (0.4 + 0.6 * decay) * m * imp
-                else:
-                    final = primary * 0.5  # 不相关的保持相对顺序，但不乘 decay
-                scored.append((final, card, primary, decay, logit))
-            scored.sort(key=lambda x: -x[0])
-
-            out = []
-            for final, card, primary, decay, logit in scored[: max(1, int(top_k))]:
-                card["lastHitAt"] = now
-                card["hitCount"] = _as_int(card.get("hitCount")) + 1
-                out.append(
-                    {
-                        **self._public_card(card),
-                        "score": round(final, 4),
-                        "rel": round(primary, 4),
-                        "rerankLogit": round(logit, 4) if logit is not None else None,
-                        "decay": round(decay, 4),
-                    }
-                )
-            result["results"] = out
-            if out:
-                self._save()  # hitCount / lastHitAt 变了
-            self.last_search_ms = int((time.time() - t0) * 1000)
+        # 两条粗排腿都不可用 → 空结果 + 明确 error（而不是 500）
+        bm_unusable = (
+            (not self.use_bm25) or bool(self._bm25_error) or self._bm25 is None
+        )
+        vec_unusable = (
+            (not self.use_vector) or bool(self._embed_error) or bool(self._vector_error)
+        )
+        if bm_unusable and vec_unusable:
+            detail = "；".join(reasons) or "向量与 BM25 均不可用"
+            result["error"] = "记忆检索不可用：%s" % detail
+            result["path"] = "none"
+            result["degraded"] = True
             return result
+
+        if not fused:  # 三路都没命中 → 退回全量让精排挑
+            fused = {c["id"]: 1.0 for c in pool[: self.candidate_n]}
+            result["path"] = "fallback"
+        cands = sorted(fused.items(), key=lambda kv: -kv[1])[: self.candidate_n]
+        cands = [(cid, base) for cid, base in cands if cid in by_id]
+
+        rerank_scores = {}
+        raw, budgeted = self._rerank_in_budget(q, [by_id[cid]["text"] for cid, _ in cands])
+        if budgeted and raw is None:
+            result["modelPending"] = True
+        if raw is not None:
+            rerank_scores = {cid: s for (cid, _), s in zip(cands, raw, strict=False)}
+        # 精排刚刚可能才降级 → 降级标记必须在它之后再算一次
+        result["degraded"] = bool(self._degradation())
+
+        now = _now_ms()
+        scored = []
+        for cid, base in cands:
+            card = by_id[cid]
+            logit = rerank_scores.get(cid)
+            if logit is not None:
+                # logit 压到 (-1, 1)：直接拿可为负的 logit 乘衰减会把老的不相关记忆顶上来
+                clamped = max(-30.0, min(30.0, logit))
+                rel = 2.0 / (1.0 + math.exp(-clamped)) - 1.0
+                primary = rel
+            else:
+                primary = min(1.0, base * 10.0)
+            age_days = max(0.0, (now - card["updatedAt"]) / 86400000.0)
+            half_life = HALF_LIFE_DAYS.get(card["kind"], DEFAULT_HALF_LIFE)
+            decay = 0.5 ** (age_days / max(0.5, half_life))
+            m = MOOD_BONUS if (mood and card.get("mood") and card["mood"] == mood) else 1.0
+            imp = 0.5 + 0.5 * card.get("importance", 0.5)
+            if primary > 0:
+                final = primary * (0.4 + 0.6 * decay) * m * imp
+            else:
+                final = primary * 0.5  # 不相关的保持相对顺序，但不乘 decay
+            scored.append((final, card, primary, decay, logit))
+        scored.sort(key=lambda x: -x[0])
+
+        # ④ 相关度闸门：这一问够不着就别硬塞（「用不上就别硬扯」不能只靠免责文案）
+        kept = self._gate(scored, vec)
+        result["gate"] = {
+            "top": round(float(scored[0][0]), 4) if scored else 0.0,
+            "topSim": round(max(vec.values()), 4) if vec else None,
+            "kept": len(kept),
+            "dropped": len(scored) - len(kept),
+            "minScoreRatio": self.min_score_ratio,
+            "minSimilarity": self.min_similarity,
+        }
+
+        out = []
+        for final, card, primary, decay, logit in kept[: max(1, int(top_k))]:
+            card["lastHitAt"] = now
+            card["hitCount"] = _as_int(card.get("hitCount")) + 1
+            sim = vec.get(card["id"])
+            out.append(
+                {
+                    **self._public_card(card),
+                    "score": round(final, 4),
+                    "rel": round(primary, 4),
+                    "rerankLogit": round(logit, 4) if logit is not None else None,
+                    "decay": round(decay, 4),
+                    "sim": round(float(sim), 4) if sim is not None else None,
+                }
+            )
+        result["results"] = out
+        if out:
+            self._save()  # hitCount / lastHitAt 变了
+        self.last_search_ms = int((time.time() - t0) * 1000)
+        return result
 
     # -- 持久化 ----------------------------------------------------------
     def _save(self):
         """把内存里的卡片落盘（真值）。持 _cards_lock：写卡路径要的是毫秒级、不等模型。"""
         os.makedirs(self.data_dir, exist_ok=True)
-        tmp = self.cards_path + ".tmp"
+        # 每个线程自己的临时名：检索（会刷新 hitCount）与写卡可能同时落盘，
+        # 共用一个 .tmp 会互相截断 —— 卡片文件坏了就是真的把记忆弄丢了。
+        tmp = "%s.%d.%d.tmp" % (self.cards_path, os.getpid(), threading.get_ident())
         try:
             with self._cards_lock:
                 data = sorted(self._cards.values(), key=lambda c: c["id"])
@@ -1198,14 +1559,23 @@ class MemoryStore:
 
     # -- 报告 ------------------------------------------------------------
     def _model_state(self, which):
+        """模型状态：disabled / missing / degraded / ready / unloaded。
+
+        missing = 模型压根不在本地缓存（跑 prefetch 脚本就能解决）；
+        degraded = 在缓存里但加载/推理失败（要看日志或重下）。两件事不一样。
+        """
         if which == "embed":
             if not self.use_vector:
                 return "disabled"
+            if self._embed_missing:
+                return "missing"
             if self._embed_error:
                 return "degraded"
             return "ready" if self._embed_ready else "unloaded"
         if not self.use_rerank:
             return "disabled"
+        if self._rerank_missing:
+            return "missing"
         if self._rerank_error:
             return "degraded"
         return "ready" if self._rerank_ready else "unloaded"
@@ -1234,6 +1604,8 @@ class MemoryStore:
             "bm25": bm25_state,
             "degraded": bool(reasons),
             "degradation": reasons,
+            # 检索里「模型那一路」没等到预算的次数：>0 说明这几轮是拿词面结果回答的
+            "modelTimeouts": self.model_timeouts,
             "dataDir": self.data_dir,
         }
 
@@ -1267,6 +1639,7 @@ class MemoryStore:
                     "error": self._embed_error or self._vector_error,
                     "count": self._chroma_count(open_if_possible=True),
                     "model": self.embed_model if self.use_vector else None,
+                    "inCache": model_in_cache(self.embed_model) if self.use_vector else None,
                     "dim": self._vector_dim,
                 },
                 "bm25": {
@@ -1281,7 +1654,18 @@ class MemoryStore:
                     "state": self._model_state("rerank"),
                     "error": self._rerank_error,
                     "model": self.rerank_model if self.use_rerank else None,
+                    "inCache": model_in_cache(self.rerank_model) if self.use_rerank else None,
                     "why": self.rerank_reason,
+                },
+                # 检索的两个旋钮 + 它们实际的表现（标定 / 排查用得上）
+                "search": {
+                    "modelBudgetMs": int(self.model_budget * 1000),
+                    "modelTimeouts": self.model_timeouts,
+                    "minScoreRatio": self.min_score_ratio,
+                    "minScoreFloor": self.min_score_floor,
+                    "minSimilarity": self.min_similarity,
+                    "denseKeepRatio": self.dense_keep_ratio,
+                    "lastSearchMs": self.last_search_ms,
                 },
                 "degraded": bool(reasons),
                 "degradation": reasons,

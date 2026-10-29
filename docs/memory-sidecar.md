@@ -7,6 +7,11 @@
 - **JSON 卡片是真值**：`data/memory_sidecar/cards.json`
 - **写卡不等模型**：写 / 删 / 改只落 JSON，两个索引（Chroma / BM25）是派生的，
   由下一次检索或预热结束补上 —— 冷启动时模型要加载十几秒，写卡完全不等它
+- **检索也不等模型**：模型那一路有 0.8s 预算，跑不完就先拿词面结果回答；
+  刚写完、还没进向量索引的卡用**词面兜底**进候选 —— 「说完就忘」不会再发生
+- **相关度闸门**：库里没有答案的问题一条都不给（阈值是量出来的，见 4.1）
+- **运行时绝不联网下模型**：只读本地 HF 缓存，缺模型立刻失败并指向
+  `scripts/prefetch_models.py`（见第 7 节）
 - **两条粗排腿**：Chroma（向量，cosine）+ BM25（关键词，jieba + 字 bigram）
 - **一条精排**：cross-encoder，**按设备自动选** —— 有 CUDA 用 `bge-reranker-v2-m3`，
   否则用 `bge-reranker-base`（实测数据见第 7 节）
@@ -57,13 +62,18 @@ python -m memory_sidecar serve --port 8788
 | GET | `/list` | `?kind=&limit=&include_superseded=` | `{ok, kind, includeSuperseded, cards:[...], count, total}`（重要度 desc → 新近 desc，默认 50 条） |
 | GET | `/stats` | — | `{ok, stats:{cards, active, superseded, byKind, pendingIndex, vector, bm25, rerank, degradation...}}` |
 | GET | `/` | — | 端点清单 |
-| POST | `/search` | `{query, top_k, mood?, kind?, kinds?, key?}` | `{ok, query, results:[...], path, degraded[, error]}` |
+| POST | `/search` | `{query, top_k, mood?, kind?, kinds?, key?}` | `{ok, query, results:[...], path, degraded[, gate][, modelPending][, error]}` |
 | POST | `/upsert` | `{cards:[...]}` | `{ok, upserted}` |
 | POST | `/delete` | `{ids:[...]}`（也接受逗号字符串） | `{ok, deleted}` |
 | POST | `/supersede` | `{oldId, card}` | `{ok, upserted}` |
 | POST | `/rebuild` | — | `{ok, rebuilt:{vector, bm25, errors}}` |
 
 `top_k` 也接受驼峰写法 `topK`。
+
+`path` 说明这次是谁给的候选：`hybrid`（向量 + 词面）/ `vector` / `bm25` /
+`pending`（只有「还没进向量索引的卡」被词面兜底命中）/ `fallback` / `none`。
+`modelPending=true` 表示模型的向量腿这一轮没在预算内跑完（先用词面结果回答，
+**不是**降级，/health 的 `modelTimeouts` 会累加）。
 
 **约定：`/search` 永远返回 200 + 可解析 JSON。** 哪怕两条粗排腿全挂，也是
 
@@ -81,9 +91,10 @@ python -m memory_sidecar serve --port 8788
 ```
 GET /list?kind=fact&limit=20
 {"ok": true, "kind": "fact", "count": 20, "total": 37, "cards": [
-  {"id": "c1", "key": "master", "kind": "fact", "text": "主人不吃辣", "mood": "happy",
-   "importance": 0.9, "createdAt": 1793264984577, "updatedAt": 1793264984577,
-   "hitCount": 2, "lastHitAt": 1793264990000}
+  {"id": "c1", "key": "master", "kind": "fact", "text": "主人不吃辣",
+   "category": "preference", "mood": "happy",
+   "importance": 0.9, "status": "active", "createdAt": 1793264984577,
+   "updatedAt": 1793264984577, "hitCount": 2, "lastHitAt": 1793264990000}
 ]}
 ```
 
@@ -99,10 +110,18 @@ GET /list?kind=fact&limit=20
 `results` 每条：
 
 ```json
-{"id": "c1", "key": "master", "kind": "fact", "text": "主人不吃辣", "mood": "happy",
- "importance": 0.9, "score": 0.1359, "rel": 0.143, "rerankLogit": 0.2881,
- "decay": 1.0, "updatedAt": 1793264984577, "hitCount": 2}
+{"id": "c1", "key": "master", "kind": "fact", "text": "主人不吃辣",
+ "category": "preference", "mood": "happy", "importance": 0.9, "status": "active",
+ "score": 0.1359, "rel": 0.143, "rerankLogit": 0.2881, "decay": 1.0,
+ "sim": 0.5231, "createdAt": 1793264984577, "updatedAt": 1793264984577,
+ "hitCount": 2, "lastHitAt": 1793264990000}
 ```
+
+- `category`：写卡时塞进来的「老的内容类型」（`preference` / `shared` / ...）。
+  **/list 与 /search 都带这个键**（没写就是空字符串）—— 面板的类别筛选和主动发言的
+  `recent_shared()` 直接读它，不用再回读 cards.json 按 id 补。
+- `sim`：这一行与 query 的**余弦相似度**（向量腿没命中就是 `null`）。
+- `gate`：这次闸门做了什么 —— `{top, topSim, kept, dropped, minScoreRatio, minSimilarity}`。
 
 ## 3. 卡片格式
 
@@ -141,6 +160,47 @@ final  = rel * (0.4 + 0.6 * decay) * mood * imp  # 没有精排时 rel 退回 mi
 但直接拿可为负的 logit 乘衰减会把「老的不相关记忆」顶到「新的不相关记忆」前面，
 所以它的代码先把 logit 压成 rel，并用 `0.4 + 0.6 * decay`）。
 
+### 4.1 相关度闸门（够不着就别硬塞）
+
+老实现有这道闸门，迁到 sidecar 时丢了 —— 于是「用不上就别硬扯」只剩一句免责文案：
+库里**没有答案**的问题也会硬塞 6 行、而且全是正分（评测台：无关注入平均 4.0 行）。
+
+现在是三条规则（阈值**全部量出来**，同一把尺子 `scripts/eval_memory_recall.py`）：
+
+| 规则 | 看什么 | 阈值 | 怎么算出来的 |
+| --- | --- | --- | --- |
+| ① 余弦门禁 | 最像的那条卡的余弦相似度（`gate.topSim`） | **0.42** | 有答案的问句**下限 0.456**、四条无答案问句**上限 0.376** → 取中间 |
+| ② 补位行门槛 | 这一行的最终分 / 顶行最终分 | **0.12** | 融合/重排分的相对窗口（老实现量到 0.088~0.19） |
+| ③ 语义保命符 | 这一行的余弦 / 顶行余弦 | **0.75** | 复合问句的另外一半 0.907（要留）、近似陷阱 0.690（要丢） |
+
+- ① 关门 = 这一问跟记忆库没有关系 → **一条都不给**（`results: []`）。
+- ② 只裁「顺带捞回来的」尾巴；③ 保证「确实是同一件事、只是精排判低」的行不被裁
+  （`我同事和老板分别是谁` → 「同事小李」重排分只有顶行的 0.10，但余弦比 0.907）。
+- 顶行永远保留；一条正分都没有则整轮不给。
+
+实测（32 条语料 / 20 条问句，真模型 bge-small-zh + bge-reranker）：
+
+| 指标 | 闸门前 | 闸门后 |
+| --- | --- | --- |
+| recall@6 | 1.000 | **1.000** |
+| precision@6 | 0.219 | **0.623** |
+| hit-rate | 1.000 | 1.000 |
+| 无关注入（平均 / 最多） | 4.0 行 / 6 行 | **0.0 行 / 0 行** |
+| 近似陷阱压过答案 | 0 | **0** |
+
+三个旋钮（构造函数 kwarg / 环境变量 / 命令行都行，优先级：显式参数 > 环境变量 > 默认）：
+
+| 旋钮 | 环境变量 | 命令行 |
+| --- | --- | --- |
+| `min_similarity` | `DESKTOP_PET_MEMORY_MIN_SIMILARITY` | `--min-similarity` |
+| `min_score_ratio` | `DESKTOP_PET_MEMORY_MIN_SCORE_RATIO` | `--min-score-ratio` |
+| `dense_keep_ratio` | `DESKTOP_PET_MEMORY_DENSE_KEEP_RATIO` | `--dense-keep-ratio` |
+| `model_budget`（秒） | `DESKTOP_PET_MEMORY_MODEL_BUDGET` | `--model-budget` |
+
+> 阈值跟**嵌入模型**绑定（余弦相似度的尺度是模型给的）。换 `DESKTOP_PET_MEMORY_EMBED`
+> 之后要拿评测台重标一次；假模型（测试里的假向量）没有语义，功能测试直接
+> `min_similarity=0` 把它关掉。
+
 ## 5. 数据目录
 
 ```
@@ -160,10 +220,24 @@ data/memory_sidecar/
 | 操作 | 干什么 | 耗时量级 |
 | --- | --- | --- |
 | `upsert` / `delete` / `supersede` | 写 `cards.json` + 标脏（向量进挂起队列） | 毫秒级（与模型无关） |
-| `search` | 先 `sync_index()`：重建脏了的 BM25 + 补挂起的向量，再检索 | 第一次会等模型 |
+| `search` | 重建脏了的 BM25（本地计算）→ 挂起队列词面兜底 → 模型那一路（有预算）→ 精排 → 闸门 | 稳态实测 80~104ms（top_k=6，含 HTTP）；模型很慢时 ≤ 预算（0.8s） |
 | `warmup()`（serve 后台线程） | 串行加载两个模型，结束时 `sync_index()` 排空队列 | 冷启动十几秒（不阻塞写） |
 
-所以 `upsert` 之后**立刻** `search` 也一定看得到新卡：检索前会把欠的索引补齐。
+**「刚写完立刻搜」为什么看得见**：检索的候选来自**真值本身**，不是只来自派生索引 ——
+
+1. BM25 脏了就重建（纯本地计算，不等模型）；
+2. **挂起队列词面兜底**：还没进向量索引的卡，用和 BM25 同一套分词（CJK 字 bigram /
+   jieba 词 / 英文词）做一次字面重合，命中就并进候选（`path=pending`）；
+3. 模型那一路（补向量索引 + 查向量 + 冷精排）只给 `model_budget` 预算，
+   跑不完就先拿 1、2 回答，索引让它在后台补（`modelPending=true`,`/health.modelTimeouts` 会累加）。
+
+同一把尺子实测（假模型每次 embed 睡 3 秒 = 「模型很慢」，聊天读超时 2s）：
+
+| | upsert→search | 结果里有没有那张卡 |
+| --- | --- | --- |
+| 改之前 | **7742 ms**（先同步补索引 3 次 embed） | 有（但聊天端 2s 就超时了，主人看到的是空记忆块） |
+| 改之后 | **820 ms** | 有 |
+
 向量腿降级时挂起项**保留**，下次再补；卡片早就落盘了，一条都不会丢。
 
 `/health` 的 `pendingIndex` 就是「还欠多少条向量」；它是**不抢锁**的计数快照，
@@ -175,8 +249,9 @@ data/memory_sidecar/
 | --- | --- | --- |
 | 精排模型 | 只用 RRF 粗排，`rerankLogit=null` | `models.rerank="degraded"`, `degraded=true` |
 | BM25（bm25s 没装） | 只走向量 | `bm25="degraded"` |
-| 模型还没加载完 | 写卡照常（毫秒级），向量挂起 | `pendingIndex>0`, models 仍是 `unloaded` |
+| 模型还没加载完 | 写卡照常（毫秒级），向量挂起；检索**不等它**（词面结果先答） | `pendingIndex>0`, models 仍是 `unloaded`, `modelTimeouts` 涨 |
 | 向量模型 | 只走 BM25，**照样回答** | `models.embed="degraded"` |
+| 模型不在本地缓存 | 立刻失败（不联网），BM25 照样回答，错误里指 prefetch 脚本 | `models.embed="missing"` |
 | Chroma 打不开 / 文件坏了 | 清空重建 → 从 `cards.json` 补索引 → 继续服务 | 有 `Chroma 异常` 记录 |
 | 全都挂 | `/search` 200 + `{ok:false, results:[], error:"..."}` | `degraded=true` |
 
@@ -208,7 +283,31 @@ data/memory_sidecar/
 
 - `DESKTOP_PET_MEMORY_RERANK` **仍然优先**：设了就听它的，自动选择只在没设时生效。
 
-模型都在 HF 默认缓存里（`%USERPROFILE%\.cache\huggingface\hub`），运行时**不下载**。
+### 7.1 运行时**绝不联网下载**
+
+模型都在 HF 默认缓存里（`%USERPROFILE%\.cache\huggingface\hub`）。sidecar 只读本地缓存：
+
+- `SentenceTransformer` / `CrossEncoder` 都传 `local_files_only=True`；
+- 加载前先**只查磁盘**（`models--<owner>--<name>/snapshots/*`，认 `HF_HUB_CACHE` /
+  `HF_HOME` / `XDG_CACHE_HOME`）—— 缺模型连 transformers 都不 import，毫秒级失败；
+- 失败信息直接指路：
+
+```
+向量模型不在本地缓存：BAAI/bge-small-zh-v1.5（运行时不会联网下载）。
+先跑一次 python scripts/prefetch_models.py 把模型备好；
+或者设 DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1 允许 sidecar 自己下载。
+```
+
+- 确实要让它自己备模型：`DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1`（默认关）。
+- `/health` 的 `models.embed` / `models.rerank` 会区分：
+
+| 值 | 意思 | 主人要做的事 |
+| --- | --- | --- |
+| `unloaded` | 还没加载（懒加载 / 预热中） | 等一会儿 |
+| `ready` | 就绪 | — |
+| `missing` | **不在本地缓存** | 跑 `scripts/prefetch_models.py` |
+| `degraded` | 在缓存里但加载/推理失败 | 看日志，或 `--force` 重下 |
+| `disabled` | 被开关关掉（`--no-vector` / `--no-rerank`） | — |
 
 实测提示：bge-reranker-base 对短中文查询的打分偏低（logit 常在 0~1 之间），
 卡片措辞会影响排序 —— 例如查询「我不能吃什么」时，卡片「主人不吃辣」得 0.29，

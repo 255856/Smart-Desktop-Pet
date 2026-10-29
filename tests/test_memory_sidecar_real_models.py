@@ -52,6 +52,10 @@ def test_semantic_query_finds_card_without_literal_overlap(tmp_path):
     store = MemoryStore(tmp_path, retry_cooldown=0)
     store.init()
     assert store.upsert(CARDS) == 4
+    # 线上 serve 启动就在后台预热模型；这里也先预热，测的是「模型热着的时候
+    # 写完立刻搜」——冷启动第一次检索不再等模型（预算内没跑完就先给词面结果，
+    # 见 test_search_does_not_wait_for_a_slow_embedder）。
+    store.warmup()
 
     res = store.search("我不能吃什么", top_k=3)
     _dump("A2 我不能吃什么", res)

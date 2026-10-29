@@ -29,6 +29,11 @@
     python scripts/eval_memory_recall.py --top-k 6
     python scripts/eval_memory_recall.py --json out.json
     python scripts/eval_memory_recall.py --base-url http://127.0.0.1:8788
+
+调闸门（标定用；子进程直接继承这两个环境变量）
+--------------------------------------------
+    DESKTOP_PET_MEMORY_MIN_SCORE_RATIO=0.5 DESKTOP_PET_MEMORY_MIN_SCORE_FLOOR=0.05 \
+        python scripts/eval_memory_recall.py
 """
 from __future__ import annotations
 
@@ -157,10 +162,19 @@ class QueryResult:
     error: str = ""
     #: 其中真的会被注入 prompt 的那些（score > 0；system_block 就是这么筛的）
     injected: list = None
+    #: rid -> {"score", "rel", "logit"}：标定闸门用的原始分数（打印 / 写 --json）
+    scores: dict = None
 
     def __post_init__(self):
         if self.injected is None:
             self.injected = list(self.got)
+        if self.scores is None:
+            self.scores = {}
+
+    @property
+    def top_score(self) -> float:
+        """这次检索的最高分（0 = 一条都没有正分）。"""
+        return max((float(v.get("score") or 0.0) for v in self.scores.values()), default=0.0)
 
     @property
     def hits(self) -> list:
@@ -218,7 +232,7 @@ def run_queries(search: Callable, queries: Sequence = QUERIES,
     out = []
     for q in queries:
         rows = search(q.text, top_k) or []
-        got, injected = [], []
+        got, injected, scores = [], [], {}
         for item in rows:
             if not isinstance(item, dict):
                 continue
@@ -229,13 +243,19 @@ def run_queries(search: Callable, queries: Sequence = QUERIES,
                 continue
             got.append(rid)
             try:
-                positive = float(item.get("score") or 0.0) > 0.0
+                score = float(item.get("score") or 0.0)
             except (TypeError, ValueError):
-                positive = True
-            if positive:
+                score = 0.0
+            try:
+                rel = float(item.get("rel") or 0.0)
+            except (TypeError, ValueError):
+                rel = 0.0
+            logit = item.get("rerankLogit")
+            scores[rid] = {"score": score, "rel": rel, "logit": logit}
+            if score > 0.0:
                 injected.append(rid)
         out.append(QueryResult(q.qid, q.text, q.kind, got, q.relevant,
-                               q.trap, "", injected))
+                               q.trap, "", injected, scores))
     return out
 
 
@@ -361,7 +381,10 @@ def wait_for_models(client: MemoryClient, seconds: float = 240.0) -> dict:
         models = health.get("models") or {}
         if not health.get("ok"):
             return health
-        if all(models.get(k) in ("ready", "absent", "failed", "disabled")
+        # degraded / missing 也算「终态」：模型坏了就别干等 240 秒，指标照量，
+        # 只是要在报告里说明这一轮是降级跑的。
+        if all(models.get(k) in ("ready", "absent", "failed", "disabled",
+                                 "degraded", "missing")
                for k in ("embed", "rerank")):
             return health
         time.sleep(0.5)
@@ -369,14 +392,19 @@ def wait_for_models(client: MemoryClient, seconds: float = 240.0) -> dict:
 
 
 def seed(client: MemoryClient, cards: dict, rebuild_wait: float = 60.0) -> int:
-    """把语料写进 sidecar，并等向量索引把新卡片吃进去。
+    """把语料写进 sidecar，并**同步**把两个索引建好（/rebuild）。
 
-    为什么要等：写卡只把向量索引**标脏**，真索引是在检索前补齐的（懒刷新）。
-    第一轮检索会顺带建索引 —— 那一次的结果就是**最终**结果，不用额外等。
+    为什么不再靠「触发一次检索」来建索引：检索对模型只给一个时间预算
+    （model_budget），冷启动那一轮跑不完就先用词面结果回答 —— 索引留给后台
+    线程补。评测要量的是**稳态**召回，所以这里显式重建，别让懒刷新影响指标。
     """
     n = client.upsert(list(cards.values()))
-    # 触发一次检索，让懒刷新的向量索引补齐（结果丢弃）
-    client.search("预热", top_k=1)
+    try:
+        report = client.rebuild()
+        print("[评测] 重建索引：%s" % (report,))
+    except Exception as e:  # noqa: BLE001 - 老 sidecar 没这个端点也能跑
+        print("[评测] /rebuild 不可用（%s），退回懒刷新" % e)
+        client.search("预热", top_k=1)
     return int(n)
 
 
@@ -401,13 +429,14 @@ def print_report(results: Sequence[QueryResult], aggs: dict, base_url: str,
     print("语料 %d 条 · 问句 %d 条 · top-k = %d"
           % (len(STORE_ROWS), len(results), top_k))
     print("=" * 78)
-    print("\n%-5s %-26s %-9s %-7s %-7s %s"
-          % ("问句", "内容", "命中", "recall", "精度", "Top-%d" % top_k))
+    print("\n%-5s %-24s %-7s %-8s %-7s %-7s %s"
+          % ("问句", "内容", "最高分", "命中", "recall", "精度", "Top-%d" % top_k))
     print("-" * 78)
     for r in results:
         flag = "陷阱!" if r.trap_hit else ("空" if not r.got else "")
-        print("%-5s %-26s %-9s %-7s %-7s %s"
-              % (r.qid, r.text[:26], "%d/%d" % (len(r.hits), len(r.relevant)),
+        print("%-5s %-24s %-7s %-8s %-7s %-7s %s"
+              % (r.qid, r.text[:24], _fmt(r.top_score),
+                 "%d/%d" % (len(r.hits), len(r.relevant)),
                  _fmt(r.recall(), 2) if r.relevant else "—",
                  _fmt(r.precision(top_k), 2) if r.relevant else "—",
                  ",".join(r.got) + (("  ←" + flag) if flag else "")))
@@ -420,6 +449,16 @@ def print_report(results: Sequence[QueryResult], aggs: dict, base_url: str,
     print("无关注入      : 平均 %s 行 / 最多 %d 行（%d 条「库里没有答案」的问句）"
           % (aggs["no_answer_leak"], aggs["no_answer_leak_max"],
              aggs["no_answer_queries"]))
+    # 标定相关度闸门的两端：无关注句能蹭到的最高分 vs 相关行的最低分
+    print("无关注句最高分: %s"
+          % ("、".join("%s=%s" % (r.qid, _fmt(r.top_score))
+                      for r in results if r.kind == "none") or "无"))
+    weakest = [(r.qid, min(float(r.scores.get(h, {}).get("score") or 0.0)
+                           for h in r.hits))
+               for r in results if r.hits]
+    if weakest:
+        print("相关行最低分  : %s"
+              % "、".join("%s=%s" % (qid, _fmt(sc)) for qid, sc in weakest))
     print("近似陷阱      : 避开率 %s（进了前 k 的陷阱：%s；"
           "压过答案的：%s —— 后者才是真的会说错话）"
           % (_fmt(aggs["trap_avoid_rate"]),
@@ -478,6 +517,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("[评测] 等 sidecar 的模型就绪…")
         ready = wait_for_models(client)
         print("[评测] 模型状态：%s" % ((ready.get("models") or {}),))
+        bad = {k: v for k, v in (ready.get("models") or {}).items()
+               if v not in ("ready", "disabled")}
+        if bad:
+            print("[评测] !! 有模型没就绪（%s）：这一轮指标是降级跑的，看报告要说明" % bad)
+        knob = (client.stats() or {}).get("search") or {}
+        if knob:
+            print("[评测] 闸门：minSimilarity=%s minScoreRatio=%s denseKeepRatio=%s "
+                  "预算=%sms" % (knob.get("minSimilarity"), knob.get("minScoreRatio"),
+                                knob.get("denseKeepRatio"), knob.get("modelBudgetMs")))
         errors = {}
 
         def _search(q: str, k: int) -> list:
@@ -503,7 +551,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "results": [
                     {"qid": r.qid, "text": r.text, "kind": r.kind,
                      "got": r.got, "relevant": list(r.relevant),
-                     "trap_hit": r.trap_hit}
+                     "trap_hit": r.trap_hit, "top_score": round(r.top_score, 4),
+                     "scores": r.scores}
                     for r in results],
             }
             Path(args.json).write_text(

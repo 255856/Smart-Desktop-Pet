@@ -6,7 +6,7 @@
 GET  /health    -> {ok, cards, models: {embed, rerank}, degraded, ...}
 GET  /list      -> {ok, cards: [...], count, total}（重要度 desc → 新近 desc）
 GET  /stats     -> 卡数 / 索引状态 / 降级原因
-POST /search    -> {ok, results: [...], path, degraded[, error]}
+POST /search    -> {ok, results: [...], path, degraded[, gate][, modelPending][, error]}
 POST /upsert    -> {ok, upserted}
 POST /delete    -> {ok, deleted}
 POST /supersede -> {ok, upserted}
@@ -215,6 +215,12 @@ def make_handler(store):
             }
             if res.get("error"):
                 body["error"] = res["error"]
+            if res.get("gate"):
+                # 闸门做了什么（top / 保留 / 丢掉）；调用方排查「为什么这轮没记忆」要看它
+                body["gate"] = res["gate"]
+            if res.get("modelPending"):
+                # 模型那一路没在预算内跑完：这一轮是词面结果，不是降级
+                body["modelPending"] = True
             self._json(body)
 
     return MemoryHandler

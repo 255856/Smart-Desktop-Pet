@@ -15,7 +15,14 @@ import json
 import sys
 
 from .server import DEFAULT_HOST, DEFAULT_PORT, MemorySidecarServer
-from .store import DEFAULT_DATA_DIR, MemoryStore
+from .store import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_DENSE_KEEP_RATIO,
+    DEFAULT_MIN_SCORE_RATIO,
+    DEFAULT_MIN_SIMILARITY,
+    DEFAULT_MODEL_BUDGET,
+    MemoryStore,
+)
 
 
 def _harden_stdio():
@@ -37,6 +44,11 @@ def _build_store(args):
         use_vector=not args.no_vector,
         use_bm25=not args.no_bm25,
         use_rerank=not args.no_rerank,
+        # None = 没传 → 交给环境变量 / 默认值（store 里那套优先级）
+        model_budget=args.model_budget,
+        min_score_ratio=args.min_score_ratio,
+        min_similarity=args.min_similarity,
+        dense_keep_ratio=args.dense_keep_ratio,
     )
 
 
@@ -130,6 +142,19 @@ def build_parser():
     ap.add_argument("--no-bm25", action="store_true", help="关掉 BM25 腿（只走向量）")
     ap.add_argument("--no-rerank", action="store_true", help="关掉精排（只走 RRF 粗排）")
     ap.add_argument("--no-warmup", action="store_true", help="serve 启动后不预热模型")
+    # 检索的两个旋钮（不传 = 环境变量 → 默认值；0 是「关掉」的意思，不是「没传」）
+    ap.add_argument("--model-budget", type=float, default=None,
+                    help="检索里「模型那一路」的时间预算（秒，默认 %.1f；0 = 不限时）"
+                         % DEFAULT_MODEL_BUDGET)
+    ap.add_argument("--min-score-ratio", type=float, default=None,
+                    help="相关度闸门：最终分低于「顶行 × 该值」的行不返回（默认 %.2f）"
+                         % DEFAULT_MIN_SCORE_RATIO)
+    ap.add_argument("--min-similarity", type=float, default=None,
+                    help="门禁：最像的那条卡余弦相似度低于它 → 整轮不给（默认 %.2f）"
+                         % DEFAULT_MIN_SIMILARITY)
+    ap.add_argument("--dense-keep-ratio", type=float, default=None,
+                    help="语义保命符：cos ≥ 顶行 × 该值的行即使精排分低也保留（默认 %.2f）"
+                         % DEFAULT_DENSE_KEEP_RATIO)
     return ap
 
 

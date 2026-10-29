@@ -61,6 +61,10 @@ CARDS = [
 
 def make_store(data_dir, embedder=None, reranker=None, **kwargs):
     kwargs.setdefault("retry_cooldown", 0)
+    # 同 test_memory_sidecar.make_store：功能测试不受延迟预算 / 语义门禁干扰
+    # （假向量跟真实语义没有可比性，默认门禁会把它一刀切掉）
+    kwargs.setdefault("model_budget", 30.0)
+    kwargs.setdefault("min_similarity", 0.0)
     return MemoryStore(
         data_dir,
         embedder=embedder if embedder is not None else FakeEmbedder(),
@@ -215,6 +219,31 @@ def test_supersede_and_rebuild_endpoints(sidecar):
 
 
 # ── A7：/search 永不 500 ─────────────────────────────────────────────────
+def test_list_and_search_payloads_keep_category(tmp_path):
+    """DEFECT 3：/list 与 /search 都要带 category（面板筛选 + 共同经历靠它）。"""
+    store = make_store(tmp_path)
+    store.init()
+    store.upsert([{"id": "c1", "key": "master", "kind": "impression",
+                   "text": "主人不吃辣", "category": "preference", "importance": 0.9}])
+    srv = MemorySidecarServer(store, port=0, warmup=False)
+    port = srv.start()
+    try:
+        _status, listed = http_get(port, "/list")
+        card = listed["cards"][0]
+        assert card["category"] == "preference", card
+        assert card["key"] == "master" and card["status"] == "active"
+
+        _status, found = http_post(port, "/search", {"query": "不吃辣", "top_k": 3})
+        row = found["results"][0]
+        assert row["category"] == "preference", row
+        assert row["key"] == "master" and row["status"] == "active"
+        # 闸门做了什么也要能看见（排查「为什么这轮没记忆」）
+        assert found["gate"]["minScoreRatio"] == store.min_score_ratio
+        assert "kept" in found["gate"] and "dropped" in found["gate"]
+    finally:
+        srv.stop()
+        store.close()
+
 def test_search_never_500_when_everything_is_down(tmp_path, monkeypatch):
     store = make_store(tmp_path, embedder=FakeEmbedder(fail=True))
     store.init()
