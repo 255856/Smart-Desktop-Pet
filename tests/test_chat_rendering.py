@@ -3562,8 +3562,12 @@ def test_v29_ast_guard_dev_state_pushed_force_write_sync():
 
 
 def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
-    """state 差时, _strategy_guidance 必须明确告诉 LLM 直接拒绝危险工具, 不走 confirm 流程。"""
-    from app.brain.hallucination_guard import _strategy_guidance
+    """state 差时, build_state_strategy 必须明确告诉 LLM 只挡高风险工具, 不走 confirm 流程。
+
+    Stage 1.5：状态文本合并成一份（build_state_strategy），并且收窄 ——
+    只对高风险工具直接拒绝，**普通请求照常回答**。
+    """
+    from app.brain.hallucination_guard import build_state_strategy, _RISKY_TOOLS
     from app.engine.state import PetState
 
     # 1. state=全 LOW: 必须有「直接拒绝」指令
@@ -3571,9 +3575,9 @@ def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
     state.feeling = 0; state.strength = 0; state.strength_food = 0
     state.strength_drink = 0; state.likability = 0; state.health = 0
     state.normalize()
-    guidance = _strategy_guidance(state)
+    guidance = build_state_strategy(state)
     assert "直接拒绝" in guidance or "必须**直接拒绝**" in guidance, (
-        "v30 regression: state=全 LOW 时, _strategy_guidance 必须明确告诉 "
+        "v30 regression: state=全 LOW 时, build_state_strategy 必须明确告诉 "
         "LLM 直接拒绝危险工具. 实际 guidance:\n" + guidance
     )
     # 必须有 lock_screen / 危险工具关键词
@@ -3586,12 +3590,21 @@ def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
         "v30 regression: 必须明确说 LLM 不要走 confirm 流程. 实际: "
         + guidance
     )
+    # Stage 1.5 收窄: 高风险工具**全部**点名
+    missing = [n for n in sorted(_RISKY_TOOLS) if n not in guidance]
+    assert not missing, f"v30: 高风险工具没被点名: {missing}"
+    # Stage 1.5 收窄: 普通请求照常回答 (不许「什么都拒」)
+    assert "普通请求一律照常回答" in guidance, (
+        "v30/Stage1.5: 状态差时普通请求必须照常回答. 实际: " + guidance
+    )
+    assert "继续拒绝" not in guidance
+    assert "preemptive" not in guidance
 
     # 2. state 全 HIGH: 不应有「直接拒绝」指令 (状态好, 仍可走 confirm 流程)
     state2 = PetState()
     state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
     state2.normalize()
-    guidance2 = _strategy_guidance(state2)
+    guidance2 = build_state_strategy(state2)
     assert "直接拒绝" not in guidance2, (
         "v30: state 全 HIGH 时不应有「直接拒绝」指令 (会误伤正常 confirm 流程). "
         "实际: " + guidance2
@@ -3601,20 +3614,25 @@ def test_v30_strategy_guidance_directs_refuse_dangerous_tools_when_state_bad():
     state3 = PetState()
     state3.feeling = 0; state3.strength_food = 100; state3.likability = 100
     state3.normalize()
-    guidance3 = _strategy_guidance(state3)
+    guidance3 = build_state_strategy(state3)
     assert "直接拒绝" in guidance3, (
         "v30: 心情 LOW 时也要触发拒绝指令. 实际: " + guidance3
     )
-    print("[OK] v30: _strategy_guidance 状态差时直接拒绝危险工具")
+    print("[OK] v30: build_state_strategy 状态差时只挡高风险工具")
 
 
-def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
-    """grounding_dynamic_prompt 把拒绝指令追加到 prompt 末尾作为 final override。"""
+def test_v31_state_strategy_moved_out_of_system_prompt():
+    """Stage 1.5: 状态指令不再拼进 system prompt, 改由 build_state_strategy 产出。
+
+    为什么: system message 落在 MiniMax 的 8192-token 前缀缓存块里,
+    块里每轮变一次 (心情/饱食/好感) 整块作废 —— 实测缓存命中率
+    98.9% → 1.5%。状态策略走**每轮动态上下文** (user 消息)。
+    """
     from app.engine.state import PetState
-    from app.brain.hallucination_guard import grounding_dynamic_prompt
-    from app.brain._companion_registry import (
-        set_state_for_thread, clear_all, _REGISTRY,
+    from app.brain.hallucination_guard import (
+        grounding_dynamic_prompt, build_state_strategy,
     )
+    from app.brain._companion_registry import set_state_for_thread, clear_all
 
     clear_all()
     state = PetState()
@@ -3632,30 +3650,23 @@ def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
     request = FakeRequest(thread_id, "你是一个有用的桌面助手。")
     sp = grounding_dynamic_prompt(request)
 
-    # 1. v31 override 必须存在
-    assert "本轮最高优先级" in sp, (
-        "v31 regression: grounding_dynamic_prompt 必须在 prompt 末尾追加 "
-        f"v31 override 块. 实际: {sp[-300:]}"
+    # 1. final override / 顶部 directive 都没了 (三份副本合并成一份)
+    assert "本轮最高优先级" not in sp, (
+        "v31→Stage1.5: final override 已删除. 实际: " + sp[-300:]
     )
-    # 2. override 必须在 confirm 协议**之后** (位置靠后)
-    confirm_pos = sp.find("高风险工具 confirm 协议")
-    override_pos = sp.find("本轮最高优先级")
-    assert confirm_pos != -1 and override_pos != -1, (
-        f"v31: confirm 协议或 override 找不到. sp 长度: {len(sp)}"
+    assert "第一原则" not in sp
+    assert "桌宠状态策略" not in sp, (
+        "Stage1.5: 状态策略属于易变通道, 不能进 system prompt. "
+        f"实际: {sp[-300:]}"
     )
-    assert override_pos > confirm_pos, (
-        f"v31 regression: v31 override 必须在 confirm 协议之后. "
-        f"confirm_pos={confirm_pos}, override_pos={override_pos}"
-    )
-    # 3. v31 override 必须明确说"以这段为准" (覆盖 confirm 协议).
-    # v33 后措辞统一成 "以这段为准" 放在顶部 directive + 末尾 override 互为冗余,
-    # 旧的 "忽略" 措辞在 v33 顶部 directive 改成 "即便下面有 confirm 协议... 以这段为准".
-    # 这里只检查核心覆盖语义, 不强制措辞.
-    assert "以这段为准" in sp, (
-        "v31 (v33 改后): prompt 必须明确说'以这段为准' (覆盖 confirm 协议). "
-        f"实际结尾: {sp[-300:]}"
-    )
-    # 4. 边界: state 全 HIGH 时不应有 override
+    # 2. 稳定部分照旧在 system prompt 里
+    assert "防幻觉基线" in sp
+    assert "高风险工具 confirm 协议" in sp
+    # 3. 状态策略由 build_state_strategy 产出 (易变通道)
+    strategy = build_state_strategy(state)
+    assert "直接拒绝" in strategy, f"实际: {strategy}"
+    assert "不要走 confirm 流程" in strategy, f"实际: {strategy}"
+    # 4. 边界: state 全 HIGH 时策略里也不该有「直接拒绝」
     clear_all()
     state2 = PetState()
     state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
@@ -3666,8 +3677,13 @@ def test_v31_grounding_dynamic_prompt_appends_final_override_when_state_bad():
         "v31: state 全 HIGH 不应有 v31 override (会误伤正常 confirm 流程). "
         f"实际: {sp2[-300:]}"
     )
+    assert "直接拒绝" not in build_state_strategy(state2), (
+        "v31: state 全 HIGH 时策略里不该有「直接拒绝」"
+    )
+    # 5. system prompt 跟状态无关 —— 逐字节稳定 (缓存能命中)
+    assert sp == sp2, "state 变了 system prompt 也变了 → 缓存块会作废"
     clear_all()
-    print("[OK] v31: grounding_dynamic_prompt 在 prompt 末尾追加 final override")
+    print("[OK] v31→Stage1.5: 状态策略移出 system prompt, 走动态上下文")
 
 
 def test_v31_grounding_dynamic_prompt_does_not_override_when_state_none():
@@ -3741,17 +3757,31 @@ def test_v32_state_bad_prompt_has_no_preemptive_ask_instruction():
         "v32: state 差时 prompt 不能教 LLM preemptively 问. 实际末尾 300 字:\n"
         + sp[-300:]
     )
-    # 仍应有 v31 override (状态差直接拒绝)
-    assert "本轮最高优先级" in sp, (
-        "v32: state 差仍应有 v31 override 块"
+    # Stage 1.5: system prompt 里已无状态指令 (走动态上下文)
+    assert "本轮最高优先级" not in sp, (
+        "v32→Stage1.5: final override 已删除, 状态策略走动态上下文"
+    )
+    assert "桌宠状态策略" not in sp
+    # 状态策略文本本身也不许教 preemptive 问
+    from app.brain.hallucination_guard import build_state_strategy
+    strategy = build_state_strategy(state)
+    assert "向主人复述参数并询问" not in strategy
+    assert "preemptive" not in strategy, (
+        f"v32→Stage1.5: 状态策略不能教 preemptive 问. 实际: {strategy}"
     )
     print("[OK] v32: state 差时 prompt 拼装, 无 preemptive 问教学")
 
 
 def test_v33_state_bad_top_directive_in_prompt():
-    """把「状态差时直接拒绝高危工具」提到 prompt 最顶部, 作为第一原则。"""
+    """Stage 1.5: 顶部「第一原则」directive 删掉了 (三份副本合并成一份)。
+
+    收窄后的语义: 状态差 → **只挡高风险工具**, 普通请求照常回答。
+    文本由 build_state_strategy() 产出, 走**易变通道**（动态上下文）。
+    """
     from app.engine.state import PetState
-    from app.brain.hallucination_guard import grounding_dynamic_prompt
+    from app.brain.hallucination_guard import (
+        grounding_dynamic_prompt, build_state_strategy,
+    )
     from app.brain._companion_registry import set_state_for_thread, clear_all
 
     clear_all()
@@ -3767,40 +3797,41 @@ def test_v33_state_bad_top_directive_in_prompt():
             self.config = {"configurable": {"thread_id": tid}}
     request = FakeRequest("test-v33", "你是一个有用的桌面助手, 名字叫小汐。")
     sp = grounding_dynamic_prompt(request)
+    strategy = build_state_strategy(state)
     clear_all()
 
-    # 1. 顶部必须有第一原则 directive
-    assert "第一原则" in sp[:600], (
-        "v33 regression: 状态差时, prompt 顶部必须有 '第一原则' 拒绝 directive. "
+    # 1. system prompt 里不再有顶部 directive (易变内容不能进缓存块)
+    assert "第一原则" not in sp, (
+        "v33→Stage1.5: 顶部 directive 已删 (走动态上下文). "
         f"实际开头 200 字: {sp[:200]}"
     )
-    # 2. directive 必须在 base persona 之前 (位置验证)
-    top_directive_pos = sp.find("第一原则")
-    base_persona_pos = sp.find("你是一个有用的桌面助手, 名字叫小汐")
-    assert top_directive_pos < base_persona_pos, (
-        f"v33: 第一原则必须在 base persona 之前. "
-        f"top={top_directive_pos}, base={base_persona_pos}"
+    assert "我状态不好" not in sp, (
+        "v33→Stage1.5: 模板化拒绝话术不进 system prompt"
     )
-    # 3. 关键禁止词必须出现
-    for kw in ["禁止 preemptive 问", "禁止走 confirm 流程", "明确直接拒绝",
-                "我状态不好"]:
-        assert kw in sp, f"v33: prompt 必须含 '{kw}'"
-    # 4. 末尾仍应有 v31 override (冗余确保 LLM 读到)
-    assert "本轮最高优先级" in sp, (
-        "v33: prompt 末尾仍应有 v31 override (与顶部 directive 互为冗余)"
-    )
-    # 5. 边界: state 全 HIGH 时不能误伤
+    # 2. 收窄后的语义在策略文本里: 只挡高风险工具, 普通请求照常回答
+    assert "直接拒绝" in strategy, f"实际: {strategy}"
+    assert "不要走 confirm 流程" in strategy, f"实际: {strategy}"
+    assert "普通请求一律照常回答" in strategy, f"实际: {strategy}"
+    assert "不要因为状态差就拒绝帮忙" in strategy, f"实际: {strategy}"
+    # 3. 旧的「什么都拒」措辞全部消失
+    for kw in ["禁止 preemptive 问", "继续拒绝", "preemptive", "不调工具"]:
+        assert kw not in strategy, f"v33→Stage1.5: 策略文本不该含 '{kw}'"
+    # 4. 边界: state 全 HIGH 时不能误伤
     clear_all()
     state2 = PetState()
     state2.feeling = 100; state2.strength_food = 100; state2.likability = 100
     state2.normalize()
     set_state_for_thread("test-v33", state2)
     sp2 = grounding_dynamic_prompt(request)
+    strategy2 = build_state_strategy(state2)
     clear_all()
     assert "第一原则" not in sp2[:600], (
         "v33 边界: state 全 HIGH 时 prompt 顶部不能有第一原则 directive"
     )
-    print("[OK] v33: state 差时 prompt 顶部加第一原则 directive, 不删工具")
+    assert "直接拒绝" not in strategy2, (
+        "v33 边界: state 全 HIGH 时策略文本不该挡工具"
+    )
+    print("[OK] v33→Stage1.5: 顶部 directive 删掉, 状态策略收窄成只挡高风险工具")
 
 
 def test_v33_langchain_agent_keeps_all_tools():

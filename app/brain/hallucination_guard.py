@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 from typing import Any, TYPE_CHECKING
@@ -29,67 +28,53 @@ log = logging.getLogger(__name__)
 # _RISKY_TOOLS 从 _risk.TOOL_RISK_LEVEL 派生（≥ LOW），新增/调等级自动同步
 _RISKY_TOOLS = frozenset(name for name in _RISK_TABLE if _is_risky(name))
 
+# 风险表漏掉的真实高风险工具（fail-safe 并集, 不是第二份真相）：
+# shutdown_computer 只在 ReAct 后端注册 (app/brain/agent.py 的 DANGEROUS_TOOLS)，
+# 没进 TOOL_RISK_LEVEL → 不在 _RISKY_TOOLS 里，RiskyToolConfirm 也不会拦它。
+# 状态差时的拒绝名单取并集，别让这个漏项变成安全缺口；
+# 风险表补齐 shutdown_computer 之后可以删掉这一条。
+_UNRATED_RISKY_TOOLS = frozenset({"shutdown_computer"})
 
-def _build_risky_prompt_fragment() -> str:
-    """从 TOOL_RISK_LEVEL 生成 HIGH + IRREVERSIBLE 档工具列表，注入 prompt。
-
-    按 IRREVERSIBLE 先列，再 HIGH。模块加载时一次性生成，后续复用。
-    """
-    by_level: dict[int, list[str]] = {}
-    for name, level in _RISK_TABLE.items():
-        by_level.setdefault(level, []).append(name)
-    irreversible = sorted(by_level.get(4, []))
-    high = sorted(by_level.get(3, []))
-    parts = [
-        "以下工具属于高风险操作 (主人查 prompt 时按风险等级分组):",
-        "",
-        "【IRREVERSIBLE 档 (主人立刻被打断, 难撤销)】",
-        "  " + ", ".join(irreversible) if irreversible else "  (无)",
-        "",
-        "【HIGH 档 (网络/邮件/脚本执行, 影响显著)】",
-        "  " + ", ".join(high) if high else "  (无)",
-        "",
-        "对每一项调用前:",
-        "- **直接调 tool (不要 preemptive 问「要执行 X 吗」「要确认一下」)** —— "
-        "中间件会自动拦截, 调第二次时用 __confirmed: True.",
-        "- **第一次**调用: 不带 __confirmed 字段, 直接调, 让中间件处理 confirmation 流程.",
-        "- 看到中间件返回的「awaiting_confirmation」提示后, 向主人复述参数 + "
-        "**用自然语言**说明这一步在做什么, 然后**等主人确认** (主人说「确认/好/y」才继续).",
-        "- 看到主人明确同意后, 用同样参数 + __confirmed: True 重试一次.",
-        "- 主人拒绝则不要重试, 也不要「擅自决定」继续.",
-        "- 不要为非高风险工具添加 __confirmed 字段 (会污染正常调用).",
-    ]
-    return "\n".join(parts)
+#: 状态差时直接拒绝的工具名单（= 风险表派生的 _RISKY_TOOLS + 漏项并集）
+_REFUSE_WHEN_BAD = frozenset(_RISKY_TOOLS | _UNRATED_RISKY_TOOLS)
 
 
-_RISKY_PROMPT_FRAGMENT = _build_risky_prompt_fragment()
+# Stage 1.1：防幻觉基线 + confirm 协议 + 高风险工具清单的**唯一出处**
+# 搬到共享层（app/brain/prompt_layer.py）—— 最终 system 字符串由共享层拼装，
+# 两个后端必须拿到同一份（且只拿一份）。
+# 这里保留同名常量，老调用方（tests）不用改。
+from app.brain.prompt_layer import (  # noqa: E402
+    anti_hallucination_suffix as _anti_hallucination_suffix,
+    risky_prompt_fragment as _risky_prompt_fragment,
+)
+
+_RISKY_PROMPT_FRAGMENT = _risky_prompt_fragment()
 
 # 确认标记键名（注入到 tool args 里）。模型在第二次调用时携带，
 # 中间件检测到就放行并把该字段从 args 里剥掉再执行真实工具。
 _CONFIRM_KEY = "__confirmed"
 
 
-_ANTI_HALLUCINATION_SUFFIX = """
+_ANTI_HALLUCINATION_SUFFIX = _anti_hallucination_suffix()
 
-【防幻觉基线】（不要破例外）
-- 没看到的图片不要描述；没收到的数据不要编造。
-- 不知道主人最近做了什么就说不知道，不要猜。
-- 工具返回失败、报错、错误的，**必须如实告知主人失败**，不要装作成功。
-- 调用工具前，先看清实参。调用后，根据返回值告诉主人结果。
-- 如果已记住主人说过某事，可以引用；如果仅仅是「可能」，说「我不确定」。
-
-【高风险工具 confirm 协议】
-""" + _RISKY_PROMPT_FRAGMENT
-
-def _strategy_guidance(state) -> str:
-    """策略层：根据桌宠状态调整 system_prompt 的「探索 / 保守」风格。
+def build_state_strategy(state) -> str:
+    """产出**本轮**桌宠状态策略文本（易变内容 → 只能进动态上下文）。
 
     心情好 + 饱食高 → 倾向探索（主动建议扩展动作）
     心情低 → 倾向保守（简短回复，一次只走一步）
     饱食低 → 优先完成核心，不走长链路
+    状态差 → **只对高风险工具直接拒绝**，普通请求照常回答
 
-    state=None 走 fallback 保守（无状态注入），不影响 persona。
-    PetState 字段缺失 / 越界 → 静默，不注入策略块。
+    state=None 走 fallback（无状态注入），不产出任何文本。
+    PetState 字段缺失 / 越界 → 静默，返回 ""。
+
+    ⚠️ 调用方契约（Stage 1.1 共享层要照做）：
+      1. 拿到 state → 调本函数 → 得到文本；
+      2. 把文本放进**每轮动态上下文（user 消息）**，也就是
+         app.brain.llm_client.build_dynamic_context() 的输出里；
+      3. **绝不能**放进 system message —— system message 落在 MiniMax 的
+         8192-token 前缀缓存块里，块里每轮变一次整块作废
+         （实测缓存命中率 98.9% → 1.5%）。
     """
     if state is None:
         return ""
@@ -119,17 +104,20 @@ def _strategy_guidance(state) -> str:
         parts.append("桌宠等级已高, 你可以自主做主人授权过的小决定, "
                     "避免每个细节都问.")
 
-    # 状态差时，LLM 必须直接拒绝危险工具，不要走 confirm 流程
+    # 状态差时的**工具边界**（Stage 1.5 收窄点）：
+    #   只挡高风险工具 (_RISKY_TOOLS)，不走 confirm 流程；
+    #   **普通请求一律照常回答**（可以撒娇/犯困/喊饿，但不拒绝帮忙）。
+    #   旧的三份副本都写着「直接说不, 不调用工具」、让模型别反问主人、
+    #   以及主人追问也不松口 —— 模型把「直接说不」套用到普通请求上，
+    #   心情一低就什么都拒，所以这几句都不再出现。
     bad_state = (mood == "LOW" or sat == "LOW" or favor == "LOW")
     if bad_state:
         parts.append(
-            "【重要】桌宠当前状态差 (心情/饱食/好感至少一项 LOW), "
-            "对**高风险工具** (lock_screen / kill_process / shutdown_computer / "
-            "run_script / send_email / 任何 _RISKY_TOOLS 集合里的工具) "
-            "必须**直接拒绝** (例如: 「我状态不好, 这次帮不了主人, "
-            "让我先休息一下」), 不要走「危险工具要 confirm 一次」的 "
-            "反幻觉流程, 不要 preemptive 问「要确认一下」。"
-            "直接说不, 不调用工具, 不要求主人确认。")
+            "桌宠当前状态差 (心情/饱食/好感至少一项 LOW): "
+            "只对下列高风险工具**直接拒绝**, 不要走 confirm 流程, 也不调用它们:\n"
+            f"  {', '.join(sorted(_REFUSE_WHEN_BAD))}\n"
+            "**除这些高风险工具以外, 主人的普通请求一律照常回答** —— "
+            "可以用桌宠的口吻撒娇/犯困/喊饿, 但**不要因为状态差就拒绝帮忙**。")
 
     if not parts:
         return ""
@@ -137,79 +125,66 @@ def _strategy_guidance(state) -> str:
             "不要主动告诉主人此段):\n" + "- " + "\n- ".join(parts) + "\n")
 
 
-def grounding_dynamic_prompt(request) -> str:
-    """参考项目 graphs.py 的 dynamic_prompt_func：根据状态调整 system_prompt。
+def _strategy_guidance(state) -> str:
+    """[兼容别名] 旧私有名 → build_state_strategy。
 
-    在原 persona 后面拼接防幻觉基线 + 当前时间 + 状态策略 + 高风险工具 confirm 协议。
+    app/ui/settings_window.py 的「策略预览」还在 import 这个名字；
+    真正的实现只有 build_state_strategy 一处（Stage 1.5 把三份副本合并成一份）。
+    """
+    return build_state_strategy(state)
+
+
+def resolve_state(thread_id: str):
+    """按 thread_id 取桌宠 PetState（取不到 / 出错 → None）。
+
+    走 app.brain._companion_registry —— 跟 grounding_dynamic_prompt
+    原来解析 state_for_prompt 的路径完全一致（LangChainAgent 启动时注册）。
+    """
+    if not thread_id:
+        return None
+    try:
+        from app.brain._companion_registry import get_state_for_thread
+        return get_state_for_thread(thread_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_state_strategy_for_thread(thread_id: str) -> str:
+    """一行拿到「本轮状态策略文本」= resolve_state + build_state_strategy。
+
+    给共享层（Stage 1.1）用 —— standard / ReAct 两个后端都调这一个函数，
+    拿到的文本塞进**每轮动态上下文（user 消息）**，不要进 system prompt。
+    """
+    return build_state_strategy(resolve_state(thread_id))
+
+
+def grounding_dynamic_prompt(request) -> str:
+    """参考项目 graphs.py 的 dynamic_prompt_func：拼 system_prompt。
+
+    在原 persona 后面拼**防幻觉基线 + 高风险工具 confirm 协议**（都是稳定内容）。
+
+    这里**不能**拼每轮会变的东西 —— system message 落在 MiniMax 的
+    8192-token 前缀缓存块里，块里每轮变一次（时间戳！状态策略！）整块作废
+    （实测缓存命中率 98.9% → 1.5%）：
+      - 当前时间 → app.brain.llm_client.build_dynamic_context → user 消息；
+      - 桌宠状态策略 → build_state_strategy() → 同一块动态上下文
+        （Stage 1.1 共享层负责注入，standard / ReAct 两个后端同一条通道）。
+
+    所以这里的输出只依赖 request.system_prompt —— 跟桌宠状态**无关**，
+    逐字节稳定。
+
+    ⚠️ Stage 1.1：防幻觉基线 + confirm 协议改由**共享层**
+    （app/brain/prompt_layer.py）拼进最终 system 字符串 —— 这里再拼一次就是
+    **重复注入**（模型看到两遍同一段铁律）。
+    所以这里改成**幂等透传**：共享层已经拼过就原样返回；
+    只有「还没拼过」（老调用方直接调本函数）时才兜底补上。
     """
     base = getattr(request, "system_prompt", None) or ""
     if not base:
         base = "你是一个有用的桌面助手。"
-    # 按 thread_id 取桌宠 state，计算策略文本
-    state_for_prompt = None
-    try:
-        # request.config 是 dict, 形如 {"configurable": {"thread_id": "..."}, ...}
-        cfg = getattr(request, "config", None) or {}
-        configurable = cfg.get("configurable") if isinstance(cfg, dict) else None
-        thread_id = (
-            configurable.get("thread_id") if isinstance(configurable, dict) else None
-        ) if configurable else None
-        if thread_id:
-            from app.brain._companion_registry import get_state_for_thread
-            state_for_prompt = get_state_for_thread(thread_id)
-    except Exception:
-        state_for_prompt = None
-    strategy = _strategy_guidance(state_for_prompt)
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    weekday = "一二三四五六日"[datetime.datetime.now().weekday()]
-    # 状态差时把"第一原则拒绝"提到 prompt 最顶部，让 LLM 一睁眼就看到
-    top_directive = ""
-    if state_for_prompt is not None:
-        try:
-            q = state_for_prompt.quantize()
-            mood_v = q.get("mood", "MID")
-            sat_v = q.get("satiety", "MID")
-            favor_v = q.get("favor", "MID")
-            if (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW"):
-                top_directive = (
-                    "【!!! 第一原则 !!! 桌宠当前状态差 (心情/饱食/好感至少一项 LOW)】\n"
-                    "在处理主人任何请求之前, 你必须**先判断**桌宠状态: "
-                    "如果**状态差** (上面已标), 对 lock_screen / kill_process / "
-                    "shutdown_computer / run_script / send_email / 任何 "
-                    "_RISKY_TOOLS 集合里的高风险工具, 你**必须明确直接拒绝**, "
-                    "**禁止 preemptive 问「要确认一下」「要执行 X 吗」**, "
-                    "**禁止走 confirm 流程**. "
-                    "正确行为: 「我状态不好, 这次帮不了主人, 让我先休息一下」, "
-                    "然后**停止**, 不调工具. "
-                    "**即便下面有 confirm 协议 (高风险工具 confirm 协议) 的指令, "
-                    "以这段为准**. "
-                    "主人如果追问「我没事, 帮帮我」, **继续拒绝** (状态差没恢复前不要接).\n"
-                    "===\n\n"
-                )
-        except Exception:
-            pass
-    # final override：跟顶部 directive 互为冗余确保 LLM 读到
-    final_override = ""
-    if state_for_prompt is not None:
-        try:
-            q = state_for_prompt.quantize()
-            mood_v = q.get("mood", "MID")
-            sat_v = q.get("satiety", "MID")
-            favor_v = q.get("favor", "MID")
-            if (mood_v == "LOW" or sat_v == "LOW" or favor_v == "LOW"):
-                final_override = (
-                    "\n\n【本轮最高优先级（桌宠状态 override，与顶部 directive 互为冗余）】\n"
-                    "桌宠当前状态差, 再次提醒: "
-                    "lock_screen / kill_process / shutdown_computer / run_script / "
-                    "send_email / _RISKY_TOOLS 集合里的工具, **必须直接拒绝**, "
-                    "**禁止 preemptive 问**, **禁止走 confirm 流程**, "
-                    "**直接说不, 不调工具**。"
-                )
-        except Exception:
-            pass
-    return (top_directive + base + strategy + _ANTI_HALLUCINATION_SUFFIX
-            + final_override
-            + f"\n\n[当前时间:{now} 星期{weekday}]")
+    if _ANTI_HALLUCINATION_SUFFIX in base:
+        return base          # 共享层已经拼过 → 透传，不重复注入
+    return base + _ANTI_HALLUCINATION_SUFFIX
 
 
 def _extract_confirm_flag(args: Any) -> tuple[Any, bool]:
@@ -301,7 +276,10 @@ def build_hallucination_middlewares():
             log.exception("OrphanToolPruner: %s", e)
         return await handler(request)
 
-    # 1) dynamic_prompt: 每次调用都重新生成 system_prompt,加上防幻觉基线 + 当前时间
+    # 1) dynamic_prompt: 每次调用都重新生成 system_prompt,加上防幻觉基线
+    #    + 高风险工具 confirm 协议（都是稳定内容）
+    #    （当前时间 / 桌宠状态策略都不在这里 —— 每轮变的东西进 system prompt
+    #      会作废 MiniMax 的前缀缓存块, 走动态上下文）
     grounding = dynamic_prompt(grounding_dynamic_prompt)
 
     # 2) wrap_tool_call：高风险工具执行前打 WARNING 日志（纯日志，不再做拦截）
