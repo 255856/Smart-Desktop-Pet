@@ -1,12 +1,12 @@
 ---
 name: desktop-pet-tool-usage
-description: When and how to call each of the 56 available tools (52 builtin + 4 ActivityWatch via MCP) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
+description: When and how to call each of the 68 available tools (61 builtin + 7 MCP tools - 4 ActivityWatch + 3 filesystem) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
 user-invocable: false
 ---
 
 # Tool Usage Skill — desktop-pet
 
-You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
+You have **68 tools** available (61 内置 + 7 个 MCP 工具（4 个 ActivityWatch + 3 个 filesystem）)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
 
 > 本文件由 `app/brain/brain_controller.py` 直接注入到 system prompt 最前面。清单必须与
 > `app/engine/tools/` 的实际注册保持一致：2026-10-04 审计发现旧版写着 31 个工具，
@@ -162,7 +162,7 @@ You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。*
 | "跳个舞" / "做个表情" | `play_animation(anim_name="spin")` |
 | "开心点" | `change_pet_emotion(emotion="happy")` |
 | "别说了" / "把气泡收了" | `clear_bubble()` |
-| "截个图" | `take_screenshot()`（**只验证能否截图，不会把图片给你看**——别描述图里有什么） |
+| "截个图" | `take_screenshot_tool()`（**只验证能否截图，不会把图片给你看**——别描述图里有什么） |
 | "通知我 XX" | `send_notification(title="…", message="…")` |
 | "把音量调到 30" | `set_volume(level=30)` |
 | "亮度调暗点" | `set_brightness(level=30)` |
@@ -171,7 +171,7 @@ You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。*
 
 ---
 
-## 📋 Quick reference (56 tools: 52 内置 + 4 aw)
+## 📋 Quick reference (68 tools: 61 内置 + 7 MCP（4 ActivityWatch + 3 filesystem）)
 
 | 工具 | 必填参数 |
 |---|---|
@@ -210,9 +210,14 @@ You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。*
 | `list_desktop_files` | (无) |
 | `read_text_file` | `path` |
 | `read_file` | (无) |
+| `edit_file` | `path`, `old_string`, `new_string` |
+| `multi_edit` | `path`, `edits` |
 | `search_files` | `keyword` |
+| `grep_files` | `pattern` |
+| `glob_files` | `pattern` |
 | `ocr_image` | (无) |
-| `take_screenshot` | (无) |
+| `understand_image` | `image_path` |
+| `take_screenshot_tool` | (无) |
 | `set_volume` | `level` |
 | `set_brightness` | `level` |
 | `set_tts_mute_until` | (无) |
@@ -227,10 +232,17 @@ You have **56 tools** available (52 内置 + 4 个 ActivityWatch MCP 工具)。*
 | `set_wifi` | (无) |
 | `set_bluetooth` | (无) |
 | `run_script` | `script_path` |
+| `Task` | `task` |
+| `generate_image` | `prompt` |
+| `generate_video` | `prompt` |
+| `generate_audio` | `prompt` |
 | `mcp_aw_aw_status` | (无) |
 | `mcp_aw_aw_get_current_window` | (无) |
 | `mcp_aw_aw_get_recent_activities` | `minutes` (默认 30) |
 | `mcp_aw_aw_get_browser_tabs` | `minutes` (默认 30) |
+| `mcp_fs_fs_read_file` | `path` |
+| `mcp_fs_fs_list_dir` | `path` |
+| `mcp_fs_fs_search_files` | `pattern` |
 
 ---
 

@@ -13,14 +13,14 @@
 | 二、时间与提醒 | 6 | — |
 | 三、搜索与记忆 | 4 | — |
 | 四、计算与转换 | 3 | — |
-| 五、应用与文件 | 10 | 2 |
+| 五、应用与文件 | 15 | 2 |
 | 六、桌宠自身 | 5 | — |
 | 七、系统控制 | 20 | 5 |
-| 八、ActivityWatch 活动感知 | 4 | — |
+| 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3） | 7 | — |
 | 九、生成 / 委派 | 4 | 1（run_script） |
 | **合计** | **68** | **9** |
 
-> 八、语音唤醒（非工具）独立章节。
+> 十、语音唤醒（非工具）独立章节。
 
 ---
 
@@ -120,7 +120,7 @@
 
 ---
 
-## 五、应用与文件（10）
+## 五、应用与文件（15）
 
 ### `open_app` ⚠️ 危险
 - **触发**："打开 QQ / 启动 Chrome / 计算器"
@@ -172,6 +172,18 @@
 - **沙箱**：路径必须在用户主目录下
 - **参数**：`path: str`（空则按 `question` 在家目录搜），`question: str`
 
+### `edit_file`
+- **触发**：把 xxx.txt 里的 foo 改成 bar
+- **作用**：精确替换文件里的一段文本（原子写；old_string 默认必须唯一匹配，防误伤）
+- **参数**：`path: str`，`old_string: str`，`new_string: str`（`replace_all: bool` 全替换，`dry_run: bool` 只看 diff 不写盘）
+- **沙箱**：路径必须在用户主目录下
+
+### `multi_edit`
+- **触发**：把这几处都改一下
+- **作用**：对同一个文件做多处精确替换（事务式：全成功或全失败，任一错就回滚）
+- **参数**：`path: str`，`edits: list`（每项含 old_string + new_string，可选 replace_all），`dry_run: bool`
+- **沙箱**：路径必须在用户主目录下
+
 ### `list_desktop_files`
 - **触发**："桌面上有什么 / 桌面文件清单"
 - **作用**：列出桌面文件（名称 + 类型 + 大小）
@@ -181,6 +193,18 @@
 - **作用**：在指定目录递归搜文件名含 `keyword` 的文件
 - **沙箱**：路径必须在用户主目录下
 - **参数**：`keyword: str`，`directory: str`（空则桌面），`limit: int (1~500, 默认 50)`
+
+### `grep_files`
+- **触发**：在项目里搜一下 xxx
+- **作用**：递归按正则匹配文件内容，输出 `file:行号:内容`（比逐个 read_file 快得多）
+- **参数**：`pattern: str`（Python re 语法），`directory: str`（空则桌面），`include: str`（文件名 glob 过滤，如 *.py），`max_results: int`，`case_insensitive: bool`
+- **沙箱**：限定在用户主目录下；超过 2 MiB 的文件自动跳过
+
+### `glob_files`
+- **触发**：找一下所有 *.png
+- **作用**：按 glob 路径模式（如 `src/**/*.py`）找文件，按修改时间倒序（比 search_files 更精确）
+- **参数**：`pattern: str`（支持 ** 递归），`directory: str`（空则桌面），`max_results: int`，`include_dirs: bool`
+- **沙箱**：限定在用户主目录下
 
 ### `fetch_url_text`
 - **触发**："这个网页说的啥 / 抓一下 github.com/xxx/yyy"
@@ -209,7 +233,7 @@
 - **触发**："跟主人说 XXX / 帮我转告他"
 - **作用**：让桌宠主动说话（不依赖对话流）
 
-### `take_screenshot`
+### `take_screenshot_tool`
 - **触发**："截图 / 截个屏 / 看看我在干嘛"
 - **作用**：截全屏保存到 `data/screenshots/`，返回路径
 
@@ -217,7 +241,7 @@
 
 ## 七、系统控制（20）
 
-### 7.1 TTS 与语音（4）
+### 7.1 TTS、语音与图像理解（5）
 
 #### `set_tts_mute_until`
 - **触发**："静音 / 闭嘴 / 别说话 / 安静一下"
@@ -238,6 +262,12 @@
 - **作用**：OCR 识别图片中的文字
 - **后端**：Windows Media.Ocr 优先 → Tesseract 兜底（需 `pip install pytesseract`）
 - **参数**：`image_path: str`（空则自动截屏 + OCR）
+
+#### `understand_image`
+- **触发**：这图里是什么 / 描述一下这张图
+- **作用**：理解图片整体内容（主体 / 场景 / 含义），走多模态 chat completion
+- **区别**：`ocr_image` 专提取图中文字，本工具不需要装 tesseract / winsdk
+- **参数**：`image_path: str`（本地图片路径），`prompt: str`（要问的问题，默认「描述图片内容」）
 
 ### 7.2 音量与亮度（4）
 
@@ -274,7 +304,7 @@
 - **触发**："别说了 / 收起来 / 隐藏气泡"
 - **作用**：隐藏桌宠头顶气泡（hook 注入实现）
 
-### 7.4 进程与剪贴板（4）
+### 7.4 进程、剪贴板与通知（5）
 
 #### `list_processes`
 - **触发**："什么程序在跑 / 内存谁占最多 / 看下 chrome 进程"
@@ -295,6 +325,12 @@
 - **触发**："复制 XXX 到剪贴板"
 - **作用**：写文本到剪贴板
 - **参数**：`text: str`
+
+#### `send_notification`
+- **触发**：弹个通知提醒我
+- **作用**：发 Windows 系统通知（右下角弹窗）
+- **参数**：`title: str`，`message: str`
+- **依赖**：需要装 win10toast（`pip install win10toast`），没装会如实回报
 
 ### 7.5 无线开关（2）
 
@@ -320,11 +356,18 @@
 
 ---
 
-## 八、ActivityWatch 活动感知
+## 八、MCP 外部工具（7）
+
+> 这些不是内置工具，是**运行时**由 MCP（Model Context Protocol）server 桥接进来的，
+> 命名规则 `mcp_<server 别名>_<工具名>`（app/mcp/protocol.py）。
+> 两个 server 在 `mcp_servers.yaml` 里配：`aw`（ActivityWatch，4 个工具）
+> + `fs`（文件系统沙箱，3 个工具）。
+
+### 8.1 ActivityWatch 活动感知（4）
 
 > 需装 [ActivityWatch](https://activitywatch.net/) 桌面客户端（5600 端口）。详见 [activitywatch-integration.md](activitywatch-integration.md)。
 
-### `mcp_aw_get_recent_activities`
+### `mcp_aw_aw_get_recent_activities`
 - **触发**：「过去 5 分钟我在做什么 / 刚才用了什么 app」
 - **作用**：调 aw-server `/api/0/.../events` 拉最近 N 分钟 window 事件，按 app 聚合
 - **参数**：`minutes: int (1~120)`，`limit: int (1~20)`
@@ -333,27 +376,72 @@
   - 没装 watcher → 「ActivityWatch 已运行, 但未检测到 aw-watcher-window / afk 数据, 请装 watcher」
   - watcher 卡住 → 「watcher 在但最近 10 分钟无活动」
 
-### `mcp_aw_get_current_window`
+### `mcp_aw_aw_get_current_window`
 - **触发**：「我现在在做什么 / 主人在哪个窗口」
 - **作用**：拉最近 1 个 window 事件
 - **报错**：同上
 
-### `mcp_aw_query`
-- **触发**：「主人今天在 VSCode 待了多久 / 浏览器 Chrome 用了多久」
-- **作用**：走 ActivityWatch Query Builder 语法聚合任意时间段数据
-- **参数**：`query: str`（ActivityWatch Web Query 语法），`timeperiods: list`
-- **报错**：同上 + query 语法错时返「query 语法错: ...」
+### `mcp_aw_aw_get_browser_tabs`
+- **触发**：「我最近看了什么网页 / 我刚逛了哪些网站」
+- **作用**：拉最近 N 分钟访问过的浏览器标签页（标题 + URL + 时长）
+- **参数**：`minutes: int`（默认 30），`limit: int`（默认 10）
+- **报错**：同上
 
-### `mcp_aw_buckets`
-- **触发**：调试用，列出所有 bucket
-- **作用**：返回 aw-server 上所有 bucket + metadata
+### `mcp_aw_aw_status`
+- **触发**：「AW 还能用吗 / aw-server 在跑吗」
+- **作用**：查 aw-server 是否在运行（健康检查，问 AW 之前先查它）
 - **报错**：server 没跑时报同上
 
-这 4 个工具**不在** `_RISKY_TOOLS` 里（只读查询），不被 post-LLM 拦截器改写，跟其他 SAFE 工具一样正常走 confirm / ALLOW 路径。
+### 8.2 文件系统沙箱（3）
+
+> 内置的 filesystem MCP server（`app/mcp/filesystem_server.py`），
+> 只允许访问 `mcp_servers.yaml` 里 `--root` 指定的沙箱根目录（默认项目目录）。
+
+### `mcp_fs_fs_read_file`
+- **触发**：看下这个文件里写了什么
+- **作用**：读一个文本文件（最多 2000 字符），仅沙箱目录内
+- **参数**：`path: str`（沙箱内路径）
+
+### `mcp_fs_fs_list_dir`
+- **触发**：这个目录里有哪些文件
+- **作用**：列出一个目录里的文件，仅沙箱目录内
+- **参数**：`path: str`（沙箱内路径）
+
+### `mcp_fs_fs_search_files`
+- **触发**：沙箱里找一下所有 *.py
+- **作用**：在沙箱内按 glob 模式搜索文件
+- **参数**：`pattern: str`（glob 模式），`root: str`（沙箱内搜索根目录）
+
+这 7 个 MCP 工具**不在** `_RISKY_TOOLS` 里（只读查询），不被 post-LLM 拦截器改写，跟其他 SAFE 工具一样正常走 confirm / ALLOW 路径。
 
 ---
 
-## 九、语音唤醒（非工具）
+## 九、生成 / 委派（4）
+
+### `generate_image`
+- **触发**：画一张猫的图
+- **作用**：按 prompt 生成图片，返回 http(s) URL（落盘后给本地 file:// 路径）
+- **参数**：`prompt: str`，`size: str`（如 1024x1024）
+- **后端**：config.yaml 的 `multimodal` 段（base_url / api_key / image_model）
+
+### `generate_video`
+- **触发**：生成一段 5 秒的短视频
+- **作用**：按 prompt 生成短视频（异步任务 + 计费高 → 危险级）
+- **参数**：`prompt: str`，`duration_seconds: int`
+- **后端**：config.yaml 的 `multimodal` 段（base_url / api_key / video_model）
+
+### `generate_audio`
+- **触发**：把这段话做成语音 / 生成一段音乐
+- **作用**：按 prompt 生成音频 / 音乐，返回 http(s) URL
+- **参数**：`prompt: str`
+- **后端**：config.yaml 的 `multimodal` 段（base_url / api_key / audio_model）
+
+### `Task`
+- **触发**：帮我搜一下 X 然后总结这类不想开新对话的活
+- **作用**：派生子 agent 跑一个隔离的小任务，返回最终文字结果（独立上下文，不污染主对话）
+- **参数**：`task: str`，`agent_type: str`（general / explore …，目前只是语义标签）
+
+## 十、语音唤醒（非工具）
 
 **模块名**：`WakeWordRecognizer`（`app/voice/wake_word.py`）
 
@@ -536,7 +624,7 @@ app/engine/tools/
 
 ## 统计
 
-- **68 个工具**（不含语音唤醒） + 1 个语音模块
+- **68 个工具**（不含语音唤醒） = 61 个内置 + 7 个 MCP（4 个 ActivityWatch + 3 个 filesystem）+ 1 个语音模块
 - **8 个弹窗 confirm** + 4 个只 log 不弹窗 = 12 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
 - **1270 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

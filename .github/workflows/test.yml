@@ -71,6 +71,25 @@ jobs:
           }
           exit $code
 
+      - name: Check tool inventory vs docs
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+        shell: pwsh
+        # 工具清单对账：live registry vs 文档 / 风险表 / 危险工具名单：
+        # 有无法解释的差异就红（退出码非 0 的差异）。
+        run: |
+          python scripts/check_tool_docs.py 2>&1 |
+            Tee-Object -FilePath check-tool-docs.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            "## 工具清单对账失败（exit $code）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Get-Content check-tool-docs.log -Tail 40 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          exit $code
+
   # Nightly job：跑所有用例，覆盖覆盖率假阳性路径上的偶发故障。
   # 触发：每天 06:00 UTC（北京时间 14:00）+ 手动 workflow_dispatch。
   # 跳过 coverage 阈值（fail-under=25 是给 PR 用的；nightly 只关心能不能跑完）
