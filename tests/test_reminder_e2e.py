@@ -1,6 +1,7 @@
 """提醒工具端到端测试：通过 ToolRegistry 调 add_reminder，看完整链路。"""
 from __future__ import annotations
 
+import datetime
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,20 @@ def _no_asr_native_load(monkeypatch):
     from app.voice import asr as asr_mod
     monkeypatch.setattr(asr_mod.SpeechRecognizer, "_get_model",
                         lambda self, *a, **k: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_win_alarm_backup(monkeypatch):
+    """本模块**不碰** Windows 计划任务。
+
+    add_reminder 会给「还剩 2 分钟以上」的提醒注册系统级兜底（schtasks 一次性
+    任务），真注册了会在若干分钟后在主人桌面上弹一个气泡通知——测试不该在
+    用户机器上留闹钟（本模块有好几条用例会加 3~20 分钟的提醒）。
+    win_alarm 本身由 tests/test_win_alarm.py 专门覆盖（那边要么把 _run mock
+    掉，要么注册完立刻 disarm）。
+    """
+    from app.core import win_alarm
+    monkeypatch.setattr(win_alarm, "is_available", lambda: False)
 
 
 @pytest.fixture
@@ -72,25 +87,50 @@ class TestAddReminderToolE2E:
         assert fired == ["E2E 喝水"], f"应该已触发，实际：{fired}"
 
     def test_add_with_at_time_in_future_fires(self, qapp, registry_and_store):
-        reg, store = registry_and_store
-        fired = []
-        store.reminder_triggered.connect(fired.append)
+        """绝对时间 at_time：工具认得、能加进 store，且 fire_at 落在未来。
 
+        这里刻意用 **'YYYY-MM-DD HH:MM' 显式日期格式**（parse_absolute_time
+        的格式 2），而不是 'HH:MM'：
+          · 格式 2 精确返回那一分钟，**不会**像 'HH:MM' 那样在「已过」时
+            被推到明天（推明天 ⇒ delay ≈ 86400）；
+          · 格式 2 的结果只由字符串决定，跟工具内部那一刻的墙钟无关，
+            所以「工具取 now」和「测试取 now」跨过分钟边界也不会分叉。
+        真正的触发留给更明确的 delay_minutes 用例（见上一个 test）。
+        """
+        reg, store = registry_and_store
         tool = reg.get("add_reminder")
-        # 用 at_time，10 秒后（避开跨分钟边界导致被推到明天）
-        future = time.localtime(time.time() + 10)
-        # 用 round 把秒抹掉避免跨分钟
-        at_str = time.strftime("%H:%M", future)
+
+        # 目标 = 现在 + 10 分钟，再把秒抹掉。
+        # 抹秒最多损失 60s ⇒ 目标分钟必定落在 (now+9min, now+10min]，
+        # 也就是说：分钟边界、跨午夜都无所谓，它一定在未来。
+        now = datetime.datetime.now()
+        target = (now + datetime.timedelta(minutes=10)).replace(second=0, microsecond=0)
+        at_str = target.strftime("%Y-%m-%d %H:%M")
+
         result = tool.fn(text="E2E at_time", at_time=at_str)
 
         assert "已设置" in result, f"got: {result}"
         items = store.list()
         assert len(items) == 1, "应该 add 到 store"
-        # 跨日 / 不跨日的边界：如果 at_str 是今天则几秒后触发，是明天则 24h 后。
-        # 这里我们只验证 add 成功，触发留给更明确的 delay_minutes 测试。
-        delay = store.list()[0].fire_at - time.time()
-        # delay 应该在 [0, 86400] 之间（要么是今天几秒后，要么是明天同一分钟）
-        assert 0 < delay < 86400, f"delay 异常：{delay}"
+
+        fire_at = items[0].fire_at
+        target_ts = target.timestamp()
+
+        # 1) fire_at 必须严格在未来
+        assert fire_at > time.time(), f"fire_at 不在未来：{fire_at}"
+
+        # 2) fire_at 必须正好落在目标分钟上（±1s：ReminderStore.add 里
+        #    int(fire_ts - now) 秒级取整最多丢 1s）。
+        #    这条比较的是两个绝对时间戳，跟「测量端等了多久」无关 → 恒成立。
+        assert abs(fire_at - target_ts) <= 1.0, (
+            f"fire_at 应等于目标分钟 {at_str}（±1s），"
+            f"实际偏差 {fire_at - target_ts:.3f}s")
+
+        # 3) delay 落在一个**明确且窄**的窗口里（不再是 0 < delay < 86400）：
+        #    目标分钟距 now ∈ (540s, 600s]，秒级取整最多再丢 1s，
+        #    测量端 time.time() 比 now 晚一点点 ⇒ delay ∈ [9min-60s, 10min+1s]
+        delay = fire_at - time.time()
+        assert 480 <= delay <= 601, f"delay 异常：{delay}"
 
     def test_delay_minutes_zero_rejected(self, registry_and_store):
         reg, store = registry_and_store
