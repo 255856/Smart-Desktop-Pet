@@ -273,7 +273,12 @@ class ChatWindow(QWidget):
             self.asr.error.connect(self._on_asr_error)
             self.asr.recording_started.connect(self._on_recording_start)
             self.asr.recording_finished.connect(self._on_recording_finish)
-            # 预热：延迟 1s 在主线程调度 _get_model()，让首次说话瞬时返回
+            # 预热：延迟 1s 后在**后台线程**加载模型，让首次说话瞬时返回。
+            # （模型加载绝不能放 GUI 主线程：ctranslate2 在主线程初始化 OpenMP
+            #  会触发 Windows fatal access violation，整个进程秒崩。）
+            self._asr_warmup_scheduled = False
+            self._asr_warmup_delay_ms = 1000
+            self._asr_warmup_relay = None
             self._warmup_asr_model()
         else:
             log.warning("ASR 不可用（未安装 sounddevice / faster-whisper，或配置关闭），语音输入按钮将隐藏")
@@ -2190,32 +2195,75 @@ class ChatWindow(QWidget):
     def _warmup_asr_model(self) -> None:
         """预热 ASR 模型（ctranslate2 首次初始化 3~5s）。
 
-        用 QTimer.singleShot 延迟 1s 调度到主线程，避免 chat_window 构造时立刻抢 CPU。
-        主线程通过 _do_warmup 跑 self.asr._get_model()，让首次说话瞬时返回。
-        失败时仅 debug log（首次说话仍可触发加载）。
+        **模型加载绝不能跑在 GUI 主线程**：faster-whisper / ctranslate2 在主线程
+        初始化 OpenMP 时会触发 *Windows fatal exception: access violation*，
+        try/except 接不住，整个桌宠进程秒崩（pytest 直接 exit 139）。
+
+        所以这里只做「排程」：延迟 1s（别跟聊天窗首屏抢 CPU）后把真正的加载
+        丢给后台线程；GUI 线程只在收到完成信号时收尾（记一条日志）。
+
+        - 幂等：一个窗口只预热一次（_asr_warmup_scheduled 标记）。
+        - 窗口已析构时直接放弃，绝不碰已删除的 Qt 对象。
+        - 失败时仅 debug log（首次说话仍可触发加载）。
         """
         if self.asr is None:
             return
+        if getattr(self, "_asr_warmup_scheduled", False):
+            return                      # 幂等：一个窗口只预热一次
+        self._asr_warmup_scheduled = True
         try:
             from app.core.qt_compat import QTimer
-
-            def _do_warmup():
-                model = None
-                # 重试一次：首次加载容易受 OpenMP/MKL 初始化影响
-                for attempt in (1, 2):
-                    try:
-                        model = self.asr._get_model()    # noqa: SLF001
-                        break
-                    except Exception as e:  # noqa: BLE001
-                        log.debug("ASR 模型预热第 %d 次失败：%s", attempt, e)
-                if model is not None:
-                    log.info("ASR 模型预热完成（首次加载已缓存）")
-                else:
-                    log.debug("ASR 模型预热 2 次都失败（首次说话时会再尝试）")
-
-            QTimer.singleShot(1000, _do_warmup)
+            QTimer.singleShot(getattr(self, "_asr_warmup_delay_ms", 1000),
+                              self._launch_asr_warmup)
         except Exception as e:  # noqa: BLE001
             log.debug("ASR 模型预热启动失败：%s", e)
+
+    def _launch_asr_warmup(self) -> None:
+        """（GUI 线程）拉起后台线程做 ASR 模型预热。
+
+        真正的模型加载跑在 worker 线程里；GUI 线程只负责发信号 / 收信号，
+        绝不自己碰 ctranslate2 / OpenMP 初始化。
+        """
+        if self.asr is None:
+            return
+        from app.core.qt_compat import QObject, Signal, is_qobject_alive
+        if not is_qobject_alive(self):
+            # 窗口已经被销毁（sip.isdeleted）→ 放弃预热，别碰已释放的 Qt 对象
+            log.debug("ASR 模型预热：窗口已析构，放弃预热")
+            return
+
+        class _WarmupRelay(QObject):
+            """完成信号的中继：在 GUI 线程创建，跨线程 emit 是安全的。"""
+
+            done = Signal(bool, str)      # ok, error
+
+        relay = _WarmupRelay()
+        relay.done.connect(self._on_asr_warmup_done)
+        self._asr_warmup_relay = relay    # 保留引用（worker 线程也持有一份）
+
+        def _worker():
+            model = None
+            err = ""
+            # 重试一次：首次加载容易受 OpenMP/MKL 初始化影响
+            for attempt in (1, 2):
+                try:
+                    model = self.asr._get_model()    # noqa: SLF001
+                    break
+                except Exception as e:  # noqa: BLE001
+                    err = str(e)
+                    log.debug("ASR 模型预热第 %d 次失败：%s", attempt, e)
+            if model is not None:
+                log.info("ASR 模型预热完成（首次加载已缓存）")
+            else:
+                log.debug("ASR 模型预热 2 次都失败（首次说话时会再尝试）：%s", err)
+            relay.done.emit(model is not None, err)
+
+        threading.Thread(target=_worker, daemon=True, name="asr-warmup").start()
+
+    def _on_asr_warmup_done(self, ok: bool, error: str) -> None:
+        """（GUI 线程）预热结束：只记日志，不碰任何 UI。"""
+        if not ok:
+            log.debug("ASR 模型预热失败：%s", error)
 
     def _confirm_dangerous_tool(self, name: str, args_json: str) -> Optional[bool]:
         """危险工具执行前的 UI 确认弹窗。
@@ -2362,6 +2410,70 @@ class ChatWindow(QWidget):
         self.mic_btn.setEnabled(True)
         self.chat_view.append(f"语音识别出错：{err}")
 
+    def _dynamic_turn_context(self, query: str = "") -> str:
+        """本轮易变上下文（当前时间 + 桌宠实时状态 + 召回的记忆）。
+
+        为什么不能放 system prompt：system message 落在 MiniMax 的
+        8192-token 前缀缓存块里，块里每轮变一次（时间戳！）整块作废 ——
+        实测缓存命中率 98.9% → 1.5%。所以易变内容一律走 user 消息。
+
+        长期记忆块（Stage 2.1）也走这条通道：它按**本轮主人说的话**召回，
+        每轮都变 ⇒ 更不能进 system prompt（还会让 Stage 2.8 的 agent
+        指纹每轮变 → 每轮重建 agent）。
+
+        query: 本轮主人说的话（这里唯一知道原文的地方）。
+        来源：context_provider 绑着的 BrainController.chat_context_dynamic()
+        （只有它手里有桌宠实时状态）；拿不到就退化成「只有时间」。
+        """
+        from app.brain.llm_client import build_dynamic_context
+        owner = getattr(self.context_provider, "__self__", None)
+        for holder in (owner, getattr(owner, "brain", None)):
+            fn = getattr(holder, "chat_context_dynamic", None)
+            if callable(fn):
+                try:
+                    try:
+                        ctx = fn(query)
+                    except TypeError:
+                        # 老签名（无参）→ 无参调用
+                        ctx = fn()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("chat_context_dynamic 失败：%s", e)
+                    ctx = ""
+                if ctx:
+                    return ctx
+        # 兜底：只有时间（state_provider 拿得到时带上实时状态）
+        state = None
+        if self._state_provider is not None:
+            try:
+                state = self._state_provider()
+            except Exception:  # noqa: BLE001
+                state = None
+        return build_dynamic_context(state=state, query=query)
+
+    def _inject_dynamic_context(self, msgs: list) -> list:
+        """把本轮易变上下文作为**独立的 user 消息**插在主人本轮发言前面。
+
+        用独立消息而不是拼进主人那句话：主人原话保持字节不变，意图判定
+        （detect_action_intent）读到的仍是主人的原话。
+
+        本轮主人说的话（最后一条 user 消息）作为 query 传下去 ——
+        长期记忆块按它召回（Stage 2.1）。
+        """
+        from app.brain.llm_client import inject_dynamic_context
+        if not msgs:
+            return msgs
+        query = ""
+        for m in reversed(msgs):
+            role = (m.get("role") if isinstance(m, dict)
+                    else getattr(m, "role", ""))
+            if role == "user":
+                content = (m.get("content") if isinstance(m, dict)
+                           else getattr(m, "content", ""))
+                query = content if isinstance(content, str) else ""
+                break
+        return inject_dynamic_context(
+            msgs, context=self._dynamic_turn_context(query))
+
     def _kickoff_llm(self) -> None:
         if is_placeholder_key(self.llm_cfg.api_key):
             self._render_message(Message(
@@ -2373,8 +2485,12 @@ class ChatWindow(QWidget):
 
         # 构造请求 messages（用 history，但**清洗幻觉痕迹**——见 _build_clean_messages_for_llm）
         msgs = self._build_clean_messages_for_llm()
+        # 本轮易变上下文（当前时间 / 桌宠实时状态）作为**独立的 user 消息**
+        # 插在主人本轮发言前面 —— 不能进 system prompt（原因见
+        # _dynamic_turn_context 的注释）。两条后端共用这一份 msgs。
+        msgs = self._inject_dynamic_context(msgs)
 
-        # 动态 system 上下文：时间 / 桌宠状态 / 长期记忆
+        # 稳定的 system 上下文：SKILL / 长期记忆 / 工具列表（都不随轮次变）
         system_prompt = self.char_cfg.persona
         if self.context_provider is not None:
             try:
@@ -2406,6 +2522,17 @@ class ChatWindow(QWidget):
         )
         client = None
         if _need_llm_client:
+            # v31: token 台账按 session 分桶。轻量路径的 LLMClient 不知道
+            # 会话 id（标准路径用的是同一个 self._session_id, 见下面
+            # LangChainAgent 的构造），这里把窗口知道的 id 写进台账的当前
+            # 会话 —— 两条后端路径因此落进同一个 session 桶。
+            try:
+                from app.brain.token_ledger import (
+                    set_session as _set_ledger_session,
+                )
+                _set_ledger_session(self._session_id or "")
+            except Exception:  # noqa: BLE001
+                pass
             client = LLMClient(
                 self.llm_cfg, system_prompt,
                 request_timeout_s=self._chat_timeout_s,
@@ -2511,6 +2638,9 @@ class ChatWindow(QWidget):
         else:
             self._worker = _StreamWorker(client, msgs)
             self._worker.chunk.connect(self._on_chunk)
+            # v31: 纯聊天路径的 usage 事件也走 _on_meta —— 状态栏 token 数
+            # 和 Trace 里的 usage 记录, 以前这条路径一个都拿不到。
+            self._worker.meta.connect(self._on_meta)
         # v31: token usage 走 _on_meta 路径 (AgentLoop 把 LLM API usage 当 meta
         # 事件 emit, 抓进 self._accum_tokens) — done 仍然只传文本, 保持兼容
         self._worker.done.connect(self._on_done)
@@ -2935,7 +3065,15 @@ class ChatWindow(QWidget):
                     self._accum_tokens += t
             except Exception:
                 pass
-            return  # 不再走 trace.record, usage 不入 trace
+            # v31: usage 也要入 trace —— 原来这里直接 return，usage 不入 trace。
+            # 载荷里除了三个 token 数，还有缓存命中 / 未命中 / 写入三个桶；
+            # 「缓存经济性」只有落进 trace 才查得到。
+            if self.trace is not None and self._trace_run_id:
+                try:
+                    self.trace.record(self._trace_run_id, "usage", dict(payload))
+                except Exception:  # noqa: BLE001
+                    pass
+            return  # usage 不再往下走 UI 事件映射（状态栏累加在上面已经做完）
 
         if self.trace is not None and self._trace_run_id:
             try:

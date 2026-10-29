@@ -1,6 +1,7 @@
 """pytest 配置：项目根目录 + 本地依赖包进 sys.path；Windows 平台守卫；Qt 单例 fixture。"""
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,22 @@ sys.path.insert(0, str(ROOT))
 _local = ROOT / ".local-packages"
 if _local.is_dir():
     sys.path.insert(0, str(_local))
+
+# ---------------------------------------------------------------------------
+# token 台账路径覆盖（Stage 0.2）
+#
+# 生产代码路径（llm_client / langchain_agent）会把每次请求的 usage 写进
+# data/token-usage.jsonl —— 那是 Stage 0.5 的**基线测量文件**，测试流量
+# 写进去会把缓存命中率算废。所以整个测试会话把台账指到临时文件。
+# ---------------------------------------------------------------------------
+_TOKEN_LEDGER_ENV = "DESKTOP_PET_TOKEN_LEDGER"
+_TOKEN_LEDGER = Path(tempfile.gettempdir()) / (
+    f"desktop-pet-token-usage-test-{os.getpid()}.jsonl")
+os.environ.setdefault(_TOKEN_LEDGER_ENV, str(_TOKEN_LEDGER))
+try:
+    _TOKEN_LEDGER.unlink()        # 每次测试会话从空台账开始
+except OSError:
+    pass
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -68,6 +85,88 @@ def _isolate_tool_choice_denylist(tmp_path):
     yield
     lc._TOOL_CHOICE_IGNORED.clear()
     lc._TOOL_CHOICE_IGNORED.update(lc._TOOL_CHOICE_SEED)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _mock_asr_model_load():
+    """把 ASR **模型加载** mock 掉（整个测试会话），但**不关掉**预热代码路径。
+
+    ChatWindow 构造完会延迟 1s 预热 faster-whisper。真正的模型加载
+    （ctranslate2 / OpenMP 初始化）在 Windows 上会直接崩进程
+    （Windows fatal exception: access violation，pytest exit 139），
+    所以测试里必须挡住**模型加载**这一步。
+
+    P0-10 修完之后，预热跑在后台线程、GUI 线程不再碰原生库；这里仍然把
+    _get_model 换成秒回的假货，保证测试永远不加载真模型 —— 但预热路径本身
+    （排程 / 后台线程 / 完成信号 / 幂等 / 析构保护）保持**真实**，
+    由 tests/test_asr_warmup_thread.py 专门覆盖。
+    """
+    try:
+        from app.voice import asr as asr_mod
+    except Exception:  # noqa: BLE001
+        yield
+        return
+
+    sentinel = object()
+
+    def _fake_get_model(self, *args, **kwargs):  # noqa: ANN001, ARG001
+        return sentinel
+
+    original = asr_mod.SpeechRecognizer._get_model
+    asr_mod.SpeechRecognizer._get_model = _fake_get_model
+    yield
+    asr_mod.SpeechRecognizer._get_model = original
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_repo_data_dir(tmp_path_factory):
+    """测试会话期间，**仓库 data/ 一个字节都不许被写**。
+
+    应用里有两处「相对路径」默认值（相对进程 CWD = 仓库根）：
+      · app/engine/chat_store.py —— ChatStore 默认 data/chat_history.db：
+        建一个 ChatWindow 就会把**测试消息追加进用户的真实聊天历史**；
+      · app/brain/_companion_log.py —— _default_log_path() → data/companion_log.txt：
+        写一条决策 trace 就往用户的真实日志里追加一行。
+
+    数据红线：测试不许碰用户数据（跟记忆库那条闸同源，
+    见 tests/test_memory_lifecycle_supersede.py::test_a6_*）。
+    """
+    tmp = tmp_path_factory.mktemp("repo_data_isolation")
+
+    # 1) 决策 trace 日志 → 临时文件
+    from app.brain import _companion_log as cl_mod
+    _orig_log_path = cl_mod._default_log_path
+    log_path = tmp / "companion_log.txt"
+    cl_mod._default_log_path = lambda: log_path
+
+    # 2) 聊天历史 → 临时 db（ChatWindow 建的 ChatStore 没显式传路径）
+    from app.engine import chat_store as cs_mod
+    _orig_init = cs_mod.ChatStore.__init__
+    chat_db = tmp / "chat_history.db"
+    legacy_json = tmp / "chat_history.json"
+
+    def _patched_init(self, data_file=None, *args, **kwargs):
+        if data_file is None:
+            data_file = chat_db
+        kwargs.setdefault("legacy_json", legacy_json)
+        _orig_init(self, data_file, *args, **kwargs)
+
+    cs_mod.ChatStore.__init__ = _patched_init
+    try:
+        yield
+    finally:
+        cs_mod.ChatStore.__init__ = _orig_init
+        cl_mod._default_log_path = _orig_log_path
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_test_token_ledger():
+    """测试会话结束后删掉临时台账文件（仓库 data/ 一个字节都不碰）。"""
+    yield
+    try:
+        _TOKEN_LEDGER.unlink()
+    except OSError:
+        pass
 
 
 @pytest.fixture(scope="session")
