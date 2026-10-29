@@ -44,6 +44,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -897,6 +898,60 @@ def archive_legacy(legacy: Path, archive_dir: Path) -> dict:
     return out
 
 
+def reindex_live(live: Path, blocking: bool = False) -> dict:
+    """合并后把 live 库的**向量索引**对齐（尽力而为，失败不影响合并结果）。
+
+    为什么必须处理：合并是**裸 SQL** 写库（不经过 MemoryStore），
+    写完索引就跟库对不上了 —— 那是「漂移」。两条防线：
+        1. 这里主动重建一次（默认**后台线程**，不阻塞合并/面板响应；
+           模型第一次下载可能很久，绝不能把 HTTP 请求挂在那儿）；
+        2. 运行中的 MemoryStore 下次召回时会自己发现漂移并修复
+           （app/brain/memory.py 的 _ensure_vector_index）。
+    索引目录还没建过 → 跳过（索引只由显式重建创建）。
+
+    ⚠️ 这里新建的 MemoryStore 跟运行中那个**共用同一个 VectorIndex 实例**
+       （app/brain/vector_index.py 的进程级注册表：同目录 → 同一个 chroma
+       客户端、同一个 collection 句柄）。所以：
+        - 不会「客户端一直占着索引目录里的 sqlite 文件」（老注释的担心）；
+        - 重建**不会**把运行中那个 store 的视图弄瞎
+          （以前这里新开客户端 + 重建时删 collection → 它的 count 变 0）。
+    """
+    out: dict = {"ok": True, "skipped": False, "error": None, "count": 0,
+                 "thread": None}
+    try:
+        from app.brain.vector_index import index_dir_for
+    except Exception as exc:  # noqa: BLE001
+        out.update(ok=False, error="向量索引模块不可用：%s" % exc)
+        return out
+    try:
+        idx_dir = index_dir_for(Path(live))
+    except Exception as exc:  # noqa: BLE001
+        out.update(ok=False, error="算不出索引目录：%s" % exc)
+        return out
+    if not idx_dir.is_dir():
+        out.update(skipped=True, reason="索引还没建过（不需要重建）")
+        return out
+
+    def _work() -> None:
+        try:
+            store = MemoryStore(Path(live))
+            report = store.rebuild_vector_index(blocking=True)
+            out.update(ok=bool(report.get("ok")),
+                       error=report.get("error"),
+                       count=report.get("count") or 0)
+        except Exception as exc:  # noqa: BLE001
+            out.update(ok=False, error="重建索引失败：%s" % exc)
+
+    if blocking:
+        _work()
+    else:
+        thread = threading.Thread(target=_work, daemon=True,
+                                  name="MemoryMergeReindex")
+        thread.start()
+        out["thread"] = thread
+    return out
+
+
 def apply_merge(live: Path, legacy: Path, groups: list, archive_dir: Path,
                 backup_dir: Path, backup: Optional[dict] = None) -> dict:
     """真正合并：备份 → 写 live（插入 + 标记冲突）→ 归档 legacy。
@@ -958,7 +1013,11 @@ def apply_merge(live: Path, legacy: Path, groups: list, archive_dir: Path,
     finally:
         conn.close()
 
-    # ③ 归档 legacy（移动，不是删除；字节必须一模一样）
+    # ③ 向量索引对齐（裸 SQL 写完库 → 索引漂移了）。
+    #    后台线程做，失败也不影响合并结果（真相在 SQLite，索引可以再重建）。
+    out["reindex"] = reindex_live(live, blocking=False)
+
+    # ④ 归档 legacy（移动，不是删除；字节必须一模一样）
     out["archived"] = archive_legacy(legacy, archive_dir)
     if not out["archived"].get("ok"):
         out["ok"] = False

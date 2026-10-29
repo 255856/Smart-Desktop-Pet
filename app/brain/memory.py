@@ -22,6 +22,34 @@ from typing import Optional, Protocol
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Stage 2.9：向量索引（Chroma + bge）+ cross-encoder 重排
+# ---------------------------------------------------------------------------
+# 向量索引是**派生索引**，不是真相来源 —— 真相永远是下面这张 SQLite 表。
+# 导入失败也不能让 memory.py 挂掉：记忆库是桌宠的核心，索引只是加速器。
+try:
+    from app.brain.vector_index import (  # noqa: E402
+        EMBED_MODEL_ID,
+        RERANK_MODEL_ID,
+        VectorIndex,
+        derive_state,
+        digest_rows,
+        index_dir_for,
+        same_index_dir,
+    )
+    _VECTOR_INDEX_IMPORT_ERROR: Optional[str] = None
+except Exception as _exc:  # noqa: BLE001
+    VectorIndex = None            # type: ignore[assignment]
+    index_dir_for = None          # type: ignore[assignment]
+    derive_state = None           # type: ignore[assignment]
+    digest_rows = None            # type: ignore[assignment]
+    same_index_dir = None         # type: ignore[assignment]
+    EMBED_MODEL_ID = ""           # type: ignore[assignment]
+    RERANK_MODEL_ID = ""          # type: ignore[assignment]
+    _VECTOR_INDEX_IMPORT_ERROR = str(_exc)
+    log.warning("向量索引模块导入失败（记忆检索降级到 substring + TF-IDF）：%s",
+                _exc)
+
 CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "shared", "other")
 
 # Stage 2.2：记忆作用域 / 生命周期分类 / 检索辅助字段
@@ -88,6 +116,59 @@ DEFAULT_FILLER_RATIO = 0.30
 #: 旧判断是「相似度 > 0 即算有关系」—— 真正的 embedding 对几乎任何 query
 #: 都会给一个小的正相似度，那个门禁等于没有门禁（安全位置问题）。
 SEMANTIC_GATE_THRESHOLD = 0.35
+
+# ---------------------------------------------------------------------------
+# Stage 2.9：向量检索（dense 腿）+ cross-encoder 重排 —— 阈值全部**量出来**
+# ---------------------------------------------------------------------------
+# 语料：scripts/eval_memory_recall.py 的 32 条合成记忆 + 20 条标注查询。
+# 工具：python scripts/eval_memory_recall.py --rerank-curve
+
+#: dense 腿（Chroma 语义检索）的门禁阈值：query 与最相似那条记忆的
+#: 余弦相似度 **≥** 该值，才算「跟记忆库有关系」。
+#: 0.40 是量出来的：
+#:   有答案的问题里，最相似那条的相似度**下限** = 0.456；
+#:   四个无关问题（今天股市涨了吗 / 量子力学怎么学 / 推荐一部好电影 / 帮我写一首诗）
+#:   的相似度**上限** = 0.376。
+#: → 0.40 落在中间，两边都留了余量（0.024 / 0.056）。
+DENSE_GATE_MIN = 0.40
+
+#: 送进 cross-encoder 的候选数（按融合分取前 K 名）。
+#: 实测：每条查询的**标注相关行**在融合排名里都进前 9，15 留了余量；
+#: 重排 15 对约 200 ms（GPU）/ 213 ms（CPU）—— 不阻塞聊天。
+RERANK_CANDIDATES = 15
+
+#: 补位行的重排分门槛：重排分 < 顶行重排分 × 该系数 → **不注入**。
+#: 0.12 是量出来的（--rerank-curve 的曲线给出的可行窗口）：
+#:   上界 ≈ 0.19 —— 再高就把「我什么时候交房租还有体检的事」里的体检那条裁掉
+#:                   （PLAN Stage 2 的验收行要求「相关 ≥2」）；
+#:   下界 ≈ 0.088 —— 再低就把近似陷阱「主人以前的手机是 iPhone 12…」放回来。
+#: 0.12 落在窗口中间：recall@6 0.952 / 近似陷阱 1/3 / precision@6 0.83。
+RERANK_CUT_RATIO = 0.12
+
+#: 语义腿开门的最低重排分：cross-encoder 说「全都不相关」→ 关门走 fallback。
+RERANK_MIN_SCORE = 0.02
+
+#: 强语义信号：重排分 ≥ 该值时，即使 dense 相似度没到阈值也开门
+#: （词面完全够不着、但语义上一模一样的场景，例如
+#:  「我不能吃什么」→「主人不吃辣」，实测重排分 0.976）。
+RERANK_STRONG_SCORE = 0.50
+
+#: **语义地板**（裁剪的第二条规则，量出来的）：
+#: 一行如果 ① 与 query **字面命中**（共享 CJK 二元组 / 英文整词）
+#: ② 与 query 的 dense 相似度 ≥ 顶行 dense 相似度 × 该系数
+#: ③ 且该相似度 ≥ DENSE_GATE_MIN（绝对门槛）
+#: → 即使 cross-encoder 给它的分很低，也**不丢掉**。
+#:
+#: 为什么需要这条：cross-encoder 对**复合问句**偏严 ——
+#: 「我什么时候交房租还有体检的事」里那条「下周要去医院做体检复查甲状腺」
+#: 的重排分只有 0.0085（它觉得这条跟问题无关），但它明明是问题的一半。
+#: 只用重排分裁剪会把真答案裁掉（PLAN Stage 2 的验收行会挂）。
+#:
+#: 实测（同一批 32 条语料）：
+#:   「我什么时候交房租还有体检的事」→ 体检那条 dense 比值 0.827（要**留**）
+#:   「我的体检报告放在哪」          → 陷阱「体检复查」dense 比值 0.690（要**丢**）
+#: → 0.75 落在两者中间（余量 0.077 / 0.060）。
+DENSE_KEEP_RATIO = 0.75
 
 #: 融合分权重（排序 + 裁剪都用它）：
 #:   W_REL —— 最强证据那一腿的相对强度（0..1）
@@ -412,13 +493,12 @@ def make_backend(name: str = "auto") -> VectorBackend:
         return TfidfBackend()
     if name in ("substring", "none"):
         return SubstringBackend()
-    # auto
-    try:
-        import importlib.util
-        if importlib.util.find_spec("sentence_transformers") is not None:
-            return SentenceTransformerBackend()
-    except Exception:  # noqa: BLE001
-        pass
+    # auto：**不再自动选 sbert**。
+    # 老行为是「装了 sentence-transformers 就用 paraphrase-multilingual-MiniLM」，
+    # 但那个模型**本机没有缓存**，一启用就是 470 MB 下载（而且在启动时阻塞）。
+    # 现在语义检索由**向量索引**负责（bge-small-zh-v1.5 + bge-reranker-base），
+    # 索引不可用时退回 TF-IDF —— 对外行为与今天一致（今天那条腿其实也是死的：
+    # Keras 3 让 transformers 直接 import 失败）。
     return TfidfBackend()
 
 
@@ -452,7 +532,9 @@ class MemoryStore:
                  character_name: str = "",
                  *,
                  filler_ratio: float = DEFAULT_FILLER_RATIO,
-                 semantic_gate_threshold: float = SEMANTIC_GATE_THRESHOLD):
+                 semantic_gate_threshold: float = SEMANTIC_GATE_THRESHOLD,
+                 vector_index: bool = True,
+                 rerank_cut_ratio: float = RERANK_CUT_RATIO):
         """
         Args:
             data_file: JSON 落盘路径 (e.g. "data/memory.json")。
@@ -461,6 +543,11 @@ class MemoryStore:
             backend_name: "auto" / "tfidf" / "sbert" / "substring"。
             filler_ratio: 补位行的相关度门槛（融合分 < 顶行 × 该值 → 不注入）。
             semantic_gate_threshold: 语义腿门禁阈值（相似度 ≥ 该值才算相关）。
+            rerank_cut_ratio: Stage 2.9 — 补位行的**重排分**门槛
+                （重排分 < 顶行重排分 × 该系数 → 不注入）。
+            vector_index: Stage 2.9 — 是否启用向量索引（Chroma + bge）。
+                True（默认）= 索引存在就用，不存在就退回 substring + tfidf；
+                False = 完全不用向量索引（消融台 / 降级测试用）。
             character_name: v31 — 角色名。非空时 data_file 派生为
                 `data/memory_{name}.db` (per-character 隔离)。空走老路径。
         """
@@ -510,8 +597,35 @@ class MemoryStore:
         #: 「最弱那条 / 顶行」越接近 1 → 注入里混进了越像噪声的行
         #: （近似陷阱的早期信号，值得盯）。
         self.last_recall_stats: dict = {}
+        # ---- Stage 2.9：向量索引（派生索引 · 可重建 · 可降级）----
+        # ⚠️ 构造期**什么都不做**：不建目录、不加载模型、不碰 chroma。
+        #    ① 桌宠启动不能被索引拖慢；② 记忆库构造**绝不能因为索引失败**；
+        #    ③ 测试跑完 data/ 必须字节一致（索引目录只由显式重建创建）。
+        self._vector_enabled = bool(vector_index)
+        self._vector_index = None            # VectorIndex 实例（懒建）
+        self._vector_status: dict = {}        # 最近一次状态（面板/测试看它）
+        self._vector_sync_report: dict = {}   # 最近一次漂移检测报告
+        self._vector_in_sync = False          # 索引是否与 SQLite 一致
+        self._dense_leg_ready = False         # 本轮 dense 腿是否可用
+        self._dense_max_sim = 0.0             # 本轮 dense 腿最大相似度（门禁用）
+        self._dense_sims: dict = {}           # 本轮 dense 腿的逐行相似度
+        self._lexical_hit_ids: set = set()    # 本轮**字面命中**的行 id
+        self._rerank_scores: dict = {}        # 本轮重排分（id → 分）
+        self._rerank_top = 0.0                # 本轮重排的顶行分
+        self._active_query = ""               # 本轮 query（重排要用）
+        #: 是否启用 cross-encoder 重排（消融台要能单独关掉它做对照）
+        self.rerank_enabled = True
+        #: 补位行的重排分门槛（默认 RERANK_CUT_RATIO；评测台扫描这个值）
+        self.rerank_cut_ratio = float(rerank_cut_ratio)
         self._load()
         self._refit_backend()
+        # 索引目录已经存在 → **后台线程**预热（绝不阻塞启动）
+        try:
+            if (self._vector_enabled and self.vector_index_dir is not None
+                    and self.vector_index_dir.is_dir()):
+                self.warmup_vector_index(blocking=False)
+        except Exception as e:  # noqa: BLE001
+            log.debug("向量索引预热跳过：%s", e)
 
     def _connect(self) -> sqlite3.Connection:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,6 +1473,251 @@ class MemoryStore:
         items.sort(key=lambda i: i.created_at)
         return items[-(n or self.max_inject):]
 
+    # ------------------ Stage 2.9：向量索引（派生索引）------------------
+
+    @property
+    def vector_index_dir(self) -> Optional[Path]:
+        """本库对应的向量索引目录（data/vectors/<角色>/）。"""
+        if index_dir_for is None:
+            return None
+        try:
+            return index_dir_for(self.data_file, self.character_name)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _vector_source_rows(self) -> list[tuple]:
+        """从 **SQLite** 读当前行（真相来源），列顺序同 _SELECT_COLUMNS。
+
+        ⚠️ 不能用内存里的 self._items：app/brain/memory_merge.py 是用**裸 SQL**
+        直接写库的（不经过 MemoryStore），写完不动内存 → 内存旧、库新。
+        漂移检测必须以库为准，否则索引会「静默过期」。
+        """
+        try:
+            conn = sqlite3.connect(
+                "file:" + self.data_file.as_posix() + "?mode=ro", uri=True)
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            cur = conn.execute(
+                "SELECT " + ", ".join(self._SELECT_COLUMNS) + " FROM memories")
+            return list(cur.fetchall())
+        except Exception:  # noqa: BLE001
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _source_rows_for_index(rows: list[tuple]) -> list[dict]:
+        """库里的行 → 向量索引要的字段（id / content / 元数据）。"""
+        return [
+            {"id": r[0], "content": r[1], "category": r[2],
+             "scope": r[7], "kind": r[8], "topic": r[9], "status": r[10]}
+            for r in rows
+        ]
+
+    def _reload_items_if_changed(self, rows: list[tuple]) -> bool:
+        """库里的行跟内存里不一样 → 以库为准重载。
+
+        谁会这样：app/brain/memory_merge.py 用裸 SQL 直接写 live 库
+        （合并 legacy 库），写完不动运行中的 MemoryStore 的内存。
+        返回 True = 确实重载过。
+        """
+        with self._lock:
+            mem_ids = {i.id for i in self._items}
+            db_ids = {str(r[0]) for r in rows}
+            if mem_ids == db_ids:
+                return False
+            self._items = [self._row_to_item(r) for r in rows]
+            self._index_dirty = True
+            self._fusion_ready = False
+        log.info("MemoryStore: 库里的行变了（%d → %d），已按库重载",
+                 len(mem_ids), len(db_ids))
+        return True
+
+    def _ensure_vector_index(self) -> Optional["VectorIndex"]:
+        """打开/同步向量索引（**漂移检测**）。不可用时返回 None（调用方降级）。
+
+        - 索引目录不存在 → 没有索引（**不自动建**）→ 走既有 substring + tfidf；
+        - 索引存在但跟库对不上 → 增量同步（只补差的那几行）；
+        - 模型还没就绪 → 本轮**不用**可能过期的索引（状态里报出来）。
+        """
+        if not self._vector_enabled or VectorIndex is None:
+            self._vector_in_sync = False
+            return None
+        if self._vector_index is None:
+            d = self.vector_index_dir
+            if d is None or not d.is_dir():
+                # 索引**只由显式重建创建**（scripts/rebuild_vector_index.py / 面板按钮）
+                self._vector_status = {
+                    "available": False, "state": "not_built",
+                    "path": str(d) if d else None, "error": None,
+                }
+                self._vector_in_sync = False
+                return None
+            # ⚠️ 用**共享实例**（同目录 → 同一个 chroma 客户端、同一个 collection
+            #    句柄）：两个 store 各开一个客户端的话，谁重建都会把对方的
+            #    视图弄瞎（而且会同时占着同一个 sqlite 文件）。
+            self._vector_index = VectorIndex.for_dir(d)
+        idx = self._vector_index
+        if not idx.open():
+            self._vector_status = idx.status()
+            self._vector_in_sync = False
+            return None
+        rows = self._vector_source_rows()
+        if not rows:
+            self._vector_status = idx.status()
+            self._vector_in_sync = False
+            return None
+        self._reload_items_if_changed(rows)
+        report = idx.sync(self._source_rows_for_index(rows), blocking=False)
+        self._vector_sync_report = report
+        try:
+            self._vector_status = idx.status()
+        except Exception:  # noqa: BLE001
+            self._vector_status = {}
+        self._vector_status["sync"] = report
+        self._vector_in_sync = report.get("action") in ("in_sync", "synced")
+        if not self._vector_in_sync:
+            log.info("向量索引未就绪（%s）：本轮走 substring + tfidf",
+                     report.get("action"))
+        return idx if self._vector_in_sync else None
+
+    def rebuild_vector_index(self, blocking: bool = True) -> dict:
+        """**显式**重建向量索引（幂等：重建两次结果一样）。
+
+        这是索引的**唯一**创建方式 —— store 自己不会建索引目录，
+        所以「跑一遍测试」不会在 data/ 里留下任何东西（见 A9）。
+        """
+        if not self._vector_enabled or VectorIndex is None:
+            return {"ok": False, "error": "向量索引不可用（模块导入失败）"}
+        d = self.vector_index_dir
+        if d is None:
+            return {"ok": False, "error": "算不出索引目录"}
+        # 复用**共享**的索引实例（别每次重建都新开一个 chroma 客户端 ——
+        # 客户端会一直占着索引目录里的 sqlite 文件；而且新客户端 = 新句柄，
+        # 重建时会让别人的句柄失效）。
+        idx = self._vector_index
+        if idx is None or not same_index_dir(idx.index_dir, d):
+            idx = VectorIndex.for_dir(d)
+            self._vector_index = idx
+        rows = self._vector_source_rows()
+        report = idx.rebuild(self._source_rows_for_index(rows), blocking=blocking)
+        self._vector_sync_report = report
+        try:
+            self._vector_status = idx.status()
+        except Exception:  # noqa: BLE001
+            self._vector_status = {}
+        self._vector_status["sync"] = report
+        self._vector_in_sync = bool(report.get("ok"))
+        return report
+
+    def vector_index_status(self) -> dict:
+        """向量索引状态（面板 / 测试）。**不抛异常**，**不返回缓存**。
+
+        ⚠️ 状态必须**每次现算**，不能端缓存：
+            - 别的实例（memory_merge 的 reindex_live、面板的重建按钮、
+              另一个 store）可能刚重建过索引 → 缓存的 count / digest 全是旧的；
+            - 源库可能被裸 SQL 改过（合并脚本就是）→ 摘要要现算。
+
+        §state§ 只从事实推出来（见 vector_index.derive_state）：
+        not_built / built / drifted / unavailable / disabled ——
+        **绝不跟同一份 payload 里的 n_indexed / built / in_sync 打架**。
+        """
+        d = self.vector_index_dir
+        out: dict = {
+            "enabled": self._vector_enabled,
+            "available": False,
+            "built": False,
+            "state": "disabled" if not self._vector_enabled else "not_built",
+            "state_reason": "",
+            "path": str(d) if d is not None else None,
+            "embed_model": EMBED_MODEL_ID,
+            "rerank_model": RERANK_MODEL_ID,
+            "n_indexed": 0,
+            "n_source": 0,
+            "in_sync": False,
+            "drift": False,
+            "sync": {},
+            "error": _VECTOR_INDEX_IMPORT_ERROR,
+        }
+        if not self._vector_enabled:
+            out["state_reason"] = "本 store 关掉了向量索引（vector_index=False）"
+            return out
+        idx = self._vector_index
+        if idx is None and d is not None and VectorIndex is not None:
+            # 只读地看一眼（不写任何东西）：共享实例，句柄也是共享的。
+            # 目录还没建也没关系 —— status() 不打开 chroma，只读状态文件。
+            try:
+                idx = VectorIndex.for_dir(d)
+            except Exception as e:  # noqa: BLE001
+                out["error"] = str(e)
+        if idx is not None:
+            try:
+                out.update(idx.status())
+            except Exception as e:  # noqa: BLE001
+                out["error"] = str(e)
+        # —— 源库（真相来源）现算 ——
+        src_rows = self._vector_source_rows()
+        out["n_source"] = len(src_rows)
+        src_digest = ""
+        if digest_rows is not None:
+            try:
+                src_digest = digest_rows(self._source_rows_for_index(src_rows))
+            except Exception:  # noqa: BLE001
+                src_digest = ""
+        idx_digest = str(out.get("digest") or "")
+        # 「现在对得上吗」= 索引里记的摘要 == 源库现算的摘要
+        in_sync = bool(idx_digest) and idx_digest == src_digest
+        report = dict(self._vector_sync_report or {})
+        # drift = 「上次同步发现过漂移」**或**「现在还对不上」——
+        # 后者保证「别的实例改过 / 裸 SQL 改过」不会被缓存掩盖。
+        drift = bool(report.get("drift")) or (bool(out.get("built")) and not in_sync)
+        out["in_sync"] = in_sync
+        out["drift"] = drift
+        out["sync"] = report
+        # 硬错误（chroma 打不开 / 模型加载失败）→ 索引用不了
+        hard = (out.get("open_error") or out.get("embed_error")
+                or out.get("rerank_error"))
+        if hard:
+            out["error"] = hard
+        if derive_state is not None:
+            state, reason = derive_state(
+                enabled=True, built=bool(out.get("built")),
+                n_indexed=int(out.get("n_indexed") or 0),
+                n_source=int(out.get("n_source") or 0),
+                in_sync=in_sync, drift=drift, error=hard)
+            out["state"] = state
+            out["state_reason"] = reason
+        return out
+
+    def warmup_vector_index(self, blocking: bool = False) -> dict:
+        """预热向量索引（加载向量模型 + 重排模型）。
+
+        blocking=False → **后台线程**加载（不阻塞启动、不阻塞聊天）；
+        blocking=True  → 等加载完（脚本 / 评测用）。
+        """
+        if not self._vector_enabled or VectorIndex is None:
+            return {"ok": False, "error": "向量索引不可用"}
+        d = self.vector_index_dir
+        if d is None:
+            return {"ok": False, "error": "算不出索引目录"}
+        if self._vector_index is None:
+            self._vector_index = VectorIndex.for_dir(d)
+        idx = self._vector_index
+        if blocking:
+            emb = idx.ensure_embedder(blocking=True)
+            rr = idx.ensure_reranker(blocking=True)
+            return {"ok": bool(emb) and bool(rr),
+                    "embed_ready": emb is not None,
+                    "rerank_ready": rr is not None}
+        # 后台：模型缓存自己会开线程加载，这里只负责触发（不等待）
+        idx.ensure_embedder(blocking=False)
+        idx.ensure_reranker(blocking=False)
+        return {"ok": True, "background": True}
+
     # ------------------ Stage 2.1：按 query 召回（RRF 融合） ------------------
 
     def _ensure_fusion_backends(self, docs: list[str]) -> None:
@@ -1387,17 +1746,18 @@ class MemoryStore:
         self._fusion_tfidf = tfidf
         self._fusion_sbert = None
         degraded: list[str] = []
+        # ⚠️ 老的那条 sbert 腿（paraphrase-multilingual-MiniLM-L12-v2）**退役**：
+        #   1. 它的权重本机没缓存，一启用就是 470 MB 下载（还会在启动时阻塞）；
+        #   2. 语义检索改由**向量索引**负责（bge-small-zh-v1.5 + bge-reranker-base）；
+        #   3. 今天它其实也是死的（Keras 3 让 transformers import 失败），
+        #      所以退役**不改变任何对外行为**。
+        # 仍然报「降级」，让面板 / 测试看得到「语义腿现在由谁负责」。
+        # （测试可以手工塞一个假后端进 _fusion_sbert，这条腿本身仍然可用。）
         if _sbert_available():
-            try:
-                sbert = SentenceTransformerBackend()
-                sbert.fit(docs)
-                self._fusion_sbert = sbert
-            except Exception as e:  # noqa: BLE001
-                log.warning("sentence-transformers 不可用（%s），融合降级到 tfidf", e)
-                degraded.append("sbert")
+            log.info("sbert 腿已退役（语义腿改由向量索引负责），融合用 substring + tfidf")
         else:
-            log.info("sentence-transformers 未安装，融合降级为 substring + tfidf")
-            degraded.append("sbert")
+            log.info("sentence-transformers 未安装，融合用 substring + tfidf")
+        degraded.append("sbert")
         self._fusion_degraded = tuple(degraded)
         self._fusion_ready = True
 
@@ -1478,7 +1838,49 @@ class MemoryStore:
                                                          self._fusion_sbert)
             lists.append(("sbert", idx))
             rel["sbert"] = _normalize_scores(sims)
+        # Stage 2.9：dense 腿（Chroma 语义检索）。
+        # 索引不可用 / 还没同步 / 模型没就绪 → 这一腿为空（整体退回两腿）。
+        dense_order, _dense_sim, dense_sims = self._dense_ranked(query, items)
+        if dense_order:
+            lists.append(("dense", dense_order))
+            rel["dense"] = _normalize_scores(dense_sims)
         return lists, semantic_sim, rel
+
+    def _dense_ranked(self, query: str, items: list[MemoryItem]
+                      ) -> tuple[list[int], float, dict[str, float]]:
+        """dense 腿：Chroma 语义检索。
+
+        返回 (下标列表, 最大相似度, {mid: 相似度})，跟 _rank_vector 同形状。
+        - 只取 status != 'superseded' 的行（过时的记忆不该被召回）；
+        - 索引没就绪 → 空（调用方整体降级，**绝不**用过期索引）。
+        """
+        self._dense_leg_ready = False
+        self._dense_max_sim = 0.0
+        idx = self._vector_index
+        if idx is None or not self._vector_in_sync:
+            return [], 0.0, {}
+        pool_ids = {i.id for i in items if i.status != "superseded"}
+        if not pool_ids:
+            return [], 0.0, {}
+        try:
+            hits = idx.query(query, k=FUSION_TOP_N, where={"status": "active"})
+        except Exception as e:  # noqa: BLE001
+            log.warning("dense 检索失败（降级）：%s", e)
+            return [], 0.0, {}
+        pos = {i.id: n for n, i in enumerate(items)}
+        order: list[int] = []
+        sims: dict[str, float] = {}
+        for mid, sim in hits:
+            mid = str(mid)
+            if mid not in pool_ids or mid not in pos:
+                continue
+            order.append(pos[mid])
+            sims[mid] = float(sim)
+        max_sim = max(sims.values(), default=0.0)
+        self._dense_leg_ready = bool(order)
+        self._dense_max_sim = max_sim
+        self._dense_sims = sims
+        return order, max_sim, sims
 
     def _query_matches_anything(self, query: str, items: list[MemoryItem],
                                 sub_list: list[int], semantic_sim: float) -> bool:
@@ -1501,7 +1903,15 @@ class MemoryStore:
             return True
         if _has_word_overlap(query, items):
             return True
-        return float(semantic_sim) >= self.semantic_gate_threshold
+        if float(semantic_sim) >= self.semantic_gate_threshold:
+            return True
+        # Stage 2.9：语义腿（dense）——
+        # 老门禁是「CJK 二元组 / 英文整词」的**字面**匹配，正是它毙掉了
+        # 「我不能吃什么」→「主人不吃辣」（零字面重叠）。
+        # 语义腿可用时，相关性由**语义相似度**判，不再只靠词面。
+        if self._dense_leg_ready and self._dense_max_sim >= DENSE_GATE_MIN:
+            return True
+        return False
 
     def _search_fused(self, query: str, kinds: Optional[list[str]] = None,
                       limit: Optional[int] = None) -> list[MemoryItem]:
@@ -1523,10 +1933,14 @@ class MemoryStore:
         if not q:
             return []
         self._ensure_backend_fresh()
+        # Stage 2.9：先做向量索引的漂移检测（必要时按库重载内存里的行 ——
+        # 合并脚本是裸 SQL 写库的），再取这一轮的快照。
+        self._ensure_vector_index()
         with self._lock:
             items = list(self._items)
         if not items:
             return []
+
         self._ensure_fusion_backends([i.content for i in items])
         # 只在 active 里找（superseded 是 Stage 2.4 的产物，不该再被召回）
         pool = [i for i in items if i.status != "superseded"]
@@ -1539,15 +1953,19 @@ class MemoryStore:
             return []
         pool_ids = {i.id for i in pool}
 
-        # 门禁：query 跟记忆库完全无关 → 什么都不召回（交给 fallback）
+        # ---- Stage 2.9：重排（cross-encoder 是最终裁决权）----
+        # 融合分只用来「提名」候选，重排分决定真正的顺序与取舍。
+        self._active_query = q
+        self._rerank_scores = {}
+        self._rerank_top = 0.0
+
         ranked_lists, semantic_sim, leg_rel = self._fusion_ranked_lists(q, items)
         sub_list = dict(ranked_lists).get("substring", [])
-        if not self._query_matches_anything(q, items, sub_list, semantic_sim):
-            self.last_fusion_backends = ()
-            self.last_fusion_degraded = self._fusion_degraded
-            self.last_recall_stats = {"gate": "closed", "n_injected": 0}
-            log.info("记忆融合召回：query=%r 与记忆库无关，不召回", q[:40])
-            return []
+        lexical_hit = bool(sub_list) or _has_word_overlap(q, items)
+        # 字面命中的行 id（语义地板要用：cross-encoder 对复合问句偏严，
+        # 但「字面命中 + 语义一样近」的行是真答案，不能被一票否决）
+        self._lexical_hit_ids = {items[i].id for i in sub_list
+                                 if 0 <= i < len(items)}
 
         # RRF 融合（照抄 qq-bridge memory_sidecar/memory_store.py:462-478 的形状）
         fused: dict[str, float] = {}
@@ -1560,11 +1978,33 @@ class MemoryStore:
                 if mid not in pool_ids:
                     continue
                 fused[mid] = fused.get(mid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        by_id = {i.id: i for i in items}
+        if fused:
+            self._rerank_candidates(q, by_id, fused)
+
+        # 门禁：query 跟记忆库完全无关 → 什么都不召回（交给 fallback）
+        pre_gate = self._query_matches_anything(q, items, sub_list, semantic_sim)
+        gate_open = pre_gate
+        if self._rerank_scores:
+            if not pre_gate:
+                # 门没开：只有「重排给出强信号」才开
+                # （词面完全够不着、但语义上一模一样，例如
+                #  「我不能吃什么」→「主人不吃辣」）
+                gate_open = self._rerank_top >= RERANK_STRONG_SCORE
+            elif not lexical_hit and self._rerank_top < RERANK_MIN_SCORE:
+                # 门是 dense 腿开的，但 cross-encoder 说「全都不相关」→ 关门
+                gate_open = False
+        if not gate_open:
+            self.last_fusion_backends = ()
+            self.last_fusion_degraded = self._fusion_degraded
+            self.last_recall_stats = {"gate": "closed", "n_injected": 0}
+            log.info("记忆融合召回：query=%r 与记忆库无关，不召回", q[:40])
+            return []
+
         self.last_fusion_backends = tuple(used)
         self.last_fusion_degraded = self._fusion_degraded
         if not fused:
             return []
-        by_id = {i.id: i for i in items}
         picked = self._pick_candidates(
             by_id, fused, leg_rel,
             self.max_inject if limit is None else int(limit))
@@ -1616,6 +2056,23 @@ class MemoryStore:
                          max_rows: int) -> list[MemoryItem]:
         """给候选**排序 + 裁剪**，返回真正要注入的行。
 
+        Stage 2.9：语义腿可用时，**cross-encoder 是排序的最终裁决权** ——
+        融合分只用来「提名」候选（前 RERANK_CANDIDATES 名），
+        真正的顺序与「补位行留不留」由重排分决定（见 _pick_candidates_rerank）。
+        重排没跑成（模型没就绪 / 索引不可用）→ 退回融合分排序（老行为）。
+        """
+        if self.rerank_enabled and self._rerank_scores:
+            picked = self._pick_candidates_rerank(by_id, fused, max_rows)
+            if picked is not None:
+                return picked
+        return self._pick_candidates_fusion(by_id, fused, leg_rel, max_rows)
+
+    def _pick_candidates_fusion(self, by_id: dict[str, MemoryItem],
+                                fused: dict[str, float],
+                                leg_rel: dict[str, dict[str, float]],
+                                max_rows: int) -> list[MemoryItem]:
+        """给候选**排序 + 裁剪**（融合分版本 —— 老行为）。
+
         排序：融合分降序 → 重要性降序 → id 升序
             （**完全确定**：跟 uuid 无关。旧实现只按 RRF 分排，
              第 2 名往后几乎并列 → 补位行是谁基本由随机 id 决定）。
@@ -1656,6 +2113,96 @@ class MemoryStore:
                                    if picked_scores and top_score > 0 else 0.0),
         }
         return picked
+
+    # ------------------ Stage 2.9：cross-encoder 重排 ------------------
+
+    def _rerank_candidates(self, query: str, by_id: dict[str, MemoryItem],
+                           fused: dict[str, float]) -> dict[str, float]:
+        """对融合分的 top-K 候选做 cross-encoder 重排（**一次批量** predict）。
+
+        融合分只用来「提名」；**重排分是排序的最终裁决权**。
+        模型没就绪 / 推理失败 → 返回 {}（调用方退回融合分排序）。
+        """
+        self._rerank_scores = {}
+        self._rerank_top = 0.0
+        idx = self._vector_index
+        if idx is None or not self.rerank_enabled or not fused:
+            return {}
+        ordered = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
+        cand = [(mid, by_id[mid].content)
+                for mid, _ in ordered[:RERANK_CANDIDATES] if mid in by_id]
+        if not cand:
+            return {}
+        scored = idx.rerank(query, cand)
+        if not scored:
+            return {}
+        self._rerank_scores = {mid: float(s) for mid, s in scored}
+        self._rerank_top = max(self._rerank_scores.values(), default=0.0)
+        return self._rerank_scores
+
+    def _pick_candidates_rerank(self, by_id: dict[str, MemoryItem],
+                                fused: dict[str, float],
+                                max_rows: int) -> Optional[list[MemoryItem]]:
+        """按**重排分**排序 + 裁剪（Stage 2.9 的最终裁决）。
+
+        - 顺序：重排分降序 → 融合分降序 → 重要性 → id（完全确定）；
+        - 裁剪：顶行永远注入；其余行只有「重排分 ≥ 顶行重排分 × RERANK_CUT_RATIO」
+          才注入（离顶行太远的就是噪声，白占 token，还有让桌宠**说错话**的风险）；
+        - 最后按 max_inject 截断。
+        返回 None = 没有重排结果（调用方退回融合分排序）。
+        """
+        cap = max(0, int(max_rows))
+        if cap == 0:
+            return []
+        scores = self._rerank_scores
+        if not scores:
+            return None
+        ordered = sorted(
+            scores.items(),
+            key=lambda kv: (-kv[1], -fused.get(kv[0], 0.0),
+                            -float(by_id[kv[0]].importance), kv[0]))
+        top = ordered[0][1]
+        floor = top * self.rerank_cut_ratio
+        dense_top = max(self._dense_sims.values(), default=0.0)             if self._dense_sims else 0.0
+        picked: list[MemoryItem] = []
+        picked_scores: list[float] = []
+        for mid, sc in ordered:
+            if picked and sc < floor and not self._semantic_floor_hit(mid,
+                                                                      dense_top):
+                continue        # 离顶行太远 → 噪声，不注入
+            picked.append(by_id[mid])
+            picked_scores.append(sc)
+            if len(picked) >= cap:
+                break
+        self.last_recall_stats = {
+            "n_candidates": len(scores),
+            "n_injected": len(picked),
+            "cut_ratio": self.rerank_cut_ratio,
+            "top_score": round(top, 6),
+            "min_injected_ratio": (round(min(picked_scores) / top, 4)
+                                   if picked_scores and top > 0 else 0.0),
+            "rerank_top": round(self._rerank_top, 6),
+            "rerank": True,
+        }
+        return picked
+
+    def _semantic_floor_hit(self, mid: str, dense_top: float) -> bool:
+        """语义地板：这条行该不该在「重排分很低」时仍然保留？
+
+        条件（三个都要满足，阈值都是量出来的，见 DENSE_KEEP_RATIO）：
+            1. 与 query **字面命中**（共享 CJK 二元组 / 英文整词）；
+            2. 与 query 的 dense 相似度 ≥ 顶行 dense 相似度 × DENSE_KEEP_RATIO；
+            3. 该相似度 ≥ DENSE_GATE_MIN（绝对门槛：确实算「有关系」）。
+
+        为什么：cross-encoder 对复合问句偏严（「我什么时候交房租还有体检的事」
+        里那条「体检复查」只有 0.0085），一刀切会把真答案裁掉。
+        """
+        if dense_top <= 0:
+            return False
+        sim = float(self._dense_sims.get(mid, 0.0))
+        if sim < DENSE_GATE_MIN or sim < dense_top * DENSE_KEEP_RATIO:
+            return False
+        return mid in self._lexical_hit_ids
 
     def _top_by_importance(self, n: int) -> list[MemoryItem]:
         """按重要性取 top-n（并列时按最近访问、再按 id → 可复现）。"""
@@ -1732,6 +2279,13 @@ class MemoryStore:
             "filler_ratio": self.filler_ratio,
             "semantic_gate_threshold": self.semantic_gate_threshold,
             "last_recall": dict(self.last_recall_stats),
+            # Stage 2.9：向量索引 + 重排的旋钮（面板 / 测试看它）
+            "dense_gate_min": DENSE_GATE_MIN,
+            "dense_keep_ratio": DENSE_KEEP_RATIO,
+            "rerank_candidates": RERANK_CANDIDATES,
+            "rerank_cut_ratio": self.rerank_cut_ratio,
+            "rerank_enabled": self.rerank_enabled,
+            "vector_index": self.vector_index_status(),
         }
 
     def store_for_scope(self, scope: str) -> "MemoryStore":

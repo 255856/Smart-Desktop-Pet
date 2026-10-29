@@ -58,6 +58,9 @@ if str(ROOT) not in sys.path:
 from app.brain.memory import (  # noqa: E402
     DEFAULT_FILLER_RATIO,
     DEFAULT_MAX_INJECT,
+    DENSE_GATE_MIN,
+    RERANK_CANDIDATES,
+    RERANK_CUT_RATIO,
     SEMANTIC_GATE_THRESHOLD,
     MemoryStore,
     _bigrams,
@@ -158,6 +161,17 @@ QUERIES: tuple[EvalQuery, ...] = (
     EvalQuery("D03", "我晚上总是睡不好", ("m30",), "m23", "nearmiss"),
 )
 
+#: 任务书给的**语义可达性**对照（cross-encoder 重排分，不是召回指标）：
+#: 「我不能吃什么」→「主人不吃辣」**零字面重叠** —— 正是老门禁毙掉的那一类。
+SEMANTIC_PAIRS = (
+    ("主人不能吃什么", "主人不吃辣", "语义等价（零字面重叠）"),
+    ("主人不能吃什么", "主人喜欢香菜", "近似陷阱（词面像、答案不同）"),
+    ("主人不能吃什么", "主人明天要交房租", "无关"),
+)
+
+#: 老配置（今天实际跑的行为）—— before/after 对照用
+LEGACY_CONFIGS = ("substring", "tfidf", "both")
+
 #: PLAN Stage 2 验收行用的那条问题（只涉及 2 行）
 ACCEPT_QUESTION = "我什么时候交房租还有体检的事"
 ACCEPT_RELEVANT = ("m06", "m11")
@@ -181,12 +195,15 @@ class AblationStore(MemoryStore):
     """
 
     def __init__(self, *args, legs: Sequence[str] = ("substring", "tfidf"),
-                 gate_leg: str = "substring", legacy: bool = False, **kwargs):
+                 gate_leg: str = "substring", legacy: bool = False,
+                 rerank: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.legs = tuple(legs)
         self.gate_leg = gate_leg
         #: legacy=True → 复刻 Stage 2.8 **之前**的行为（before/after 对照用）
         self.legacy = legacy
+        #: rerank=True → 启用 cross-encoder 重排（Stage 2.9 的最终裁决权）
+        self.rerank_enabled = bool(rerank)
 
     # -- 挑腿：父类算好三路排名，这里只留要参与融合的那些 --
     def _fusion_ranked_lists(self, query, items):
@@ -203,6 +220,11 @@ class AblationStore(MemoryStore):
                 return self._tfidf_positive_hits(query) > 0
             # 新门禁：最大相似度 **≥ 阈值**（跟生产语义腿同一套判断）
             return self._tfidf_max_sim(query) >= self.semantic_gate_threshold
+        if self.gate_leg == "dense":
+            # 纯语义门禁：只有 dense 相似度够高才算「跟记忆库有关系」
+            # （单腿配置下，门禁必须看**它自己那条腿**）
+            return bool(self._dense_leg_ready
+                        and self._dense_max_sim >= DENSE_GATE_MIN)
         if self.legacy:
             return bool(sub_list) or _has_word_overlap(query, items)                 or semantic_sim > 0
         return super()._query_matches_anything(query, items, sub_list, semantic_sim)
@@ -283,7 +305,40 @@ CONFIGS: dict[str, dict] = {
     },
 }
 
-PRIMARY_CONFIG = "both"
+#: Stage 2.9（向量检索 + cross-encoder 重排）新增的三个配置。
+#:   dense            —— 只用 dense 腿（Chroma 语义检索），门禁也只看它；
+#:   dense_sparse     —— dense + substring + tfidf 三腿，**不重排**；
+#:   dense_sparse_rerank —— 三腿 + cross-encoder 重排（**新的生产配置**）。
+CONFIGS.update({
+    "dense": {
+        "label": "dense only（单腿·Chroma 语义）",
+        "legs": ("dense",),
+        "gate_leg": "dense",
+        "vector": True,
+        "rerank": False,
+    },
+    "dense_sparse": {
+        "label": "dense + sparse（三腿·不重排）",
+        "legs": ("substring", "tfidf", "dense"),
+        "gate_leg": "default",
+        "vector": True,
+        "rerank": False,
+    },
+    "dense_sparse_rerank": {
+        "label": "dense + sparse + cross-encoder 重排（新生产配置）",
+        "legs": ("substring", "tfidf", "dense"),
+        "gate_leg": "default",
+        "vector": True,
+        "rerank": True,
+    },
+})
+
+#: 新的生产配置（Stage 2.9 之后）
+PRIMARY_CONFIG = "dense_sparse_rerank"
+#: 老配置（今天实际跑的行为）—— before/after 对照用
+LEGACY_PRIMARY_CONFIG = "both"
+#: 需要向量索引的配置（评测台会为它们**显式重建**索引）
+VECTOR_CONFIGS = tuple(k for k, c in CONFIGS.items() if c.get("vector"))
 
 
 # ===========================================================================
@@ -325,11 +380,14 @@ def _build_store(rows: Iterable[MemoryRow], tmpdir: Path, cfg: dict,
                  plain: bool = False, legacy: bool = False,
                  max_inject: Optional[int] = None,
                  filler_ratio: Optional[float] = None,
+                 rerank_cut_ratio: Optional[float] = None,
                  random_ids: bool = False) -> MemoryStore:
     """建一个只装合成语料的临时记忆库（绝不碰 data/）。
 
     - legacy=True → 用 LegacyStore 复刻 Stage 2.8 **之前**的行为；
-    - random_ids=True → **不钉 id**，让 add() 生成 uuid4（= 生产真实情况）。
+    - random_ids=True → **不钉 id**，让 add() 生成 uuid4（= 生产真实情况）；
+    - cfg["vector"]=True → **显式重建**向量索引（索引只由显式重建创建，
+      所以评测台跑完 data/ 仍然是字节一致的）。
     """
     db = tmpdir / "memory.db"
     kwargs: dict = {"backend_name": "tfidf"}
@@ -340,12 +398,15 @@ def _build_store(rows: Iterable[MemoryRow], tmpdir: Path, cfg: dict,
         kwargs["max_inject"] = max_inject
     if filler_ratio is not None:
         kwargs["filler_ratio"] = filler_ratio
+    if rerank_cut_ratio is not None:
+        kwargs["rerank_cut_ratio"] = rerank_cut_ratio
     store: MemoryStore
     if plain:
         store = LegacyStore(db, **kwargs) if legacy else MemoryStore(db, **kwargs)
     else:
         store = AblationStore(db, legs=cfg["legs"], gate_leg=cfg["gate_leg"],
-                              legacy=legacy, **kwargs)
+                              legacy=legacy,
+                              rerank=bool(cfg.get("rerank")), **kwargs)
     for row in rows:
         item = store.add(row.content, row.category, importance=row.importance)
         if random_ids:
@@ -360,6 +421,11 @@ def _build_store(rows: Iterable[MemoryRow], tmpdir: Path, cfg: dict,
         item.id = row.rid
     # 把钉过的 id 写回临时库，保持内存与磁盘一致（临时库，用完即删）
     store._save()
+    # 需要向量索引的配置 → **显式重建**（生产里也是显式重建才建索引）
+    if cfg.get("vector"):
+        report = store.rebuild_vector_index(blocking=True)
+        if not report.get("ok"):
+            raise RuntimeError("向量索引重建失败：%s" % report.get("error"))
     return store
 
 
@@ -376,10 +442,12 @@ def run_config(rows: Sequence[MemoryRow], queries: Sequence[EvalQuery],
                cfg: dict, tmpdir: Path, plain: bool = False, *,
                legacy: bool = False, max_inject: Optional[int] = None,
                filler_ratio: Optional[float] = None,
+               rerank_cut_ratio: Optional[float] = None,
                random_ids: bool = False) -> list[QueryResult]:
     """跑一个配置，返回每条查询的逐条结果。"""
     store = _build_store(rows, tmpdir, cfg, plain=plain, legacy=legacy,
                          max_inject=max_inject, filler_ratio=filler_ratio,
+                         rerank_cut_ratio=rerank_cut_ratio,
                          random_ids=random_ids)
     content_to_rid = {r.content: r.rid for r in rows}
     results: list[QueryResult] = []
@@ -514,6 +582,61 @@ def filler_similarity_spread(rows: Sequence[MemoryRow], queries: Sequence[EvalQu
 # ===========================================================================
 
 
+def semantic_reachability(store) -> list[dict]:
+    """用**真实重排模型**给任务书里的几对打分（语义可达性对照）。
+
+    这一栏回答的问题是：「跨编码器到底能不能看出语义等价？」
+    —— 与召回指标无关，但它是「近似陷阱能被重排解决」的根因证据。
+    """
+    idx = getattr(store, "_vector_index", None)
+    if idx is None:
+        return []
+    out: list[dict] = []
+    for query, doc, note in SEMANTIC_PAIRS:
+        scored = idx.rerank(query, [("pair", doc)])
+        score = scored[0][1] if scored else 0.0
+        out.append({
+            "query": query, "doc": doc, "note": note,
+            "score": round(float(score), 4),
+            "bigram_overlap": bool(_bigrams(query) & _bigrams(doc)),
+        })
+    return out
+
+
+def rerank_ratio_curve(rows: Sequence[MemoryRow], queries: Sequence[EvalQuery],
+                       tmpdir: Path, ratios: Optional[Sequence[float]] = None,
+                       cfg: Optional[dict] = None) -> list[dict]:
+    """重排分的比例门槛曲线：补位行（重排分 ≥ 顶行重排分 × ratio）从 0 扫到 1。
+
+    ratio 越大 → 留的补位行越少 → precision 越高、recall 越低。
+    **重排分的裁剪比例就从这条曲线上选**，不靠猜。
+    """
+    cfg = cfg or CONFIGS[PRIMARY_CONFIG]
+    ratios = list(ratios) if ratios else [
+        0.0, 0.02, 0.05, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20,
+        0.25, 0.30, 0.40, 0.50, 0.70, 0.90, 1.00]
+    out: list[dict] = []
+    for r in ratios:
+        res = run_config(rows, queries, cfg, tmpdir / ("rr%s" % r),
+                         rerank_cut_ratio=r)
+        a = aggregate(res)
+        out.append({
+            "ratio": r,
+            "recall@6": a["recall@6"],
+            "precision@6": a["precision@6"],
+            "hit_rate": a["hit_rate"],
+            "mean_injected": a["mean_injected"],
+            "none_max_injected": a["none_max_injected"],
+            "none_fallback_ratio": a["none_fallback_ratio"],
+            "nearmiss_trap_ratio": a["nearmiss_trap_ratio"],
+            "nearmiss_trap_injected": a["nearmiss_trap_injected"],
+            "n_nearmiss": a["n_nearmiss"],
+            "total_relevant_hit": a["total_relevant_hit"],
+            "total_relevant": a["total_relevant"],
+        })
+    return out
+
+
 def score_ratio_curve(rows: Sequence[MemoryRow], queries: Sequence[EvalQuery],
                       tmpdir: Path, ratios: Optional[Sequence[float]] = None,
                       cfg: Optional[dict] = None) -> list[dict]:
@@ -553,8 +676,10 @@ def legacy_aggs(rows: Sequence[MemoryRow], queries: Sequence[EvalQuery],
     """Stage 2.8 **之前**的行为（注入 6 条 + 不裁剪 + 旧门禁）的三配置指标。"""
     configs = configs or CONFIGS
     out: dict = {}
-    for key, cfg in configs.items():
-        res = run_config(rows, queries, cfg, tmpdir / ("legacy_" + key),
+    # 只跑**老配置**：before/after 对照的 "before" 必须是今天的行为
+    # （没有 dense 腿、没有重排）。
+    for key in (LEGACY_CONFIGS if configs is CONFIGS else tuple(configs)):
+        res = run_config(rows, queries, configs[key], tmpdir / ("legacy_" + key),
                          legacy=True)
         out[key] = aggregate(res)
     return out
@@ -621,6 +746,66 @@ def random_id_realism(rows: Sequence[MemoryRow], queries: Sequence[EvalQuery],
     }
 
 
+def pick_rerank_ratio(curve: list[dict]) -> dict:
+    """从**曲线**上选出裁剪比例（不靠猜，也不靠手填一个数）。
+
+    选点规则（按优先级）：
+        1. 近似陷阱 ≤ 1/3（桌宠「自信说错话」的红线）；
+        2. 无关问题仍然 100% 走 fallback；
+        3. 在满足 1+2 的比例里取 recall@6 **最高**的那一档（不牺牲召回）；
+        4. 同一档 recall 里取 precision 最高的（噪声裁得最狠）；
+        5. 还并列就取**小**的比例（多给桌宠留一点上下文）。
+    返回选中的那一行（空 dict = 曲线里没有合格点）。
+    """
+    ok = [c for c in (curve or [])
+          if c.get("nearmiss_trap_ratio") is not None
+          and c["nearmiss_trap_ratio"] <= 1 / 3
+          and c.get("none_fallback_ratio", 0) >= 1.0
+          and c.get("none_max_injected", 99) <= 2]
+    if not ok:
+        return {}
+    best_recall = max(c["recall@6"] for c in ok)
+    plateau = [c for c in ok if c["recall@6"] >= best_recall - 1e-9]
+    return max(plateau, key=lambda c: (c["precision@6"], -c["ratio"]))
+
+
+def print_rerank_curve(curve: Optional[list]) -> None:
+    """打印重排分的比例门槛曲线（裁剪比例就是从这条曲线上选的）。"""
+    if not curve:
+        return
+    print("-" * 78)
+    print("【3e】重排分的比例门槛曲线"
+          "（补位行：重排分 ≥ 顶行重排分 × ratio）")
+    print("-" * 78)
+    rows = []
+    for c in curve:
+        rows.append([
+            _fmt(c["ratio"], 3), _fmt(c["recall@6"]), _fmt(c["precision@6"]),
+            _fmt(c["hit_rate"]), _fmt(c["mean_injected"], 2),
+            c["none_max_injected"], _fmt(c["none_fallback_ratio"], 2),
+            "%s/%s" % (c["nearmiss_trap_injected"], c["n_nearmiss"]),
+        ])
+    print(_table(["ratio", "recall@6", "precision@6", "hit-rate", "平均注入",
+                  "无关最大注入", "无关走fallback", "近似陷阱命中"], rows))
+    print()
+    picked = pick_rerank_ratio(curve)
+    print("→ 选点规则：① 近似陷阱 ≤ 1/3 且无关问题 100% 走 fallback；"
+          "② 在这样的比例里取 recall@6 **最高**的一档（不牺牲召回）；"
+          "③ 同一档 recall 里取 precision 最高的（噪声裁得最狠）。")
+    if picked:
+        print("→ 曲线上选出来的比例 = %s（recall@6 %s / precision@6 %s / "
+              "近似陷阱 %s/%s）"
+              % (_fmt(picked["ratio"], 3), _fmt(picked["recall@6"]),
+                 _fmt(picked["precision@6"]),
+                 picked["nearmiss_trap_injected"], picked["n_nearmiss"]))
+        print("→ 生产默认 ratio = %s（app/brain/memory.py 的 RERANK_CUT_RATIO）"
+              % RERANK_CUT_RATIO)
+        if abs(float(picked["ratio"]) - float(RERANK_CUT_RATIO)) > 1e-9:
+            print("→ ⚠️ 曲线上选出来的值跟生产默认值**不一致**（%s vs %s）"
+                  % (_fmt(picked["ratio"], 3), RERANK_CUT_RATIO))
+    print()
+
+
 def print_stage28_sections(aggs: dict, legacy: Optional[dict] = None,
                            curve: Optional[list] = None,
                            rand_ids: Optional[dict] = None,
@@ -631,7 +816,7 @@ def print_stage28_sections(aggs: dict, legacy: Optional[dict] = None,
         print("【3b】Stage 2.8 before/after（同一批语料、同一把尺子）")
         print("-" * 78)
         rows = []
-        for key in ("substring", "tfidf", "both"):
+        for key in LEGACY_CONFIGS:
             for tag, src in (("before（旧行为）", legacy), ("after（现在）", aggs)):
                 a = src.get(key)
                 if not a:
@@ -643,6 +828,18 @@ def print_stage28_sections(aggs: dict, legacy: Optional[dict] = None,
                     a["none_max_injected"], _fmt(a["none_fallback_ratio"], 2),
                     "%s/%s" % (a["nearmiss_trap_injected"], a["n_nearmiss"]),
                 ])
+        # Stage 2.9：新的三个配置（dense / dense+sparse / dense+sparse+rerank）
+        for key in ("dense", "dense_sparse", "dense_sparse_rerank"):
+            a = aggs.get(key)
+            if not a:
+                continue
+            rows.append([
+                CONFIGS[key]["label"], "after（新管线）",
+                _fmt(a["recall@6"]), _fmt(a["precision@6"]),
+                _fmt(a["hit_rate"]), _fmt(a.get("mean_injected", 0.0), 2),
+                a["none_max_injected"], _fmt(a["none_fallback_ratio"], 2),
+                "%s/%s" % (a["nearmiss_trap_injected"], a["n_nearmiss"]),
+            ])
         print(_table(["配置", "版本", "recall@6", "precision@6", "hit-rate",
                       "平均注入", "无关最大注入", "无关走fallback",
                       "近似陷阱命中"], rows))
@@ -800,7 +997,9 @@ def print_report(all_results: dict[str, list[QueryResult]],
                  legacy: Optional[dict] = None,
                  curve: Optional[list] = None,
                  rand_ids: Optional[dict] = None,
-                 rand_ids_legacy: Optional[dict] = None) -> None:
+                 rand_ids_legacy: Optional[dict] = None,
+                 rerank_curve: Optional[list] = None,
+                 semantic: Optional[list] = None) -> None:
     print("=" * 78)
     print("D1 决策评估：进程内召回（substring + tfidf）够不够？")
     print("=" * 78)
@@ -848,8 +1047,10 @@ def print_report(all_results: dict[str, list[QueryResult]],
     print("【3】三配置消融（只看有答案的查询）")
     print("-" * 78)
     abl_rows = []
-    for key in ("substring", "tfidf", "both"):
-        a = aggs[key]
+    for key in CONFIGS:
+        a = aggs.get(key)
+        if not a:
+            continue
         abl_rows.append([
             CONFIGS[key]["label"],
             _fmt(a["recall@6"]), _fmt(a["precision@6"]), _fmt(a["hit_rate"]),
@@ -880,6 +1081,25 @@ def print_report(all_results: dict[str, list[QueryResult]],
     # ---------- Stage 2.8：before/after + 曲线 + 生产真实性 ----------
     print_stage28_sections(aggs, legacy=legacy, curve=curve, rand_ids=rand_ids,
                            rand_ids_legacy=rand_ids_legacy)
+    # ---------- Stage 2.9：重排分的裁剪曲线 + 语义可达性 ----------
+    print_rerank_curve(rerank_curve)
+    if semantic:
+        print("-" * 78)
+        print("【3f】语义可达性对照（真实 cross-encoder 重排分）")
+        print("-" * 78)
+        rows = []
+        for s in semantic:
+            rows.append([s["query"], s["doc"], s["note"],
+                         "有" if s["bigram_overlap"] else "**无**",
+                         _fmt(s["score"], 4)])
+        print(_table(["query", "候选记忆", "说明", "二元组重叠", "重排分"], rows))
+        print()
+        print("→ 「我不能吃什么」→「主人不吃辣」重排分 %s：**零字面重叠**却被判为"
+              "语义等价 —— 这就是老门禁（字面二元组）杀掉的答案。"
+              % (_fmt(next((s["score"] for s in semantic
+                            if s["doc"] == "主人不吃辣"), 0.0), 4),))
+        print("→ 「主人喜欢香菜」是近似陷阱（词面像、答案不同），重排分明显更低。")
+        print()
 
     # ---------- fallback / near-miss ----------
     print("-" * 78)
@@ -985,7 +1205,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="D1：进程内召回是否够用（离线评测）")
     ap.add_argument("--json", metavar="PATH", help="把结果写成 JSON（机器可读）")
     ap.add_argument("--config", default="all",
-                    choices=["all", "substring", "tfidf", "both"],
+                    choices=["all"] + list(CONFIGS),
                     help="只跑某个配置（默认全部）")
     ap.add_argument("--legacy", action="store_true",
                     help="同时跑 Stage 2.8 之前的老行为，打印 before/after 对照")
@@ -993,6 +1213,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="打印分数比曲线（补位行门槛扫描）")
     ap.add_argument("--random-ids", type=int, default=0, metavar="N",
                     help="生产真实性检查：随机 id 跑 N 次")
+    ap.add_argument("--rerank-curve", action="store_true",
+                    help="打印重排分的比例门槛曲线（选裁剪比例用）")
     args = ap.parse_args(argv)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="d1-memeval-"))
@@ -1004,11 +1226,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             res = run_config(STORE_ROWS, QUERIES, CONFIGS[key], tmpdir / key)
             all_results[key] = res
             aggs[key] = aggregate(res)
-        # 一致性自检：两腿配置必须与**生产 MemoryStore** 逐条一致
-        plain = run_config(STORE_ROWS, QUERIES, CONFIGS["both"], tmpdir / "plain",
-                           plain=True)
+        # 一致性自检：消融配置必须与**生产 MemoryStore** 逐条一致
+        #   ① 新生产配置（dense + sparse + 重排）
+        plain = run_config(STORE_ROWS, QUERIES, CONFIGS[PRIMARY_CONFIG],
+                           tmpdir / "plain", plain=True)
         same = ([r.injected for r in plain]
-                == [r.injected for r in all_results.get("both", plain)])
+                == [r.injected for r in all_results.get(PRIMARY_CONFIG, plain)])
+        #   ② 老两腿配置（今天的实际行为）
+        plain_legacy = run_config(STORE_ROWS, QUERIES,
+                                  CONFIGS[LEGACY_PRIMARY_CONFIG],
+                                  tmpdir / "plain_legacy", plain=True)
+        same_legacy = ([r.injected for r in plain_legacy]
+                       == [r.injected for r in
+                           all_results.get(LEGACY_PRIMARY_CONFIG, plain_legacy)])
         accept = acceptance_check(STORE_ROWS, tmpdir / "accept",
                                   CONFIGS[PRIMARY_CONFIG])
         # 语料敏感性对照：去掉每行的「主人」前缀（同一批查询、同一套代码）
@@ -1029,12 +1259,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                              tmpdir / "rand_legacy",
                                              args.random_ids, legacy=True)
                            if (args.random_ids and args.legacy) else None)
+        # Stage 2.9：重排分的裁剪曲线 + 语义可达性对照
+        rerank_curve = (rerank_ratio_curve(STORE_ROWS, QUERIES,
+                                            tmpdir / "rerank_curve")
+                        if args.rerank_curve else None)
+        semantic: list = []
+        if PRIMARY_CONFIG in CONFIGS and CONFIGS[PRIMARY_CONFIG].get("vector"):
+            _sem_store = _build_store(STORE_ROWS, tmpdir / "semantic",
+                                       CONFIGS[PRIMARY_CONFIG])
+            semantic = semantic_reachability(_sem_store)
 
         if args.config == "all":
             print_report(all_results, aggs, accept, STORE_ROWS, QUERIES,
                          variant=variant, spread=spread, legacy=legacy,
                          curve=curve, rand_ids=rand_ids,
-                         rand_ids_legacy=rand_ids_legacy)
+                         rand_ids_legacy=rand_ids_legacy,
+                         rerank_curve=rerank_curve, semantic=semantic)
         else:
             print(_table(["qid", "注入行", "recall@6", "precision@6", "hit"],
                          [[r.qid, ",".join(r.injected), _fmt(r.recall),
@@ -1045,7 +1285,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                    rand_ids=rand_ids,
                                    rand_ids_legacy=rand_ids_legacy)
 
-        print("消融台自检：两腿配置与生产 MemoryStore 逐条一致 = %s" % same)
+        print("消融台自检：新生产配置与生产 MemoryStore 逐条一致 = %s" % same)
+        print("消融台自检：老两腿配置与生产 MemoryStore 逐条一致 = %s" % same_legacy)
 
         if args.json:
             payload = {
@@ -1058,6 +1299,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 "queries": [r.to_dict() for r in all_results[k]]}
                             for k in keys},
                 "plain_matches_two_leg": same,
+                "plain_matches_primary": same_legacy,
+                "primary_config": PRIMARY_CONFIG,
+                "legacy_primary_config": LEGACY_PRIMARY_CONFIG,
+                "vector_configs": list(VECTOR_CONFIGS),
+                "thresholds": {
+                    "dense_gate_min": DENSE_GATE_MIN,
+                    "rerank_candidates": RERANK_CANDIDATES,
+                    "rerank_cut_ratio": RERANK_CUT_RATIO,
+                },
+                "semantic_reachability": semantic,
                 "acceptance": accept,
                 "variant_no_owner_prefix": variant,
                 "stage28": {
@@ -1066,6 +1317,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "semantic_gate_threshold": SEMANTIC_GATE_THRESHOLD,
                     "legacy_aggs": legacy,
                     "score_ratio_curve": curve,
+                    "rerank_ratio_curve": rerank_curve,
                     "random_ids": rand_ids,
                     "random_ids_legacy": rand_ids_legacy,
                 },

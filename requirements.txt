@@ -91,8 +91,45 @@ ddgs>=9.0.0
 # date_info 的农历
 # lunardate>=0.2.3
 
-# 记忆的语义向量后端（不装则退回内置 TF-IDF）
-# sentence-transformers>=3.0.0
+# ================= [向量检索 · Stage 2.9] =================
+# 记忆检索的**语义腿**：Chroma（持久化向量库，派生索引）
+#   + sentence-transformers（bge-small-zh-v1.5 向量模型 + bge-reranker-base 交叉编码器重排）。
+#
+# ⚠️ 版本边界（都是本机实测过的组合）：
+#   * sentence-transformers：>=4.41,<6（本机实测 5.7.0 可用；<4.41 没有
+#     CrossEncoder 的稳定 API）。
+#   * transformers：**必须 < 5**。sentence-transformers 5.7.0 自己的依赖写的是
+#     transformers<6，但 5.x 的 transformers 改了 CrossEncoder 依赖的 API，
+#     4.41~4.57 这一段才是实测能跑通的（本机 4.57.6）。
+#   * chromadb：>=1.0（1.x 的 PersistentClient / get_or_create_collection API
+#     与 0.x 不一样；本机实测 1.5.9 可用）。
+#
+# ⚠️ **USE_TF=0（硬要求）**：
+#    本机装了 tensorflow 2.19 + Keras 3，而 transformers 4.x 一见到 Keras 3 就直接
+#    raise ValueError("Your currently installed version of Keras is Keras 3, but this
+#    is not yet supported in Transformers")。
+#    所以凡是 import transformers / sentence_transformers 的地方，**必须先**
+#    os.environ.setdefault("USE_TF", "0")。
+#    app/brain/vector_index.py 在模块导入时就设好了（项目本身从不 import transformers，
+#    所以在这里设是安全的）。
+#
+# 模型 id 与缓存位置（**模型不随仓库走**）：
+#   * 向量模型：BAAI/bge-small-zh-v1.5   （512 维，约 95 MB）
+#   * 重排模型：BAAI/bge-reranker-base    （cross-encoder，约 1.1 GB）
+#   * 缓存在 HuggingFace 默认缓存目录（Windows 上就是用户目录下的）：
+#       %USERPROFILE%/.cache/huggingface/hub
+#     里面的目录名是 models--BAAI--bge-small-zh-v1.5 / models--BAAI--bge-reranker-base。
+#   * 第一次用会**联网下载**（合计约 1.2 GB）。下载在**后台线程**里进行，
+#     不阻塞聊天路径；下载失败 / 没网 → 索引不可用 → 记忆检索自动退回
+#     substring + TF-IDF（桌宠照常工作，测试照常全绿）。
+#
+# ⚠️ 体积提醒：这两个包会带进 torch（CUDA 版约 2.5 GB）。
+#    CI（.github/workflows/test.yml）会跑 pip install -r requirements.txt，
+#    装它们会让 CI 多下 ~2.5 GB；如果 CI 时间/空间吃紧，
+#    可以把下面三行注释掉（记忆检索自动退回 TF-IDF，测试仍然全绿）。
+sentence-transformers>=4.41,<6
+transformers>=4.41,<5
+chromadb>=1.0
 
 # ================= [开发 / CI] =================
 pytest>=8.0.0
