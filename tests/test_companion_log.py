@@ -2,9 +2,17 @@
 import json
 from pathlib import Path
 
+from app.brain import _companion_log as _cl
 from app.brain._companion_log import (
-    trace_decision, trace_outcome, read_recent, _default_log_path,
+    trace_decision, trace_outcome, read_recent,
 )
+
+
+def _default_log_path():
+    """取 trace 日志路径（**走模块属性**，这样 tests/conftest.py 里把日志
+    重定向到临时目录的隔离闸才生效 —— 直接 import 会拿到旧引用）。
+    """
+    return _cl._default_log_path()
 from app.brain.hallucination_guard import RiskyToolConfirm
 from app.engine.state import PetState
 
