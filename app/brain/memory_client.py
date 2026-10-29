@@ -121,7 +121,7 @@ class MemoryCard:
     """
 
     __slots__ = ("id", "content", "category", "kind", "key", "importance",
-                 "created_at", "updated_at", "hit_count", "superseded")
+                 "created_at", "updated_at", "hit_count", "superseded", "fuzzy")
 
     def __init__(self, raw: dict) -> None:
         raw = raw if isinstance(raw, dict) else {}
@@ -142,6 +142,7 @@ class MemoryCard:
         except (TypeError, ValueError):
             self.hit_count = 0
         self.superseded = str(raw.get("status") or "active") != "active"
+        self.fuzzy = bool(raw.get("fuzzy"))
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
         return "<MemoryCard %s [%s★%.1f] %s>" % (
@@ -305,14 +306,17 @@ class MemoryClient:
         stats = data.get("stats")
         return stats if isinstance(stats, dict) else {}
 
-    def graph(self, limit: int = 300, top_k: int = 4, timeout=None) -> dict:
+    def graph(self, limit: int = 300, top_k: int = 4, mode: str = "neighbors",
+              timeout=None) -> dict:
         """GET /graph → 语义图 {ok, nodes, edges, ...}（拿不到 → {"ok": False}）。
 
         节点是记忆卡，位置按向量主成分排；边是余弦近邻。
+        mode="all" 时改成「所有超过相似度下限的连线」，不限近邻个数。
         sidecar 没有向量时返回 ok=False —— 那是降级，不是错误。
         """
+        mode = (mode or "neighbors").strip().lower()
         data = self._call(
-            "GET", "/graph?limit=%d&top_k=%d" % (int(limit), int(top_k)),
+            "GET", "/graph?limit=%d&top_k=%d&mode=%s" % (int(limit), int(top_k), mode),
             None, timeout=timeout, track_failure=False,
         ) or {}
         if not data.get("ok"):
@@ -324,8 +328,47 @@ class MemoryClient:
             "ok": True,
             "projection": data.get("projection") or "pca",
             "dim": data.get("dim"),
+            "mode": data.get("mode") or mode,
             "nodes": nodes if isinstance(nodes, list) else [],
             "edges": edges if isinstance(edges, list) else [],
+        }
+
+    def sleep_plan(self, timeout=None) -> dict:
+        """GET /sleep/plan → 睡觉计划 {clusters, blur, forget, counts}。
+
+        只算不做：归组、哪些该模糊、哪些该忘掉。拿不到 → {"ok": False}。
+        """
+        data = self._call("GET", "/sleep/plan", None, timeout=timeout,
+                          track_failure=False) or {}
+        if not data.get("ok"):
+            return {"ok": False,
+                    "reason": str(data.get("reason") or data.get("error") or "")}
+        return {
+            "ok": True,
+            "now": data.get("now"),
+            "clusters": data.get("clusters") if isinstance(data.get("clusters"), list) else [],
+            "blur": data.get("blur") if isinstance(data.get("blur"), list) else [],
+            "forget": data.get("forget") if isinstance(data.get("forget"), list) else [],
+            "counts": data.get("counts") if isinstance(data.get("counts"), dict) else {},
+        }
+
+    def apply_sleep(self, clusters=None, blur: bool = True, forget: bool = True,
+                    timeout=None) -> dict:
+        """POST /sleep/apply → 真的动卡片 {merged, blurred, forgotten, ...}。
+
+        clusters 每项 ``{ids, summary}``：摘要那句话由调用方（模型）写好。
+        """
+        payload = {"clusters": clusters or [], "blur": bool(blur), "forget": bool(forget)}
+        data = self._post("/sleep/apply", payload, timeout=timeout) or {}
+        if not data.get("ok"):
+            return {"ok": False,
+                    "reason": str(data.get("reason") or data.get("error") or "")}
+        return {
+            "ok": True,
+            "merged": int(data.get("merged") or 0),
+            "blurred": int(data.get("blurred") or 0),
+            "forgotten": int(data.get("forgotten") or 0),
+            "newCards": data.get("newCards") if isinstance(data.get("newCards"), list) else [],
         }
 
     def search(self, query: str, top_k: int = 8, mood: str | None = None,

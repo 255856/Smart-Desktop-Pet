@@ -61,12 +61,15 @@ python -m memory_sidecar serve --port 8788
 | GET | `/health` | — | `{ok, cards, cardsTotal, pendingIndex, models:{embed,rerank}, bm25, degraded, degradation, dataDir, port, uptimeSec}` |
 | GET | `/list` | `?kind=&limit=&include_superseded=` | `{ok, kind, includeSuperseded, cards:[...], count, total}`（重要度 desc → 新近 desc，默认 50 条） |
 | GET | `/stats` | — | `{ok, stats:{cards, active, superseded, byKind, pendingIndex, vector, bm25, rerank, degradation...}}` |
+| GET | `/graph` | `?limit=&top_k=&mode=all\|neighbors` | `{ok, projection, dim, mode, nodes:[...], edges:[...]}`（语义图，见 9.1） |
+| GET | `/sleep/plan` | — | `{ok, clusters, blur, forget, counts}`（睡觉计划，只算不做，见 9.2） |
 | GET | `/` | — | 端点清单 |
 | POST | `/search` | `{query, top_k, mood?, kind?, kinds?, key?}` | `{ok, query, results:[...], path, degraded[, gate][, modelPending][, error]}` |
 | POST | `/upsert` | `{cards:[...]}` | `{ok, upserted}` |
 | POST | `/delete` | `{ids:[...]}`（也接受逗号字符串） | `{ok, deleted}` |
 | POST | `/supersede` | `{oldId, card}` | `{ok, upserted}` |
 | POST | `/rebuild` | — | `{ok, rebuilt:{vector, bm25, errors}}` |
+| POST | `/sleep/apply` | `{clusters:[{ids, summary}], blur?, forget?}` | `{ok, merged, blurred, forgotten, newCards}`（见 9.2） |
 
 `top_k` 也接受驼峰写法 `topK`。
 
@@ -325,3 +328,49 @@ python -m pytest tests/test_memory_sidecar.py tests/test_memory_sidecar_server.p
 # 真实模型（要 1.1GB 模型 + 十几秒加载，默认跳过）
 DESKTOP_PET_MEMORY_SIDECAR_REAL=1 python -m pytest tests/test_memory_sidecar_real_models.py -q -s
 ```
+
+## 9. 语义图与睡觉
+
+### 9.1 `/graph`：语义图
+
+把记忆卡投影成一张图：**节点 = 记忆卡，边 = 语义上挨着的两张卡**。
+
+- 位置取自 Chroma 里已存的向量（归一化的 bge-small-zh，512 维），PCA 降到 3 维 ——
+  意思相近的记忆在图上自然挨着。三个轴各自按标准差开方缩放，否则第一主成分会吃掉
+  绝大部分方差，整张图被压成一条线。
+- 边默认取每个节点的余弦近邻（`top_k` 个）；`mode=all` 时改成「所有超过相似度
+  下限的连线」，并且**保证每个点至少有一条**（它最像的那条）—— 不然会有点孤零零挂着。
+- 只读派生索引，**不碰模型**：向量已经在 Chroma 里，缺模型照样出图。
+  没有向量 / 少于两张卡就返回 `ok=false`，调用方退回自己的布局。
+
+开发者面板的记忆 Tab 默认用 `mode=all`（图上所有线都画出来）；点一个节点只留跟它
+相连的线，点空白处全部回来。
+
+### 9.2 睡觉：整理记忆
+
+睡觉做三件事。**在哪算、动哪张卡都在 sidecar**；模型只负责写摘要那句话。
+
+| 动作 | 判定 | 做什么 |
+| --- | --- | --- |
+| **归组** | 向量相似度 ≥ 0.65（绝对下限），且 ≥ 0.85×各自最像的那条（相对下限） | 一组的卡合并成一条新卡，旧卡标 `superseded` |
+| **模糊** | 重要度 ≤ 0.35 且 ≥ 30 天没碰过 | 重要性 ×0.45，标 `fuzzy`（已模糊过的不重复模糊） |
+| **遗忘** | 重要度 ≤ 0.35 且 ≥ 180 天没碰过 | 卡片删掉 |
+
+- 「多久没碰」取 `max(updatedAt, lastHitAt, createdAt)`。
+- 归组用**单链聚合**，一组最多 12 张（超了就不并 —— 一句话概括不出十几件事）。
+- 相似度阈值是照着 bge-small-zh 实测调的：真相关的两句在 0.80~0.92，不相干的在
+  0.52~0.64 —— 0.65 卡在中间，0.55 会把噪音也归进来。
+- 归组里的卡不再重复进模糊 / 遗忘名单。
+
+流程分两步，模型不参与判定：
+
+```
+GET  /sleep/plan   → {clusters:[{id, ids, texts, ...}], blur:[...], forget:[...], counts}
+   ↓  调用方（面板）拿 clusters 里的 texts 去问模型要每组一句摘要
+POST /sleep/apply  {clusters:[{ids, summary}]}  → 真正动卡片
+```
+
+`/sleep/apply` 没给 `summary` 的组**不合并** —— 宁可少做，也不把内容丢了。
+
+写完卡后台补一次向量索引（不阻塞响应），所以合并出来的新卡过一会儿才出现在语义图里。
+

@@ -51,6 +51,7 @@ import os
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("USE_FLAX", "0")
 
+import hashlib
 import json
 import math
 import re
@@ -168,6 +169,24 @@ GRAPH_DEFAULT_TOP_K = 4
 GRAPH_MIN_SIMILARITY = 0.15
 #: 相对阈值：只连「跟自己最像的」达到这个比例的近邻
 GRAPH_RELATIVE_CUT = 0.72
+#: 全连接模式一次最多返回多少条边（节点多的时候别把面板撑爆）
+GRAPH_MAX_EDGES = 2000
+
+# 睡觉（记忆整理）：分组合并、模糊、遗忘的门槛
+#: 相似度到这个值的记忆归成一组，等着被总结成一条
+SLEEP_CLUSTER_SIMILARITY = 0.65
+#: 相对下限：跟自己最像的那条比，低这么多就不算一回事
+SLEEP_CLUSTER_RELATIVE = 0.85
+SLEEP_CLUSTER_MIN = 2
+SLEEP_CLUSTER_MAX = 12
+#: 重要度低于这个值算「不重要」
+SLEEP_BLUR_IMPORTANCE = 0.35
+#: 不重要且这么久没碰过 → 模糊（重要度打折，标记 fuzzy）
+SLEEP_BLUR_DAYS = 30
+#: 不重要且更久没碰过 → 遗忘（卡片删掉）
+SLEEP_FORGET_DAYS = 180
+#: 模糊一次打几折
+SLEEP_BLUR_FACTOR = 0.45
 
 # 各 kind 的半衰期（天）：越短的记得越浅
 HALF_LIFE_DAYS = {
@@ -487,6 +506,42 @@ def _env_or(value, name, default):
     return float(value) if value is not None else _env_float(name, default)
 
 
+def _short_hash(text):
+    """内容派生的短 id（合并出来的记忆卡用它取名）。"""
+    return hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:12]
+
+
+def _same_value(values):
+    """一组值全一样就返回它，否则空字符串。"""
+    values = list(values or [])
+    if not values:
+        return ""
+    first = values[0]
+    return first if all(v == first for v in values) else ""
+
+
+def _dominant_kind(cards):
+    """一组卡里出现最多的 kind（并列时取第一个）。"""
+    counts = {}
+    for card in cards or []:
+        k = str(card.get("kind") or "fact")
+        counts[k] = counts.get(k, 0) + 1
+    best, best_n = "fact", -1
+    for k, n in counts.items():
+        if n > best_n:
+            best, best_n = k, n
+    return best
+
+
+def _idle_days(card, now_ms):
+    """这张卡多久没被碰过了（天）。"""
+    touch = max(_as_int(card.get("updatedAt")), _as_int(card.get("lastHitAt")),
+                _as_int(card.get("createdAt")))
+    if touch <= 0:
+        return 0
+    return max(0, int((int(now_ms) - touch) / 86400000))
+
+
 def _pca3(matrix):
     """矩阵（n × d）的主成分投影到 3 维 → (n × 3) ndarray。
 
@@ -744,6 +799,7 @@ class MemoryStore:
             "mood": card["mood"],
             "importance": card["importance"],
             "status": card["status"],
+            "fuzzy": bool(card.get("fuzzy")),
             "createdAt": card["createdAt"],
             "updatedAt": card["updatedAt"],
             "hitCount": card["hitCount"],
@@ -789,12 +845,14 @@ class MemoryStore:
 
     # -- 语义图 ------------------------------------------------------------
     def graph(self, limit: int = GRAPH_DEFAULT_LIMIT, top_k: int = GRAPH_DEFAULT_TOP_K,
-              min_similarity: float = GRAPH_MIN_SIMILARITY) -> dict:
+              min_similarity: float = GRAPH_MIN_SIMILARITY,
+              all_pairs: bool = False) -> dict:
         """把记忆卡投影成一张语义图：节点 = 卡，边 = 语义上挨着的两张卡。
 
         位置取自 Chroma 里已存的向量（归一化的 bge-small-zh，512 维），
         用 PCA 降到 3 维 —— 意思相近的记忆在图上自然挨着，边也就有意义了。
-        边取每个节点的余弦近邻（向量已归一化，点积即余弦）。
+        边默认取每个节点的余弦近邻（向量已归一化，点积即余弦）；
+        all_pairs=True 时改成「所有超过相似度下限的连线」。
 
         只读派生索引，不碰模型：向量已经在 Chroma 里，缺模型照样能出图。
         没有向量 / 少于两张卡就返回 ok=False，让调用方退回自己的布局。
@@ -837,30 +895,60 @@ class MemoryStore:
 
         edges = []
         sims = mat @ mat.T          # 归一化向量 → 点积就是余弦
-        for i in range(len(node_ids)):
-            row = sims[i]
-            best = sorted(
-                (j for j in range(len(node_ids)) if j != i),
-                key=lambda j: -row[j],
-            )[:k]
-            if not best:
-                continue
-            # 相对阈值：只连「跟自己最像的那几个」，而不是一刀切的绝对线。
-            # 绝对线单独用会把弱相似的整簇边砍光，图上只剩孤立的点。
-            cut = max(floor, float(row[best[0]]) * GRAPH_RELATIVE_CUT)
-            for j in best:
-                if row[j] < cut:
+        if all_pairs:
+            # 全连接：所有超过相似度下限的连线都画出来，不限近邻个数。
+            # 每个点至少留一条（它最像的那条）—— 不然会有点孤零零地挂着。
+            pairs = []
+            for i in range(len(node_ids)):
+                for j in range(i + 1, len(node_ids)):
+                    w = float(sims[i][j])
+                    if w >= floor:
+                        pairs.append((w, i, j))
+            pairs.sort(key=lambda t: (-t[0], t[1], t[2]))
+            chosen = pairs[:GRAPH_MAX_EDGES]
+            seen = {(i, j) for (_w, i, j) in chosen}
+            for i in range(len(node_ids)):
+                best_j, best_w = -1, -1.0
+                for j in range(len(node_ids)):
+                    if i == j:
+                        continue
+                    w = float(sims[i][j])
+                    if w > best_w:
+                        best_w, best_j = w, j
+                if best_j < 0:
                     continue
-                if i < j:                      # 无向边只留一份
-                    edges.append({
-                        "a": node_ids[i], "b": node_ids[j],
-                        "w": round(float(row[j]), 4),
-                    })
+                a, b = (i, best_j) if i < best_j else (best_j, i)
+                if (a, b) not in seen:
+                    seen.add((a, b))
+                    chosen.append((best_w, a, b))
+            edges = [{"a": node_ids[i], "b": node_ids[j], "w": round(w, 4)}
+                     for (w, i, j) in chosen]
+        else:
+            for i in range(len(node_ids)):
+                row = sims[i]
+                best = sorted(
+                    (j for j in range(len(node_ids)) if j != i),
+                    key=lambda j: -row[j],
+                )[:k]
+                if not best:
+                    continue
+                # 相对阈值：只连「跟自己最像的那几个」，而不是一刀切的绝对线。
+                # 绝对线单独用会把弱相似的整簇边砍光，图上只剩孤立的点。
+                cut = max(floor, float(row[best[0]]) * GRAPH_RELATIVE_CUT)
+                for j in best:
+                    if row[j] < cut:
+                        continue
+                    if i < j:                      # 无向边只留一份
+                        edges.append({
+                            "a": node_ids[i], "b": node_ids[j],
+                            "w": round(float(row[j]), 4),
+                        })
 
         return {
             "ok": True,
             "projection": "pca",
             "dim": int(mat.shape[1]),
+            "mode": "all" if all_pairs else "neighbors",
             "nodes": [
                 {"id": cid, "x": round(float(positions[i][0]), 5),
                  "y": round(float(positions[i][1]), 5),
@@ -898,6 +986,246 @@ class MemoryStore:
         if mat.ndim != 2 or mat.shape[0] != len(raw_ids):
             return None
         return raw_ids, mat
+
+    # -- 睡觉（整理记忆） --------------------------------------------------
+    def sleep_plan(self, now_ms=None):
+        """算一遍「睡觉」要做的事（只算不做）。
+
+        三件事：
+        * **归组** —— 意思相近的几张卡合成一条，摘要那句话交给模型写。
+        * **模糊** —— 不重要、又久没碰的：重要性打折，标成模糊。
+        * **遗忘** —— 不重要、而且久到没救的：直接忘掉。
+
+        真正动卡片的是 ``apply_sleep``。
+        """
+        now = _as_int(now_ms) or _now_ms()
+        cards = self._active_cards()
+        clusters = self._cluster_cards(cards)
+
+        grouped = set()
+        for cluster in clusters:
+            grouped.update(cluster["ids"])
+
+        blur, forget = [], []
+        for card in cards:
+            if card["id"] in grouped:
+                continue                       # 归组的走合并，不再重复模糊
+            if card["importance"] > SLEEP_BLUR_IMPORTANCE:
+                continue                       # 重要的永远不动
+            days = _idle_days(card, now)
+            row = {"id": card["id"], "text": card["text"],
+                   "importance": card["importance"], "days": days}
+            if days >= SLEEP_FORGET_DAYS:
+                forget.append(row)
+            elif days >= SLEEP_BLUR_DAYS and not card.get("fuzzy"):
+                blur.append(row)             # 已经模糊过的不用再模糊一遍
+
+        return {
+            "ok": True,
+            "now": now,
+            "clusters": clusters,
+            "blur": blur,
+            "forget": forget,
+            "counts": {
+                "cards": len(cards),
+                "clusters": len(clusters),
+                "blur": len(blur),
+                "forget": len(forget),
+            },
+        }
+
+    def _cluster_cards(self, cards):
+        """把意思相近的记忆归成组。
+
+        单链聚合：两两相似度够高就并进同一组，一组最多 SLEEP_CLUSTER_MAX 张
+        （超了就不并，免得一句话概括不出十几件事）。只有两张以上的组算数。
+
+        归组要过两道门槛：绝对下限（太不像就不算一回事）+ 相对下限
+        （跟自己最像的那条比，差太多也不算一回事 —— 免得一条特别合群的记忆
+        把一串不相干的都拖进来）。
+        """
+        if len(cards) < SLEEP_CLUSTER_MIN:
+            return []
+        got = self._stored_vectors([c["id"] for c in cards])
+        if not got:
+            return []
+        vec_ids, matrix = got
+        keep = {cid: i for i, cid in enumerate(vec_ids)}
+        picked = [(c["id"], c) for c in cards if c["id"] in keep]
+        if len(picked) < SLEEP_CLUSTER_MIN:
+            return []
+        sims = matrix[[keep[cid] for cid, _ in picked]] @ \
+            matrix[[keep[cid] for cid, _ in picked]].T
+
+        parent = list(range(len(picked)))
+        size = [1] * len(picked)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        best = [0.0] * len(picked)
+        for i in range(len(picked)):
+            for j in range(len(picked)):
+                if i != j:
+                    best[i] = max(best[i], float(sims[i][j]))
+
+        pairs = []
+        for i in range(len(picked)):
+            for j in range(i + 1, len(picked)):
+                w = float(sims[i][j])
+                if w < SLEEP_CLUSTER_SIMILARITY:
+                    continue
+                if w < SLEEP_CLUSTER_RELATIVE * max(best[i], best[j]):
+                    continue
+                pairs.append((w, i, j))
+        pairs.sort(key=lambda t: (-t[0], t[1], t[2]))
+        for _w, i, j in pairs:
+            ri, rj = find(i), find(j)
+            if ri == rj:
+                continue
+            if size[ri] + size[rj] > SLEEP_CLUSTER_MAX:
+                continue
+            parent[rj] = ri
+            size[ri] += size[rj]
+
+        groups = {}
+        for i in range(len(picked)):
+            groups.setdefault(find(i), []).append(i)
+
+        out = []
+        for members in groups.values():
+            if len(members) < SLEEP_CLUSTER_MIN:
+                continue
+            ids = [picked[i][0] for i in members]
+            group_cards = [picked[i][1] for i in members]
+            out.append({
+                "id": ids[0],               # 组内第一张卡的 id：这一组的稳定标识
+                "ids": ids,
+                "texts": [c["text"] for c in group_cards],
+                "kind": _dominant_kind(group_cards),
+                "partition": _same_value([c.get("key") or "" for c in group_cards]),
+                "category": _same_value([str(c.get("category") or "") for c in group_cards]),
+                "importance": max(c["importance"] for c in group_cards),
+            })
+        out.sort(key=lambda g: (-len(g["ids"]), g["id"]))
+        return out
+
+    def apply_sleep(self, clusters=None, blur=True, forget=True, now_ms=None):
+        """按睡觉计划真的动卡片：合并成摘要卡、模糊、遗忘。
+
+        clusters：调用方给的归组，每组 ``{ids, summary}``。
+        传 None 就用 ``sleep_plan`` 现算的分组（没有摘要，等于只合并不写内容）。
+        """
+        now = _as_int(now_ms) or _now_ms()
+        plan = self.sleep_plan(now_ms=now)
+        groups = list(clusters) if clusters is not None else list(plan["clusters"])
+
+        merged = 0
+        new_cards = []
+        merged_ids = set()
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            ids = [str(i) for i in (group.get("ids") or []) if str(i or "").strip()]
+            summary = str(group.get("summary") or "").strip()
+            if len(ids) < SLEEP_CLUSTER_MIN or not summary:
+                continue
+            with self._cards_lock:
+                members = [self._cards.get(i) for i in ids]
+                members = [m for m in members
+                           if m and m["status"] == STATUS_ACTIVE and m["text"]]
+            if len(members) < SLEEP_CLUSTER_MIN:
+                continue
+            member_ids = [m["id"] for m in members]
+            new_id = "sleep_" + _short_hash(",".join(sorted(member_ids)))
+            card = {
+                "id": new_id,
+                "key": _same_value([m.get("key") or "" for m in members]),
+                "kind": _dominant_kind(members),
+                "text": summary[:500],
+                "category": _same_value([str(m.get("category") or "") for m in members]),
+                "importance": max(m["importance"] for m in members),
+                "mood": "",
+                "createdAt": now,
+                "updatedAt": now,
+                "hitCount": sum(_as_int(m.get("hitCount")) for m in members),
+                "lastHitAt": max(_as_int(m.get("lastHitAt")) for m in members),
+                "status": STATUS_ACTIVE,
+                "supersedes": member_ids,
+                "sleptAt": now,
+            }
+            with self._cards_lock:
+                for member in members:
+                    member["status"] = STATUS_SUPERSEDED
+                    member["supersededBy"] = new_id
+                    member["updatedAt"] = now
+                self._cards_gen += 1
+                self._save()
+                self._refresh_counts()
+            self._mark_pending(member_ids, "delete")
+            self.upsert([card])
+            merged += 1
+            merged_ids.update(member_ids)
+            new_cards.append(card)
+
+        blurred = []
+        if blur:
+            with self._cards_lock:
+                touched = False
+                for row in plan["blur"]:
+                    card = self._cards.get(row["id"])
+                    if card is None or card["status"] != STATUS_ACTIVE:
+                        continue
+                    card["importance"] = round(
+                        max(0.05, card["importance"] * SLEEP_BLUR_FACTOR), 4)
+                    card["fuzzy"] = True
+                    card["blurredAt"] = now
+                    blurred.append({"id": card["id"], "importance": card["importance"],
+                                    "days": row["days"]})
+                    touched = True
+                if touched:
+                    self._cards_gen += 1
+                    self._save()
+                    self._refresh_counts()
+
+        forgotten = []
+        if forget:
+            for row in plan["forget"]:
+                cid = row["id"]
+                if cid in merged_ids:
+                    continue
+                forgotten.append(cid)
+            if forgotten:
+                self.delete(forgotten)
+
+        if merged or blurred or forgotten:
+            self._sync_in_background()
+
+        return {
+            "ok": True,
+            "merged": merged,
+            "newCards": new_cards,
+            "blurred": len(blurred),
+            "blurredIds": [b["id"] for b in blurred],
+            "forgotten": len(forgotten),
+            "forgottenIds": forgotten,
+        }
+
+    def _sync_in_background(self):
+        """把向量索引补上（不等它：写卡不该被模型加载拖住）。
+
+        合并出来的新卡要过一会儿才出现在语义图里 —— 就是靠这一手补上的。
+        """
+        def work():
+            try:
+                self.sync_index()
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=work, name="memory-sidecar-sync", daemon=True).start()
 
     # -- 挂起队列（写卡记账，检索 / 预热时补索引） ------------------------
     def _mark_pending(self, ids, op):

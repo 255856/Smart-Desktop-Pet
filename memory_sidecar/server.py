@@ -6,11 +6,14 @@
 GET  /health    -> {ok, cards, models: {embed, rerank}, degraded, ...}
 GET  /list      -> {ok, cards: [...], count, total}（重要度 desc → 新近 desc）
 GET  /stats     -> 卡数 / 索引状态 / 降级原因
+GET  /graph     -> {ok, nodes, edges, mode}（语义图；?mode=all 出全部连线）
+GET  /sleep/plan-> {ok, clusters, blur, forget, counts}（睡觉计划，只算不做）
 POST /search    -> {ok, results: [...], path, degraded[, gate][, modelPending][, error]}
 POST /upsert    -> {ok, upserted}
 POST /delete    -> {ok, deleted}
 POST /supersede -> {ok, upserted}
 POST /rebuild   -> {ok, rebuilt: {vector, bm25, errors}}
+POST /sleep/apply -> {ok, merged, blurred, forgotten, newCards}
 
 约定：/search **永远**返回 200 + 可解析的 JSON。哪怕两条粗排腿全挂，
 也是 {ok: false, results: [], error: "..."} —— 调用方不需要为 500 写分支。
@@ -35,11 +38,14 @@ def _endpoints():
         "GET /health": "健康状态（卡数 / 模型是否就绪 / 是否降级）",
         "GET /list": "列卡片：?kind=&limit=（重要度 desc → 新近 desc）",
         "GET /stats": "详细统计（卡数、索引、降级原因）",
+        "GET /graph": "语义图：?limit=&top_k=&mode=all（全部连线）",
+        "GET /sleep/plan": "算一遍睡觉要做什么（归组 / 模糊 / 遗忘）",
         "POST /search": "检索：{query, top_k, mood?, kind?}",
         "POST /upsert": "写入：{cards: [...]}",
         "POST /delete": "删除：{ids: [...]}",
         "POST /supersede": "更新：{oldId, card}",
         "POST /rebuild": "从 JSON 卡片重建两个索引",
+        "POST /sleep/apply": "执行睡觉：{clusters: [{ids, summary}], blur?, forget?}",
     }
 
 
@@ -114,6 +120,9 @@ def make_handler(store):
             if path == "/graph":
                 self._handle_graph()
                 return
+            if path == "/sleep/plan":
+                self._handle_sleep_plan()
+                return
             if path == "/":
                 self._json({"ok": True, "service": "desktop-pet-memory-sidecar", "endpoints": _endpoints()})
                 return
@@ -146,6 +155,8 @@ def make_handler(store):
                     self._json({"ok": True, "upserted": n})
                 elif path == "/rebuild":
                     self._json({"ok": True, "rebuilt": store.rebuild_index()})
+                elif path == "/sleep/apply":
+                    self._handle_sleep_apply(payload)
                 else:
                     self._json({"ok": False, "error": "not found: %s" % path}, 404)
             except Exception as e:
@@ -197,8 +208,10 @@ def make_handler(store):
                 top_k = int(q.get("top_k") or q.get("topK") or 4)
             except Exception:
                 top_k = 4
+            mode = (q.get("mode") or "neighbors").strip().lower()
+            all_pairs = mode in ("all", "full", "complete")
             try:
-                payload = store.graph(limit=limit, top_k=top_k)
+                payload = store.graph(limit=limit, top_k=top_k, all_pairs=all_pairs)
             except Exception as e:
                 self._json({
                     "ok": False, "nodes": [], "edges": [],
@@ -207,6 +220,31 @@ def make_handler(store):
                 return
             # 没有向量时 store.graph 会给 ok=False —— 那是正常降级，不是错误
             self._json(payload)
+
+        # -- /sleep/plan：算一遍睡觉要做什么（只算不做） ------------------
+        def _handle_sleep_plan(self):
+            store = self.store_
+            try:
+                self._json(store.sleep_plan())
+            except Exception as e:
+                self._json({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 500)
+
+        # -- /sleep/apply：按计划真的动卡片 -------------------------------
+        def _handle_sleep_apply(self, payload):
+            store = self.store_
+            clusters = payload.get("clusters")
+            if clusters is None:
+                clusters = []
+            try:
+                result = store.apply_sleep(
+                    clusters=clusters,
+                    blur=bool(payload.get("blur", True)),
+                    forget=bool(payload.get("forget", True)),
+                )
+            except Exception as e:
+                self._json({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 500)
+                return
+            self._json(result)
 
         # -- /search：绝不 500 ------------------------------------------
         def _handle_search(self, payload):

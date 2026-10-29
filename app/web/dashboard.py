@@ -14,6 +14,9 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+#: 记忆神经网络里最多画多少个节点（前端 JS 的 MAX_NODES 用这个值填进去）
+MEM_NET_MAX_NODES = 220
+
 # companion_log.txt 的增量解析缓存（只增不减的文件，按已读位置增量解析）
 _COMPANION_LOG_CACHE = {
     "offset": 0,        # 已解析到的位置（文本模式的 tell cookie）
@@ -304,6 +307,14 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .mem-node-detail .nd-near-t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .mem-node-detail .nd-near-w{font-size:11px;color:var(--faint);flex:none;font-variant-numeric:tabular-nums;}
   .mem-node-detail .nd-empty{font-size:12px;color:var(--faint);}
+
+  /* 睡觉面板 */
+  .mem-sleep-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 4px;}
+  .mem-sleep-time{border:1px solid var(--border);border-radius:9px;padding:6px 10px;
+    font-size:13px;font-family:inherit;color:var(--text);background:#fff;}
+  .mem-sleep-out{margin-top:10px;font-size:12.5px;color:var(--sub);line-height:1.75;}
+  .mem-sleep-out .sl-line{display:flex;gap:8px;align-items:baseline;padding:3px 0;}
+  .mem-sleep-out .sl-sum{padding-left:22px;color:var(--text);}
   .sub-head{font-size:14px;font-weight:700;margin:22px 0 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
   .bar-row{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
   .bar-row .name{width:170px;flex:none;font-size:13px;font-weight:600;}
@@ -328,9 +339,27 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   /* 桌宠养成 (v23) */
   .cs-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
   .cs-row .name{width:90px;flex:none;font-size:13px;font-weight:600;}
-  .cs-row .track{flex:1;height:20px;background:var(--bg);border-radius:6px;overflow:hidden;border:1px solid var(--line);}
+  .cs-row .track{flex:1;height:20px;background:var(--bg);border-radius:6px;overflow:hidden;border:1px solid var(--line);
+    position:relative;}
+  .cs-row .track::after{content:"";position:absolute;inset:0;border-radius:6px;pointer-events:none;
+    background:linear-gradient(90deg,transparent,rgba(110,150,245,.20),transparent);
+    background-size:42% 100%;background-repeat:no-repeat;
+    animation:trackShine 3.8s linear infinite;animation-delay:var(--d,0s);}
   .cs-row .fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;
-    color:#fff;font-size:11px;font-weight:700;padding-right:7px;min-width:34px;transition:width .5s;}
+    color:#fff;font-size:11px;font-weight:700;padding-right:7px;min-width:34px;transition:width .5s;
+    position:relative;overflow:hidden;animation:barBreath 3.4s ease-in-out infinite;
+    animation-delay:var(--d,0s);}
+  /* 填充里一道来回扫的高光 */
+  .cs-row .fill::after{content:"";position:absolute;top:0;bottom:0;left:0;width:34%;
+    background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,.78),rgba(255,255,255,0));
+    transform:translateX(-130%);animation:barShine 2.9s ease-in-out infinite;
+    animation-delay:calc(var(--d,0s) + .35s);pointer-events:none;}
+  @keyframes barBreath{0%,100%{filter:brightness(1);}50%{filter:brightness(1.16);}}
+  @keyframes barShine{0%{transform:translateX(-130%);}55%,100%{transform:translateX(330%);}}
+  @keyframes trackShine{0%{background-position:-42% 0;}100%{background-position:142% 0;}}
+  @media (prefers-reduced-motion:reduce){
+    .cs-row .fill,.cs-row .fill::after,.cs-row .track::after{animation:none;}
+  }
   .cs-row .v{font-family:Consolas,monospace;font-size:12px;color:var(--sub);width:80px;text-align:right;flex:none;}
   .cs-row .fill.satiety{background:linear-gradient(90deg,#fbbf24,#f59e0b);}
   .cs-row .fill.mood{background:linear-gradient(90deg,#6aa0ff,#4d6bfe);}
@@ -468,7 +497,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div class="grid3" id="memKpis" style="margin-top:12px;"></div>
 
       <div class="mem-mode" id="memMode" role="tablist">
-        <button type="button" class="mem-mode-btn active" data-mode="net">神经网络</button>
+        <button type="button" class="mem-mode-btn active" data-mode="net">网络</button>
         <button type="button" class="mem-mode-btn" data-mode="list">列表</button>
       </div>
 
@@ -482,6 +511,19 @@ _HTML_PAGE = r"""<!DOCTYPE html>
         <div class="mem-net-empty" id="memNetEmpty" style="display:none;"></div>
       </div>
       <div class="mem-node-detail" id="memNodeDetail" style="display:none;"></div>
+
+      <!-- 睡觉：把记忆整理一遍 -->
+      <div class="mem-sleep">
+        <div class="sub-head" style="margin-top:20px;" data-icon="hourglass">睡觉 · 整理记忆 <span id="memSleepTag" class="mini-tag">没开定时</span></div>
+        <div class="hint">睡觉做三件事：意思相近的几条合并成一条；不重要又久没碰的变模糊；不重要而且久到没救的直接忘掉。</div>
+        <div class="mem-sleep-bar">
+          <label class="switch"><input type="checkbox" id="memSleepOn">每天定时睡觉</label>
+          <input type="time" id="memSleepAt" class="mem-sleep-time" value="03:00">
+          <button type="button" class="btn" id="memSleepSave">保存定时</button>
+          <button type="button" class="btn" id="memSleepRun">现在睡一觉</button>
+        </div>
+        <div id="memSleepOut" class="mem-sleep-out"></div>
+      </div>
 
       <!-- 列表 / 分布 -->
       <div class="mem-list-wrap" id="memListWrap" style="display:none;">
@@ -713,7 +755,7 @@ function emptyBox(text, ico){
 const state = {
   stats:null, runs:[], selectedId:null, filter:"all", kw:"",
   detail:null, auto:true, companion:null, tab:"runs",
-  maintOn:false,
+  maintOn:false, memory:null,
 };
 let memMode="net"; // 记忆视图：net 神经网络 / list 列表
 
@@ -1058,6 +1100,49 @@ function renderMemory(data){
   }).join("");
 }
 
+/* 睡觉：定时设置 + 这一觉的计划 + 上次的结果 */
+function renderSleep(d){
+  const st=(d&&d.state)||{};
+  const plan=(d&&d.plan)||{};
+  const counts=plan.counts||{};
+  const tag=$("#memSleepTag");
+  tag.textContent=st.enabled?("每天 "+st.time):"没开定时";
+  tag.className="mini-tag"+(st.enabled?"":" warn");
+  const on=$("#memSleepOn");
+  if(on)on.checked=!!st.enabled;
+  const at=$("#memSleepAt");
+  if(at&&st.time)at.value=st.time;
+
+  const out=[];
+  if(plan.ok===false){
+    out.push('<div class="sl-line">'+icon("alert")+' '
+      +esc(plan.reason||"记忆 sidecar 没连上，算不出这一觉的计划。")+'</div>');
+  }else{
+    out.push('<div class="sl-line">'+icon("info")+' 这一觉会：合并 <b>'+(counts.clusters||0)
+      +'</b> 组相似记忆，模糊 <b>'+(counts.blur||0)+'</b> 条，忘掉 <b>'+(counts.forget||0)+'</b> 条。</div>');
+  }
+  const last=st.lastReport||{};
+  if(last.at){
+    out.push('<div class="sl-line">'+icon("check")+' 上次睡觉（'+fmtTime(last.at/1000)
+      +'）：合并 '+(last.merged||0)+' 组，模糊 '+(last.blurred||0)+' 条，忘掉 '
+      +(last.forgotten||0)+' 条。</div>');
+    (last.summaries||[]).forEach(function(s){
+      out.push('<div class="sl-line sl-sum">· '+esc(s)+'</div>');
+    });
+  }
+  $("#memSleepOut").innerHTML=out.join("");
+}
+async function loadSleep(note){
+  let d=null;
+  try{ d=await api("/api/memory/sleep"); }
+  catch(e){ d={ok:false,plan:{ok:false,reason:e.message}}; }
+  renderSleep(d);
+  if(note){
+    $("#memSleepOut").insertAdjacentHTML("afterbegin",
+      '<div class="sl-line">'+icon("check")+' '+esc(note)+'</div>');
+  }
+}
+
 /* ------------------------------------------------------------------
  * 记忆 · 3D 神经网络（原生 WebGL，自包含 / 离线 / 零依赖）
  * 每条记忆 = 一个发光神经元；连线 = 余弦近邻；点节点看它和谁挨着
@@ -1071,7 +1156,7 @@ const MemNet = (function(){
     fact:      {c:[0.96,0.78,0.40],t:"事实/偏好"},
     impression:{c:[0.96,0.56,0.76],t:"印象"},
     other:     {c:[0.70,0.76,0.92],t:"其他"}};
-  const MAX_NODES=220;
+  const MAX_NODES=__MEM_MAX_NODES__;
 
   /* ---- 最小 mat4（列主序） ---- */
   function ident(){return new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);}
@@ -1141,6 +1226,7 @@ const MemNet = (function(){
   let gl,canvas,prog,lprog;
   let nodes=[],segs=[],edgeLinks=[];
   let layoutKind="kind";
+  let graphMode="neighbors";
   let rotXv=0.25,rotYv=0,dist=16,dragging=false,last=[0,0],hover=-1,selected=-1,hovering=false;
   let raf=0,running=false,pxr=1,mvp=ident();
   let nbPos,nbCol,nbGlow,ebSt,ebEn,ebSf,ebCol,nodeCount=0,edgeVCount=0,ready=false;
@@ -1240,6 +1326,7 @@ const MemNet = (function(){
       });
     }
     layoutKind=real?"semantic":"kind";
+    graphMode=real?((graph&&graph.mode)||"neighbors"):"kind";
   }
 
   function setBuf(b,d){if(!b)b=gl.createBuffer();
@@ -1250,14 +1337,24 @@ const MemNet = (function(){
     const hub=layoutKind!=="semantic";
     const total=nodes.length+(hub?1:0);
     const pos=new Float32Array(total*3),col=new Float32Array(total*4),glow=new Float32Array(total);
+    const sel=selected>=0&&nodes[selected]?nodes[selected].id:null;
+    const near={};
+    if(sel){
+      edgeLinks.forEach(function(e){
+        if(e.a===sel)near[e.b]=1;
+        else if(e.b===sel)near[e.a]=1;
+      });
+    }
     nodes.forEach((n,i)=>{const c=KIND[n.kind].c;
       pos[i*3]=n.pos[0];pos[i*3+1]=n.pos[1];pos[i*3+2]=n.pos[2];
       col[i*4]=c[0];col[i*4+1]=c[1];col[i*4+2]=c[2];
       col[i*4+3]=n.size*(i===selected?1.5:1);
-      glow[i]=n.glow*(i===selected?1.6:1);});
+      let g=n.glow*(i===selected?1.6:1);
+      if(sel&&i!==selected&&!near[n.id])g*=0.2;
+      glow[i]=g;});
     if(hub){
       const ci=nodes.length;
-      col[ci*4]=0.72;col[ci*4+1]=0.84;col[ci*4+2]=1.0;col[ci*4+3]=34;glow[ci]=1;
+      col[ci*4]=0.72;col[ci*4+1]=0.84;col[ci*4+2]=1.0;col[ci*4+3]=34;glow[ci]=sel?0.15:1;
     }
     nbPos=setBuf(nbPos,pos);nbCol=setBuf(nbCol,col);nbGlow=setBuf(nbGlow,glow);
     nodeCount=total;
@@ -1275,7 +1372,7 @@ const MemNet = (function(){
         if(s.link.a===sel||s.link.b===sel){
           a=Math.min(1,a*2.4+0.25);
           r=Math.min(1,r+0.22);g=Math.min(1,g+0.22);b=Math.min(1,b+0.22);
-        }else a=a*0.16;
+        }else a=0;          /* 选中之后，只留跟它相连的线 */
       }
       for(let k=0;k<6;k++){
         const vi=i*6+k;
@@ -1360,6 +1457,13 @@ const MemNet = (function(){
     out.sort(function(a,b){return b.w-a.w;});
     return out;
   }
+  function clearSelection(){
+    if(selected<0)return;
+    selected=-1;
+    uploadNodes();uploadEdges();
+    const el=document.getElementById("memNodeDetail");
+    if(el)el.style.display="none";
+  }
   function select(i){
     const n=nodes[i],m=n.m,c=KIND[n.kind];
     const rgb=c.c.map(v=>Math.round(v*255)).join(",");
@@ -1395,7 +1499,7 @@ const MemNet = (function(){
       };
     });
     document.getElementById("ndClose").onclick=function(){
-      el.style.display="none";selected=-1;uploadNodes();uploadEdges();};
+      el.style.display="none";clearSelection();};
   }
   function bind(){
     const tip=document.getElementById("memTip");
@@ -1430,7 +1534,9 @@ const MemNet = (function(){
         const x=e.clientX-r.left,y=e.clientY-r.top;
         if(x>=0&&y>=0&&x<=r.width&&y<=r.height){
           const i=pickAt(x,y);
-          if(i>=0){select(i);hideTip();}}}});
+          if(i>=0){select(i);hideTip();}
+          else clearSelection();      /* 点空白 → 恢复所有连线 */
+        }}});
     canvas.addEventListener("mouseenter",function(){hovering=true;});
     canvas.addEventListener("mouseleave",function(){hovering=false;hideTip();});
     canvas.addEventListener("wheel",function(e){e.preventDefault();
@@ -1442,10 +1548,13 @@ const MemNet = (function(){
     const rows=KIND_ORDER.map(function(k){
       return '<div class="lg-row"><span class="lg-dot k-'+k+'"></span>'+KIND[k].t+'</div>';}).join("");
     const note=layoutKind==="semantic"
-      ? '位置 = 向量主成分 · 连线 = 余弦近邻'
+      ? (graphMode==="all"
+          ? '位置 = 向量主成分 · 连线 = 全部相似关系'
+          : '位置 = 向量主成分 · 连线 = 余弦近邻')
       : '按类别摆位，没有向量可用';
     document.getElementById("memLegend").innerHTML=rows
       +'<div class="lg-note">'+note+'<br>拖拽旋转 · 滚轮缩放 · 点击节点看近邻'
+      +'<br>选中节点只看它的连线，点空白恢复全部'
       +'<br>指针停在画布上时暂停自转</div>';
   }
   function screenPoints(){
@@ -1479,7 +1588,8 @@ const MemNet = (function(){
     const badge=document.getElementById("memGraphBadge");
     if(badge){
       badge.textContent=layoutKind==="semantic"
-        ? (nodes.length+" 个节点 · "+edgeLinks.length+" 条语义关联")
+        ? (nodes.length+" 个节点 · "+edgeLinks.length
+           +(graphMode==="all"?" 条连线（全部）":" 条语义关联"))
         : "分类布局";
       badge.style.display=layoutKind==="semantic"?"":"none";
     }
@@ -1676,18 +1786,20 @@ function renderState(st){
     ["等级", st.level, "level", Math.max(Number(st.level||1),1)],
     ["EXP", st.exp, "exp", 100],
   ];
-  $("#stateBars").innerHTML=rows.map(function(row){
+  $("#stateBars").innerHTML=rows.map(function(row,i){
     const name=row[0], v=row[1], cls=row[2], max=row[3];
     const p=Math.max(0,Math.min(100,Number(v||0)/max*100));
-    return '<div class="cs-row"><div class="name">'+name+'</div>'
-      + '<div class="track"><div class="fill '+cls+'" style="width:'+p+'%">'+Number(v||0).toFixed(1)+'</div></div>'
+    return '<div class="cs-row" style="--d:-'+(i*0.34)+'s"><div class="name">'+name+'</div>'
+      + '<div class="track"><div class="fill '+cls+'" style="width:'+p+'%">'
+      + Number(v||0).toFixed(1)+'</div></div>'
       + '<div class="v">'+Number(v||0).toFixed(1)+'</div></div>';
   }).join("");
 
   const up=st.unlock_progress||{};
   $("#stateUnlock").innerHTML=
-      '<div class="cs-row"><div class="name">解锁进度</div>'
-    + '<div class="track"><div class="fill level" style="width:'+Number(up.percent||0)+'%">'+Number(up.percent||0).toFixed(1)+'%</div></div>'
+      '<div class="cs-row" style="--d:-1.7s"><div class="name">解锁进度</div>'
+    + '<div class="track"><div class="fill level" style="width:'+Number(up.percent||0)+'%">'
+    + Number(up.percent||0).toFixed(1)+'%</div></div>'
     + '<div class="v">'+(up.unlocked_tools||0)+'/'+(up.total_tools||0)+'</div></div>'
     + '<div class="hint">当前等级 '+esc(up.level||1)+' · 已解锁 '+esc(up.unlocked_tools||0)+' / '+esc(up.total_tools||0)+' 个工具</div>';
 }
@@ -1842,9 +1954,11 @@ const TAB_LOADERS = {
   },
   async memory(){
     const data=await api("/api/memory");
+    state.memory=data;
     renderMemory(data);
     MemNet.setData(data);
     if(memMode==="net")MemNet.start();
+    await loadSleep();
   },
   async decision(){
     state.companion = await api("/api/companion?decision_limit=200&outcome_limit=200");
@@ -1996,6 +2110,54 @@ $$("#memMode .mem-mode-btn").forEach(function(b){
     }
   });
 });
+
+/* 记忆：睡觉（定时 + 立刻睡） */
+$("#memSleepSave").addEventListener("click",async function(){
+  const btn=this;
+  btn.disabled=true;
+  try{
+    await apiRaw("/api/memory/sleep/schedule",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({enabled:$("#memSleepOn").checked,time:$("#memSleepAt").value})});
+    await loadSleep("定时已保存。");
+  }catch(e){
+    $("#memSleepOut").innerHTML='<div class="sl-line">'+icon("alert")+' 保存失败：'
+      +esc(e.message)+'</div>';
+  }finally{
+    btn.disabled=false;
+  }
+});
+$("#memSleepRun").addEventListener("click",async function(){
+  const btn=this;
+  btn.disabled=true;
+  btn.textContent="睡梦中…";
+  $("#memSleepOut").innerHTML='<div class="sl-line">'+icon("hourglass")
+    +' 正在整理记忆，模型在写摘要…</div>';
+  try{
+    const r=await apiRaw("/api/memory/sleep/run",{method:"POST",
+      headers:{"content-type":"application/json"},body:JSON.stringify({})});
+    if(r&&r.ok){
+      await loadSleep();
+      $("#memSleepOut").insertAdjacentHTML("afterbegin",'<div class="sl-line">'+icon("check")
+        +' 睡好了：合并 '+(r.merged||0)+' 组，模糊 '+(r.blurred||0)+' 条，忘掉 '
+        +(r.forgotten||0)+' 条。</div>');
+      const data=await api("/api/memory");
+      state.memory=data;
+      renderMemory(data);
+      MemNet.setData(data);
+    }else{
+      $("#memSleepOut").innerHTML='<div class="sl-line">'+icon("alert")+' 没睡成：'
+        +esc((r&&r.error)||"未知原因")+'</div>';
+    }
+  }catch(e){
+    $("#memSleepOut").innerHTML='<div class="sl-line">'+icon("alert")+' 没睡成：'
+      +esc(e.message)+'</div>';
+  }finally{
+    btn.disabled=false;
+    btn.textContent="现在睡一觉";
+  }
+});
+
 $$(".danger .danger-btn").forEach(function(b){
   b.disabled=true;
   b.onclick=function(){runMaintenance(b.dataset.op,b.dataset.confirm,b.textContent.trim());};
@@ -2255,7 +2417,9 @@ def _memory_payload(base_url: Optional[str] = None) -> dict:
     graph = {"ok": False, "nodes": [], "edges": []}
     if reachable:
         try:
-            graph = client.graph(limit=400, top_k=4, timeout=6.0)
+            # 默认就把所有够格的连线都画出来；选中节点时前端只留它那几条
+            graph = client.graph(limit=MEM_NET_MAX_NODES, top_k=4,
+                                 mode="all", timeout=15.0)
         except Exception:  # noqa: BLE001
             graph = {"ok": False, "nodes": [], "edges": []}
 
@@ -3067,8 +3231,13 @@ def create_app(trace_db: str | Path,
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         try:
+            _sleep_service.start_scheduler()
             yield
         finally:
+            try:
+                _sleep_service.stop_scheduler()
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 _recorder.close()
             except Exception:  # noqa: BLE001
@@ -3081,6 +3250,12 @@ def create_app(trace_db: str | Path,
     #   配置文件跟着仓库根走（config.yaml + app/core/companion_config.yaml）。
     _data_dir = _resolve_data_dir(trace_db)
     _root = _project_root()
+
+    # 记忆「睡觉」服务：定时整理记忆（归组 / 模糊 / 遗忘）。
+    from app.web.memory_sleep import MemorySleepService
+    _sleep_service = MemorySleepService(
+        _data_dir, sidecar_url=str(sidecar_url or ""), project_root=_root,
+    )
 
     # API key 兜底脱敏：即使某个端点不小心把 key 写进了响应体，
     # 这个中间件也会把它替换掉（PLAN.md 5.2：配置 Tab 里看不到 API key 内容）。
@@ -3110,7 +3285,7 @@ def create_app(trace_db: str | Path,
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return _HTML_PAGE
+        return _HTML_PAGE.replace("__MEM_MAX_NODES__", str(MEM_NET_MAX_NODES))
 
     @app.get("/api/stats")
     async def stats():
@@ -3250,6 +3425,39 @@ def create_app(trace_db: str | Path,
         面板跟桌宠一样，只是一个 HTTP 客户端。
         """
         return _memory_payload(sidecar_url)
+
+    @app.get("/api/memory/graph")
+    def memory_graph(mode: str = "all", limit: int = MEM_NET_MAX_NODES, top_k: int = 4):
+        """语义图。默认把所有超过相似度下限的连线都算出来。"""
+        client = _memory_sidecar(sidecar_url, timeout=20.0)
+        try:
+            return client.graph(limit=limit, top_k=top_k, mode=mode, timeout=15.0)
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "nodes": [], "edges": []}
+
+    @app.get("/api/memory/sleep")
+    def memory_sleep():
+        """睡觉面板：定时设置 + 这一觉的计划 + 上次的结果。"""
+        try:
+            plan = _sleep_service.plan()
+        except Exception:  # noqa: BLE001
+            plan = {"ok": False}
+        return {"ok": True, "state": _sleep_service.state(), "plan": plan}
+
+    @app.post("/api/memory/sleep/schedule")
+    def memory_sleep_schedule(payload: Optional[dict] = None):
+        """改定时睡觉的设置（enabled / time）。"""
+        payload = payload or {}
+        state = _sleep_service.set_schedule(
+            enabled=payload.get("enabled"), time=payload.get("time"))
+        return {"ok": True, "state": state}
+
+    @app.post("/api/memory/sleep/run")
+    def memory_sleep_run(payload: Optional[dict] = None):
+        """现在睡一觉：模型写摘要 → sidecar 归组 / 模糊 / 遗忘。"""
+        payload = payload or {}
+        return _sleep_service.run(dry_run=bool(payload.get("dry_run")),
+                                  trigger="manual")
 
     @app.get("/api/tools")
     def tools():
