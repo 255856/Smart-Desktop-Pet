@@ -80,6 +80,125 @@ _load_tool_choice_ignored()
 THINK_TAG_START = "<think>"
 THINK_TAG_END = "</think>"
 
+
+class ThinkBlockFilter:
+    """跨 chunk 的 <think>…</think> 过滤器：思维链不许漏进正文。
+
+    为什么必须有状态（Stage 2.10 实测出来的坑）
+    ------------------------------------------
+    MiniMax-M3 的思维链是**跨好几个 SSE delta** 的英文正文。
+    单块清洗里的 `<think>.*$` 规则只能剥掉「带开标签的那一块」，
+    后面的 CoT 块里根本没有标签 → 原样漏进正文。
+    平时靠「句级清洗」把英文句子删掉，看不出来；
+    但**输出预算被 CoT 吃光、回复在 CoT 中间被截断**时，
+    中英文碎片会混在同一句里 → 主人直接看到中英混杂的垃圾
+    （实测：'Theyask "是不是哪里写错了". Need perhapsaskforcode?本身不会卡死…'）。
+
+    chat_stream()（纯聊天那条路径）早就有同款状态机；
+    这里给事件流这条路径（_stream_once，agent 循环走的就是它）补上。
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._in_think = False
+        self._buf = ""      # 还没判定归属的尾巴
+
+    @staticmethod
+    def _partial_tail(buf: str, tag: str) -> int:
+        """buf 末尾有多长的「半个标签」要留住（等下一块拼上）。
+
+        标签可能被 SSE delta 切开（「<thi」+「nk>」），
+        这种半截必须留着，否则整段 CoT 会漏进正文。
+        """
+        for k in range(min(len(tag) - 1, len(buf)), 0, -1):
+            if buf.endswith(tag[:k]):
+                return k
+        return 0
+
+    def feed(self, chunk: str) -> str:
+        """吃进一个 chunk，返回「这段里该给主人看的部分」。"""
+        self._buf += chunk
+        out: list[str] = []
+        while True:
+            if self._in_think:
+                idx = self._buf.find(self._CLOSE)
+                if idx < 0:
+                    # 还没闭合：留够「半个闭标签」的尾巴，其余丢掉
+                    keep = self._partial_tail(self._buf, self._CLOSE)
+                    self._buf = self._buf[-keep:] if keep else ""
+                    break
+                self._buf = self._buf[idx + len(self._CLOSE):]
+                self._in_think = False
+                continue
+            idx = self._buf.find(self._OPEN)
+            if idx < 0:
+                # 可能只有半个开标签（「<thi」+「nk>」）→ 留住尾巴等下一块
+                keep = self._partial_tail(self._buf, self._OPEN)
+                if keep:
+                    out.append(self._buf[:-keep])
+                    self._buf = self._buf[-keep:]
+                else:
+                    out.append(self._buf)
+                    self._buf = ""
+                break
+            out.append(self._buf[:idx])
+            self._buf = self._buf[idx + len(self._OPEN):]
+            self._in_think = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        """流结束时把还挂着的尾巴交出去（还在 CoT 里就不给主人看）。"""
+        tail, self._buf = self._buf, ""
+        if self._in_think:
+            return ""
+        return tail
+
+
+#: 旧名保留（Stage 2.10 内部用过）—— 两条后端现在都直接用公开名 ThinkBlockFilter
+_ThinkBlockFilter = ThinkBlockFilter
+
+
+# ---------------------------------------------------------------------------
+# 「整轮只有思维链」的重问参数（**两条后端共用**）
+# ---------------------------------------------------------------------------
+#
+# ReAct 后端（app/brain/agent.py）和 standard 后端（app/brain/langchain_agent.py）
+# 踩的是同一个坑：MiniMax-M3 的思维链计入 max_tokens，CoT 比输出预算还长 →
+# 整条回复在 CoT 中间被截断 → 清洗完什么都不剩 → 主人只看到空气泡。
+#
+# 判据（is_cot_only_reply）、提示语、标记、预算都放在这里 —— **只有一份**。
+# 两个后端的重问行为因此完全一致（提示语不一样，模型行为就会分叉）。
+
+#: 重试上限：最多重问一次，绝不连发
+MAX_COT_ONLY_RETRIES = 1
+
+#: 重问时给模型的提示：上一条回复只有思维链，主人什么都没看到
+COT_ONLY_RETRY_HINT = (
+    "（上一条回复的思考过程太长被截断了，主人什么都没看到。"
+    "请直接用简体中文给出最终答复，最多 3 句，不要输出思考过程。）"
+)
+
+#: 重问时在 assistant 位置留的标记。
+#: ⚠️ 不把整段思维链回灌给模型：回灌会诱发它继续写思维链，还白烧 prompt token。
+COT_ONLY_RETRY_MARK = "（上一条回复只有思考过程，没有可见内容）"
+
+#: 重问时给模型的提示：上一条回复被截断，主人只看到半句话
+TRUNCATED_RETRY_HINT = (
+    "（上一条回复被截断了，主人只看到半句话。"
+    "请用简体中文把答案说完整，最多 3 句，不要输出思考过程。）"
+)
+
+#: 重问时在 assistant 位置留的标记（截断那条）
+TRUNCATED_RETRY_MARK = "（上一条回复被截断了，没有说完）"
+
+#: 重问时的输出预算：原预算已经被 CoT 吃光了，重问必须给更多空间，
+#: 否则重问还是同样的截断（实测 1024 → 4096 才有意义）。
+#: ⚠️ 只作用在**这一次**重问请求上，其它请求的预算不变（成本可控）。
+COT_ONLY_RETRY_MAX_TOKENS = 4096
+
+
 # 中文约束片段：以对话示例形式给出，强化但避免被模型当成"待输出文本"复述
 #
 # Stage 1.1：常量搬进共享层 app/brain/prompt_layer.py（两个后端都得有它，
@@ -469,6 +588,42 @@ def is_low_cjk_reply(text: str) -> bool:
     return _cjk_ratio(body) < _LOW_CJK_RATIO
 
 
+#: 判定「原文里出现过思维链标签」用（开标签 / 闭标签都算）
+_THINK_ANY_RE = re.compile(r"</?think\s*>", re.IGNORECASE)
+
+
+def is_cot_only_reply(text: str) -> bool:
+    """这条回复是不是「只有思维链（CoT），主人看不到任何答案」。
+
+    Stage 2.10：MiniMax-M3 把英文思维链以 <think>...</think> 塞在
+    message.content 里，而 **CoT 的 token 计入 max_tokens**。
+    CoT 一旦比输出预算还长，整条回复就在 CoT 中间被截断 ——
+    清洗管线把 CoT 剥光之后什么都不剩，主人只看到兜底话术。
+
+    判据（跟 is_low_cjk_reply 同一层语义，只是判的是「有没有可见正文」）：
+      1. 原文非空 —— 模型确实吐了东西；
+      2. 原文里出现过 think 标签 —— 不是普通英文回复（那种走低中文占比重试）；
+      3. 剥掉 think 块之后**没有可见正文**。
+
+    ⚠️ 必须传**原始**输出：清洗管线逐块剥 think 块，传清洗后的文本
+    永远判不出来（这正是这个 bug 当初漏网的原因）。
+
+    Args:
+        text: 模型原始输出（未经清洗）
+
+    Returns:
+        True = 只有思维链、主人看不到答案；False = 有可见正文 / 不是 CoT
+    """
+    if not text or not text.strip():
+        return False
+    if not _THINK_ANY_RE.search(text):
+        return False
+    visible = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    visible = re.sub(r"<think>.*$", "", visible, flags=re.DOTALL)
+    visible = _THINK_CLOSE_TAG_RE.sub("", visible)
+    return not visible.strip()
+
+
 def _drop_leading_low_cjk_paragraphs(text: str) -> str:
     """剥离开头的低中文占比段落。
 
@@ -695,9 +850,11 @@ def _build_full_system_prompt(persona: str) -> str:
 # --------------------------------------------------------------------------
 # 为什么它不能进 system prompt
 # ----------------------
-#   MiniMax 的 prompt cache 按 8192-token 块做前缀缓存。system message 落在
-#   **第一块**里，块里任何一处每轮变化的内容（时间戳！）都会让整块失效 ——
-#   实测缓存命中率从 98.9% 掉到 1.5%（每轮白付 ~8173 个 prompt token）。
+#   MiniMax 的 prompt cache 命中的是**最长公共前缀**，粒度是 128-token 页
+#   （Stage 2.11 实测：命中数恒为 128 的整数倍 —— 7808/7936/8064/8192/8960）。
+#   system message 在**最前面**，它里面任何一处每轮变化（时间戳！）都会让
+#   **它后面的一切**不再匹配 —— 实测命中率从 98.9% 掉到 1.5%。
+#   注意：不是「必须凑满 8192 才命中」；真命中时复用的前缀可以只有 7808 token。
 #   所以每轮变的东西一律走 **user 消息**（排在主人这句话前面）。
 #
 # 为什么用「独立的 user 消息」而不是拼进主人那句话
@@ -1312,6 +1469,7 @@ class LLMClient:
         tools: Optional[list[dict]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         force_tool_use: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[tuple[str, object]]:
         """带工具调用支持的流式接口（agent 循环用）。
 
@@ -1319,6 +1477,10 @@ class LLMClient:
             messages: 对话历史
             tools: 工具 schema 列表
             cancel_check: 取消检查回调
+            max_tokens: 本次请求的输出预算上限（None = 用配置里的值）。
+                ⚠️ 只在「重问一次」那种补救请求上用：CoT 吃光预算之后，
+                重问必须给更多空间，否则重问还是同样的截断。
+                不影响 system 消息（system 串逐字节不变，前缀缓存不受影响）。
             force_tool_use: True 时设 tool_choice="required"（OpenAI 协议扩展，
                 让模型至少调一个工具）。很多模型（包括国产 LLM）默认行为是
                 直接回文本，强制 tool_choice 解决「该调不调」的问题。
@@ -1335,6 +1497,9 @@ class LLMClient:
             raise LLMError("未配置 API Key，请先在 config.yaml 填好 llm.api_key（当前是占位符）")
 
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        # 只有真的指定了 max_tokens 才往下传 —— 老调用方（测试里的 spy 等）
+        # 的签名里没有这个参数，硬传会打断它们。
+        extra = {"max_tokens": max_tokens} if max_tokens else {}
         # 是否要尝试 force_tool_use（只有第一轮有意义，且只有提供 tools 时才有意义）
         want_force = bool(force_tool_use and tools)
 
@@ -1346,14 +1511,15 @@ class LLMClient:
                 log.debug("LLMClient: %s 已确认忽略 tool_choice，本轮直接 prompt 强制",
                           self.cfg.model)
                 async for ev, data in self._stream_with_force_prompt(
-                        url, list(messages), tools, cancel_check):
+                        url, list(messages), tools, cancel_check, **extra):
                     yield ev, data
                 return
             forced_msgs = list(messages)
             async for ev, data in self._stream_with_optional_force(
                     url, forced_msgs, tools,
                     tool_choice="required",
-                    cancel_check=cancel_check):
+                    cancel_check=cancel_check,
+                    **extra):
                 yield ev, data
             return
 
@@ -1361,7 +1527,8 @@ class LLMClient:
         async for ev, data in self._stream_with_optional_force(
                 url, list(messages), tools,
                 tool_choice=None,
-                cancel_check=cancel_check):
+                cancel_check=cancel_check,
+                **extra):
             yield ev, data
 
     async def _stream_with_optional_force(
@@ -1372,6 +1539,7 @@ class LLMClient:
         tool_choice: Optional[str],
         cancel_check: Optional[Callable[[], bool]] = None,
         allow_prompt_fallback: bool = True,
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[tuple[str, object]]:
         """底层流式调用：tool_choice 不为空时直接用，为空时普通模式。
 
@@ -1387,13 +1555,15 @@ class LLMClient:
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        extra = {"max_tokens": max_tokens} if max_tokens else {}
         full = [ChatMessage(role="system", content=self.system_prompt).__dict__]
         full.extend(messages)
         payload = {
             "model": self.cfg.model,
             "messages": full,
             "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
+            # 补救请求（重问）可以自带更大的输出预算；其余请求用配置值
+            "max_tokens": max_tokens or self.cfg.max_tokens,
             "stream": True,
         }
         # 推理强度:仅推理模型支持;非空才带
@@ -1424,7 +1594,7 @@ class LLMClient:
                 log.warning("LLMClient: tool_choice=%r 不被服务端支持（%s），"
                             "降级为 prompt 强制", tool_choice, str(e)[:120])
                 async for ev, data in self._stream_with_force_prompt(
-                        url, messages, tools, cancel_check):
+                        url, messages, tools, cancel_check, **extra):
                     yield ev, data
                 return
             # 其它错误：原样抛
@@ -1443,7 +1613,7 @@ class LLMClient:
                 "LLMClient: tool_choice=%r 服务端接受，但模型仍然没调工具，"
                 "二次降级为 user-prompt 强制", tool_choice)
             async for ev, data in self._stream_with_force_prompt(
-                    url, messages, tools, cancel_check):
+                    url, messages, tools, cancel_check, **extra):
                 yield ev, data
 
     async def _do_stream_request(
@@ -1506,6 +1676,11 @@ class LLMClient:
                 body = await resp.aread()
                 raise LLMError(f"HTTP {resp.status_code}: {body[:300].decode('utf-8', errors='ignore')}")
             content_parts: list[str] = []
+            # 原始（**未清洗**）正文：判定「整轮只有思维链」必须用它 ——
+            # 清洗管线逐块把 think 块剥掉了，剥完就看不出 CoT-only 了。
+            raw_parts: list[str] = []
+            # 跨块跟踪 think 块：思维链不许漏进正文（见 _ThinkBlockFilter）
+            think_filter = _ThinkBlockFilter()
             tc_acc: dict[int, dict] = {}
             finish_reason = ""
             try:
@@ -1551,8 +1726,15 @@ class LLMClient:
                     content_chunk = delta.get("content") or ""
                     if content_chunk:
                         saw_content = True
-                        # chunk 只做流式安全清洗；完整文本的最终规范在 finish.content
-                        clean = sanitize_text(content_chunk, is_final=False)
+                        raw_parts.append(content_chunk)
+                        # 先跨块剥掉思维链，再做流式安全清洗
+                        # （完整文本的最终规范在 finish.content）
+                        visible_chunk = think_filter.feed(content_chunk)
+                        if not visible_chunk:
+                            continue
+                        clean = sanitize_text(visible_chunk, is_final=False)
+                        if not clean:
+                            continue
                         content_parts.append(clean)
                         yield ("text", clean)
 
@@ -1575,6 +1757,14 @@ class LLMClient:
                     await resp.aclose()
                 except Exception:  # noqa: BLE001
                     pass
+
+            # 流结束：把还挂着的尾巴（半个标签之类）交出来
+            tail = think_filter.flush()
+            if tail:
+                clean = sanitize_text(tail, is_final=False)
+                if clean:
+                    content_parts.append(clean)
+                    yield ("text", clean)
 
             tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
             if not saw_content and not tool_calls:
@@ -1607,6 +1797,11 @@ class LLMClient:
             record_usage(usage, backend="lightweight",
                          model=getattr(self.cfg, "model", ""),
                          request_index=request_index)
+            # 「整轮只有思维链、主人看不到任何答案」→ 交给上层重问一次。
+            # 原因：CoT 的 token 计入 max_tokens，CoT 过长会把输出预算吃光，
+            # 整条回复被截断（清洗管线把 CoT 剥光后什么都不剩）。
+            # ⚠️ 工具调用轮**不算**：那一轮正文本来就该是空的。
+            cot_only = (not tool_calls) and is_cot_only_reply("".join(raw_parts))
             yield ("finish", {
                 "reason": finish_reason,
                 "tool_calls": tool_calls,
@@ -1616,6 +1811,7 @@ class LLMClient:
                 # 用这个在状态栏精确显示, 不再走 "字符数 / 4" 粗估。某些 API
                 # (老 ollama / 本地) 不返 usage, got_real=False, 上层 fallback
                 "usage": usage,
+                "cot_only": cot_only,
             })
 
     async def _stream_with_force_prompt(
@@ -1624,6 +1820,7 @@ class LLMClient:
         messages: list[dict],
         tools: Optional[list[dict]],
         cancel_check: Optional[Callable[[], bool]] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[tuple[str, object]]:
         """降级路径：去掉 tool_choice，在 messages 末尾追加 user 强制提示。
 
@@ -1633,6 +1830,7 @@ class LLMClient:
         提示里带「第 N 次」标记：让重试的请求与上一次**真正不同**
         （否则就是同一个请求重复发，既费钱又慢）。
         """
+        extra = {"max_tokens": max_tokens} if max_tokens else {}
         self._force_attempts += 1
         attempt = self._force_attempts
         forced = list(messages)
@@ -1652,7 +1850,8 @@ class LLMClient:
         async for ev, data in self._stream_with_optional_force(
                 url, forced, tools,
                 tool_choice=None,
-                cancel_check=cancel_check):
+                cancel_check=cancel_check,
+                **extra):
             yield ev, data
 
     async def chat_once(self, messages: list[ChatMessage]) -> str:

@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
 from typing import AsyncIterator, Callable, Optional
 
-from app.brain.llm_client import (LLMClient, count_request_actions,
-                                  detect_action_intent, is_low_cjk_reply)
+from app.brain.llm_client import (COT_ONLY_RETRY_HINT as _COT_ONLY_RETRY_HINT,
+                                  COT_ONLY_RETRY_MARK as _COT_ONLY_RETRY_MARK,
+                                  COT_ONLY_RETRY_MAX_TOKENS as _COT_ONLY_RETRY_MAX_TOKENS,
+                                  LLMClient, MAX_COT_ONLY_RETRIES as _MAX_COT_ONLY_RETRIES,
+                                  count_request_actions, detect_action_intent,
+                                  is_low_cjk_reply)
 from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
                                     build_tool_handbook, load_style_guide)
 from app.engine.tools import ToolRegistry
@@ -36,6 +41,10 @@ _MAX_LOW_CJK_RETRIES = 1
 # 重问时给模型的提示：上一条回复几乎不是中文
 _LOW_CJK_RETRY_HINT = "上一条回复几乎全是英文，请只用简体中文重新回答一遍。"
 
+# 「整轮只有思维链」的重问参数（Stage 2.10）—— **跟 standard 后端共用**
+# （定义在 app/brain/llm_client.py）：判据、提示语、标记、预算只有一份，
+# 两个后端的重问行为完全一致。上面的 import 已经把老名字接住了。
+
 # 同一个工具连续失败多少次后，本轮对话内不再提供它
 _MAX_SAME_TOOL_FAIL = 2
 
@@ -56,6 +65,24 @@ def _sanitize_reply(text: str) -> str:
     """ReAct 回复清洗：复用 LLMClient 的清洗（think/emoji/空白/英文 CoT 剥离）。"""
     from app.brain.llm_client import sanitize_text
     return sanitize_text(text or "")
+
+
+def _supports_max_tokens(client) -> bool:
+    """这个 client 的 chat_stream_events 支不支持 max_tokens= 参数。
+
+    测试里的假 client 大多没有这个参数 —— 不支持就别传（免得 TypeError）。
+    """
+    fn = getattr(client, "chat_stream_events", None)
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # noqa: BLE001
+        return False
+    if "max_tokens" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in params.values())
 
 
 # 模型输出被清洗规则剥光、且无工具结果可兜底时说的话术（宁可给一句自然的「再来一次」也不要空气泡）
@@ -661,6 +688,10 @@ class AgentLoop:
         over_sanitized = False
         # 「中文占比过低」的重试次数（Stage 1.3，最多 1 次）
         low_cjk_retries = 0
+        # 「整轮只有思维链」的重试次数（Stage 2.10，最多 1 次）
+        cot_retries = 0
+        # 重问那一轮用的输出预算（None = 用配置里的预算）
+        retry_max_tokens: Optional[int] = None
 
         # 抗幻觉第 1 层：意图识别 → 第一轮 force_tool_use
         first_user_text = self._first_user_text(messages)
@@ -697,6 +728,8 @@ class AgentLoop:
                 break
             content_parts: list[str] = []
             tool_calls: list[dict] = []
+            # 整轮只有思维链（客户端在 finish 事件里给的标记）
+            cot_only = False
 
             # 抗幻觉第 3 层：连续多轮纯调工具 → 去掉 tools 强制 final
             force_final = consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_TURNS
@@ -708,11 +741,16 @@ class AgentLoop:
                                 "reason": f"连续 {consecutive_tool_only} 轮纯调工具无文字",
                                 "turn": turn})
 
+            # 重问那一轮用更大的输出预算（CoT 已经把原预算吃光了）
+            stream_kwargs: dict = {}
+            if retry_max_tokens and _supports_max_tokens(self.client):
+                stream_kwargs["max_tokens"] = retry_max_tokens
             async for ev, data in self.client.chat_stream_events(
                     messages,
                     tools=None if force_final else tools,
                     cancel_check=cancel_check,
-                    force_tool_use=force_first_turn):
+                    force_tool_use=force_first_turn,
+                    **stream_kwargs):
                 if ev == "text":
                     # 只缓存、不上屏：避免模型先输出工具独白（「我应该使用XX工具…」）被多轮拼成精神污染
                     content_parts.append(data)
@@ -727,6 +765,9 @@ class AgentLoop:
                     if isinstance(data, dict) and data.get("usage"):
                         yield ("meta", {"event": "usage",
                                         **data["usage"]})
+                    if isinstance(data, dict):
+                        # Stage 2.10：整轮只有思维链（CoT 吃光输出预算）
+                        cot_only = bool(data.get("cot_only"))
                     if data.get("content") and not content_parts:
                         content_parts.append(data["content"])
                     tool_calls = data.get("tool_calls") or []
@@ -739,10 +780,38 @@ class AgentLoop:
                 log.info("AgentLoop: 模型输出被清洗规则全部剥离（过度清洗），"
                          "raw=%r", raw_text[:120])
 
+            # Stage 2.10：整轮只有思维链（CoT 把输出预算吃光）→ **重问一次**。
+            # 这时候 raw_text 是**空的**（清洗管线逐块把 CoT 剥光了），
+            # 低中文占比那条重试判不出来（它要求 raw_text 非空），
+            # 所以只能靠客户端给的 cot_only 标记来认。
+            if (cot_only and not tool_calls
+                    and cot_retries < _MAX_COT_ONLY_RETRIES
+                    and turn + 1 < self.max_turns
+                    and not (cancel_check and cancel_check())):
+                cot_retries += 1
+                log.warning("AgentLoop: 第 %d 轮回复只有思维链、没有可见答案，"
+                            "重问一次（预算 %d）", turn + 1,
+                            _COT_ONLY_RETRY_MAX_TOKENS)
+                yield ("meta", {"event": "cot_only_retry",
+                                "reason": "回复只有思维链，没有可见答案",
+                                "turn": turn})
+                # 把「上一条只有思维链」告诉模型，重问才有意义
+                messages.append({"role": "assistant",
+                                 "content": _COT_ONLY_RETRY_MARK})
+                messages.append({"role": "user",
+                                 "content": _COT_ONLY_RETRY_HINT})
+                # 重问这一轮给更大的输出预算：原预算已经被 CoT 吃光了
+                retry_max_tokens = _COT_ONLY_RETRY_MAX_TOKENS
+                consecutive_tool_only = 0
+                continue
+
             # Stage 1.3：中文占比过低（几乎全是英文 / 乱码）→ **重问一次**。
             # 旧行为是整条丢掉，主人只能看到兜底话术；
             # 现在先让模型重答一次（最多一次，绝不连发），仍失败才走兜底。
+            # ⚠️ cot_only 的那轮已经在上面处理掉了 —— 两条重试互斥，
+            #    绝不会对同一条回复连发两次请求。
             if (raw_text.strip() and not tool_calls and not final_text.strip()
+                    and not cot_only
                     and is_low_cjk_reply(raw_text)
                     and low_cjk_retries < _MAX_LOW_CJK_RETRIES
                     and turn + 1 < self.max_turns
