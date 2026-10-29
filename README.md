@@ -26,7 +26,7 @@
 
 - **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 `max_turns` → 工具结果直接总结），可选 **LangChain** 后端
 - **68 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令 + **ActivityWatch 活动感知**（mcp_aw_get_recent_activities / current_window / query / buckets，桌宠能主动汇报主人最近在做什么）
-- **真记忆**：可插拔 `TF-IDF` / `sentence-transformers` 检索；重要性评分 + 时间衰减 + 冲突检测 + 长期演化
+- **真记忆**：**独立记忆进程** `memory_sidecar`（HTTP `127.0.0.1:8788`，桌宠自动拉起）：**Chroma 向量 + BM25 关键词 + 交叉编码器精排**，JSON 记忆卡是真值、索引随时能重建；重要度评分 + 时间衰减 + 冲突改写 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
 - **真玩法**：**五子棋**（3 档 AI 难度）+ **中国象棋**（**走法生成 / 将军 / 将死 / 困毙 / 飞将全部走 [cchess](https://pypi.org/project/cchess/) 库**，MIT、PyPI 1.20+，我们自己只写 alpha-beta 搜索 + 估值；3 档 AI 难度）+ **9 人狼人杀**（你 + 8 个独立 NPC Agent + 桌宠主持，无 API key 也能离线玩）+ 每日签到 + 喂食 + 5 项状态养成
@@ -46,7 +46,7 @@ pip3 install -r requirements.txt
 # 可选：Live2D 渲染 + Chromium 内核（建议 250MB+）
 pip3 install PyQtWebEngine
 
-# 启动
+# 启动（会顺带拉起记忆 sidecar 子进程 :8788，不用手动开）
 python3 main.py
 ```
 
@@ -60,9 +60,13 @@ pip install -r requirements.txt
 # 可选：Live2D 渲染 + Chromium 内核（建议 250MB+）
 pip install PyQtWebEngine
 
-# 启动
+# 启动（会顺带拉起记忆 sidecar 子进程 :8788，不用手动开）
 python main.py
 ```
+
+> **桌宠启动时会多出一个进程**：长期记忆住在**独立进程** `memory_sidecar`（HTTP `127.0.0.1:8788`）里。
+> 桌宠**自动拉起它**（健康检查 + 崩溃自动重启 + 退出时收干净），**你什么都不用做**；
+> 想自己看看它：`python -m memory_sidecar stats`。细节见 [记忆 sidecar 文档](docs/memory-sidecar.md)。
 
 ### 可选：ActivityWatch 活动感知 (强烈推荐)
 
@@ -83,43 +87,47 @@ python main.py
 4. **无 API key**？桌宠用 mock 回复兜底（功能演示完整，但不能调真实 Tavily 搜索 / 真 LLM）
 5. **ActivityWatch 未运行**？桌宠启动时 log 提示 `MCP aw 未启用 (aw-server 未运行?)`，不影响其他功能，mcp_aw_* 工具会回「server 未运行, 请装 ActivityWatch」
 6. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型；设置面板 → 「控制 Tab → 主动关心」段可开 AW SQLite 落盘
-7. **语义记忆检索没开**？桌宠照常用「关键词 + TF-IDF」（零下载）；想开就跑一次 `python scripts/prefetch_models.py`（≈1.2 GB 模型），详见下一节
+7. **记忆 sidecar 在后台起来了**：桌宠自己拉起 `memory_sidecar`（:8788），**不阻塞桌宠启动**；它没就绪也不影响聊天，只是这一轮没有长期记忆
+8. **记忆模型没下载**？语义召回（向量 + 精排）用不了，只剩 BM25 关键词腿；想开就跑一次 `python scripts/prefetch_models.py`（≈1.1 GB / 有 CUDA ≈2.2 GB），详见下一节
 
-### 可选：语义记忆检索（第一次要下 ≈1.2 GB 模型）
+### 长期记忆：sidecar 进程 + 模型（第一次要下 ≈1.1 GB / 有 CUDA ≈2.2 GB）
 
-桌宠的长期记忆有两条腿：
+长期记忆住在**独立进程** `memory_sidecar` 里（HTTP `127.0.0.1:8788`）：**JSON 记忆卡是真值**
+（`data/memory_sidecar/cards.json`），Chroma（向量）和 BM25（关键词）只是**派生索引**，
+随时可以 `POST /rebuild` 从卡片重建；最后还有一条**交叉编码器精排**，决定本轮真正注入哪几条记忆。
 
-- **关键词 + TF-IDF**：永远可用、零下载、不联网；
-- **语义检索**（Chroma 向量索引 + 向量模型 + 交叉编码器重排）：能想起「意思相近、
-  字面不重合」的记忆（比如问「我不能吃什么」能想起「主人不吃辣」），但要两个模型：
-
-| 模型 | 大小 | 干什么 |
-|---|---|---|
-| `BAAI/bge-small-zh-v1.5` | 91.9 MB | 把记忆变成向量（512 维），找语义相近的 |
-| `BAAI/bge-reranker-base` | 1081.8 MB | 给候选重排，决定最终注入哪几条 |
-
-**桌宠不会自己偷偷下载**（免得主人说的第一句话被 1.2 GB 的下载拖住）。想开语义检索：
+**进程是桌宠拉起来的，模型不是**：模型下载被做成一个**显式动作** —— 想开语义召回，就自己跑一次
+下面的脚本（脚本幂等，模型已在缓存里就跳过）：
 
 ```powershell
-# 1) 下载 + 校验两个模型（幂等：下过一次再跑就是 no-op）
+# 1) 下载 + 校验模型（幂等：下过一次再跑就是 no-op）
 python scripts/prefetch_models.py
 
 # 只看模型在不在（不下载、不加载）
 python scripts/prefetch_models.py --check
-
-# 2) 打开面板（http://127.0.0.1:8766）→「健康与维护」→「重建向量索引」
 ```
+
+| 模型 | 大小 | 干什么 |
+|---|---|---|
+| `BAAI/bge-small-zh-v1.5` | 91.9 MB | 向量模型（512 维）：找语义相近的记忆 |
+| `BAAI/bge-reranker-v2-m3` | ≈2.1 GB | 精排：GPU 上 16 对 41 ms、分离度 2.7x（**有 CUDA 才选它**） |
+| `BAAI/bge-reranker-base` | ≈1.1 GB | 精排：CPU 上 16 对 291 ms（**没有 CUDA 选它**） |
+
+精排模型**按设备自动选**（有 CUDA → v2-m3，没有 → base）；想自己定就设环境变量
+`DESKTOP_PET_MEMORY_RERANK`。首次下载合计 **≈1.15 GB（纯 CPU）/ ≈2.2 GB（有 CUDA）**。
 
 模型落在 HuggingFace 缓存目录（Windows：`%USERPROFILE%\.cache\huggingface\hub`），
 **不进仓库**（仓库的 `data/` 始终是干净的）。
 
-**不装会怎样**：桌宠照常工作，召回退回「关键词 + TF-IDF」。桌宠会**冒泡告诉主人**
-这件事，面板「健康与维护」里也会写清楚该跑哪条命令 —— 不会让主人莫名其妙地觉得
-「桌宠变笨了」。
+**没跑预取会怎样**：向量腿和精排腿降级（精排退回粗排，向量退回 BM25 关键词腿），召回只剩
+关键词匹配 —— 桌宠照样聊天、照样记东西，只是想不起「意思相近、字面不重合」的那条。
 
-> 实在想让桌宠自己把模型备好（不跑脚本）：设环境变量
-> `DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1`，下载会发生在后台线程里
-> （不阻塞聊天，但会跟聊天抢磁盘和带宽，**默认不推荐**）。
+**记忆服务没起来会怎样**（sidecar 挂了 / 起不来）：桌宠**照常聊天**，只是这一轮没有长期记忆
+（记忆块是空的）；`remember_fact` / `recall_memory` 会如实回「错误：记忆服务不可用…」，
+不会假装记住。sidecar 连续重试 3 次还起不来，桌宠会冒泡告诉你「长期记忆暂时用不了了」。
+
+接口就这几个：`GET /health /stats /list`、`POST /search /upsert /delete /supersede /rebuild`。
+端点细节、卡片格式、降级矩阵、命令行用法都在 [记忆 sidecar 文档](docs/memory-sidecar.md)。
 
 ### 试用在线 Demo
 
@@ -141,7 +149,7 @@ python scripts/prefetch_models.py --check
 
 ### 设置面板（5 个分组 18+ 选项）
 
-LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
+LLM / TTS / ASR / 提醒 / 快捷指令 全部可调；**长期记忆**另有记忆面板（查看 / 搜索 / 分类 / 增删）+ sidecar 环境变量（端口 / 数据目录 / 精排模型）
 
 ### FastAPI Dashboard（https://localhost:8766）
 
@@ -179,12 +187,14 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 - **Research Agent**：搜资料 / 查资料 / 写报告
 - **Code Agent**：写脚本 / 改文件 / git 提交
 
-### 3. 长期记忆（双记忆引擎 + 重要性 + 冲突检测）
+### 3. 长期记忆（独立 sidecar 进程 + 重要度 + 冲突改写）
 
-- **检索**：`TF-IDF`（离线，永远可用）/ 语义检索（Chroma + bge，**需先跑 `scripts/prefetch_models.py` 下模型**，≈1.2 GB）
-- **重要度评分**（1–10）
-- **时间衰减**（记忆越久越靠后）
-- **冲突检测**（更新与已有记忆冲突时合并）
+- **存储**：**独立进程** `memory_sidecar`（HTTP :8788）—— **JSON 记忆卡是真值**（`data/memory_sidecar/cards.json`），Chroma 向量索引 + BM25 关键词索引都只是**派生**的，随时能从卡片重建
+- **检索**：向量 + 关键词两路粗排（RRF 融合）→ **交叉编码器精排**（模型按设备自动选，见上文）
+- **重要度评分**（0–1）
+- **时间衰减**（按 kind 的半衰期，记忆越久越靠后）
+- **冲突改写**（事实变了用 `remember_fact(supersedes=旧id)` 改写，旧卡自动标记过时，不会新旧两条并存）
+- **降级不阻塞**：sidecar 不可用 → 记忆块为空、工具如实报错，**桌宠照常聊天**
 
 ### 4. 状态养成对 Agent 决策的耦合
 
@@ -228,7 +238,7 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 | 语音 | Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
 | 大脑 | ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
 | 工具 | 52 个 | ✓ 18 个（browser sandbox） |
-| 记忆 | TF-IDF / 向量 / 持久化 | ✓ localStorage |
+| 记忆 | sidecar 进程：向量 + 关键词 + 精排 / 持久化 | ✓ localStorage |
 | 提醒 | 系统通知 + cron | ✓ Browser Notifications |
 | 游戏 | 五子棋 / 象棋 / 狼人杀 | ✗（browser sandbox） |
 | 养成 | 5 状态 / 喂食 / 签到 | ✗ |
@@ -256,7 +266,7 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 | TTS / TTS | 引擎（edge / GPT-SoVITS）/ 语速 / 音调 / 试听 |
 | ASR / ASR | 语言 / 自动发送 |
 | 提醒 / Reminder | 默认 5 / 10 / 30 分钟 |
-| 记忆 / Memory | 重要度阈值 / 冲突合并 / 检索策略 |
+| 记忆 / Memory | 记忆面板（搜索 / 分类 / 增删）+ sidecar 环境变量（端口 / 数据目录 / 精排模型） |
 | 快捷指令 / Shortcut | 自定义 / 系统级 |
 
 ### 游戏
@@ -286,6 +296,7 @@ mcp_servers.yaml:
 - [Live2D Demo 功能对齐报告](docs/demo/FEATURE_ALIGNMENT.html) — 网页 Demo 与桌面版能力对比表
 - [快速开始](docs/quickstart.md)
 - [架构](docs/architecture.md)
+- [记忆 sidecar](docs/memory-sidecar.md) — 独立记忆进程：端点 / 卡片格式 / 降级矩阵 / 模型
 - [Live2D 集成](docs/live2d-integration.md)
 - [情绪系统](docs/emotion-system.md)
 - [TTS 集成](docs/tts-integration.md)
@@ -353,7 +364,7 @@ CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Wi
 
 - **Real intelligence**: hand-rolled **ReAct Agent** loop + **3-layer anti-hallucination** (force tool calls → keep going up to `max_turns` → summarize tool outputs), with an optional **LangChain** backend
 - **68 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts + **ActivityWatch activity awareness** (mcp_aw_get_recent_activities / current_window / query / buckets — the pet proactively reports what the owner has been doing)
-- **Real memory**: pluggable `TF-IDF` / `sentence-transformers` retrieval; importance scoring + time decay + conflict detection + long-term evolution
+- **Real memory**: a **standalone sidecar process** (`memory_sidecar`, HTTP `127.0.0.1:8788`, auto-started by the pet): **Chroma vector + BM25 keyword + cross-encoder rerank**, with JSON memory cards as the source of truth (the indexes are derived and rebuildable); importance scoring + time decay + conflict rewriting + long-term evolution
 - **Real voice**: **3 TTS engines** (edge-tts / GPT-SoVITS local cloning / MiniMax cloud) + browser SpeechRecognition **ASR hold-to-talk** + mouth-sync
 - **Real look**: **dual renderer** (Live2D Cubism 4 + pixi-live2d-display / PNG frame animation), graceful fallback when the model is missing
 - **Real games**: **Gomoku** (3 AI difficulty levels) + **Chinese Chess** (move generation / check / checkmate / stalemate / flying general all come from the **[cchess](https://pypi.org/project/cchess/)** library, MIT, PyPI 1.20+; we only write the alpha-beta search + evaluation, with 3 AI difficulty levels) + **9-player Werewolf** (you + 8 independent NPC agents + the pet as moderator, fully offline without any API key) + daily check-in + feeding + 5-stat nurturing
@@ -373,7 +384,7 @@ pip3 install -r requirements.txt
 # Optional: Live2D rendering + Chromium core (250MB+ recommended)
 pip3 install PyQtWebEngine
 
-# Run
+# Run (also starts the memory sidecar process on :8788 — nothing to launch by hand)
 python3 main.py
 ```
 
@@ -387,9 +398,14 @@ pip install -r requirements.txt
 # Optional: Live2D rendering + Chromium core (250MB+ recommended)
 pip install PyQtWebEngine
 
-# Run
+# Run (also starts the memory sidecar process on :8788 — nothing to launch by hand)
 python main.py
 ```
+
+> **One more process shows up on startup**: long-term memory lives in a **standalone sidecar process**
+> (`memory_sidecar`, HTTP `127.0.0.1:8788`). The pet **starts it for you** (health check,
+> restart on crash, cleaned up on exit) — **no action needed**. Peek at it with
+> `python -m memory_sidecar stats`; details in the [memory sidecar doc](docs/memory-sidecar.md).
 
 ### Optional: ActivityWatch activity awareness (strongly recommended)
 
@@ -410,6 +426,45 @@ See [ActivityWatch integration](docs/activitywatch-integration.md)
 4. **No API key?** The pet falls back to mock replies (full feature demo, but no real Tavily search / real LLM)
 5. **ActivityWatch not running?** Startup log shows `MCP aw not enabled (aw-server not running?)` — everything else keeps working, `mcp_aw_*` tools return "server not running, please install ActivityWatch"
 6. **Right-click the model → "Settings"** to configure LLM / Tavily keys; Settings → "Control Tab → Proactive Care" enables AW SQLite persistence
+7. **The memory sidecar comes up in the background**: the pet starts `memory_sidecar` (:8788) without blocking its own startup; if it isn't ready yet the pet still chats — that turn simply has no long-term memory
+8. **Models not downloaded?** Semantic recall (vector + rerank) is unavailable and only the BM25 keyword leg remains; run `python scripts/prefetch_models.py` once to enable it (≈1.1 GB, ≈2.2 GB with CUDA) — see the section below
+
+### Long-term memory models (≈1.1 GB on first run, ≈2.2 GB with CUDA)
+
+Long-term memory lives in a **standalone sidecar process** (`memory_sidecar`, HTTP `127.0.0.1:8788`):
+**JSON memory cards are the source of truth** (`data/memory_sidecar/cards.json`), while Chroma (vector)
+and BM25 (keyword) are **derived indexes** that can be rebuilt from the cards at any time
+(`POST /rebuild`); a **cross-encoder reranker** then decides which memories actually get injected.
+
+**The pet starts the process, not the models**: downloading the models is an explicit step — run
+the script yourself once (idempotent: models already in the cache are skipped):
+
+```powershell
+# 1) Download + verify the models (idempotent: a second run is a no-op)
+python scripts/prefetch_models.py
+
+# Just report whether they are cached (no download, no loading)
+python scripts/prefetch_models.py --check
+```
+
+| Model | Size | What it does |
+|---|---|---|
+| `BAAI/bge-small-zh-v1.5` | 91.9 MB | Embeddings (512-dim): finds semantically similar memories |
+| `BAAI/bge-reranker-v2-m3` | ≈2.1 GB | Reranker: 41 ms per 16 pairs on GPU, 2.7x separation (**picked when CUDA is available**) |
+| `BAAI/bge-reranker-base` | ≈1.1 GB | Reranker: 291 ms on CPU (**picked when there is no CUDA**) |
+
+The reranker is **auto-selected by device**; override it with the `DESKTOP_PET_MEMORY_RERANK`
+environment variable. First-run download: **≈1.15 GB (CPU only) / ≈2.2 GB (with CUDA)**.
+Models land in the HuggingFace cache (Windows: `%USERPROFILE%\.cache\huggingface\hub`),
+**not in the repo**.
+
+**Without them**: the vector and rerank legs degrade (rerank → coarse ranking, vector → BM25
+keyword leg) — the pet still chats and still remembers, it just can't recall memories that mean
+the same without sharing words. **Without the sidecar**: the pet still chats, that turn simply has
+no long-term memory, and the memory tools honestly answer "记忆服务不可用…".
+
+Endpoints, card format, the degradation matrix and the CLI live in the
+[memory sidecar doc](docs/memory-sidecar.md).
 
 ### Try the online demo
 
@@ -431,7 +486,7 @@ Open it in any browser (no runtime required / zero dependencies):
 
 ### Settings panel (5 groups, 18+ options)
 
-LLM / TTS / ASR / reminders / memory / shortcuts — all adjustable.
+LLM / TTS / ASR / reminders / shortcuts — all adjustable; **long-term memory** has its own panel (view / search / filter / add / delete) plus sidecar environment variables (port / data dir / rerank model).
 
 ### FastAPI Dashboard (https://localhost:8766)
 
@@ -469,12 +524,14 @@ Pet + Life + Research + Code agents + Orchestrator:
 - **Research Agent**: searches for material, looks things up, writes reports
 - **Code Agent**: writes scripts, edits files, makes git commits
 
-### 3. Long-term memory (dual backends + importance + conflict detection)
+### 3. Long-term memory (standalone sidecar process + importance + conflict rewriting)
 
-- **Retrieval**: `TF-IDF` (offline) / `sentence-transformers` (semantic)
-- **Importance score** (1–10)
-- **Time decay** (older memories rank lower)
-- **Conflict detection** (merge when an update conflicts with an existing memory)
+- **Storage**: a **standalone process** (`memory_sidecar`, HTTP :8788) — **JSON memory cards are the source of truth**; the Chroma vector index and the BM25 keyword index are **derived** and can be rebuilt from the cards at any time
+- **Retrieval**: vector + keyword coarse ranking fused with RRF → **cross-encoder rerank** (the model is auto-selected per device, see above)
+- **Importance score** (0–1)
+- **Time decay** (per-kind half-life: older memories rank lower)
+- **Conflict rewriting** (a changed fact is rewritten with `remember_fact(supersedes=<old id>)` — the old card is marked as superseded instead of keeping both versions)
+- **Degradation never blocks**: if the sidecar is unavailable the memory block is empty and the tools answer honestly, but **the pet still chats**
 
 ### 4. Innovation #2: pet state couples into Agent decisions
 
@@ -518,7 +575,7 @@ Full design and 19+ tests in [docs/innovation-2-companion-policy.md](docs/innova
 | Voice | ✅ Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
 | Brain | ✅ ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
 | Tools | ✅ 52 | ✓ 18 (browser sandbox) |
-| Memory | ✅ TF-IDF / vector / persistent | ✓ localStorage |
+| Memory | ✅ sidecar process: vector + keyword + rerank / persistent | ✓ localStorage |
 | Reminders | ✅ System notification + cron | ✓ Browser Notifications |
 | Games | ✅ Gomoku / Xiangqi / Werewolf | ✗ (browser sandbox) |
 | Nurturing | ✅ 5 stats / feeding / check-in | ✗ |
@@ -546,7 +603,7 @@ This repo keeps the Web demo **in sync** with the desktop app — new desktop to
 | TTS | Engine (edge / GPT-SoVITS / MiniMax) / speed / pitch / test |
 | ASR | Language / auto-send |
 | Reminder | Default 5 / 10 / 30 minutes |
-| Memory | Importance threshold / conflict merge / retrieval strategy |
+| Memory | Memory panel (search / filter / add / delete) + sidecar env vars (port / data dir / rerank model) |
 | Shortcut | Custom / system-level |
 
 ### Games
@@ -576,6 +633,7 @@ Enable it in Settings → MCP Servers → the pet can now read/write your Docume
 - [Feature alignment report](docs/demo/FEATURE_ALIGNMENT.html) — capability comparison between the web demo and the desktop app
 - [Quick start](docs/quickstart.md)
 - [Architecture](docs/architecture.md)
+- [Memory sidecar](docs/memory-sidecar.md) — the standalone memory process: endpoints / card format / degradation matrix / models
 - [Live2D integration](docs/live2d-integration.md)
 - [Emotion system](docs/emotion-system.md)
 - [TTS integration](docs/tts-integration.md)
