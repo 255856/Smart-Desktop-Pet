@@ -46,7 +46,7 @@ RISK_RATIONALE: dict[int, str] = {
     IRREVERSIBLE: "锁屏 / 杀进程 / 文件物理删除, 主人立刻被影响, 难撤销",
 }
 
-# 工具风险等级主表 (60 个工具)
+# 工具风险等级主表 (65 个工具)
 TOOL_RISK_LEVEL: dict[str, int] = {
     # ---- SAFE (0): 纯读 / 纯计算 / 纯查询 ----
     "get_current_time":          SAFE,
@@ -116,6 +116,11 @@ TOOL_RISK_LEVEL: dict[str, int] = {
     # ---- IRREVERSIBLE (4): 主人立刻被影响, 难撤销 ----
     "kill_process":              IRREVERSIBLE,
     "lock_screen":               IRREVERSIBLE,
+    # 下面两个是**预留名**(工具函数还没实现, live 注册表里查不到):
+    # shutdown_computer 已经在 agent.py 的 DANGEROUS_TOOLS 里, RISK_RATIONALE[4] 也点名了
+    # 「文件物理删除」—— 等级先定死, 模型真调这两个名字时一律走 confirm 流程。
+    "shutdown_computer":         IRREVERSIBLE,   # 关机 / 重启: 物理不可逆
+    "delete_file":               IRREVERSIBLE,   # 文件物理删除: 不可逆
 }
 
 
