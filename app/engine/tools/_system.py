@@ -20,6 +20,22 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型标注
 _SHELL_METACHARS = frozenset('&|<>^"\'%!()\n\r`$*?;#')
 
 
+def _has_cjk(text: str) -> bool:
+    """名字里有没有中日韩字符（用来把中文应用排到英文应用前面）。"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
+
+
+# 列表展示顺序：主人自己放的应用（桌面）排最前，其次开始菜单，
+# 系统组件（卸载注册表 / Program Files）排最后 —— 它们几乎不会被「打开 XX」命中。
+_SOURCE_PRIORITY = {
+    "desktop": 0,
+    "start_menu": 1,
+    "app_paths": 2,
+    "uninstall": 3,
+    "program_files": 4,
+}
+
+
 def _find_installed_candidates(
     query: str, limit: int = 5,
 ) -> list[tuple["InstalledApp", float]]:
@@ -272,8 +288,13 @@ def register(reg: ToolRegistry, *, hooks=None) -> None:
         apps = list_installed_apps(wait=True, timeout=5.0)
         if not apps:
             return "已装应用列表为空（扫描还没完成或系统未安装第三方应用）。"
-        # 按名字排序
-        apps_sorted = sorted(apps, key=lambda a: a.name.lower())
+        # 排序：中文名优先。纯按字母序排的话，前 N 个会被 7-Zip / Accessibility
+        # 这类英文系统应用占满，中文应用（尤其在开始菜单子目录里的）根本露不出来 ——
+        # 主人说「打开星穹铁道」，LLM 在列表里翻不到这个名字就会答「没找到」。
+        apps_sorted = sorted(
+            apps,
+            key=lambda a: (not _has_cjk(a.name), a.name.lower()),
+        )
         lines = [f"已装应用（共 {len(apps_sorted)} 个，显示前 {min(limit, len(apps_sorted))} 个）：", ""]
         for app in apps_sorted[:limit]:
             lines.append(f"  {app.name}  [{app.source}]  {app.path}")
@@ -404,7 +425,9 @@ def open_website(url: str) -> str:
         "(3) **系统已安装应用扫描**（按相似度匹配，扫描开始菜单 / 桌面 / "
         "App Paths / Uninstall / Program Files）；\n"
         "(4) 找不到时返回 top 5 相似候选，让你挑一个再开。\n"
-        "用户给的 app_name 不必精确——支持中文 / 拼写错误 / 别名。"
+        "用户给的 app_name 不必精确——支持中文 / 拼写错误 / 别名，"
+        "**直接把主人说的原话传进来即可**（如 app_name='星穹铁道'），"
+        "不要因为自己不确定名字就去 list_installed_apps 里查。"
     ),
     parameters={
         "type": "object",
@@ -548,10 +571,12 @@ def open_app(app_name: str) -> str:
         "列出系统中已安装的应用（扫描开始菜单 / 桌面 / App Paths / "
         "Uninstall 注册表 / Program Files）。\n"
         "用法：\n"
-        "  - 不传 query：返回所有已装应用（按名字排序）\n"
+        "  - 不传 query：返回所有已装应用（中文名优先，再按名字排序）\n"
         "  - 传 query：按相似度返回 top-N（如 list_installed_apps(query='vscode')）\n"
-        "主人说「打开 XX」但你不确定 XX 的真实应用名时，先用这个工具列一下，"
-        "再调 open_app 用准确的名称。"
+        "重要：主人说「打开 XX」时，**直接调 open_app 就能开**（它自带模糊匹配），"
+        "本工具只在你需要确认真实应用名时用。别因为列表里没看到某个名字就"
+        "回答「没装」——同一个程序常有多个快捷方式名（米哈游启动器 / 崩坏：星穹铁道），"
+        "而列表默认只显示前 20 条。"
     ),
     parameters={
         "type": "object",
@@ -586,8 +611,20 @@ def list_installed_apps_tool(query: str = "", limit: int = 20) -> str:
     apps = list_installed_apps(wait=True, timeout=5.0)
     if not apps:
         return "已装应用列表为空（扫描还没完成或系统未安装第三方应用）。"
-    # 按名字排序
-    apps_sorted = sorted(apps, key=lambda a: a.name.lower())
+    # 排序：先按来源（主人自己放的应用优先），组内中文名优先、再按名字。
+    #
+    # 纯按名字排序的话，前 N 个会被 7-Zip / Accessibility / 「卸载 xxx」
+    # 这类系统组件占满 —— 主人说「打开星穹铁道」，LLM 在列表里翻不到
+    # 「崩坏：星穹铁道」这个名字就会答「没装」。而桌面 / 开始菜单里的才是
+    # 他真正会用工具去打开的东西。
+    apps_sorted = sorted(
+        apps,
+        key=lambda a: (
+            _SOURCE_PRIORITY.get(a.source, 9),
+            not _has_cjk(a.name),
+            a.name.lower(),
+        ),
+    )
     lines = [f"已装应用（共 {len(apps_sorted)} 个，显示前 {min(limit, len(apps_sorted))} 个）：", ""]
     for app in apps_sorted[:limit]:
         lines.append(f"  {app.name}  [{app.source}]  {app.path}")

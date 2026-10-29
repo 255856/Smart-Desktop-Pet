@@ -26,13 +26,16 @@ class InstalledApp:
     path: str          # 完整 exe 路径
     source: str        # 来源："app_paths" / "start_menu" / "desktop" / "uninstall" / "program_files"
 
+    # 同一 exe 可能有多个快捷方式名（「米哈游启动器」/「崩坏：星穹铁道」），
+    # 相等性按 (path, name) 算 —— 只按 path 算会把别名当成同一个条目。
     def __hash__(self) -> int:
-        return hash(self.path.lower())
+        return hash((self.path.lower(), self.name.lower()))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, InstalledApp):
             return False
-        return self.path.lower() == other.path.lower()
+        return (self.path.lower(), self.name.lower()) == \
+            (other.path.lower(), other.name.lower())
 
 
 @dataclass
@@ -210,11 +213,17 @@ def _normalize_for_search(name: str) -> str:
 
 
 def _scan_installed_apps() -> list[InstalledApp]:
-    """合并所有来源的结果，按路径去重。"""
-    out: dict[str, InstalledApp] = {}    # path(lowercase) -> InstalledApp
+    """合并所有来源的结果。
+
+    去重键是 (path, name) 而不是单独的 path：同一个 exe 往往有多个快捷方式
+    （桌面「米哈游启动器」+ 开始菜单「崩坏：星穹铁道」指向同一个 launcher.exe），
+    按 path 去重会把别名丢掉，列表里就只剩其中一个名字 —— LLM 听到的名字跟
+    用户说的对不上，就会答「没找到这个应用」。
+    """
+    out: dict[tuple[str, str], InstalledApp] = {}    # (path, name) -> InstalledApp
 
     def _add(app: InstalledApp) -> None:
-        key = app.path.lower()
+        key = (app.path.lower(), app.name.lower())
         if key not in out:
             out[key] = app
 
@@ -260,22 +269,28 @@ def _get_shell():
 def _resolve_lnk(lnk_path: Path) -> Optional[str]:
     """解析 .lnk 指向的 exe 路径。
 
-    用 Windows Shell COM 接口（pywin32 / winshell）。如果环境没装，
-    退化为：直接把 .lnk 路径丢给 os.startfile（Windows 也能解析）。
+    优先用 Windows Shell COM 接口（pywin32 / winshell）。COM 拿不到目标时
+    （没装 pywin32、后台线程里 COM 不可用）降级返回 .lnk 自身路径 ——
+    os.startfile 对 .lnk 一样能启动，而 lnk.stem 正好是用户看得懂的
+    快捷方式名（"崩坏：星穹铁道"），比整条丢掉强得多：丢掉的话
+    主人桌面上的应用就从列表里消失了，LLM 会答「没装」。
     """
     try:
         # 复用同一个 COM 对象（每个 .lnk 新建一次要 3.4 ms）
         shell = _get_shell()
-        if shell is None:
-            return None
-        shortcut = shell.CreateShortCut(str(lnk_path))
-        target = shortcut.Targetpath
-        if target and Path(target).is_file():
-            return target
+        if shell is not None:
+            shortcut = shell.CreateShortCut(str(lnk_path))
+            target = shortcut.Targetpath
+            if target and Path(target).is_file():
+                return target
     except Exception:  # noqa: BLE001
         pass
 
-    return None
+    # COM 不可用 → 降级：把 .lnk 本身当可启动目标
+    try:
+        return str(lnk_path) if lnk_path.is_file() else None
+    except OSError:
+        return None
 
 
 def _scan_start_menu() -> list[InstalledApp]:

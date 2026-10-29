@@ -73,6 +73,36 @@ class TestScanInstalledApps:
             assert Path(app.path).is_file(), \
                 f"App path doesn't exist: {app.path}"
 
+    def test_same_exe_keeps_every_shortcut_name(self, monkeypatch):
+        """同一个 exe 的多个快捷方式名都要保留，别名不能被去重吃掉。
+
+        桌面「米哈游启动器」和开始菜单「崩坏：星穹铁道」指向同一个 launcher.exe。
+        之前按 path 去重只留一个名字，主人说「打开星穹铁道」时 LLM 在列表里
+        看到的是「米哈游启动器」，就会答「没装」。
+        """
+        from app.core import installed_apps as ia
+
+        shared = "E:/game/miHoYo Launcher/launcher.exe"
+        apps = [
+            ia.InstalledApp(name="米哈游启动器", path=shared, source="desktop"),
+            ia.InstalledApp(name="崩坏：星穹铁道", path=shared, source="start_menu"),
+            ia.InstalledApp(name="重复项", path="E:/a.exe", source="desktop"),
+            ia.InstalledApp(name="重复项", path="E:/a.exe", source="desktop"),
+        ]
+        monkeypatch.setattr(ia, "_scan_app_paths", lambda: [])
+        monkeypatch.setattr(ia, "_scan_uninstall", lambda: [])
+        monkeypatch.setattr(ia, "_scan_program_files_top_level", lambda: [])
+        monkeypatch.setattr(ia, "_scan_desktop", lambda: apps[:2])
+        monkeypatch.setattr(ia, "_scan_start_menu", lambda: apps[2:])
+
+        merged = ia._scan_installed_apps()
+        names = [a.name for a in merged]
+        assert "米哈游启动器" in names
+        assert "崩坏：星穹铁道" in names
+        # 完全相同的 (path, name) 才合并
+        assert names.count("重复项") == 1
+        assert len(merged) == 3
+
 
 # ============================================================
 #  Cache + find_similar（注入 mock 数据，不依赖系统）
@@ -305,6 +335,46 @@ class TestListInstalledAppsTool:
         assert "App1" in result
         assert "App2" in result
         assert "共" in result
+
+    def test_empty_query_lists_desktop_and_chinese_apps_first(self):
+        """无 query 时：桌面应用 + 中文名排前面，别让系统组件占满前 N 条。
+
+        之前纯按名字排序，前 20 条全是 7-Zip / Accessibility / 「卸载 xxx」，
+        主人说「打开星穹铁道」，LLM 在列表里翻不到「崩坏：星穹铁道」就答「没装」。
+        """
+        from app.engine.tools._core import ToolRegistry
+        from app.engine.tools._system import register
+        from app.core.installed_apps import InstalledApp
+        import unittest.mock as mock
+
+        reg = ToolRegistry()
+        register(reg)
+
+        cache = InstalledAppsCache()
+        cache._result.apps = [
+            InstalledApp(name="7-Zip", path="C:/fake/7z.exe", source="app_paths"),
+            InstalledApp(name="Accessibility Magnify",
+                         path="C:/fake/magnify.exe", source="start_menu"),
+            InstalledApp(name="卸载某个东西",
+                         path="C:/fake/unins.exe", source="uninstall"),
+            InstalledApp(name="崩坏：星穹铁道",
+                         path="E:/game/launcher.exe", source="desktop"),
+            InstalledApp(name="微信", path="C:/fake/weixin.exe", source="desktop"),
+        ]
+        cache._result.scanned_at = time.time()
+
+        with mock.patch(
+            "app.core.installed_apps.get_installed_apps_cache", return_value=cache,
+        ):
+            result = reg.get("list_installed_apps").fn("", 3)
+
+        # 前 3 条里必须能看到中文的桌面应用
+        body = result.split("\n", 2)[-1]
+        assert "崩坏：星穹铁道" in body
+        assert "微信" in body
+        # 系统组件被挤到后面
+        assert "7-Zip" not in body
+        assert "卸载某个东西" not in body
 
 
 # ============================================================
