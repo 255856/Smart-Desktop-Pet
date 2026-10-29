@@ -877,7 +877,7 @@ class LangChainAgent:
 
         # 本轮易变上下文（当前时间 / 桌宠实时状态）作为**独立的 user 消息**
         # 插在主人本轮发言前面。**不能**进 system prompt —— system message
-        # 落在 MiniMax 的 8192-token 前缀缓存块里，块里每轮变一次（时间戳！）
+        # 落在 MiniMax 的前缀缓存（最长公共前缀）块里，块里每轮变一次（时间戳！）
         # 整块作废（实测缓存命中率 98.9% → 1.5%）。
         # chat_window 已经插过的话这里是幂等 no-op；直接调 LangChainAgent 的
         # 路径（例如 task 子 agent）由这里兜底补上时间。
@@ -953,7 +953,7 @@ class LangChainAgent:
 
         ⚠️ **长期记忆块不在 system prompt 里**（Stage 2.1 + 记忆通道搬家）：
         记忆块按**本轮 query** 召回 ⇒ 每轮都变。放 system prompt 会打掉
-        MiniMax 的 8192-token 前缀缓存（98.9% → 1.5%），也会让 Stage 2.8
+        MiniMax 的前缀缓存（最长公共前缀）（98.9% → 1.5%），也会让 Stage 2.8
         的 agent 指纹每轮变（每轮重建 agent，编译好的图 + checkpointer
         状态全丢）。它现在走**易变通道**：build_turn_context(query=...) →
         独立的 user 消息（见 inject_dynamic_context）。

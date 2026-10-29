@@ -84,7 +84,7 @@ _FALLBACK_SKILL = """\
 #:
 #: 为什么放**稳定通道**（system prompt）而不是易变通道：
 #:   这段文字是**常量** —— 不随本轮 query / 时间 / 状态变，
-#:   所以留在 system prompt 里**不会**让 MiniMax 的 8192-token 前缀缓存
+#:   所以留在 system prompt 里**不会**让 MiniMax 的前缀缓存（最长公共前缀）
 #:   第一块每轮作废（实测缓存命中率 98.9% → 1.5%，见 P0-11）。
 #:   真正每轮都变的是**召回的记忆块**，它走易变通道（独立 user 消息）。
 MEMORY_RULE_BLOCK = (
@@ -446,7 +446,7 @@ class BrainController(QObject):
         SKILL 放在最前。
 
         这里**不能**放每轮变的东西（当前时间 / 桌宠实时状态 / 召回的记忆）——
-        system message 落在 MiniMax 的 8192-token 前缀缓存块里，块里每轮
+        system message 是前缀缓存*最长公共前缀*的起点，里面每轮
         变一次（时间戳！）整块作废（实测缓存命中率 98.9% → 1.5%）。
         易变部分走 chat_context_dynamic() → 本轮的 user 消息。
 

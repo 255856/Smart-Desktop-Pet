@@ -23,9 +23,9 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
 
 易变内容（当前时间 / 桌宠实时状态 / 状态策略）**一律不进这里**
 ------------------------------------------------------------
-MiniMax 的 prompt cache 按 8192-token 块缓存前缀，system message 落在**第一块**，
-块里每轮变一次的内容（时间戳！状态策略！）都会让整块作废 ——
-实测缓存命中率 98.9% → 1.5%。
+MiniMax 的 prompt cache 命中**最长公共前缀**（128-token 页粒度），system message 在**最前面**，
+它里面每轮变一次的内容（时间戳！状态策略！）会让它后面的一切不再匹配 ——
+实测缓存命中率 98.9% → 1.5%。（不是「凑满 8192 块」才命中：真命中可只复用 7808 token。）
 所以易变内容走 build_turn_context() → 一条**独立的 user 消息**（排在主人这句话前面），
 主人原话保持字节不变（意图判定 detect_action_intent 读的就是它）。
 """
@@ -299,7 +299,7 @@ def build_dynamic_block(*, project_docs=None, skills=None,
 
     ⚠️ **长期记忆块不在这里**（Stage 2.1 + 记忆通道搬家）：
     记忆块按**本轮 query** 召回 ⇒ 每轮都变。放在 system prompt 里会：
-      · 打掉 MiniMax 的 8192-token 前缀缓存（实测 98.9% → 1.5%）；
+      · 打掉 MiniMax 的前缀缓存（最长公共前缀）（实测 98.9% → 1.5%）；
       · 让 Stage 2.8 的 agent 指纹每轮变 → 每轮重建 agent
         （编译好的图 + checkpointer 状态每轮丢掉）。
     它现在走**易变通道**：build_turn_context(query=...) → 独立的 user 消息。
@@ -376,8 +376,8 @@ def build_session_block(*, skill=None, memory=None, tool_list=None) -> str:
     所以两个后端拿到的是**同一段字符串**。
 
     ⚠️ 这里**不能**放每轮变的东西（当前时间 / 桌宠实时状态 / 状态策略）：
-    system message 落在 MiniMax 的 8192-token 前缀缓存块里，块里每轮变一次
-    整块作废（实测缓存命中率 98.9% → 1.5%）。
+    system message 在最前面，是前缀缓存**最长公共前缀**的起点；它里面每轮变一次，
+    后面全部不再匹配（实测缓存命中率 98.9% → 1.5%）。
     """
     parts: list[str] = []
     if skill:
@@ -521,7 +521,7 @@ def build_turn_context(*, now=None, state=None, thread_id=None,
     """构造本轮**易变**上下文：当前时间 + 桌宠实时状态 + 状态策略 + 召回的记忆。
 
     这是易变通道（独立的 user 消息），**不能**进 system prompt ——
-    system message 落在 MiniMax 的 8192-token 前缀缓存块里，块里每轮变一次
+    system message 是前缀缓存**最长公共前缀**的起点，里面每轮变一次
     （时间戳！状态策略！记忆块！）整块作废（实测缓存命中率 98.9% → 1.5%）。
 
     Args:

@@ -72,8 +72,8 @@ def build_state_strategy(state) -> str:
       1. 拿到 state → 调本函数 → 得到文本；
       2. 把文本放进**每轮动态上下文（user 消息）**，也就是
          app.brain.llm_client.build_dynamic_context() 的输出里；
-      3. **绝不能**放进 system message —— system message 落在 MiniMax 的
-         8192-token 前缀缓存块里，块里每轮变一次整块作废
+      3. **绝不能**放进 system message —— 它是前缀缓存最长公共前缀的起点，
+         里面每轮变一次，**后面全部不再匹配**
          （实测缓存命中率 98.9% → 1.5%）。
     """
     if state is None:
@@ -164,7 +164,7 @@ def grounding_dynamic_prompt(request) -> str:
     在原 persona 后面拼**防幻觉基线 + 高风险工具 confirm 协议**（都是稳定内容）。
 
     这里**不能**拼每轮会变的东西 —— system message 落在 MiniMax 的
-    8192-token 前缀缓存块里，块里每轮变一次（时间戳！状态策略！）整块作废
+    前缀缓存**最长公共前缀**的起点，里面每轮变一次（时间戳！状态策略！）后面全部不再匹配
     （实测缓存命中率 98.9% → 1.5%）：
       - 当前时间 → app.brain.llm_client.build_dynamic_context → user 消息；
       - 桌宠状态策略 → build_state_strategy() → 同一块动态上下文
