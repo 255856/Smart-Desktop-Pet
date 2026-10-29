@@ -62,20 +62,20 @@ class TestSanitize:
         result = sanitize_text("你好世界")
         assert "你好世界" == result
 
-    def test_strip_meta_narration(self):
-        """LLM 夹带的『我们刚才...』『让我想想...』类括号应被剥掉。"""
-        text = "（我们刚才说了半天）主人这么晚说有点累。"
-        result = sanitize_text(text)
-        assert "我们刚才" not in result
-        assert "有点累" in result
+    def test_meta_narration_bracket_is_no_longer_stripped(self):
+        """Stage 3：括号里的自我规划（「（我们刚才说了半天）」）不再被删。
 
-    def test_strip_long_paren_segment(self):
-        """超过 50 字的纯括号段（Ollama reasoning 痕迹）应被剥掉。"""
+        原来是 _META_NARRATION_RE 干的；那族「猜模型意图」的正则已整族删除 ——
+        它分不清「模型的思考痕迹」和「角色括注 / 拟声」，宁愿漏删也不改写人话。
+        """
+        text = "（我们刚才说了半天）主人这么晚说有点累。"
+        assert sanitize_text(text) == text
+
+    def test_long_paren_segment_is_no_longer_stripped(self):
+        """Stage 3：超过 50 字的括号段（_LONG_PAREN_RE）不再被删。"""
         long_inside = "我们刚刚说到设置了喝水提醒，现在主人又告诉我他有点累。" * 3
         text = f"（{long_inside}）主人真是可怜呢"
-        result = sanitize_text(text)
-        assert "我们刚刚" not in result
-        assert "可怜" in result
+        assert sanitize_text(text) == text
 
     def test_short_paren_may_be_stripped(self):
         """短括号可能被启发式剥掉（特征匹配）— trade-off，能接受。"""
@@ -87,35 +87,45 @@ class TestSanitize:
         """清理后两段独立句子应保留完整。"""
         text = "（思考 30 字的内容）\n\n主人辛苦了。\n\n（又一段 60 字的思考呢）我帮你倒杯水。"
         result = sanitize_text(text)
+        # Stage 3：括号不再剥，整段逐字通过
+        assert result == text
         assert "主人辛苦了" in result
         assert "我帮你倒杯水" in result
 
-    def test_strip_meta_tool_talk(self):
-        """元描述「让我调用工具 / 这应该用XX工具 / 我应该用open_website工具」应被剥掉。"""
-        # 典型漏网：模型即便真的调了工具，也会把"我要做什么"塞进 final answer
+    def test_tool_talk_is_no_longer_rewritten(self):
+        """Stage 3：工具独白不再被清洗管线改写（业主裁决）。
+
+        以前「这应该用 open_website 工具…」会被整句删；但同一族正则也会吃掉
+        「让我看看。」「主人说今天会下雨」这类人话。工具独白改由 prompt 层
+        （【任务执行协议】+ 最终轮禁用工具）拦，管线不再替模型改写散文。
+        """
         text = "打开哔哩哔哩（B站），让主人看动漫。这应该用open_website工具来打开B站的网址。让我调用工具。"
         result = sanitize_text(text)
-        assert "工具" not in result
-        assert "调用" not in result
+        assert result == text
         assert "打开哔哩哔哩" in result
 
-    def test_strip_plan_narration(self):
-        """元描述「根据角色设定 / 用户说 / 我需要以XX角色来回答」应被剥掉。"""
+    def test_plan_narration_is_no_longer_rewritten(self):
+        """Stage 3：「根据角色设定 / 我需要以XX角色来回答」不再被删。"""
         text = (
             "鱼娘有什么喜欢做的事情。我需要以鲸鱼娘的可爱软萌角色来回答，保持自然简短，不要长篇大论。"
             "\n\n根据角色设定：- 外貌：蓝渐变长卷发- 性格：可爱软萌，温柔"
             "\n\n我可以提到一些符合角色的爱好嘿嘿~主人问鲸鱼娘的爱好呀~我喜欢游泳呢"
         )
         result = sanitize_text(text)
-        # 元描述应被剥掉，保留正文
-        assert "根据角色设定" not in result
-        assert "我需要" not in result
+        # Stage 3：不再改写，只在中文占比兜底层面判断
+        assert result == text
         assert "我喜欢游泳呢" in result
 
-    def test_strip_user_repeat(self):
-        """元描述「用户说 / 主人想要 / 用户想问」应被剥掉。"""
-        assert "用户说" not in sanitize_text("用户说想看天气。今天晴朗。")
-        assert "主人想要" not in sanitize_text("主人想要一杯水。好的主人，给你倒。")
+    def test_user_repeat_is_no_longer_rewritten(self):
+        """Stage 3：句首「用户说 / 主人想要」不再被当成复述删掉。
+
+        这条最伤人：「主人说今天会下雨，我记着呢~」本来是正常回应，
+        旧规则按「主人说」整句删。
+        """
+        for text in ("用户说想看天气。今天晴朗。",
+                     "主人想要一杯水。好的主人，给你倒。",
+                     "主人说今天会下雨，我记着呢~"):
+            assert sanitize_text(text) == text
 
     def test_strip_mid_emotion_tag_inline(self):
         """句中位置的 [happy] 标签也必须剥除（旧逻辑只剥末尾），前后回答都保留。"""
@@ -123,17 +133,15 @@ class TestSanitize:
         assert "[" not in out and "happy" not in out
         assert "马上帮你打开抖音" in out and "记得刷完早点休息" in out
 
-    def test_strip_process_filler_clause(self):
-        """工具过程废话「~打开X的方式有很多种呢」应剥掉，保留前面的真动作。"""
-        out = sanitize_text("好的主人，马上帮你打开抖音~ 打开抖音的方式有很多种呢。")
-        assert "方式有很多种" not in out
-        assert "马上帮你打开抖音" in out
+    def test_process_filler_clause_is_no_longer_rewritten(self):
+        """Stage 3：「打开X的方式有很多种呢」不再被剪掉（那是在改模型写的句子）。"""
+        text = "好的主人，马上帮你打开抖音~ 打开抖音的方式有很多种呢。"
+        assert sanitize_text(text) == text
 
-    def test_strip_quote_analysis_sentence(self):
-        """句首引用主人指令后做意图分析「说「打开X」，这是要…」应整句剥除。"""
-        out = sanitize_text('说"打开星穹铁道"，这是要打开一个游戏应用。好的主人，帮你启动星穹铁道~')
-        assert "这是要" not in out and "游戏应用" not in out
-        assert "帮你启动星穹铁道" in out
+    def test_quote_analysis_sentence_is_no_longer_stripped(self):
+        """Stage 3：「说「打开X」，这是要…」这种引用分析句不再整句删除。"""
+        text = '说"打开星穹铁道"，这是要打开一个游戏应用。好的主人，帮你启动星穹铁道~'
+        assert sanitize_text(text) == text
 
     def test_strip_leading_english_cot_prefix(self):
         """英文 CoT 与中文回答黏在同一句（无句号）时，剥掉英文前缀、保留中文。"""
@@ -158,13 +166,17 @@ class TestSanitize:
         assert "think" not in out and "try again" not in out
         assert "刚才没打开吗？再试一次" in out
 
-    def test_keep_answer_after_chinese_cot_same_paragraph(self):
-        """中文角色规划与真回答同段（无句号分隔）时，锚点后的真回答必须保留。"""
+    def test_chinese_cot_same_paragraph_is_no_longer_spliced(self):
+        """Stage 3：中文规划与真回答同段时不再被「截断式」改写，整段原样通过。
+
+        旧行为：靠 _ANSWER_ANCHOR_RE 找「角色发语锚点」，只留锚点之后 ——
+        锚点本身就是猜的（「嘿嘿」「嗯」「主人~」），猜错就把回答砍掉。
+        """
         text = ("根据角色设定：- 外貌：鲸鱼娘，白色长发- 性格：温柔可爱- 擅长：游泳"
                 "好呀~我喜欢游泳呢，毕竟人家是鲸鱼嘛~")
         out = sanitize_text(text)
+        assert out == text
         assert "我喜欢游泳呢" in out
-        assert "根据角色设定" not in out and "外貌" not in out
 
     def test_english_cot_with_scattered_chinese_keeps_only_answer(self):
         """英文 CoT 夹带少量中文引用/语气词时仍应剥掉，只留中文回答。"""
@@ -180,12 +192,12 @@ class TestSanitize:
         text = "主人想玩崩坏：星穹铁道呢，我现在就去启动游戏~"
         assert sanitize_text(text) == text
 
-    def test_strip_tool_soliloquy_keep_answer(self):
-        """工具调用独白剥除，保留给主人的最终结果句。"""
+    def test_tool_soliloquy_no_longer_takes_the_answer_with_it(self):
+        """Stage 3：工具独白不再删，更重要的是**同段的正常回答绝不能被带走**。"""
         text = "我应该使用 open_website 工具来打开哔哩哔哩。打开哔哩哔哩（B站），让主人看动漫。"
         out = sanitize_text(text)
-        assert "open_website" not in out and "工具" not in out
-        assert "哔哩哔哩" in out
+        assert out == text
+        assert "打开哔哩哔哩" in out
 
 
 def test_tts_sentence_split_pattern():

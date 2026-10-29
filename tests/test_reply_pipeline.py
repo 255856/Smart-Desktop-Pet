@@ -2,15 +2,19 @@
 """Stage 1.3「拆回复清洗管线」的验收测试（离线，不需要 key / 网络 / GUI）。
 
 对应 PLAN §1.3 的五条改动：
-  A1 括号式自言自语：**先匹配规划词、再匹配括号**（不再吞掉任意括号内容）
-  A2 过渡语 / 工具独白判别器（过渡语要活，工具独白要删）
-  A3 emoji 保留（<think> / CoT / 规则复读的剥离照旧）
+  A1 括号式自言自语 —— **Stage 3 起整族删除**：括号一律不再改写（见本文件末尾说明）
+  A2 过渡语 / 工具独白判别器 —— **Stage 3 起删除**：只留「过渡语必须活」这半边钉子
   A4 中文占比过低 → **重试一次**（最多一次），再失败才走兜底
   A5 空回复兜底话术轮换（不再每次同一句）
   A6 正常中文回复永远不会被整条丢弃
 
 判别标准（写在实现里，这里再钉一遍）：
     **过渡语 + 工具调用标志 = 工具独白（删）；只有过渡语 = 自然过渡（留）**
+
+Stage 3（业主裁决「没必要硬限制」）之后前半句被判失败：那套判别器连
+「让我看看。」「主人说今天会下雨」都会当工具独白删掉，所以整族正则已删除。
+本文件现在钉的是**新的契约**：过渡语照旧必须活，工具独白不再由清洗管线改写，
+而真正的模型工件（<think> 块 / 情绪标签 / schema 回显行）照旧必删。
 """
 from __future__ import annotations
 
@@ -29,7 +33,6 @@ from app.brain.agent import (  # noqa: E402
     _next_empty_reply_fallback,
 )
 from app.brain.llm_client import (  # noqa: E402
-    _META_NARRATION_RE,
     is_low_cjk_reply,
     sanitize_text,
 )
@@ -40,13 +43,19 @@ from app.brain.llm_client import (  # noqa: E402
 # --------------------------------------------------------------------------
 
 class TestNarrationBracket:
-    """括号里**先认规划词**，再吃括号；没有规划词的括号一律保留。"""
+    """Stage 3：括号内容**一律不再改写**（连「先认规划词再吃括号」也不要了）。"""
 
-    def test_planning_bracket_is_stripped(self):
-        """规划词开头的括号 = 模型的自言自语，剥掉。"""
-        assert sanitize_text("（让我查一下天气）今天真好") == "今天真好"
-        assert sanitize_text("（我们刚才说了半天）主人这么晚说有点累。") == \
-            "主人这么晚说有点累。"
+    def test_planning_bracket_is_no_longer_stripped(self):
+        """规划词开头的括号也保留。
+
+        Stage 1.3 曾把它收窄成「规划词开头的括号才删」；Stage 3 整族删除 ——
+        「（我打算明天早点睡）」这种角色括注跟模型的思考痕迹长得一样，
+        正则分不清，误删的是人话。
+        """
+        for raw in ("（让我查一下天气）今天真好",
+                    "（我们刚才说了半天）主人这么晚说有点累。",
+                    "（我打算明天早点睡）主人晚安啦~"):
+            assert sanitize_text(raw) == raw, f"括号被改了：{raw!r}"
 
     def test_ordinary_bracket_is_kept(self):
         """拟声 / 情绪 / 括注不是规划独白，必须保留。"""
@@ -55,15 +64,28 @@ class TestNarrationBracket:
         assert sanitize_text("（笑）今天真好") == "（笑）今天真好"
 
     def test_arbitrary_bracket_content_is_kept(self):
-        """旧实现的空分支会吞掉**任意**3~500 字括号，现在不会。"""
+        """旧实现的空分支会吞掉**任意**3~500 字括号；Stage 3 之后连正则都不在了。"""
         for raw in ("（今天真不错的一天）主人早呀", "（主人今天辛苦了）好的喵~"):
             assert sanitize_text(raw) == raw, f"括号被误吞：{raw!r}"
 
-    def test_narration_regex_requires_planning_word(self):
-        """结构性钉子：_META_NARRATION_RE 的规划词是强制的（没有空分支）。"""
-        assert _META_NARRATION_RE.search("（让我查一下天气）") is not None
-        assert _META_NARRATION_RE.search("（今天真不错的一天）") is None
-        assert _META_NARRATION_RE.search("（小声地笑）") is None
+    def test_meta_regex_family_is_gone(self):
+        """结构性钉子（Stage 3）：改写模型散文的那族正则已从模块里消失。"""
+        import app.brain.llm_client as llm
+        for name in (
+            "_META_NARRATION_RE", "_LONG_PAREN_RE",
+            "_META_TOOL_TALK_RE", "_META_SHOULD_USE_TOOL_RE",
+            "_META_PLAN_NARRATION_RE", "_META_USER_REPEAT_RE",
+            "_META_SELF_PLAN_RE", "_META_PROMPT_ECHO_RE",
+            "_META_RULE_KEYWORDS_RE", "_META_CHAR_SHEET_RE",
+            "_META_USER_REPEAT_SENT_RE", "_META_SELF_PLAN_SENT_RE",
+            "_META_PLAN_CONTEXT_RE", "_META_TOOL_SENT_RE",
+            "_META_PROCESS_CLAUSE_RE", "_NUMBERED_RULE_RE",
+            "_NARRATION_SENT_RE", "_INTERNAL_VOCAB_RE",
+            "_INTERNAL_CHECKLIST_LINE_RE", "_ANSWER_ANCHOR_RE",
+            "_TRANSITION_WORDS", "_TOOL_CALL_MARKER", "_TOOL_CALL_MARKER_RE",
+            "_EMOJI_PATTERN",
+        ):
+            assert not hasattr(llm, name), f"{name} 不该还留在清洗管线里"
 
 
 # --------------------------------------------------------------------------
@@ -71,7 +93,12 @@ class TestNarrationBracket:
 # --------------------------------------------------------------------------
 
 class TestTransitionVsToolMonologue:
-    """过渡语 + 工具标志 = 工具独白（删）；只有过渡语 = 自然过渡（留）。"""
+    """过渡语必须活；工具独白**不再由清洗管线改写**（Stage 3 业主裁决）。
+
+    判「这句在说工具」是猜模型意图：实测它连「主人说今天会下雨」「让我看看。」
+    都会整句删掉。真正管住工具独白的是 prompt 层（【任务执行协议】+
+    最终轮禁用工具），管线只管模型工件。
+    """
 
     @pytest.mark.parametrize("raw", (
         "我来帮你查一下。",
@@ -90,13 +117,16 @@ class TestTransitionVsToolMonologue:
         "这应该用open_website工具来打开B站的网址。",
         "我来使用 web_search 查一下天气。",
     ))
-    def test_tool_monologue_is_stripped(self, raw):
-        assert sanitize_text(raw) == "", f"工具独白漏进回复：{raw!r}"
+    def test_tool_monologue_is_no_longer_rewritten(self, raw):
+        """Stage 3：管线原样放行（改写模型散文的代价比漏一句独白更大）。"""
+        assert sanitize_text(raw) == raw, f"流水线仍在改写模型散文：{raw!r}"
 
-    def test_tool_monologue_does_not_take_the_answer_with_it(self):
-        """工具独白删掉，同段里的正常回答必须留下。"""
-        assert sanitize_text("我需要调用 open_app 打开记事本。今天天气不错呢。") == \
-            "今天天气不错呢。"
+    def test_answer_next_to_monologue_is_never_taken_with_it(self):
+        """这条是**永久契约**：不管独白删不删，同段的正常回答绝不能被带走。"""
+        raw = "我需要调用 open_app 打开记事本。今天天气不错呢。"
+        out = sanitize_text(raw)
+        assert out == raw
+        assert "今天天气不错呢" in out
 
 
 # --------------------------------------------------------------------------
@@ -113,11 +143,15 @@ class TestEmojiKept:
         assert sanitize_text("<think>模型在思考</think>今天天气不错呢") == "今天天气不错呢"
         assert sanitize_text("<think>还在想\n今天天气不错呢~") == ""
 
-    def test_rule_repetition_still_stripped(self):
-        """prompt 规则复读（「不要使用 emoji」这类）照旧剥掉。"""
-        out = sanitize_text("1. 不要使用 emoji\n2. 保持简短")
-        assert "emoji" not in out
-        assert "不要使用" not in out
+    def test_rule_repetition_is_no_longer_rewritten(self):
+        """Stage 3：prompt 规则复读不再按关键词删（_NUMBERED_RULE_RE 已删除）。
+
+        「1. 不要使用 emoji / 2. 保持简短」跟主人自己的分步说明长得一模一样，
+        正则只能靠「编号 + 规则词」猜，猜错的代价是把真回复吃掉。
+        """
+        text = "1. 不要使用 emoji\n2. 保持简短"
+        out = sanitize_text(text)
+        assert out == text
 
 
 # --------------------------------------------------------------------------

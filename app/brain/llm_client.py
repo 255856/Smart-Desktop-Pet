@@ -207,144 +207,37 @@ COT_ONLY_RETRY_MAX_TOKENS = 4096
 # Stage 1.4：末尾的硬上限「回复 1~3 句」已删，换成共享层里的【回复长度】策略。
 
 
-# emoji 字符范围。Stage 1.3 起**不再全局剥离**（sanitize_text 保留 emoji），
-# 这里保留定义，供需要「显式剥 emoji」的调用方使用。
-_EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FAFF"
-    "\u2600-\u26FF"
-    "\u2700-\u27BF"
-    "\u2300-\u23FF"
-    "]+",
-    flags=re.UNICODE,
-)
-
-
-# 去掉 LLM 在 content 里夹带的"思考痕迹"（中文模型常见括号式自言自语）
-#
-# ⚠️ 机制修正（Stage 1.3）：旧写法的前缀组里有**空分支**
-#   （`因为|` 之后无内容），于是它匹配的是「任意」3~500 字的括号内容 ——
-#   「（小声地笑）」「（打个哈欠）」这类拟声词也会被吞掉。
-#   现在改成「**先匹配已知规划词，再匹配括号**」：
-#   括号内容必须以规划词开头（让我 / 我要 / 我需要 / 我们刚才 …）才算「规划 / 思考」，
-#   其余括号（拟声、情绪、括注）一律保留。
-_META_NARRATION_PREFIX = (
-    r"(?:我们刚才|刚才|现在|让我|我要|我需要|我打算|我准备|我先|我想|"
-    r"嗯|好的|作为|毕竟|事实上|好了|由于|因为|思考|想想)"
-)
-_META_NARRATION_RE = re.compile(
-    r"[（(](?=\s*" + _META_NARRATION_PREFIX + r")"   # 必须以已知规划词开头
-    r"[^()（）\n]{3,500}"
-    r"[)）]",
-    flags=re.UNICODE,
-)
-# 兜底：任何长得像「（中文思考 200+ 字）」的整段括号
-_LONG_PAREN_RE = re.compile(r"[（(][^)（）\n]{50,}[)）]")
-
 # --------------------------------------------------------------------------
-# 过渡语 vs 工具独白 —— Stage 1.3 的核心判别器
+# Stage 3：改写模型散文的那一族正则已移除（业主裁决）
 # --------------------------------------------------------------------------
-# 人话里的自然过渡语：「我来…」「让我…」「我看看…」「我要…」
-# —— 它们让回复像人说话，**不该**被清洗管线删掉。
-# 但「让我调用工具查一下广州天气。」是**工具独白**（在描述要调什么工具），必须删。
+# 业主原话：「我代码里对模型输出用了很多正则表达式进行限制输出，我觉得没必要硬限制」。
 #
-# 判别规则（唯一标准，集中写在这里，避免各正则各写各的）：
-#     **过渡语 + 工具调用标志 = 工具独白（删）；只有过渡语 = 自然过渡（留）**
+# 删掉的是**改写模型散文 / 猜模型意图**的一整族：
+#   _META_NARRATION_RE / _LONG_PAREN_RE             括号式自言自语、超长括号
+#   _META_TOOL_TALK_RE / _META_SHOULD_USE_TOOL_RE   工具独白、建议句
+#   _META_PLAN_NARRATION_RE / _META_USER_REPEAT_RE  规划复述、「用户说…」
+#   _META_SELF_PLAN_RE / _META_PROMPT_ECHO_RE       system prompt 复读
+#   _META_RULE_KEYWORDS_RE / _META_CHAR_SHEET_RE    规则复读、角色卡罗列
+#   _META_USER_REPEAT_SENT_RE / _META_SELF_PLAN_SENT_RE
+#   _META_PLAN_CONTEXT_RE / _META_TOOL_SENT_RE
+#   _META_PROCESS_CLAUSE_RE / _NUMBERED_RULE_RE
+#   _NARRATION_SENT_RE / _INTERNAL_VOCAB_RE / _INTERNAL_CHECKLIST_LINE_RE
+#   _ANSWER_ANCHOR_RE / _EMOJI_PATTERN
+# 以及只为驱动它们而存在的判别器
+#   _TRANSITION_WORDS / _TOOL_CALL_MARKER / _TOOL_CALL_MARKER_RE。
 #
-# 工具调用标志 = 出现「工具 / 调用 / schema」这类词，
-# 或 snake_case 的工具名（open_app / web_search / add_reminder …）。
-
-#: 过渡语（人话里的自然开场 / 自我规划）
-_TRANSITION_WORDS = (
-    r"想让我|想我要|让我|需要我|应当我|要求我|"
-    r"我需要|我应该|我要|我来|我会|我打算|我将|我准备|我先|我想|我看看|我再"
-)
-
-#: 工具调用标志（正则片段）：「工具 / 调用 / schema」这类词，
-#: 或 snake_case 的工具名（open_app / web_search / add_reminder …）
-_TOOL_CALL_MARKER = (
-    r"(?:工具|调用|schema|calculator|"
-    r"(?:open|web|add|set|get|list|take|memory|recall|calc|run|launch|start|stop|"
-    r"create|delete|update|remove|browse|query|screen|system)_[a-z0-9_]+|"
-    r"[a-z_]+_(?:website|app|tool|reminder|fact))"
-)
-
-#: 工具调用标志（编译好的）
-_TOOL_CALL_MARKER_RE = re.compile(_TOOL_CALL_MARKER, flags=re.IGNORECASE)
-
-# 兜底：模型把"我要做什么工具"类元描述裸句塞进 final answer
-# Stage 1.3：与其它规则统一口径 —— 过渡语 + 工具调用标志才算工具独白
-_META_TOOL_TALK_RE = re.compile(
-    r"(?:" + _TRANSITION_WORDS + r"|接下来)"
-    r"[^。.!?\n]*?"
-    + _TOOL_CALL_MARKER +
-    r"[^。.!?\n]*"
-    r"[。.!?]?",
-    flags=re.UNICODE | re.IGNORECASE,
-)
-# 兜底：「这应该用XX工具来YY」类建议句
-_META_SHOULD_USE_TOOL_RE = re.compile(
-    r"(?<=[。.!?\n])这\s*(应该|需要|可以)?\s*"
-    r"(用|通过|借助|使用)\s*"
-    r"[^。.!?\n]*?"
-    r"工具"
-    r"[^。.!?\n]*"
-    r"[。.!?]?",
-    flags=re.UNICODE,
-)
-
-# 兜底：「根据角色设定 / 根据人设 / 用户说 / 主人想要」类规划/复述元描述句
-_META_PLAN_NARRATION_RE = re.compile(
-    r"((?:^|(?<=[。.!?\n]))(?:但是\s*)?(?:然而\s*)?(?:所以\s*)?(?:因此\s*)?)"
-    r"(根据|按照|依据)"                             # 引导词
-    r"\s*(?:(?:我的|主人|LLM)\s*)?"               # 可选"我的/主人/LLM" + 0+ 空格
-    r"(角色设定|角色|人设|设定|性格|要求|指令|用户|主人)"
-    r"[^。.!?\n]*"
-    r"[。.!?]?",
-    flags=re.UNICODE,
-)
-_META_USER_REPEAT_RE = re.compile(
-    r"(^|(?<=[。.!?\n]))"
-    r"(用户|主人)\s*(说|想问|希望|想要|问的是|说的是)"
-    r"[^。.!?\n]*"
-    r"[。.!?]?",
-    flags=re.UNICODE,
-)
-# 「过渡语 + 工具调用标志」= 工具独白，整句删（文本级）
-_META_SELF_PLAN_RE = re.compile(
-    r"(^|(?<=[。.!?\n]))"
-    r"(?:" + _TRANSITION_WORDS + r")"
-    r"[^。.!?\n]{0,80}?"
-    + _TOOL_CALL_MARKER +
-    r"[^。.!?\n]*"
-    r"[。.!?]?",
-    flags=re.UNICODE | re.IGNORECASE,
-)
-# 兜底：模型把 system prompt 原文复读出来
-_META_PROMPT_ECHO_RE = re.compile(
-    r"(^|(?<=[。.!?\n]))"
-    r"(?:"                                                 # 整段匹配下列任一标志
-    r"(?:唯一允许|唯一要求|输出规范|输出要求|输出风格|输出语言|输出格式|回复规范|回复风格|回复要求|对话规范|对话风格|对话要求|语言规范|格式规范)"
-    r"|(?:禁止使用|禁止出现|禁止输出|禁止用|不要使用|不要出现|不要输出|不要用|不要列|不要解释|不要复述|不要描述|不要思考|不要规划|不要自我)"
-    r"|(?:保持角色|保持人设|保持设定|保持风格|保持自然|保持简短|保持简洁|保持中文|保持输出|保持一致)"
-    r"|(?:用简体中文|中文输出|输出中文|使用中文|使用简体中文|中文回复|中文对话)"
-    r"|(?:简短自然|简短回答|简短输出|简短对话|简短回复|一句话|两三句|1\s*[-~]?\s*3\s*句|3\s*[-~]?\s*5\s*句)"
-    r"|(?:不要长篇|不要长篇大论|不要使用任何|不要使用 emoji|禁止使用 emoji|禁止 emoji|不要 markdown|不要列表)"
-    r")"
-    r"[^。.!?\n]+?"                                        # 该句剩余内容（非贪婪：最短匹配）
-    r"(?=[。.!?\n]|$)",                                    # 终止条件：句末标点 / 换行 / 字符串末尾
-    flags=re.UNICODE,
-)
-# 注：早先还有一个 _META_NUMBERED_LIST_RE（死代码），放宽会误删正常编号列表
-# （"1. 北京 2. 上海"）。编号规则项统一由 _NUMBERED_RULE_RE 保守处理。
+# 为什么删：实测它们吃掉的常常是**人话** ——
+#   「让我看看。」「主人说今天会下雨，我记着呢。」
+#   「不要用那个杯子啦，会烫到主人的。」「（我打算明天早点睡）」
+#   「打开 QQ 的方式有很多种呢」……
+# 它们真正想解决的问题（模型复述 prompt / 输出工具独白）是 **prompt 问题**，
+# 现在由 characters/style-guide.md + 共享 prompt 层（app/brain/prompt_layer.py）
+# 承载，残局由 CoT-only 重试、低中文占比重试与空回复兜底轮换兜住。
+#
+# 留下的只剩「删模型工件、不碰人话」的一类：<think> 块、情绪标签、
+# schema 结果回显行、句末切分，以及英文 CoT 漏进正文的占比判定。
 
 
-#  句子级「规划 / 元描述 / 规则复读」识别
 # 情绪标签词（系统铁律：模型不应输出，出现即剥，无论在句尾还是句中）
 _EMOTION_WORDS = (
     "happy|sad|angry|surprised|scared|confused|shy|proud|thinking|talking|love|skip"
@@ -358,74 +251,6 @@ _EMOTION_TAG_OPEN_RE = re.compile(
 # 孤立的 think 结束标签（起始标签已在更早 chunk 剥离）
 _THINK_CLOSE_TAG_RE = re.compile(r"</think\s*>", re.IGNORECASE)
 
-# 角色「真正开口」的发语锚点：从最后一个锚点处截断，只保留锚点之后的回答
-_ANSWER_ANCHOR_RE = re.compile(
-    r"(嘿嘿+|哈哈+|嘻嘻+|诶嘿|嗯哼|唔嗯|好嘞|好哒|好啦|好呀|"
-    r"好的?[，,~～\s]?主人|主人[~～，,、呀呢啦嘛哦哟看]|"
-    r"唔[~～，,。]?|呜哇|嘤嘤|啊嘞|欸+|嗯[~～])",
-    flags=re.UNICODE,
-)
-
-# prompt 规则 / 风格指令被模型复读（高置信，几乎不可能出现在正常回答里）
-_META_RULE_KEYWORDS_RE = re.compile(
-    r"(唯一允许|唯一要求|输出规范|输出要求|输出风格|输出语言|输出格式|回复规范|回复风格|"
-    r"回复要求|对话规范|对话风格|对话要求|语言规范|格式规范|禁止使用|禁止出现|禁止输出|"
-    r"禁止用|不要使用|不要出现|不要输出|不要用|不要列|不要解释|不要复述|不要描述|"
-    r"不要思考|不要规划|不要自我|不要长篇|保持角色|保持人设|保持设定|保持风格|保持自然|"
-    r"保持简短|保持简洁|保持中文|保持输出|保持一致|用简体中文|中文输出|输出中文|使用中文|"
-    r"使用简体中文|中文回复|中文对话|简短自然|简短回答|简短输出|简短对话|简短回复|"
-    r"一句话|两三句|不要\s*markdown|不要\s*列表|emoji)",
-    re.IGNORECASE,
-)
-# 角色卡罗列 / 设定复述（"根据角色设定…"、"外貌：…"、"性格：…"、"擅长：…"）
-_META_CHAR_SHEET_RE = re.compile(
-    r"(?:根据|按照|依据)[^。！？!?\n]{0,8}"
-    r"(?:角色|人设|设定|性格|要求|指令|我的设定)|"
-    r"(?:^|[\s\-、，,：:；;])(?:外貌|性格|擅长|角色设定|人物设定|说话风格|常用语气词)\s*[:：]",
-    flags=re.UNICODE,
-)
-# 句首对用户的复述（"用户说 / 主人想要 / 主人在问…"）
-# 注意"主人想玩 / 想看 / 想吃"是角色对主人的正常回应语气，不算复述
-_META_USER_REPEAT_SENT_RE = re.compile(
-    r"^\s*(?:用户\s*(?:在?说|想问|想要|想|希望|问的是|说的是|是说)|"
-    r"主人\s*(?:在?说|想问|想要|希望|问的是|说的是|是说))"
-)
-# 句首第一人称过渡 / 自我规划。
-# Stage 1.3：它**只负责认出「这是一句过渡 / 规划」**；
-# 算不算污染由工具调用标志（_TOOL_CALL_MARKER_RE）决定 —— 见 _is_pollution_sentence。
-_META_SELF_PLAN_SENT_RE = re.compile(
-    r"^\s*(?:" + _TRANSITION_WORDS + r"|"
-    r"我(?:可以|不应该|不能|这就|马上))"
-)
-# 规划 / 元语境关键词：与句首自我规划搭配出现。
-# Stage 1.3 收窄：只保留「明显在复述系统设定」的词 ——
-# 「看看 / 试试 / 查询 / 应该 / 需要 / 回答」这类词同样会出现在自然过渡语里
-# （「让我看看。」），不能再当污染依据，否则过渡语会被误删。
-_META_PLAN_CONTEXT_RE = re.compile(
-    r"(角色|人设|角色卡|性格|设定|根据|依据|按照|指令|要求|规划|"
-    r"schema|提示词|prompt|系统提示|输出规范|输出要求)"
-)
-# 工具元描述（"这应该用 open_website 工具"、"让我调用工具"、"通过 XX 工具来…"）
-_META_TOOL_SENT_RE = re.compile(
-    r"(?:调用|使用|借助|运行|执行|通过)\s*[A-Za-z_0-9\u4e00-\u9fff]{0,20}?工具|"
-    r"工具\s*(?:来|去|打开|执行|查|完成|处理|帮)|"
-    r"这应该用|应该用\s*[a-z_]+|open_[a-z_]+\s*工具|"
-    r"[a-z_]+_(?:website|app|tool|reminder|fact)|"
-    r"说\s*[\"“「『\'][^。！？!?\n]{0,24}?[\"”」』]?\s*[,，]?\s*这是(?:要|一|在|个|应用|网页|链接|动作)",
-    flags=re.IGNORECASE,
-)
-# 工具过程废话子句：模型解释「动作有很多种方式」，常与真回答同句
-_META_PROCESS_CLAUSE_RE = re.compile(
-    r"[，,~～\s]*(?:打开|启动|搜索|查询|使用|调用|运行|执行)"
-    r"[^。！？!?\n，,~～]{0,10}的方式有很多种[呢呀啊~～。！？!?]*",
-    flags=re.UNICODE,
-)
-# 编号规则项（"1. 禁止使用 emoji"、"4.不要复述"）
-# 只认「编号 + 规则关键词」组合，避免误删正常编号列表
-_NUMBERED_RULE_RE = re.compile(
-    r"^\s*[0-9]+\s*[.、)）]\s*"
-    r"(?:禁止|保持|不要|输出|使用|用|回复|简短|角色|人设|复述|emoji|表情|自然|中文|句)"
-)
 # 句子切分（保留分隔符）
 _SENT_SPLIT_RE = re.compile(r"([。！？!?\n]+)")
 
@@ -459,13 +284,11 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     # 3) emoji 与装饰符号：**不再剥离**（Stage 1.3）
     #    旧行为全局删 emoji，回复因此「不像人发的」。
     #    ⚠️ 红线：TTS 是独立管线（app/voice/voice.py），这里不碰音色 / 韵律。
-    # 4) 括号式自言自语与超长括号思考段
-    text = _META_NARRATION_RE.sub("", text)
-    text = _LONG_PAREN_RE.sub("", text)
+    # 4) 括号 / 规划 / 元描述：**不再改写模型散文**（Stage 3 删掉整族正则）
     # 5) 收紧空白
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
-    # 6) 最终阶段：逐句剥离 CoT 规划 / 元描述 / 规则复读（循环处理嵌套）
+    # 6) 最终阶段：只删模型工件（schema 回显行 + 英文 CoT 句），不改人话
     if is_final:
         text = _strip_internal_checklist(text)
         prev_text = None
@@ -489,69 +312,27 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
 
 
 def _strip_internal_checklist(text: str) -> str:
-    """剥掉「编号 + 内部核对话术」的清单行。
+    """剥掉模型回显的工具执行结果行（如「1. get_weather（成功）：广州 晴 33度」）。
 
-    模型常把 AgentLoop 的核对清单原样复述给主人（如「1. 工具都成功执行了
-    2. 主人要求：…」），或回显 `工具名（成功/失败）` 这种 schema 结果。
-
-    按行删：行首是序号，且行内出现内部过程词或 schema 回显格式就整行去掉。
-    要求「序号 + 内部词」同时成立，避免误删主人的分步说明。
+    Stage 3：这里只剩**一种**删行规则 —— 把工具调用的 schema 结果原样复述，
+    这种行不可能出现在人话里，属于纯模型工件。
+    按「内部过程词」整行删的 _INTERNAL_VOCAB_RE，以及按句删工具独白的
+    _NARRATION_SENT_RE，已随过度清洗的那族正则一起删除：它们连
+    「主人要求：明天早点叫我」这种人话都会当核对清单吃掉。
     """
     if not text:
         return text
-    keep = []
-    for line in text.split("\n"):
-        if _INTERNAL_CHECKLIST_LINE_RE.match(line) and _INTERNAL_VOCAB_RE.search(line):
-            continue
-        if _SCHEMA_ECHO_LINE_RE.match(line):
-            continue
-        keep.append(line)
-    text = "\n".join(keep)
-    # 行内序号（句号后面开始的清单）
-    text = re.sub(rf"[^。！？\n]*?{_LINE_INDEX_RE_BODY}[^\n]*?_INTERNAL_VOCAB_END",
-                  "", text)
-    # 无序号的单句叙述
-    text = _NARRATION_SENT_RE.sub("", text)
-    return text
+    keep = [line for line in text.split("\n")
+            if not _SCHEMA_ECHO_LINE_RE.match(line)]
+    return "\n".join(keep)
 
 
-# 句内序号（不带行首锚点，供行内清理拼正则用）
-_LINE_INDEX_RE_BODY = r"\d{1,2}\s*[.、)）]\s*"
-# 以内部词结尾的清单行剩余部分（吃到换行）
-_INTERNAL_VOCAB_END = r"[^\n]*?(?:工具都成功执行了|数据来源确认|主人要求：)[^\n]*"
-
-# 只在**句级**使用的收窄词表。
-# 不能复用 _INTERNAL_VOCAB_RE：那里有「我查」「我搜」，
-# 按宽表删会把正文清空。真正只属于内部叙述的是「抓取/爬取页面」「调用了 schema」类描述。
-_NARRATION_SENT_RE = re.compile(
-    r"[^。！？\n]*?(?:"
-    # 过渡语 + 查/搜索/看 —— 只有**带工具标志**时才算工具独白（Stage 1.3）
-    r"(?:让我|我来|我先)\s*(?:查|搜索|搜|看|打开|抓)[^。！？\n]{0,20}?"
-    + _TOOL_CALL_MARKER +
-    r"|从第?[一二三四五六七八九十\d]*次?(?:抓取|爬取|搜索|访问|打开)[^。！？\n]{0,25}"
-    r"|(?:抓取|爬取|爬虫)(?:了)?[^。！？\n]{0,20}"
-    r"|调用了?\s*schema[^。！？\n]{0,20}"
-    r"|(?:请|需要)?给(?:主人|用户)最终(?:答复|回答|总结)[^。！？\n]{0,10}"
-    r"|(?:给|对)主人(?:一个|一份)?(?:完整|最终)?(?:答案|答复|总结)[^。！？\n]{0,10}"
-    r"|工具(?:都|已)?(?:成功)?执行(?:了|完)?[^。！？\n]{0,15}"
-    r")[^。！？\n]*[。！？]?",
-    re.UNICODE)
-
-
-# 行首序号（1. / 1) / 1、/ 第1点）
+# 行首序号（1. / 1) / 1、/ 第1点）—— schema 回显行判定用
 _LINE_INDEX_RE = r"^\s*(?:\d{1,2}\s*[.、)）]|[（(]\d{1,2}[)）]|第\s*\d{1,2}\s*[点项步])"
-# 内部过程词：这些词只可能出现在给模型看的核对清单里，不该给主人看
-_INTERNAL_VOCAB_RE = re.compile(
-    r"(工具(?:都|已)?(?:成功)?执行|本轮工具|执行结果|结果核对|数据来源|"
-    r"主人要求|逐条对照|核对(?:结果|过程|清单)|是否真的成功|"
-    r"主人原话|已搜到|搜到了相关数据|我(?:来|先)?查|我(?:来|先)?搜索|"
-    r"抓取(?:了)?(?:页面|内容)|爬(?:取|虫)|调用(?:了)?(?:工具|schema))",
-    re.UNICODE)
 # 「工具名（成功）」「工具名（失败）：…」这种 schema 结果回显
 _SCHEMA_ECHO_LINE_RE = re.compile(
     _LINE_INDEX_RE + r"\s*[A-Za-z_][A-Za-z0-9_]{1,30}\s*[（(]\s*(?:成功|失败|已取消)\s*[)）]",
     re.UNICODE)
-_INTERNAL_CHECKLIST_LINE_RE = re.compile(_LINE_INDEX_RE, re.UNICODE)
 
 
 #: 中文占比低于该值 → 判定「这条回复几乎不是中文」（清洗后会被整段丢弃）
@@ -660,56 +441,17 @@ def _drop_low_cjk_paragraphs(text: str, threshold: float = 0.3) -> str:
     return "\n\n".join(kept).strip()
 
 
-# 「反思 / 否认工具行为」语境（如「以后小汐会注意的…老老实实调用工具」）
-# _META_TOOL_SENT_RE 里的「调用…工具」会命中，这种句子讲的是对工具的态度，必须放行
-_REFLECTION_RE = re.compile(
-    r"(?:不再|别再|没再|不会再|不该|不应该|没有(?:再)?(?:调用|使用)?工具|"
-    r"假装|骗|糊弄|老老实实|以后.{0,8}注意|下次(?:会|不)|改掉|改正|"
-    r"是不是在骗|有没有骗|有没有调用|是不是(?:在)?(?:假装|骗))"
-)
-
-
 def _is_pollution_sentence(core: str) -> bool:
-    """判断一个句子单元是否为 CoT 规划 / 元描述 / 规则复读（高置信、保守）。"""
-    if _META_RULE_KEYWORDS_RE.search(core):
-        return True
-    if _META_CHAR_SHEET_RE.search(core):
-        return True
-    if _META_USER_REPEAT_SENT_RE.search(core):
-        return True
-    if _META_TOOL_SENT_RE.search(core):
-        # 工具独白判定前先让「反思语境」过关
-        if not _REFLECTION_RE.search(core):
-            return True
-    if _NUMBERED_RULE_RE.search(core):
-        return True
-    # 句首过渡/规划 +（工具调用标志 或 复述系统设定的语境）→ 污染
-    # ⚠️ Stage 1.3 的判别标准：**过渡语 + 工具标志 = 工具独白（删）；
-    #    只有过渡语 = 自然过渡（留）** —— 「我来帮你查一下。」必须活着。
-    if (_META_SELF_PLAN_SENT_RE.search(core)
-            and (_TOOL_CALL_MARKER_RE.search(core)
-                 or _META_PLAN_CONTEXT_RE.search(core))):
-        return True
-    # 英文为主的句子（推理模型英文 CoT）
+    """这个句子单元是不是**模型工件**（英文 CoT 漏进了可见正文）。
+
+    Stage 3：只留「英文为主的句子」这一条判据。它是推理模型的英文思维链
+    没带 <think> 标签、直接黏进正文的产物 —— 是模型工件，不是人话。
+    「工具独白 / 规划复述 / 规则复读」这些**猜意图**的判据已随正则族删除：
+    它们连「主人说今天会下雨」「不要用那个杯子啦」都会当独白删掉。
+    """
     cjk = sum(1 for ch in core if "\u4e00" <= ch <= "\u9fff")
     ascii_letters = sum(1 for ch in core if ch.isascii() and ch.isalpha())
-    if ascii_letters > 10 and cjk / max(1, ascii_letters + cjk) < 0.15:
-        return True
-    return False
-
-
-def _split_answer_anchor(core: str) -> Optional[str]:
-    """污染句里若在「角色发语锚点」之后还有正常回答，返回该回答（含锚点），否则 None。"""
-    for m in reversed(list(_ANSWER_ANCHOR_RE.finditer(core))):
-        tail = core[m.start():].strip()
-        if len(tail) < 4:
-            continue
-        if _is_pollution_sentence(tail):
-            continue
-        cjk = sum(1 for ch in tail if "\u4e00" <= ch <= "\u9fff")
-        if cjk >= 2:
-            return tail
-    return None
+    return ascii_letters > 10 and cjk / max(1, ascii_letters + cjk) < 0.15
 
 
 def _strip_leading_english_prefix(core: str) -> str:
@@ -737,11 +479,13 @@ def _strip_leading_english_prefix(core: str) -> str:
 
 
 def _strip_meta_by_sentence(text: str) -> str:
-    """逐句剥离规划 / 元描述 / 规则复读，保留角色回答句。
+    """逐句丢掉模型工件（英文 CoT 句），其余句子**原样**保留。
 
-    - 非污染句原样保留；
-    - 污染句若含角色发语锚点，只保留锚点之后；
-    - 否则整句丢弃。
+    Stage 3 之后这里只做两件事：
+      - 英文 CoT 碎片与中文回答黏在同一句时，剥掉句首英文前缀；
+      - 整句都是英文 CoT 的，整句丢掉。
+    不再按关键词猜「这句是不是工具独白 / 规划 / 复述 / 规则复读」——
+    那是改写模型写出来的散文（「让我看看。」曾被整句删掉）。
     """
     parts = _SENT_SPLIT_RE.split(text)
     out: list[str] = []
@@ -751,19 +495,10 @@ def _strip_meta_by_sentence(text: str) -> str:
         core = body.strip()
         if not core:
             continue
-        # 工具过程废话子句按短语剥掉；仅在确实删除时才 strip 残留标点
-        core_before = core
-        core = _META_PROCESS_CLAUSE_RE.sub("", core)
-        if core != core_before:
-            core = core.strip("，, ~～")
-        # 句首英文 CoT 前缀剥离
         core = _strip_leading_english_prefix(core)
         if not core:
             continue
         if _is_pollution_sentence(core):
-            kept = _split_answer_anchor(core)
-            if kept:
-                out.append(kept + sep)
             continue
         out.append(core + sep)
     return "".join(out)

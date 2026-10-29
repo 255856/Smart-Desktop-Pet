@@ -39,10 +39,15 @@ def test_reflection_about_tools_survives(text):
     "我应该使用 web_search 工具搜索一下",
     "这应该用 calculate 工具算",
 ])
-def test_real_tool_monologue_still_stripped(text):
-    """真正的工具独白仍然要删——别把修复做成漏洞。"""
-    assert sanitize_text(text, is_final=True).strip() == "", text
-    assert _is_pollution_sentence(text) is True, text
+def test_tool_monologue_is_no_longer_rewritten(text):
+    """Stage 3：工具独白不再由清洗管线删除（业主裁决「没必要硬限制」）。
+
+    判「这句在说工具」是猜模型意图，实测连「主人说今天会下雨」「让我看看。」
+    都会整句删。工具独白改由 prompt 层（【任务执行协议】+ 最终轮禁用工具）拦，
+    清洗管线只删模型工件。<think> / 情绪标签 / schema 回显行照旧必删。
+    """
+    assert sanitize_text(text, is_final=True) == text, text
+    assert _is_pollution_sentence(text) is False, text
 
 
 def test_normal_reply_unaffected():

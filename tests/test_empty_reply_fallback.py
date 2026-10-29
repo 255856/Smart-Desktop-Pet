@@ -1,6 +1,6 @@
 """空回复兜底回归测试。
 
-背景：清洗规则（prompt 复读 / 工具独白 / 人设复述）会把模型输出整段剥光。
+背景：清洗规则（<think> 块 / 低中文占比 / schema 回显）会把模型输出整段剥光。
 若本轮又没执行任何工具，就拿不到 _tool_ack_sentence 兜底，
 原实现会 `if final_text: yield` 后直接 break —— 主人面对空气泡，以为桌宠坏了。
 现已在 agent.py 加 _EMPTY_REPLY_FALLBACK 兜底，这里锁死该行为。
@@ -9,6 +9,8 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # 项目根目录（按文件位置推导）
@@ -60,23 +62,40 @@ async def _collect(agen):
     return [ev async for ev in agen]
 
 
-def test_prompt_echo_does_not_produce_silence():
-    """prompt 复读被剥光 → 必须给出兜底话术，不能空。"""
-    evs = _run(GarbageClient("唯一允许的输出语言是简体中文。1. 不要用 emoji"))
+@pytest.mark.parametrize("raw", (
+    "Hello World",                                  # 低中文占比 → 整段丢弃
+    "<think>只有思维链，没有可见答案</think>",        # CoT 全剥 → 空
+))
+def test_reply_empty_after_cleaning_still_gets_fallback(raw):
+    """清洗后真为空时 → 必须给出兜底话术，不能空。
+
+    Stage 1.3：兜底话术改成多条轮换 → 断言「轮换池里任意一条出现」。
+    Stage 3：入口换成「真会空掉」的两类（纯英文 / 只有思维链）——
+    原来用的 prompt 复读文本不再被剥光（见下一条测试）。
+    """
+    evs = _run(GarbageClient(raw))
     texts = [d for ev, d in evs if ev == "text"]
     assert texts, "没有任何回复，主人会看到空气泡"
     assert any(t.strip() for t in texts), "兜底文案是空的"
-    # Stage 1.3：兜底话术改成多条轮换 → 断言「轮换池里任意一条出现」
     joined = " ".join(texts)
     assert any(line in joined for line in _EMPTY_REPLY_FALLBACKS), (
         f"兜底话术不在轮换池里：{joined!r}")
 
 
-def test_tool_monologue_does_not_produce_silence():
-    """纯工具独白（无工具调用）被剥光 → 同样要有兜底。"""
-    evs = _run(GarbageClient("让我调用工具查一下天气。"))
+def test_prompt_echo_is_no_longer_emptied():
+    """Stage 3：prompt 复读不再被正则剥光 —— 它原样送达（业主裁决去掉硬限制）。"""
+    echo = "唯一允许的输出语言是简体中文。1. 不要用 emoji"
+    evs = _run(GarbageClient(echo))
     texts = [d for ev, d in evs if ev == "text"]
-    assert texts and any(t.strip() for t in texts)
+    assert " ".join(texts) == echo
+
+
+def test_tool_monologue_is_no_longer_emptied():
+    """Stage 3：纯工具独白也不再被剥光，原样送达（工具独白交给 prompt 层管）。"""
+    raw = "让我调用工具查一下天气。"
+    evs = _run(GarbageClient(raw))
+    texts = [d for ev, d in evs if ev == "text"]
+    assert " ".join(texts) == raw
 
 
 def test_normal_reply_passes_through_untouched():

@@ -4,8 +4,11 @@
 两处都来自压测（真实 API，54 条语料四层）。
 
 P11：模型把 AgentLoop 回传给它的核对清单原样复述给主人。
-     「_STYLE_RULE」明令禁止，但逐句判污染的 _strip_meta_by_sentence
-     盖不住「编号 + 内部词」「工具名（成功）」这两种形态。
+     当时靠 _strip_meta_by_sentence + _INTERNAL_VOCAB_RE 整行删。
+     ⚠️ Stage 3：那族「按内部词删」的正则已按业主要求删除（它们连
+     「主人要求：明天早点叫我」这种人话都吃）。现在只留一条纯工件规则 ——
+     「工具名（成功）」这种 schema 结果回显行照旧删；核对清单叙述改由 prompt
+     层负责，本文件锁「管线原样放行」这条新契约。
 
 P13：模型对一个打不开的网页连调 6 次 open_website，每次只换参数。
      MAX_CONSECUTIVE_TOOL_ONLY_TURNS 只管轮数，不管「同一个工具重复调」。
@@ -23,15 +26,19 @@ from app.brain.llm_client import sanitize_text
 # ------------------------------------------------------------------ P11
 
 # 压测现场实况（真实 API 返回）
-LEAKS = [
+#: schema 结果回显 —— 纯模型工件，仍然删（Stage 3 保留的唯一删行规则）
+SCHEMA_ECHO_LEAK = (
+    "1. get_weather（成功）：广州 晴 33度\n2. add_reminder（成功）：已设置提醒"
+)
+
+#: 这些是真实泄漏，但删它们的那族正则也会吃掉正常回复 —— Stage 3 起原样放行
+LEAKS_NO_LONGER_STRIPPED = [
     # 编号 + 内部核对词
     "要查火星天气。1. 工具都成功执行了\n"
     "2. 主人要求：查火星天气 - 我已经搜到了相关数据\n"
     "3. 数据来源确认：\n- 火星表面平均温度约-60°C",
     # 爬取叙述
     "让我查广州天气。从最后一次抓取中央气象台的页面拿到了比较完整的预报数据：10/14 周三 晴 33℃",
-    # schema 结果回显
-    "1. get_weather（成功）：广州 晴 33度\n2. add_reminder（成功）：已设置提醒",
     # 复述指令本身
     "请给主人最终答复",
 ]
@@ -47,13 +54,22 @@ MUST_KEEP = [
 ]
 
 
-@pytest.mark.parametrize("leak", LEAKS)
-def test_internal_checklist_is_stripped(leak):
-    out = sanitize_text(leak, is_final=True)
-    for word in ("工具都成功执行", "数据来源确认", "主人要求：",
-                 "中央气象台", "get_weather（", "add_reminder（",
-                 "请给主人最终"):
-        assert word not in out, f"仍泄漏「{word}」：{out!r}"
+def test_schema_echo_lines_are_still_stripped():
+    """「工具名（成功）：…」这种 schema 结果回显照旧删 —— 它只可能来自工具回传。"""
+    out = sanitize_text(SCHEMA_ECHO_LEAK, is_final=True)
+    assert "get_weather（" not in out, f"仍泄漏 get_weather 回显：{out!r}"
+    assert "add_reminder（" not in out, f"仍泄漏 add_reminder 回显：{out!r}"
+
+
+@pytest.mark.parametrize("leak", LEAKS_NO_LONGER_STRIPPED)
+def test_internal_checklist_is_no_longer_rewritten(leak):
+    """Stage 3：核对清单 / 抓取叙述不再用正则删，改由 prompt 层负责。
+
+    以前这些句子会被按「内部过程词」整行删；同一套规则连
+    「主人要求：明天早点叫我」这种正常回复都吃，业主裁决去掉硬限制。
+    这里锁住新契约：清洗管线原样放行（只有 <think> / 情绪标签 / schema 回显行例外）。
+    """
+    assert sanitize_text(leak, is_final=True) == leak
 
 
 @pytest.mark.parametrize("keep", MUST_KEEP)

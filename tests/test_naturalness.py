@@ -53,7 +53,6 @@ from app.brain.agent import (AgentLoop, _EMPTY_REPLY_FALLBACK,  # noqa: E402
 from app.brain.llm_client import (  # noqa: E402
     CHINESE_SYSTEM_SUFFIX,
     _build_full_system_prompt,
-    _META_TOOL_SENT_RE,
     sanitize_text,
 )
 
@@ -85,6 +84,17 @@ _TRANSITION_RE = re.compile(r"我来|让我|我看看")
 #: 客服腔句式：「已帮你…」「已为主人…」
 _SERVICE_PHRASE_RE = re.compile(
     r"已(?:经)?\s*(?:帮你|帮您|为你|为您|为主人|帮主人|给主人|替你|替您)"
+)
+
+#: 工具独白的**评测口径**（不是清洗规则）。
+#: Stage 3 删掉了清洗管线里的 _META_TOOL_SENT_RE —— 那族正则连人话都吃，
+#: 但「工具独白有没有漏进最终回复」仍然要量：这里保留一份同名口径用来测量。
+_TOOL_MONOLOGUE_RE = re.compile(
+    r"(?:调用|使用|借助|运行|执行|通过)\s*[A-Za-z_0-9\u4e00-\u9fff]{0,20}?工具|"
+    r"工具\s*(?:来|去|打开|执行|查|完成|处理|帮)|"
+    r"这应该用|应该用\s*[a-z_]+|open_[a-z_]+\s*工具|"
+    r"[a-z_]+_(?:website|app|tool|reminder|fact)",
+    flags=re.IGNORECASE,
 )
 
 #: 判定「这段原文本来就是元描述 / 工具独白」的标志
@@ -238,15 +248,17 @@ class TestCharacterization:
         # 现状依据：app/brain/llm_client.py:283
         assert sanitize_text("<think>还在想\n今天天气不错呢~") == ""
 
-    def test_tool_meta_narration_is_stripped(self):
-        """模型把「我要调什么工具」塞进 final answer 时必须剥掉。"""
-        # 现状依据：app/brain/llm_client.py:301-305（逐句剥离循环）
-        #          + :439-461（_is_pollution_sentence）
-        #          + :245-251（_META_TOOL_SENT_RE）
-        #          + :233-237（_META_SELF_PLAN_SENT_RE）
-        assert sanitize_text("我需要调用 open_app 打开记事本。今天天气不错呢。") == "今天天气不错呢。"
-        assert sanitize_text("让我调用工具查一下广州天气。") == ""
-        assert sanitize_text("这应该用open_website工具来打开B站的网址。") == ""
+    def test_tool_meta_narration_is_no_longer_rewritten(self):
+        """Stage 3：清洗管线不再用正则猜「这句在说工具」，一律原样保留。
+
+        原来靠 _is_pollution_sentence + _META_TOOL_SENT_RE + _META_SELF_PLAN_SENT_RE
+        整句删工具独白；但那族正则同时吃掉「让我看看。」「主人说今天会下雨」。
+        业主裁决：去掉硬限制。工具独白改由 prompt 层拦，管线只删模型工件。
+        """
+        for raw in ("我需要调用 open_app 打开记事本。今天天气不错呢。",
+                    "让我调用工具查一下广州天气。",
+                    "这应该用open_website工具来打开B站的网址。"):
+            assert sanitize_text(raw) == raw, f"流水线仍在改写模型散文：{raw!r}"
 
     def test_normal_cjk_reply_survives_unchanged(self):
         """正常中文回复一个字都不能被改 —— Stage 1.3 也不能破这条契约。"""
@@ -265,17 +277,24 @@ class TestCharacterization:
 
         Stage 1.3：兜底话术从「固定一句」改成**多条轮换**，
         所以这里断言「轮换池里任意一条出现」，而不是固定那一句。
+
+        Stage 3：删掉「规则复读」那族正则后，「唯一允许的输出语言是简体中文」
+        不再被剥光（它本来也是人话），所以换两个**真正会空掉**的入口来测：
+          - 纯英文（低中文占比兜底 → 空）
+          - 只有 <think> 思维链（CoT 全剥 → 空）
         """
-        # 现状依据：app/brain/llm_client.py:311-316（清洗后整段为空）
-        #          + app/brain/agent.py:73（_EMPTY_REPLY_FALLBACK / _EMPTY_REPLY_FALLBACKS）
-        #          + app/brain/agent.py:848-851（兜底二用该话术）
+        # 现状依据：app/brain/llm_client.py 的 sanitize_text 第 1/9 步
+        #          + app/brain/agent.py 的 _EMPTY_REPLY_FALLBACKS（轮换池）
         assert sanitize_text("Hello World") == ""
-        evs = _run_agent("唯一允许的输出语言是简体中文。1. 不要用 emoji")
-        texts = [d for ev, d in evs if ev == "text"]
-        assert texts and any(t.strip() for t in texts), "没有兜底话术，主人会看到空气泡"
-        joined = " ".join(texts)
-        assert any(line in joined for line in _EMPTY_REPLY_FALLBACKS), (
-            f"兜底话术不在轮换池里：{joined!r}")
+        assert sanitize_text("<think>只有思维链，没有可见答案</think>") == ""
+        for raw in ("Hello World", "<think>只有思维链，没有可见答案</think>"):
+            evs = _run_agent(raw)
+            texts = [d for ev, d in evs if ev == "text"]
+            assert texts and any(t.strip() for t in texts), \
+                "没有兜底话术，主人会看到空气泡"
+            joined = " ".join(texts)
+            assert any(line in joined for line in _EMPTY_REPLY_FALLBACKS), (
+                f"兜底话术不在轮换池里：{joined!r}")
 
     def test_emoji_is_kept_now(self):
         """Stage 1.3：emoji **保留**（原来被全局剥掉，回复因此不像人发的）。
@@ -363,12 +382,12 @@ def test_golden_reply_structure(case):
             "清洗把一段普通中文回复剥光了（Stage 1.3 必须保证正常回复不被清空）"
         )
         pytest.skip("该条 golden reply 本身就是元描述 / 工具独白，清洗后为空")
-    assert not _META_TOOL_SENT_RE.search(cleaned), (
-        f"工具独白漏进了最终回复：{cleaned!r}"
-    )
-
     # ---- 期望门禁：Stage 1.3 / 1.4 修好后自动转 pass ----
     violations = []
+    # Stage 3：清洗管线不再删工具独白（那族正则连人话都吃），
+    # 所以「独白漏进最终回复」改由**评测口径**量，命中记 violation。
+    if _TOOL_MONOLOGUE_RE.search(cleaned):
+        violations.append(f"工具独白漏进了最终回复：{cleaned!r}")
     ai_hits = _ai_flavor_hits(cleaned)
     if ai_hits:
         violations.append(f"AI 味词命中 {ai_hits}")
