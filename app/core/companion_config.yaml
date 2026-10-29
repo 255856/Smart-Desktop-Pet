@@ -217,3 +217,78 @@ tool_unlock:
     8:  "视频生成和外接工具上线,主人玩得更尽兴!"
     9:  "系统通知和脚本执行我都学会了,小心用哦~"
     10: "主人,我们一起走到了最高等级,什么都能做,但也请谨慎使用危险工具哦~"
+
+# 工具白名单 (Stage 3.1) —— 执行期第三道闸
+# 姿态: 存量工具默认放行, 增量工具默认拒绝。
+#   - 存量(本表列出的 61 个内置工具)默认放行;
+#   - 增量(此后新增的任何工具)默认拒绝, 必须显式登记进本表才可用。
+# 两级形式: exact(精确名) + prefixes(前缀桶, 本项目自带的 MCP 命名空间)。
+# 闸在 app/engine/tools/_core.py::execute() 里, 模型硬点名也拦得住。
+#
+# ⚠️ 新增内置工具时, 必须在这里补一行, 否则它会被执行期拒绝。
+tool_allowlist:
+  exact:
+    - Task
+    - add_reminder
+    - calculate
+    - cancel_countdown
+    - change_pet_emotion
+    - clear_bubble
+    - clipboard_copy
+    - convert_units
+    - countdown
+    - date_info
+    - delete_reminder
+    - edit_file
+    - feed_self
+    - fetch_url_text
+    - forget_memory
+    - generate_audio
+    - generate_image
+    - generate_video
+    - get_battery
+    - get_brightness
+    - get_clipboard
+    - get_current_time
+    - get_pet_status
+    - get_tts_mute_status
+    - get_volume
+    - get_weather
+    - glob_files
+    - grep_files
+    - kill_process
+    - list_countdowns
+    - list_desktop_files
+    - list_installed_apps
+    - list_processes
+    - list_reminders
+    - lock_screen
+    - multi_edit
+    - ocr_image
+    - open_app
+    - open_file_explorer
+    - open_notepad
+    - open_terminal
+    - open_website
+    - play_animation
+    - read_file
+    - read_text_file
+    - recall_memory
+    - remember_fact
+    - run_script
+    - say_to_user
+    - search_files
+    - send_notification
+    - set_bluetooth
+    - set_brightness
+    - set_tts_mute_until
+    - set_volume
+    - set_wifi
+    - system_info
+    - take_screenshot_tool
+    - understand_image
+    - unmute_tts
+    - web_search
+  prefixes:                       # MCP 外部工具按命名空间前缀放行
+    - mcp_aw_                      # ActivityWatch (aw server)
+    - mcp_fs_                      # 文件系统沙箱 (fs server)

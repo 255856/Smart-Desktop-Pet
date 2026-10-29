@@ -14,7 +14,9 @@ class Message:
     content: str
     emotion: Optional[Emotion] = None
     ts: float = field(default_factory=time.time)
-    tools: list[tuple[str, str, str]] = field(default_factory=list)  # (工具名, args_json, 结果)
+    # (工具名, args_json, 结果[, 信封状态]) —— 第 4 元是 Stage 3.5 加的
+    # 工具信封状态（ok/error/denied/cancel）；历史老记录只有 3 元。
+    tools: list[tuple[str, ...]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)  # 思考文本（按时间累积）
     execs: list[dict] = field(default_factory=list)  # 命令执行：{cmd, output, exit_code}
     # per-message skill：主人写 /skills/<name> 时关联到当条 user message

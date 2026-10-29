@@ -125,7 +125,16 @@ def convert_tools(registry: ToolRegistry) -> list[StructuredTool]:
 
 
 def convert_tools_for_level(registry: ToolRegistry, level: int) -> list[StructuredTool]:
-    """按等级过滤后转换 ToolRegistry → LangChain tool 列表。"""
+    """按等级过滤后转换 ToolRegistry → LangChain tool 列表。
+
+    Stage 3.5 白名单语义（标准后端）：白名单外的工具**不下发**给模型 ——
+    模型点名也调不到（LangChain 的 ToolNode 只认下发过的工具，
+    硬造一个 tool_call 只会拿到「not a valid tool」，工具本体不会执行）。
+    所以标准后端的白名单语义是「不提供给模型」；
+    ReAct 后端（app/brain/agent.py 走 registry.execute）才是「执行期拒绝」。
+    两边都要堵的洞：Task 派出去的子 agent —— 它的注册表现在也 seal 过，
+    白名单对它同样生效（见 _build_subagent_registry）。
+    """
     return [_internal_tool_to_langchain(t) for t in registry.tools_for_level(level)]
 
 
@@ -388,6 +397,12 @@ class LangChainAgent:
         """给子 agent 一个「安全」工具集：继承主 agent 的工具，去掉 Task 和高风险工具。
 
         返回新的 ToolRegistry（不修改 self.registry）。
+
+        Stage 3.5：主注册表 seal 过（生产）→ 子注册表**也 seal**。
+        不 seal 的话子注册表走「快照兜底」分支，执行期白名单对它**不生效**：
+        主 agent 被白名单挡掉的工具，Task 派出去的子 agent 照样能调
+        （白名单从子任务这条路上被绕过）。seal 之后，yaml 的 tool_allowlist
+        对子 agent 同样生效：没登记的工具既不下发、也执行不了。
         """
         from app.brain.hallucination_guard import _RISKY_TOOLS
         sub_reg = ToolRegistry()
@@ -400,6 +415,8 @@ class LangChainAgent:
                 sub_reg.register(tool)
         except Exception as e:  # noqa: BLE001
             log.warning("_build_subagent_registry 失败,降级空 registry: %s", e)
+        if getattr(self.registry, "_sealed", False):
+            sub_reg.seal_baseline()
         return sub_reg
 
     def _make_subagent_factory(self):
@@ -426,6 +443,9 @@ class LangChainAgent:
                 thread_id=f"sub-{_uuid.uuid4().hex[:10]}",
                 cwd=parent_self._cwd,
                 extra_docs_paths=parent_self._extra_docs_paths,
+                # 子 agent 跟主 agent 同一个等级：否则 level_getter 缺省 = Lv.10，
+                # 主 agent 按等级裁过的工具集，子 agent 全都能调（等级闸同样漏）。
+                level_getter=parent_self.level_getter,
             )
             # 子 agent 不用重新装 subagent factory(已经被本 factory 占用,
             # 递归风险已经通过 _build_subagent_registry 去掉 Task 工具消除)。
@@ -785,12 +805,30 @@ class LangChainAgent:
                 results.extend(tool_msg)
         return results
 
+    def _aw_tool_allowed(self, oai_name: str) -> bool:
+        """预取用的 aw 工具（mcp_aw_<tool>）是否还在执行期白名单里。
+
+        预取走的是 app.integrations.activitywatch（集成层，**不经过注册表**），
+        工具层那道白名单闸拦不到它 —— 这里手动查一次：
+        用户把 mcp_aw_ 前缀从白名单里去掉 = 不许碰活动记录，那就真的不碰。
+        """
+        try:
+            allowed, _why = self.registry._allowlist_allows(oai_name, capture=False)
+        except Exception:  # noqa: BLE001
+            return True    # 查不了就别拦（别因为一次异常把功能整个掐掉）
+        return bool(allowed)
+
     async def _call_aw(self, tool_name: str, args: dict) -> list:
         """直接调 aw_* 工具，同步返 LangChain message 序列。
 
         用 app.integrations.activitywatch 调（不走 MCP，同步快），失败返 [] 不影响流程。
         """
         import uuid as _uuid
+        # 白名单闸：预取不经过注册表，工具层那道闸拦不到它 —— 这里补一道。
+        oai_name = "mcp_aw_" + tool_name
+        if not self._aw_tool_allowed(oai_name):
+            log.info("AW 预取跳过：%s 不在执行期白名单里", oai_name)
+            return []
         try:
             from app.integrations.activitywatch import (
                 get_recent_activities_summary,

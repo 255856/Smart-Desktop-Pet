@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import re
+import time
 from typing import AsyncIterator, Callable, Optional
 
 from app.brain.llm_client import (COT_ONLY_RETRY_HINT as _COT_ONLY_RETRY_HINT,
@@ -17,6 +18,10 @@ from app.brain.llm_client import (COT_ONLY_RETRY_HINT as _COT_ONLY_RETRY_HINT,
 from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
                                     build_tool_handbook, load_style_guide)
 from app.engine.tools import ToolRegistry
+from app.engine.tools._core import (TOOL_CALL_TIMEOUT_SECONDS,
+                                  TOOL_PHASE_BUDGET_SECONDS, TOOL_RESULT_MAX_CHARS,
+                                  ToolResult, classify_legacy_result,
+                                  classify_tool_result, fit_tool_payload)
 
 log = logging.getLogger(__name__)
 
@@ -110,21 +115,20 @@ def _next_empty_reply_fallback() -> str:
     return line
 
 # 工具结果工具名 → 中文（用于空总结时的角色化兜底）
+#
+# ⚠️ 键必须是**注册表里的真名**（见 app/engine/tools/_core.py 的注册表）。
+# 以前这里混着一批早就不存在的名字（take_screenshot / calculator /
+# get_system_info / memory_search / web_deep_search / set_timer / set_alarm /
+# add_todo …），它们让「空总结兜底」永远走不到对应分支 —— 死路径。
 _TOOL_PRETTY = {
     "open_app": "打开应用",
     "open_website": "打开网页",
     "web_search": "联网搜索",
-    "web_deep_search": "深度搜索",
     "add_reminder": "设置提醒",
-    "add_todo": "添加待办",
-    "set_timer": "设置计时器",
-    "set_alarm": "设置闹钟",
-    "take_screenshot": "截图",
-    "screen_capture": "截图",
-    "calculator": "计算",
-    "get_system_info": "查看系统信息",
+    "take_screenshot_tool": "截图",
+    "calculate": "计算",
+    "system_info": "查看系统信息",
     "list_installed_apps": "查看已安装应用",
-    "memory_search": "记忆检索",
     "recall_memory": "记忆检索",
 }
 
@@ -155,34 +159,37 @@ def _is_user_cancel(result: str) -> bool:
     return any(k in (result or "") for k in _CANCEL_MARKERS)
 
 
-def _tool_ack_sentence(name: str, args: str, result: str) -> str:
+def _tool_ack_sentence(name: str, args: str, result) -> str:
     """工具执行成功但模型没给文字时，按工具类型生成一句角色化确认。
 
     绝不回显原始 result（可能含 URL / 路径 / JSON）；取消 / 失败如实表达，
     只有确实成功才报喜，避免把"没成功"说成"搞定啦"。
+
+    result 可以是结构化信封（ToolResult）或裸字符串（旧调用方）。
     """
-    result = result or ""
+    result_text = _result_text(result)
     try:
         a = json.loads(args or "{}")
     except Exception:
         a = {}
     pretty = _TOOL_PRETTY.get(name, name)
+    state = _tool_result_state(result)
 
     # 用户主动取消
-    if _is_user_cancel(result):
+    if state == "cancel":
         return "好的主人，那就不弄啦~"
 
     # 工具失败 / 无结果：诚实告知，绝不假装成功
-    if _tool_result_state(result) == "fail":
+    if state == "fail":
         if name == "open_app":
             target = _APP_NICE.get(str(a.get("app_name", "")).strip(),
                                    str(a.get("app_name", "")).strip())
             return f"好的，我尝试打开{target}了，不过好像没成功，主人帮我看看是不是名字不对？"
         if name == "open_website":
             return "好的，我尝试打开网页了，不过好像没成功，主人帮我看看网址对不对？"
-        if name in ("web_search", "web_deep_search"):
+        if name == "web_search":
             return f"唔，{a.get('query', '')}我这边没搜到结果，主人换个关键词试试？"
-        if name in ("memory_search", "recall_memory"):
+        if name == "recall_memory":
             return "好的主人，我翻了翻记忆，暂时没找到相关的内容~"
         if name == "add_reminder":
             return "好的，我试着帮主人记提醒了，不过好像没成功，主人再说一遍？"
@@ -194,27 +201,22 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
         return f"好的，已经帮主人打开{target}啦~"
     if name == "open_website":
         return "好的主人，已经帮你打开网页啦~"
-    if name in ("web_search", "web_deep_search"):
+    if name == "web_search":
         q = a.get("query", "")
         return f"好的主人，{pretty}的结果来啦~" if not q else f"好的主人，{q}的结果来啦~"
     if name == "add_reminder":
         t = a.get("time", "")
         c = a.get("content", "")
         return f"好的，已经帮主人设好提醒啦~{t} {c}"
-    if name == "add_todo":
-        c = a.get("content", "")
-        return f"好的，已经记到待办里啦：{c}"
-    if name in ("set_timer", "set_alarm"):
-        return f"好的主人，{pretty}设好啦~"
-    if name in ("take_screenshot", "screen_capture"):
+    if name == "take_screenshot_tool":
         return "好的，已经截好图啦，主人看看桌面~"
-    if name == "calculator":
-        return f"好的，算好啦：{result}"
+    if name == "calculate":
+        return f"好的，算好啦：{result_text}"
     if name in ("get_pet_status", "get_pet_stats"):
         return "好的主人，我看看自己的状态~"
-    if name in ("memory_search", "recall_memory"):
+    if name == "recall_memory":
         return "好的主人，我翻了翻记忆~"
-    if name == "get_system_info":
+    if name == "system_info":
         return "好的主人，系统信息来啦~"
     if name == "list_installed_apps":
         return "好的，主人电脑上的应用都在这啦~"
@@ -223,31 +225,96 @@ def _tool_ack_sentence(name: str, args: str, result: str) -> str:
     return "好的，已经帮主人搞定啦~"
 
 
-# 工具结果里代表「没做成」的关键词（任一命中 → 判 fail）
-_TOOL_FAIL_MARKERS = (
-    "失败", "错误", "无法", "未安装", "未找到",
-    "没有找到", "找不到", "没找到", "未能", "为空",
-    "没安装", "没装", "不支持", "未开启", "不可用", "未连接",
-    "钱不够", "没有叫", "没成功", "超时", "未执行", "未响应",
-    "未改变", "未生效", "没改变", "不支持",
-)
+# 工具成败的判定口径（Stage 3.2）
+#
+# 原来这里是一张 26 个中文关键词的表，agent 靠猜工具是成功还是失败。
+# 现在工具层把成败翻译成结构化字段（status / error_code），
+# agent 只读字段，不再猜关键词；裸字符串的旧路径由工具层的
+# classify_legacy_result() 兜底（见 app/engine/tools/_core.py）。
+
+#: error_code → 「用户主动取消」（区别于失败：主人就是不让做）
+_CANCEL_ERROR_CODES = ("user_cancelled",)
 
 
-def _tool_result_state(result: str) -> str:
-    """根据工具结果文本判定 'cancel' / 'fail' / 'ok'。
+def _fmt_seconds(x: float) -> str:
+    """秒数 → 人话（60.0 → "60s"，0.5 → "0.5s"）。"""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    return f"{int(v)}s" if v.is_integer() else f"{v:.1f}s"
 
-    判定依据两条，任一命中即 fail：
-      1. 带 `错误：` 前缀（docs/tools-reference.md 定的工具契约）；
-      2. 命中失败关键词（兜底，照顾历史文案和第三方后端）。
+
+def _swallow_task_result(task) -> None:
+    """取走后台任务的异常（避免 "Task exception was never retrieved"）。"""
+    try:
+        if not task.cancelled():
+            task.exception()
+    except Exception:  # noqa: BLE001
+        pass
+
+def _result_text(result) -> str:
+    """取工具结果文本：信封 → data；裸字符串 → 原样。"""
+    if isinstance(result, dict):
+        return str(result.get("data") or "")
+    return result or ""
+
+
+def _as_envelope(result, name: str = "") -> dict:
+    """把任意工具返回值规整成结构化信封（旧后端可能还返回裸字符串）。"""
+    if isinstance(result, dict):
+        return result
+    text = "" if result is None else str(result)
+    state = _tool_result_state(text)
+    if state == "ok":
+        return ToolResult("ok", text)
+    if state == "cancel":
+        return ToolResult("denied", text, error_code="user_cancelled")
+    status, code = (classify_tool_result(name, text) if name
+                    else classify_legacy_result(text))
+    if status == "ok":
+        status, code = "error", "tool_error"
+    return ToolResult(status, text, error_code=code)
+
+
+def _tool_result_state(result) -> str:
+    """工具结果 → 'cancel' / 'fail' / 'ok'（Stage 3.2：读结构化字段）。
+
+    - 新路径：ToolResult 信封 —— 直接看 status / error_code；
+    - 兼容路径：裸字符串（旧调用方）—— 只认「错误：/失败：」前缀与取消标记。
     """
+    if isinstance(result, dict):
+        status = result.get("status") or "ok"
+        if status == "ok":
+            return "ok"
+        if result.get("error_code") in _CANCEL_ERROR_CODES:
+            return "cancel"
+        return "fail"
     r = result or ""
     if _is_user_cancel(r):
         return "cancel"
-    if r.lstrip().startswith("错误"):
-        return "fail"
-    if any(k in r for k in _TOOL_FAIL_MARKERS):
-        return "fail"
-    return "ok"
+    status, _code = classify_legacy_result(r)
+    return "ok" if status == "ok" else "fail"
+
+
+def _tool_event_status(env) -> str:
+    """工具信封 → 工具事件携带的**权威状态**（'ok' / 'error' / 'denied' / 'cancel'）。
+
+    Stage 3.5：界面不再从**结果文本**猜成败 —— 文本可能没有「错误：」前缀
+    （失败被显示成「完成」），正文也可能碰巧出现「错误：」（成功被显示成「失败」）。
+    唯一权威答案是工具信封里的 status。
+
+      · 信封 status 原样带出：ok / error / denied；
+      · denied + error_code=user_cancelled（主人主动取消）单独报 cancel ——
+        「主人不让做」和「策略拒绝（白名单 / 等级闸）」不是一回事，
+        界面要分开显示：前者是「取消」，后者是「失败」。
+    """
+    if not isinstance(env, dict):
+        return "ok"
+    status = str(env.get("status") or "ok")
+    if status == "denied" and env.get("error_code") in _CANCEL_ERROR_CODES:
+        return "cancel"
+    return status
 
 
 # 最终答案里「声称动作成功」的信号（用于和工具实际失败做矛盾检测）
@@ -283,12 +350,21 @@ _ACTION_CLAIM_RE = re.compile(
     rf"|(?:{_ACTION_DONE})"
 )
 # 最终答案里「如实提及失败」的信号（出现则不算矛盾）
+#
+# Stage 3.2：原来的 24 词失败词表换成**一条语义正则**：
+# 工具侧已经结构化成 status / error_code，agent 不再需要词表猜工具成败；
+# 这里剩下的唯一一件事是「模型自己说的话是不是在如实交代失败」，
+# 用「否定 / 失败 + 动作」的语义组合表达，比维护 24 个词更准。
+#
 # 注意：不能放「唔」——它是小汐的口头禅，放进来会让校验器自我静音
-_HONEST_FAIL_WORDS = (
-    "失败", "没能", "没法", "无法", "找不到", "没找到", "未找到", "没有找到",
-    "未安装", "没安装", "没装", "取消", "抱歉", "出错", "错误", "打不开",
-    "开不了", "没成功", "没打开", "没反应", "不支持", "没办到",
+_HONEST_FAIL_RE = re.compile(
+    r"(?:没能|没法|无法|未能|未|没|无|不)(?:有)?(?:能|成功|办法|法)?\s*"
+    r"(?:打开|启动|开启|运行|调出|拉起|设置|设好|记好|记下|记住|删掉|删除"
+    r"|截好|截图|搜到|查到|算好|调好|发送|复制好|保存好|完成|搞定|弄好|找到)"
+    r"|(?:打不开|开不了|没成功|没反应|没办到|没装|不支持|不可用|失败|出错"
+    r"|错误|抱歉|对不起|取消)"
 )
+
 
 # 工具失败却报喜时的纠正提示
 _CORRECTION_HINT = (
@@ -309,7 +385,7 @@ def _final_contradicts_tools(final_text: str, executed_tools: list) -> bool:
     last_name, last_args, last_result = executed_tools[-1]
     if _tool_result_state(last_result) == "ok":
         return False
-    if any(w in final_text for w in _HONEST_FAIL_WORDS):
+    if _HONEST_FAIL_RE.search(final_text or ""):
         return False
     return _claims_success(final_text)
 
@@ -318,7 +394,7 @@ def _claims_success(text: str) -> bool:
     """文本是否在断言「某件事已经做完」（纯格式判断）。"""
     if not text:
         return False
-    if any(w in text for w in _HONEST_FAIL_WORDS):
+    if _HONEST_FAIL_RE.search(text):
         return False
     return any(w in text for w in _SUCCESS_CLAIM_WORDS) or bool(
         _SUCCESS_CLAIM_RE.search(text))
@@ -331,7 +407,7 @@ def _claims_unbacked_action(text: str) -> bool:
     """
     if not text:
         return False
-    if any(w in text for w in _HONEST_FAIL_WORDS):
+    if _HONEST_FAIL_RE.search(text):
         return False
     return bool(_ACTION_CLAIM_RE.search(text))
 
@@ -359,7 +435,7 @@ def _format_verify_hint(executed_tools: list, force_final: bool = False) -> str:
         if state == "cancel":
             lines.append(f"  {i}. {name}（{mark}）")
             continue
-        brief = (result or "").replace("\n", " ").strip()
+        brief = _result_text(result).replace("\n", " ").strip()
         # 去掉开头重复的状态词（"失败：/错误：/未找到应用…"），避免与括号状态重复
         brief = re.sub(
             r"^(?:错误|失败|无法|未能|未找到应用|未找到|没有找到|找不到)[：:，,。\s]*",
@@ -414,7 +490,7 @@ _INTENT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "query": (
         "get_current_time", "get_pet_status", "system_info", "get_battery",
         "get_volume", "get_brightness", "calculate", "convert_units",
-        "date_info", "take_screenshot", "get_clipboard",
+        "date_info", "take_screenshot_tool", "get_clipboard",
         "list_installed_apps", "list_processes", "get_tts_mute_status",
         "get_weather",
     ),
@@ -445,6 +521,73 @@ _INTENT_BLOCKED_TOOLS: dict[str, dict[str, str]] = {
         "cancel_countdown": "错误：本轮不提供倒计时相关工具，请改用 list_reminders / delete_reminder。",
     },
 }
+
+
+class _ToolPhaseBudget:
+    """整轮工具阶段的**墙钟预算**（Stage 3.3）。
+
+    - 单工具超时 60s（与 MCP 桥接现状一致）；
+    - 整轮工具阶段总预算 120s：超时后**不再执行新工具**，
+      并把结果标成 truncated（可观测：meta 事件 + 日志 + 信封 truncated）。
+    """
+
+    def __init__(self, total_seconds: Optional[float] = None) -> None:
+        # 默认值在**调用时**读模块全局（单测可以改预算）
+        self.total_seconds = (TOOL_PHASE_BUDGET_SECONDS
+                              if total_seconds is None else total_seconds)
+        self._started: Optional[float] = None
+        self.exhausted = False
+        self.truncated = False
+
+    def start(self) -> None:
+        if self._started is None:
+            self._started = time.monotonic()
+
+    def elapsed(self) -> float:
+        if self._started is None:
+            return 0.0
+        return time.monotonic() - self._started
+
+    def remaining(self) -> float:
+        return max(0.0, self.total_seconds - self.elapsed())
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0.0
+
+    def mark_exhausted(self) -> None:
+        self.exhausted = True
+        self.truncated = True
+
+
+class _ToolPayloadBudget:
+    """整轮注入上下文的**工具结果总预算**（Stage 3.3）。
+
+    超过 TOOL_RESULT_MAX_CHARS 时：保头（45000）、保尾（2000），
+    中间整段省略并留明确标记；被裁的结果标 truncated。
+    """
+
+    def __init__(self, budget_chars: Optional[int] = None) -> None:
+        self.budget_chars = (TOOL_RESULT_MAX_CHARS
+                             if budget_chars is None else budget_chars)
+        self._entries: list[tuple[dict, dict]] = []
+        self.total = 0
+        self.truncated = False
+
+    def add(self, message: dict, env: dict) -> None:
+        """登记一条工具结果；超预算时回头重裁已注入的内容。"""
+        self._entries.append((message, env))
+        self.total += len(_result_text(env))
+        if self.total > self.budget_chars:
+            self._refit()
+
+    def _refit(self) -> None:
+        contents = [_result_text(env) for _msg, env in self._entries]
+        fitted, _changed = fit_tool_payload(contents)
+        for (msg, env), new in zip(self._entries, fitted):
+            if new != _result_text(env):
+                msg["content"] = new
+                env["truncated"] = True
+        self.truncated = True
 
 
 class AgentLoop:
@@ -557,8 +700,11 @@ class AgentLoop:
                 bits.append(f"  - {content}")
         return "\n".join(bits) if bits else "（无）"
 
-    async def _confirm_or_skip(self, name: str, args: str) -> Optional[str]:
-        """对危险工具执行确认。返回 None 表示继续执行，返回字符串表示跳过（附带结果文本）。"""
+    async def _confirm_or_skip(self, name: str, args: str) -> Optional[ToolResult]:
+        """对危险工具执行确认。
+
+        返回 None 表示继续执行；返回**结构化信封**表示跳过（未执行）。
+        """
         if name not in DANGEROUS_TOOLS or self.confirm_tool is None:
             return None
         try:
@@ -570,9 +716,11 @@ class AgentLoop:
         # 超时必须和「主人点了否」分开，否则会对主人谎称「你取消了」
         if confirmed is None:
             log.warning("tool %s 确认超时，未执行", name)
-            return "确认弹窗超时未响应，未执行。"
+            return ToolResult("denied", "确认弹窗超时未响应，未执行。",
+                              error_code="confirm_timeout")
         if not confirmed:
-            return "用户取消了此操作。"
+            return ToolResult("denied", "用户取消了此操作。",
+                              error_code="user_cancelled")
         return None
 
     async def _execute_tools_parallel(
@@ -582,16 +730,36 @@ class AgentLoop:
         cancel_check: Optional[Callable[[], bool]] = None,
         intent: Optional[str] = None,
         failed_tools: Optional[dict[str, int]] = None,
+        budget: Optional["_ToolPhaseBudget"] = None,
+        payload: Optional["_ToolPayloadBudget"] = None,
+        out_envelopes: Optional[list] = None,
     ) -> AsyncIterator[tuple]:
-        """并行执行所有工具调用，按原顺序 yield 结果。"""
+        """并行执行所有工具调用，按原顺序 yield 结果。
+
+        Stage 3.2：结果一律是**结构化信封**（ToolResult）。
+        Stage 3.3：单工具 60s 超时 + 整轮工具阶段 120s 墙钟预算。
+        """
         blocked = _INTENT_BLOCKED_TOOLS.get(intent or "", {})
         # 同一工具反复失败的累计次数（由 run() 持有，跨轮次）
         failed_tools = failed_tools if failed_tools is not None else {}
+        budget = budget if budget is not None else _ToolPhaseBudget()
+        payload = payload if payload is not None else _ToolPayloadBudget()
+        out_envelopes = out_envelopes if out_envelopes is not None else []
+        budget.start()
 
-        async def _exec_one(i: int, tc: dict) -> tuple[int, str, str, str]:
-            """在后台线程中执行单个工具，返回 (index, name, args, result)。"""
+        async def _exec_one(i: int, tc: dict) -> tuple[int, str, str, dict]:
+            """在后台线程中执行单个工具，返回 (index, name, args, 信封)。"""
             name = tc["name"] or f"unknown_{i}"
             args = tc["arguments"] or "{}"
+
+            # 整轮工具阶段预算：超了就不再执行新工具（Stage 3.3）
+            if budget.expired():
+                log.warning("AgentLoop: 工具阶段预算已用尽，跳过 %s", name)
+                return i, name, args, ToolResult(
+                    "error",
+                    (f"错误：工具阶段预算已用尽（{_fmt_seconds(budget.total_seconds)}），"
+                     f"本轮不再执行新工具（{name} 未执行）。"),
+                    truncated=True, error_code="budget_exhausted")
 
             # 工具解锁闸：未达等级的工具有可见不可调,提示主人升级
             from app.engine.tools._unlock import is_unlocked, level_for_tool
@@ -603,14 +771,16 @@ class AgentLoop:
                        "或在聊天窗口顶部点「工具解锁」查看进度。")
                 log.warning("AgentLoop: %s 未解锁 (level=%d < required %d)",
                             name, current_lvl, req_lvl)
-                return i, name, args, msg
+                return i, name, args, ToolResult("denied", msg,
+                                              error_code="level_locked")
 
             # 意图级硬闸：白名单是软约束，这里硬拒并说明原因
             if name in blocked:
                 msg = blocked[name]
                 log.warning("AgentLoop: 意图 %s 下拒绝调用 %s（已改用正确工具）",
                             intent, name)
-                return i, name, args, msg
+                return i, name, args, ToolResult("denied", msg,
+                                              error_code="intent_blocked")
 
             # 失败次数硬闸：同一个工具已经失败 _MAX_SAME_TOOL_FAIL 次就别再试了
             if failed_tools.get(name, 0) >= _MAX_SAME_TOOL_FAIL:
@@ -619,41 +789,91 @@ class AgentLoop:
                        "改用别的工具，或直接如实告诉主人这一步做不到、为什么。")
                 log.warning("AgentLoop: %s 已失败 %d 次，拒绝再次调用",
                             name, failed_tools[name])
-                return i, name, args, msg
+                return i, name, args, ToolResult("denied", msg,
+                                              error_code="repeat_failure")
 
-            # 危险工具确认
+            # 危险工具确认（第三道：单次高危要主人点头）
             skip_result = await self._confirm_or_skip(name, args)
             if skip_result is not None:
                 log.info("tool %s(%s) -> SKIPPED", name, args[:120])
                 return i, name, args, skip_result
 
-            # 在线程池中执行同步工具函数
-            result = await asyncio.to_thread(self.registry.execute, name, args)
-            log.info("tool %s(%s) -> %s", name, args[:120], result[:120])
-            return i, name, args, result
+            # 在线程池中执行同步工具函数（单工具 60s 超时）
+            #
+            # ⚠️ 用 shield：超时时**不等**那个跑不动的线程（线程没法杀），
+            # agent 立刻拿到「超时」的信封继续往下走；线程在后台跑完即弃。
+            task = asyncio.ensure_future(asyncio.to_thread(
+                self.registry.execute, name, args))
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.shield(task), timeout=TOOL_CALL_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                log.warning("AgentLoop: 工具 %s 超时（%s）",
+                            name, _fmt_seconds(TOOL_CALL_TIMEOUT_SECONDS))
+                task.add_done_callback(_swallow_task_result)
+                return i, name, args, ToolResult(
+                    "error",
+                    (f"错误：工具 {name} 超时（{_fmt_seconds(TOOL_CALL_TIMEOUT_SECONDS)}），"
+                     "没有返回结果。"),
+                    error_code="timeout")
+            env = _as_envelope(raw, name=name)
+            log.info("tool %s(%s) -> %s", name, args[:120],
+                     _result_text(env)[:120])
+            return i, name, args, env
 
         # 检查取消
         if cancel_check is not None and cancel_check():
             return
+        if not tool_calls:
+            return
 
-        # 并行执行所有工具
-        tasks = [_exec_one(i, tc) for i, tc in enumerate(tool_calls)]
-        results = await asyncio.gather(*tasks)
+        # 并行执行所有工具（整轮墙钟预算兜底：超时的按预算耗尽记账）
+        tasks = []
+        index_of = {}
+        for i, tc in enumerate(tool_calls):
+            task = asyncio.ensure_future(_exec_one(i, tc))
+            tasks.append(task)
+            index_of[task] = i
+        done, pending = await asyncio.wait(tasks, timeout=budget.remaining())
+        results = [t.result() for t in done]
+        for task in pending:
+            task.cancel()
+            i = index_of[task]
+            tc = tool_calls[i]
+            name = tc["name"] or f"unknown_{i}"
+            results.append((i, name, tc["arguments"] or "{}", ToolResult(
+                "error",
+                (f"错误：工具阶段预算已用尽（{_fmt_seconds(budget.total_seconds)}），"
+                 f"{name} 未执行。"),
+                truncated=True, error_code="budget_exhausted")))
+        if pending:
+            budget.mark_exhausted()
+            log.warning("AgentLoop: 工具阶段预算 %s 用尽，%d 个工具未执行",
+                        _fmt_seconds(budget.total_seconds), len(pending))
+            yield ("meta", {"event": "tool_budget_exhausted",
+                            "reason": (f"工具阶段预算 {_fmt_seconds(budget.total_seconds)} "
+                                       f"已用尽，{len(pending)} 个工具未执行"),
+                            "pending": len(pending)})
 
         # 按原始顺序 yield 结果
-        for i, name, args, result in sorted(results, key=lambda x: x[0]):
-            yield "tool", name, args, result
+        for i, name, args, env in sorted(results, key=lambda x: x[0]):
+            # 工具事件把信封里的**权威状态**一起带出去（ok/error/denied/cancel）：
+            # 界面直接拿它渲染成败标记，不再从结果文本猜成败（Stage 3.5）。
+            yield "tool", name, args, _result_text(env), _tool_event_status(env)
             # 累计失败次数（供下一轮 _exec_one 的失败闸使用）
-            if (_tool_result_state(result) == "fail"
-                    and not _is_user_cancel(result)):
+            if _tool_result_state(env) == "fail":
                 failed_tools[name] = failed_tools.get(name, 0) + 1
             elif name in failed_tools:
                 failed_tools[name] = 0   # 成功了就把计数清零
-            messages.append({
+            msg = {
                 "role": "tool",
                 "tool_call_id": tool_calls[i]["id"] or f"call_{i}",
-                "content": result[:4000],
-            })
+                "content": _result_text(env),
+            }
+            # 整轮注入预算（Stage 3.3）：超了保头保尾、中间省略
+            payload.add(msg, env)
+            messages.append(msg)
+            out_envelopes.append((name, args, env))
 
     async def run(
         self,
@@ -676,9 +896,12 @@ class AgentLoop:
         final_text = ""
         # 累计「最近连续纯调工具、无文字」的轮数
         consecutive_tool_only = 0
-        # 已经成功执行的工具调用 (name, args, result)，用于矛盾检测和兜底
+        # 已经成功执行的工具调用 (name, args, 信封)，用于矛盾检测和兜底
         tools_used = 0
-        executed_tools: list[tuple[str, str, str]] = []
+        executed_tools: list[tuple[str, str, dict]] = []
+        # Stage 3.3：整轮工具阶段的墙钟预算 + 注入上下文的总预算
+        budget = _ToolPhaseBudget()
+        payload = _ToolPayloadBudget()
         verify_corrections = 0   # 「工具失败却报喜」的纠正次数（最多 1 次）
         partial_retries = 0     # 「多步任务只做一半」的纠正次数（最多 1 次）
         force_retries = 0       # 「该调工具却只给文字」的重试次数（最多 1 次）
@@ -932,14 +1155,16 @@ class AgentLoop:
             })
 
             # 并行执行所有工具调用
+            batch: list[tuple[str, str, dict]] = []
             async for event in self._execute_tools_parallel(
                     tool_calls, messages, cancel_check=cancel_check,
-                    intent=intent, failed_tools=failed_tools):
+                    intent=intent, failed_tools=failed_tools,
+                    budget=budget, payload=payload, out_envelopes=batch):
                 yield event
                 if event[0] == "tool":
-                    # event = ("tool", name, args, result)
+                    # event = ("tool", name, args, 结果文本, 信封状态)；信封在 batch 里
                     tools_used += 1
-                    executed_tools.append((event[1], event[2], event[3]))
+            executed_tools.extend(batch)
 
             # 统计「纯调工具无文字」连续次数
             if not final_text.strip():

@@ -305,6 +305,29 @@ class MemoryClient:
         stats = data.get("stats")
         return stats if isinstance(stats, dict) else {}
 
+    def graph(self, limit: int = 300, top_k: int = 4, timeout=None) -> dict:
+        """GET /graph → 语义图 {ok, nodes, edges, ...}（拿不到 → {"ok": False}）。
+
+        节点是记忆卡，位置按向量主成分排；边是余弦近邻。
+        sidecar 没有向量时返回 ok=False —— 那是降级，不是错误。
+        """
+        data = self._call(
+            "GET", "/graph?limit=%d&top_k=%d" % (int(limit), int(top_k)),
+            None, timeout=timeout, track_failure=False,
+        ) or {}
+        if not data.get("ok"):
+            return {"ok": False, "nodes": [], "edges": [],
+                    "reason": str(data.get("reason") or data.get("error") or "")}
+        nodes = data.get("nodes")
+        edges = data.get("edges")
+        return {
+            "ok": True,
+            "projection": data.get("projection") or "pca",
+            "dim": data.get("dim"),
+            "nodes": nodes if isinstance(nodes, list) else [],
+            "edges": edges if isinstance(edges, list) else [],
+        }
+
     def search(self, query: str, top_k: int = 8, mood: str | None = None,
                kind: str | None = None, key: str | None = None) -> list:
         """POST /search → 结果列表（失败 → []）。

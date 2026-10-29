@@ -34,14 +34,18 @@ def _safe_qapp():
 
 def _convert_loaded_tools(stored_tools):
     """把 ChatStore 读回的 tools（JSON 序列化的 list-of-lists）转为
-    Message dataclass 期望的 list[tuple[str, str, str]] 形态。
+    Message dataclass 期望的 list[tuple] 形态。
 
-    SQLite 里存的是 tools_json = JSON，每个工具是 [name, args, result] 三元 list。
+    SQLite 里存的是 tools_json = JSON，每个工具是 [name, args, result] 三元 list；
+    Stage 3.5 之后是 [name, args, result, status] 四元 list（第 4 元 = 信封状态）。
     兼容旧版 2 元组 (name, summary)；损坏项跳过。
     """
     out = []
     for t in (stored_tools or []):
-        if isinstance(t, (list, tuple)) and len(t) >= 3:
+        if isinstance(t, (list, tuple)) and len(t) >= 4:
+            # 新版：带信封状态（回放历史时也能显示真实的成败标记）
+            out.append((str(t[0]), str(t[1]), str(t[2]), str(t[3])))
+        elif isinstance(t, (list, tuple)) and len(t) == 3:
             out.append((str(t[0]), str(t[1]), str(t[2])))
         elif isinstance(t, (list, tuple)) and len(t) == 2:
             # 旧版 2 元组 (name, summary)
@@ -2868,16 +2872,22 @@ class ChatWindow(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
-    def _on_tool(self, name: str, args: str, result: str) -> None:
-        """一次工具调用完成：在当前气泡里追加一行工具记录。"""
+    def _on_tool(self, name: str, args: str, result: str, status: str = "") -> None:
+        """一次工具调用完成：在当前气泡里追加一行工具记录。
+
+        status 是工具信封里的**权威成败**（ok / error / denied / cancel，Stage 3.5）：
+        界面拿它渲染成败标记，不再从结果文本猜成败（文本没前缀的失败曾被显示成「完成」）。
+        老后端不带 status → 空串 → 渲染端回退到文本判定。
+        """
         if self._current_bot_msg is None:
             return
         # run_script：把 [OK] path\n--- stdout ---\n…\n--- stderr ---\n… 的结构化结果
         # 拆成命令块（meta）和简化结果，渲染端识别后展示终端风格块
         if name == "run_script" and "--- stdout ---" in result:
-            self._parse_run_script_into_blocks(name, args, result)
+            self._parse_run_script_into_blocks(name, args, result, status)
         else:
-            self._current_bot_msg.tools.append((name, args or "", result or ""))
+            self._current_bot_msg.tools.append(
+                (name, args or "", result or "", status or ""))
             # multimodal 工具结果自动追加到 msg.content,渲染时显示产物
             self._maybe_inject_multimodal_to_content(name, result)
         # Trace
@@ -2894,6 +2904,7 @@ class ChatWindow(QWidget):
                     "name": name,
                     "args": _args,
                     "result": (result or "").replace("\n", " ")[:80],
+                    "status": status or "",
                 })
             except Exception:  # noqa: BLE001
                 pass
@@ -2975,7 +2986,7 @@ class ChatWindow(QWidget):
         addition = []
         for t in tools:
             try:
-                name, args, result = _unpack_tool(t)
+                name, args, result, _tool_status_raw = _unpack_tool(t)
             except Exception:
                 name, args, result = ("", "", "")
             kind_map = {
@@ -3009,8 +3020,13 @@ class ChatWindow(QWidget):
         if addition:
             msg.content = (msg.content or "") + "".join(addition)
 
-    def _parse_run_script_into_blocks(self, name: str, args: str, result: str) -> None:
-        """run_script 结果拆成：命令块（execs）+ 简化结果（tools）。"""
+    def _parse_run_script_into_blocks(self, name: str, args: str, result: str,
+                                       status: str = "") -> None:
+        """run_script 结果拆成：命令块（execs）+ 简化结果（tools）。
+
+        status 一起带进简化结果（Stage 3.5）：脚本退出码非 0 时卡片要显示「失败」，
+        不能因为简化文本没有「错误：」前缀就显示成「完成」。
+        """
         import re as _re
         cmd = ""
         output = result
@@ -3047,7 +3063,8 @@ class ChatWindow(QWidget):
         })
         # 同时保留简化结果（不进 TTS）
         simple = f"[{'OK' if ec == 0 else f'exit={ec}'}] "
-        self._current_bot_msg.tools.append((name, args or "", simple))
+        self._current_bot_msg.tools.append(
+            (name, args or "", simple, status or ""))
 
     def _on_meta(self, kind: str, payload: dict) -> None:
         """内部事件（plan / reflection / meta / thought / exec）。
@@ -3618,14 +3635,18 @@ class ChatWindow(QWidget):
             return ""
         rows = []
         for i, t in enumerate(tools):
-            name, args, result = _unpack_tool(t)
+            name, args, result, tool_status = _unpack_tool(t)
             cn, target = _tool_label(name, args)
-            status = _tool_status(result)
+            # 成败用**信封状态**（有的话），不再从结果文本猜（Stage 3.5）
+            status = _tool_status(result, tool_status)
             num = _CIRCLED_NUMS[i] if i < len(_CIRCLED_NUMS) else str(i + 1)
             if status == "cancel":
                 mark = '<span style="color:#9ca3af;">⊘ 取消</span>'
             elif status == "fail":
                 mark = '<span style="color:#dc2626;">[失败]</span>'
+            elif status == "rejected":
+                # 桌宠拒绝（companion REJECT/REFUSE）——不是「完成」
+                mark = '<span style="color:#a45b2e;">[桌宠拒绝]</span>'
             else:
                 mark = '<span style="color:#16a34a;">[完成]</span>'
             target_html = (
@@ -3648,13 +3669,13 @@ class ChatWindow(QWidget):
         if collapsed:
             # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
             # 不出现"点击展开"字样,只靠箭头指示
-            first_name, first_args, first_result = _unpack_tool(tools[0])
+            first_name, first_args, first_result, first_status = _unpack_tool(tools[0])
             first_cn, first_target = _tool_label(first_name, first_args)
             preview = (
                 '<div style="color:#9ca3af;font-size:9pt;margin:2px 0 0 0;">'
                 '▸ ' + _html_escape(first_cn) +
                 (' · ' + _html_escape(first_target[:40]) if first_target else '') +
-                '  ' + (_unpack_status_mark(first_result)) +
+                '  ' + (_unpack_status_mark(first_result, first_status)) +
                 '</div>'
             )
             return (

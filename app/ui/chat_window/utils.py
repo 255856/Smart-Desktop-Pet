@@ -4,6 +4,21 @@ from __future__ import annotations
 import json
 from typing import Tuple
 
+# 工具结果的成败判定**不在本模块自维护词表**（Stage 3.5）：
+#   · 成败 / 取消 → 脑层的 _tool_result_state（app/brain/agent.py）——
+#     它读的是工具层那张唯一的判定表（classify_legacy_result + 用户取消标记），
+#     跟工具信封的 status 同一个出处，不会出现「脑层说失败、界面显示成功」。
+#   · 本模块只多认一种：桌宠拒绝（companion 策略的产物，工具层不认）。
+# 权威顺序：**信封 status 优先**（Stage 3.5 修复）——
+#   工具事件现在把信封的 status 一起送到界面
+#   （app/brain/agent.py 的 yield "tool", name, args, _result_text(env), status），
+#   界面直接用它渲染成败标记，不再从结果文本猜成败：
+#   失败文本没有「错误：」前缀会被显示成「完成」（谎报成功），
+#   成功文本里碰巧出现「错误：」会被显示成「失败」（谎报失败）。
+#   只有拿不到 status 的调用方（老路径 / 只有文本的折叠预览）才回退到文本判定。
+from app.brain.agent import _tool_result_state
+from app.engine.tools._core import _ERROR_PREFIXES
+
 
 # 危险工具的中文标签（弹窗里给主人看）
 _DANGEROUS_LABELS = {
@@ -59,8 +74,11 @@ _TOOL_UI_META = {
 
 _CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
-# 工具结果失败标记（必须以「错误:」开头，避免 read_file 内容里出现「错误」字样被误判）
-_TOOL_FAIL_MARKERS = ("错误：", "错误:", "失败：", "失败:", "未安装：", "未安装:")
+# 工具层的失败前缀契约 —— UI 侧只是**转发**这份表，不自己抄一份
+# （app/ui/chat_window/__init__.py 还在导入这个名字）。
+# 判定成败不再用这张表：走脑层 _tool_result_state（工具层判定表的唯一出口）。
+_TOOL_FAIL_MARKERS = _ERROR_PREFIXES
+
 # companion REJECT/REFUSE 标记（让桌宠拒绝可视化）
 _COMPANION_REJECT_MARKERS = (
     "rejected_by_companion",
@@ -70,10 +88,22 @@ _COMPANION_REJECT_MARKERS = (
 
 
 def _unpack_tool(t):
-    """tools 元组兼容 2 元 (name, summary) 与 3 元 (name, args, result)。"""
+    """tools 元组兼容 2 元 (name, summary)、3 元 (name, args, result)
+    与 4 元 (name, args, result, status)。
+
+    第 4 元是**信封状态**（ok / error / denied / cancel，Stage 3.5）：
+    老记录 / 历史回放没有它 → 空串 → 调用方回退到文本判定。
+    """
+    if len(t) >= 4:
+        # 只认**认识的状态字符串**：老记录的第 4 元可能是别的东西
+        # （历史上有 (name, args, result, 100) 这种形态），认不出来就当没有，
+        # 走文本兜底 —— 不能把不认识的东西当成成功。
+        raw = t[3]
+        st = raw.strip().lower() if isinstance(raw, str) else ""
+        return t[0], t[1] or "", t[2] or "", (st if st in _STATUS_FROM_ENVELOPE else "")
     if len(t) >= 3:
-        return t[0], t[1] or "", t[2] or ""
-    return t[0], "", (t[1] if len(t) > 1 else "") or ""
+        return t[0], t[1] or "", t[2] or "", ""
+    return t[0], "", (t[1] if len(t) > 1 else "") or "", ""
 
 
 def _tool_label(name: str, args: str) -> Tuple[str, str]:
@@ -107,21 +137,47 @@ def _tool_label(name: str, args: str) -> Tuple[str, str]:
     return cn, target
 
 
-def _tool_status(result: str) -> str:
-    """工具结果状态：'cancel' / 'rejected' / 'fail' / 'ok'."""
+#: 信封状态 → 界面状态。denied（策略拒绝：白名单 / 等级闸）算**失败**，
+#: 不是「取消」—— 主人没点取消，是策略不让做，两者必须分开显示。
+_STATUS_FROM_ENVELOPE = {
+    "ok": "ok",
+    "error": "fail",
+    "denied": "fail",
+    "fail": "fail",
+    "cancel": "cancel",
+    "rejected": "rejected",
+}
+
+
+def _tool_status(result: str, status: str = None) -> str:
+    """工具结果状态：'cancel' / 'rejected' / 'fail' / 'ok'。
+
+    status 给了就用它 —— 那是**工具信封里的权威答案**（Stage 3.5）：
+      · 'ok'      → 成功（哪怕结果文本里出现「错误：」也不改判）
+      · 'error'   → 失败
+      · 'denied'  → 失败（策略拒绝 ≠ 主人取消）
+      · 'cancel'  → 主人主动取消（信封 denied + error_code=user_cancelled）
+    没给 status（老调用方 / 只有文本的折叠预览）才回退到文本判定：
+    成败与取消交给脑层的 _tool_result_state（工具层判定表的唯一出口）；
+    这里额外认「桌宠拒绝」（companion 策略的产物，工具层不认）。
+    """
     r = result or ""
-    if "取消" in r:
-        return "cancel"
+    st = str(status or "").strip().lower()
+    if st:
+        mapped = _STATUS_FROM_ENVELOPE.get(st)
+        if mapped:
+            if mapped == "fail" and any(k in r for k in _COMPANION_REJECT_MARKERS):
+                return "rejected"
+            return mapped
+        # 认不出的状态 → 落到文本兜底（别把不认识的状态当成成功）
     if any(k in r for k in _COMPANION_REJECT_MARKERS):
         return "rejected"
-    if any(k in r for k in _TOOL_FAIL_MARKERS):
-        return "fail"
-    return "ok"
+    return _tool_result_state(r)
 
 
-def _unpack_status_mark(result: str) -> str:
+def _unpack_status_mark(result: str, status: str = None) -> str:
     """返回工具结果对应的彩色 mark html,用于折叠态预览行."""
-    status = _tool_status(result)
+    status = _tool_status(result, status)
     if status == "cancel":
         return '<span style="color:#9ca3af;">⊘ 取消</span>'
     if status == "rejected":
@@ -157,7 +213,7 @@ def _format_time_short(ts: float) -> str:
 
 __all__ = [
     "_DANGEROUS_LABELS", "_CONFIRM_TIMEOUT_S",
-    "_TOOL_UI_META", "_CIRCLED_NUMS", "_TOOL_FAIL_MARKERS",
+    "_TOOL_UI_META", "_CIRCLED_NUMS",
     "_unpack_tool", "_tool_label", "_tool_status", "_unpack_status_mark",
     "_html_escape", "_format_time_short", "_img_open_key",
 ]

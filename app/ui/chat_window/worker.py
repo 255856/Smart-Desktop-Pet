@@ -56,7 +56,11 @@ class _AgentWorker(QThread):
     """Agent 循环 worker：流式正文 + 工具调用（Function Calling）。"""
 
     chunk = Signal(str)
-    tool_used = Signal(str, str, str)
+    # (name, args, result, status) —— status 是工具信封里的**权威成败**
+    # （ok / error / denied / cancel）。界面直接拿它渲染成败标记，
+    # 不再从结果文本猜成败（Stage 3.5）。老后端（LangChainAgent）不带
+    # status → 这里补空串 → 界面回退到文本判定。
+    tool_used = Signal(str, str, str, str)
     meta = Signal(str, dict)       # (kind, payload) — 内部事件，给 Trace 用
     done = Signal(str)
     failed = Signal(str)
@@ -85,8 +89,12 @@ class _AgentWorker(QThread):
                         full.append(payload[0])
                         self.chunk.emit(payload[0])
                     elif kind == "tool":
-                        # payload = (name, args, result)
-                        self.tool_used.emit(*payload)
+                        # payload = (name, args, result[, status])
+                        name = payload[0] if len(payload) > 0 else ""
+                        args = payload[1] if len(payload) > 1 else ""
+                        result = payload[2] if len(payload) > 2 else ""
+                        status = payload[3] if len(payload) > 3 else ""
+                        self.tool_used.emit(name, args, result, status)
                     elif kind == "meta":
                         # payload = (dict)
                         self.meta.emit("meta", payload[0] if payload else {})
@@ -113,7 +121,9 @@ class _AgentWorker(QThread):
                                 full.append(ev[1])
                                 self.chunk.emit(ev[1])
                             elif kind == "tool":
-                                self.tool_used.emit(ev[1], ev[2], ev[3])
+                                # ev = ("tool", name, args, result[, status])
+                                self.tool_used.emit(ev[1], ev[2], ev[3],
+                                                    ev[4] if len(ev) > 4 else "")
                             elif kind == "meta":
                                 # ev = ("meta", dict)
                                 meta_payload = ev[1] if len(ev) > 1 else {}

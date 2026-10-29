@@ -606,6 +606,9 @@ class BrainController(QObject):
                 tavily_api_key=tavily_key,
                 cfg=cfg,
             )
+            # Stage 3.1：冻结「存量工具」基线 —— 从这一刻起，白名单外的
+            # 工具在**执行期**一律拒绝（模型硬点名也拦得住）。
+            self.tool_registry.seal_baseline()
             log.info("智能中枢：注册 %d 个工具（默认全可见,实际 LLM 可见取决于等级）%s",
                      len(self.tool_registry.names()), self.tool_registry.names())
         else:
@@ -742,8 +745,9 @@ class BrainController(QObject):
         from app.brain.prompt_layer import build_session_block
         tool_list = ""
         if self.tool_registry is not None:
-            tool_names = "、".join(self.tool_registry.names())
-            tool_list = self._tool_usage_instruction(tool_names)
+            # Stage 3.4：按能力分组，不再平铺 68 个工具名
+            tool_groups = self.tool_registry.grouped_names()
+            tool_list = self._tool_usage_instruction(tool_groups)
         return build_session_block(
             skill=self._skill_text,      # SKILL.md 内容（最重要，放在最前）
             # Stage 2.3：memory= 槽位放的是**常量**的【记忆规则】，
@@ -766,14 +770,15 @@ class BrainController(QObject):
         return build_dynamic_context(state=self.state, query=query)
 
     @staticmethod
-    def _tool_usage_instruction(tool_names: str) -> str:
-        """列出可用工具名；「何时调 / 怎么调」规则见上方 SKILL 文档。
+    def _tool_usage_instruction(tool_groups) -> str:
+        """按能力分组列出可用工具；「何时调 / 怎么调」规则见上方 SKILL 文档。
 
         Stage 1.1：文案搬进共享层（app/brain/prompt_layer.py），
         两个后端的 system prompt 因此长得一样。
+        Stage 3.4：入参从「平铺的工具名」改成「分组 → 工具名」。
         """
         from app.brain.prompt_layer import build_tool_list
-        return build_tool_list(tool_names)
+        return build_tool_list(tool_groups)
 
     def connect_tool_animation(self, pet) -> None:
         """连接工具动画信号到桌宠。"""
@@ -846,6 +851,8 @@ class BrainController(QObject):
                 from app.brain.agent import DANGEROUS_TOOLS
                 bridged = registry.bridge_to(
                     self.tool_registry, dangerous_tools=set(DANGEROUS_TOOLS))
+                # MCP 工具也进基线（白名单里它们按 mcp_aw_ / mcp_fs_ 前缀放行）
+                self.tool_registry.seal_baseline()
                 log.info("MCP：已桥接 %d 个外挂工具 %s",
                          bridged, list(ok.keys()))
             except Exception:  # noqa: BLE001

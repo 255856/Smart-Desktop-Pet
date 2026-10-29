@@ -1,4 +1,8 @@
-"""全量审计回归测试：模型说成功但实际未执行 / 未调用 这类问题的回归锁。"""
+"""全量审计回归测试：模型说成功但实际未执行 / 未调用 这类问题的回归锁。
+
+Stage 3.2 之后：**工具成败不再靠关键词猜**，工具层把结果翻成结构化信封
+（status / data / truncated / error_code），这里断言的也是信封。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -13,52 +17,107 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.brain.agent import (  # noqa: E402
-    AgentLoop, DANGEROUS_TOOLS, _ACTION_CLAIM_RE, _HONEST_FAIL_WORDS,
+    AgentLoop, DANGEROUS_TOOLS, _ACTION_CLAIM_RE, _HONEST_FAIL_RE,
     _INTENT_TOOL_NAMES, _SUCCESS_CLAIM_WORDS, _claims_success,
-    _claims_unbacked_action, _final_contradicts_tools, _tool_result_state,
+    _claims_unbacked_action, _final_contradicts_tools,
 )
-from app.engine.tools._core import Tool, ToolRegistry  # noqa: E402
+from app.engine.tools._core import (  # noqa: E402
+    Tool, ToolRegistry, ToolResult,
+)
 
 
 # =============================================================================
-# 1) 失败文案必须被判为 fail
-#    原表只有 10 个词，下面这些全被判 ok → 假装成功畅通无阻
+# 1) 失败文案必须变成结构化错误（不再靠 agent 猜关键词）
+#    工具层知道每个工具「失败长什么样」，把它翻成稳定的 error_code；
+#    agent 只读 status / error_code。
 # =============================================================================
 
-@pytest.mark.parametrize("result", [
-    "钱不够（20 金币，现有 5），先去打工吧～",          # _pet feed_self
-    "没有叫「火锅」的食物。可选：可乐、面包",            # _pet feed_self
-    "不支持的换算：parsec → ly",                       # _math convert_units
-    "错误：脚本执行失败（退出码 1），\n[exit=1] x.py",    # _runner 非零退出
-    "确认弹窗超时未响应，未执行。",                      # 危险工具超时
-    "没有叫「happy」的动画，未触发任何动作。",
-    "没有找到匹配的记忆",
-    "没装这个软件",
-    "错误：本机没有支持 WMI 亮度的显示器（台式机常见），亮度未改变。",
-    "无法设置音量到 30%：缺少 pycaw",
-])
-def test_failure_phrases_are_detected(result):
-    """这些文案在审计时全部被判 ok，模型于是照着「成功文案」对主人报喜。"""
-    assert _tool_result_state(result) == "fail", result
+def _fake_registry(tool_name: str, text: str) -> ToolRegistry:
+    """注册一个只会返回固定文案的假工具。"""
+    reg = ToolRegistry()
+    reg.register(Tool(name=tool_name, description="fake",
+                      parameters={"type": "object", "properties": {}},
+                      fn=lambda text=text: text))
+    return reg
 
 
-@pytest.mark.parametrize("result", [
-    "已启动 QQ",
-    "截图成功（base64，128400 字符）",
-    "吃掉了「面包」，花 3 金币。现在状态：Lv.2",
-    "找到 5 条结果",
-    "已取消倒计时 #3（到点不会再提醒）",
-    "已把亮度调到 80%",
+@pytest.mark.parametrize("tool_name,text,expect_code", [
+    # _pet feed_self
+    ("feed_self", "钱不够（20 金币，现有 5），先去打工吧～", "insufficient_funds"),
+    ("feed_self", "没有叫「火锅」的食物。可选：可乐、面包", "unknown_item"),
+    # _math convert_units
+    ("convert_units", "不支持的换算：parsec → ly", "unsupported_conversion"),
+    # _runner run_script（带「错误：」前缀 → 走契约）
+    ("run_script", "错误：脚本执行失败（退出码 1），\n[exit=1] x.py", "tool_error"),
+    # _pet play_animation
+    ("play_animation", "没有叫「happy」的动画，未触发任何动作。", "unknown_animation"),
+    # 记忆检索
+    ("recall_memory", "没有找到匹配的记忆", "no_match"),
+    # _system open_app
+    ("open_app", "没装这个软件", "not_installed"),
+    # _audio set_brightness（带「错误：」前缀，但错误码映射表更具体）
+    ("set_brightness",
+     "错误：本机没有支持 WMI 亮度的显示器（台式机常见），亮度未改变。",
+     "unsupported_display"),
+    # _audio set_volume（没有前缀，靠错误码映射表）
+    ("set_volume", "无法设置音量到 30%：缺少 pycaw", "missing_dependency"),
 ])
-def test_success_phrases_stay_ok(result):
+def test_failure_phrases_become_structured_errors(tool_name, text, expect_code):
+    """这些文案以前只能靠关键词命中；现在由工具层翻成 error_code。"""
+    out = _fake_registry(tool_name, text).execute(tool_name, "{}")
+    assert out["status"] == "error", out
+    assert out["error_code"] == expect_code, out
+    assert out["data"] == text, out
+    assert out["truncated"] is False, out
+
+
+def test_confirm_timeout_is_structured_denied():
+    """危险工具确认超时 → 信封 status='denied'、error_code='confirm_timeout'。
+
+    超时必须和「主人点了否」（user_cancelled）分开，否则会对主人谎称
+    「你取消了」。
+    """
+    agent = AgentLoop(client=None, registry=ToolRegistry(),
+                      confirm_tool=lambda n, a: None)
+    env = asyncio.run(agent._confirm_or_skip("lock_screen", "{}"))
+    assert env["status"] == "denied", env
+    assert env["error_code"] == "confirm_timeout", env
+    assert "超时" in env["data"], env
+
+
+def test_user_cancel_is_structured_denied():
+    """主人拒绝 → 信封 status='denied'、error_code='user_cancelled'。"""
+    agent = AgentLoop(client=None, registry=ToolRegistry(),
+                      confirm_tool=lambda n, a: False)
+    env = asyncio.run(agent._confirm_or_skip("lock_screen", "{}"))
+    assert env["status"] == "denied", env
+    assert env["error_code"] == "user_cancelled", env
+
+
+@pytest.mark.parametrize("tool_name,text", [
+    ("open_app", "已启动 QQ"),
+    ("take_screenshot_tool", "截图成功（base64，128400 字符）"),
+    ("feed_self", "吃掉了「面包」，花 3 金币。现在状态：Lv.2"),
+    ("web_search", "找到 5 条结果"),
+    ("cancel_countdown", "已取消倒计时 #3（到点不会再提醒）"),
+    ("set_brightness", "已把亮度调到 80%"),
+])
+def test_success_phrases_stay_ok(tool_name, text):
     """正常成功不能被误判成失败（否则桌宠会无故道歉）。"""
-    assert _tool_result_state(result) == "ok", result
+    out = _fake_registry(tool_name, text).execute(tool_name, "{}")
+    assert out["status"] == "ok", out
+    assert out["error_code"] == "", out
 
 
 def test_error_prefix_alone_is_enough():
     """项目契约：工具失败必须返回带「错误：」前缀的串（docs/tools-reference.md）。
-    判定函数以前从不看这个前缀，等于契约形同虚设。"""
-    assert _tool_result_state("错误：某个从没见过的失败原因") == "fail"
+
+    契约由**工具层**兜底翻译成 error_code='tool_error'，agent 不再自己猜。
+    """
+    out = _fake_registry("open_app", "错误：某个从没见过的失败原因").execute(
+        "open_app", "{}")
+    assert out["status"] == "error", out
+    assert out["error_code"] == "tool_error", out
 
 
 # =============================================================================
@@ -95,16 +154,18 @@ def test_conditional_statement_is_not_a_claim():
 # =============================================================================
 
 def test_filler_word_does_not_disable_verification():
-    assert "唔" not in _HONEST_FAIL_WORDS, (
-        "「唔」是人设口头禅，放进失败词表会让幻觉校验在几乎所有回复上失效")
-    ex = [("open_app", "{}", "错误：未找到应用 QQ")]
+    assert not _HONEST_FAIL_RE.search("唔"), (
+        "「唔」是人设口头禅，放进诚实失败判定会让幻觉校验在几乎所有回复上失效")
+    ex = [("open_app", "{}", ToolResult("error", "错误：未找到应用 QQ",
+                                          error_code="tool_error"))]
     assert _final_contradicts_tools(
         "唔，已经帮主人打开QQ啦~", ex) is True, (
         "带「唔」的报喜也必须被抓出来")
 
 
 def test_honest_failure_still_passes():
-    ex = [("open_app", "{}", "错误：未找到应用 QQ")]
+    ex = [("open_app", "{}", ToolResult("error", "错误：未找到应用 QQ",
+                                          error_code="tool_error"))]
     assert _final_contradicts_tools("抱歉主人，没能打开QQ", ex) is False
 
 
@@ -418,9 +479,9 @@ def test_feed_self_reports_failure_honestly():
     reg = ToolRegistry()
     _pet.register(reg, state=State(), items=Items(), hooks={})
     out = reg.execute("feed_self", json.dumps({"food_name": "火锅"}))
-    assert _tool_result_state(out) == "fail", out
+    assert out["status"] == "error", out
     out2 = reg.execute("feed_self", json.dumps({"food_name": "不存在"}))
-    assert _tool_result_state(out2) == "fail", out2
+    assert out2["status"] == "error", out2
 
 
 def test_run_script_nonzero_exit_is_failure():
@@ -483,7 +544,7 @@ def test_clear_bubble_reports_honestly_without_hook():
     out = reg.execute("clear_bubble", "{}")
     if "已隐藏" in out:
         return  # 运行环境注入了 hook
-    assert _tool_result_state(out) == "fail", out
+    assert out["status"] == "error", out
 
 
 def test_set_wifi_string_false_disables():
@@ -503,7 +564,7 @@ def test_play_animation_reports_when_hook_missing():
     reg = ToolRegistry()
     _pet.register(reg, state=None, items=None, hooks={})
     out = reg.execute("play_animation", json.dumps({"anim_name": "spin"}))
-    assert _tool_result_state(out) == "fail", out
+    assert out["status"] == "error", out
 
 
 def test_countdown_is_honest_about_missing_channel():

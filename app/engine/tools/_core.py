@@ -83,17 +83,410 @@ def is_safe_url(url: str, allowed_hosts: Optional[set[str]] = None) -> bool:
     return True
 
 
+# ===========================================================================
+# Stage 3 —— 工具可信：结构化信封 / 统一裁剪 / 执行期白名单 / 能力分组
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 3.2 结构化结果信封
+# ---------------------------------------------------------------------------
+
+class ToolResult(dict):
+    """工具结果信封（Stage 3.2）。
+
+    字段：status / data / truncated / error_code
+
+    - status："ok" | "error" | "denied"
+      （denied = 没过闸：白名单 / 等级 / 人工确认；error = 跑了但失败）
+    - data：给模型看的文本（失败时也保留原始文案，便于模型自己判断）
+    - truncated：数据是否被裁剪过（统一裁剪或整轮预算裁剪）
+    - error_code：稳定的机器可读错误码（not_found / timeout / denied /
+      tool_error / level_locked / user_cancelled …），**不是中文短语** ——
+      调用方按码分支，不猜关键词。
+
+    兼容旧调用方：app/agents/base.py 与部分老测试还按**字符串**用它
+    （result[:4000] / "错误" in result / result == "ok"）。
+    这里让 dict 子类保留字符串语义，边界外的文件不用改。
+    """
+
+    __slots__ = ()
+
+    def __init__(self, status: str = "ok", data: str = "",
+                 truncated: bool = False, error_code: str = "") -> None:
+        super().__init__(status=status or "ok", data=data or "",
+                         truncated=bool(truncated), error_code=error_code or "")
+
+    # -- 便捷访问 ----------------------------------------------------------
+    @property
+    def status(self) -> str:
+        return self["status"]
+
+    @property
+    def data(self) -> str:
+        return self["data"]
+
+    @property
+    def truncated(self) -> bool:
+        return self["truncated"]
+
+    @property
+    def error_code(self) -> str:
+        return self["error_code"]
+
+    @property
+    def ok(self) -> bool:
+        return self["status"] == "ok"
+
+    # -- 旧字符串语义兼容 --------------------------------------------------
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return (self.get("data") or "")[key]
+        return super().__getitem__(key)
+
+    def __contains__(self, key) -> bool:
+        if super().__contains__(key):
+            return True
+        if isinstance(key, str):
+            return key in (self.get("data") or "")
+        return False
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, str):
+            return (self.get("data") or "") == other
+        return super().__eq__(other)
+
+    def __ne__(self, other) -> bool:
+        return not self.__eq__(other)
+
+    def __getattr__(self, item):
+        # 其余字符串方法（lower / strip / split …）一律转给 data
+        return getattr(self.get("data") or "", item)
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+#: 工具失败契约（docs/tools-reference.md）：失败必须带这些前缀
+_ERROR_PREFIXES = ("错误", "失败", "未安装")
+
+#: 工具 → 错误码的**声明式**映射表（Stage 3.2）
+#:
+#: 工具层知道每个工具「失败长什么样」，所以在这里把它翻译成稳定的
+#: error_code；agent 层不再拿 26 个中文关键词去猜成败。
+#:
+#: 键 = 工具名；值 = ((错误码, 命中片段), …) —— 命中任一片段即判失败。
+#: 没登记的工具走「错误：/失败：」前缀契约（见 _ERROR_PREFIXES）。
+_TOOL_ERROR_SPECS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "feed_self": (
+        ("insufficient_funds", ("钱不够", "金币不够")),
+        ("unknown_item", ("没有叫",)),
+    ),
+    "play_animation": (
+        ("unknown_animation", ("没有叫",)),
+    ),
+    "convert_units": (
+        ("unsupported_conversion", ("不支持的换算",)),
+    ),
+    "set_volume": (
+        ("missing_dependency", ("缺少 pycaw", "无法设置音量")),
+    ),
+    "set_brightness": (
+        ("unsupported_display", ("没有支持 WMI 亮度",)),
+    ),
+    "open_app": (
+        ("not_installed", ("未找到与", "未找到应用", "没装这个")),
+    ),
+    "recall_memory": (
+        ("no_match", ("没有找到匹配的记忆",)),
+    ),
+    "memory_search": (
+        ("no_match", ("没有找到匹配的记忆",)),
+    ),
+    "ocr_image": (
+        ("missing_backend", ("没装", "无法识别这张图")),
+    ),
+    "web_search": (
+        ("search_failed", ("搜索失败", "网络错误", "连接失败")),
+    ),
+}
+
+
+def classify_legacy_result(text: str) -> tuple[str, str]:
+    """裸字符串结果 → (status, error_code)（**旧路径兜底**）。
+
+    只服务「结果不是信封」的旧调用方（第三方后端 / 测试里的假 registry
+    直接返回字符串）。判据 = 前缀契约 + 上面那张错误码映射表的**全部**
+    片段（因为没有工具名，只能取并集）。
+
+    新路径（ToolResult 信封）一律读 status / error_code，不走这里。
+    """
+    raw = text or ""
+    if not raw.strip():
+        return "ok", ""
+    if raw.lstrip().startswith(_ERROR_PREFIXES):
+        return "error", "tool_error"
+    for specs in _TOOL_ERROR_SPECS.values():
+        for _code, patterns in specs:
+            for p in patterns:
+                if p in raw:
+                    return "error", "tool_error"
+    return "ok", ""
+
+def classify_tool_result(name: str, text: str) -> tuple[str, str]:
+    """工具返回文本 → (status, error_code)。
+
+    status："ok" | "error"；error_code：""（成功）或稳定错误码。
+    """
+    raw = text or ""
+    if not raw.strip():
+        return "ok", ""
+    for code, patterns in _TOOL_ERROR_SPECS.get(name or "", ()):
+        for p in patterns:
+            if p in raw:
+                return "error", code
+    if raw.lstrip().startswith(_ERROR_PREFIXES):
+        return "error", "tool_error"
+    return "ok", ""
+
+
+# ---------------------------------------------------------------------------
+# 3.3 统一裁剪 + 工具阶段预算
+# ---------------------------------------------------------------------------
+
+#: 统一裁剪预算（写死，对齐 qq-bridge 挂载的 dsh-compaction-tool-result-pruner：
+#: thresholdChars 50000 / headChars 45000 / tailChars 2000）
+TOOL_RESULT_MAX_CHARS = 50000
+TOOL_RESULT_HEAD_CHARS = 45000
+TOOL_RESULT_TAIL_CHARS = 2000
+
+#: 单个工具的墙钟超时（与 MCP 桥接现状一致：60s）
+TOOL_CALL_TIMEOUT_SECONDS = 60.0
+#: 整轮工具阶段的墙钟总预算
+TOOL_PHASE_BUDGET_SECONDS = 120.0
+
+
+def _omission_marker(omitted: int) -> str:
+    """中间省略标记（明确写出省略了多少字符）。"""
+    return ("\n\n…【中间省略 " + str(omitted) + " 字符：工具结果超出 "
+            + str(TOOL_RESULT_MAX_CHARS) + " 字符上限，已裁剪】…\n\n")
+
+
+def trim_tool_result(text: str) -> tuple[str, bool]:
+    """统一后置裁剪（Stage 3.3）：超阈值时保头保尾，中间插省略标记。
+
+    返回 (裁剪后的文本, 是否裁剪过)。
+    """
+    t = text or ""
+    if len(t) <= TOOL_RESULT_MAX_CHARS:
+        return t, False
+    omitted = len(t) - TOOL_RESULT_HEAD_CHARS - TOOL_RESULT_TAIL_CHARS
+    return (t[:TOOL_RESULT_HEAD_CHARS] + _omission_marker(omitted)
+            + t[-TOOL_RESULT_TAIL_CHARS:]), True
+
+
+def fit_tool_payload(contents: list[str]) -> tuple[list[str], bool]:
+    """整轮工具结果的**注入预算**（Stage 3.3）。
+
+    一轮里所有工具结果的总量超过 TOOL_RESULT_MAX_CHARS 时：保头
+    （前 45000 字符）、保尾（后 2000 字符），中间整段省略并留明确标记。
+
+    返回 (裁剪后的内容列表, 是否裁剪过)。
+    """
+    items = list(contents)
+    total = sum(len(c or "") for c in items)
+    if total <= TOOL_RESULT_MAX_CHARS:
+        return items, False
+
+    out: list[str] = ["" for _ in items]
+    # 头：从前往后吃满 head
+    used = 0
+    head_end = len(items)
+    for i, c in enumerate(items):
+        c = c or ""
+        room = TOOL_RESULT_HEAD_CHARS - used
+        if room <= 0:
+            head_end = i
+            break
+        if len(c) <= room:
+            out[i] = c
+            used += len(c)
+        else:
+            out[i] = c[:room]
+            used += room
+            head_end = i + 1
+            break
+    # 尾：从后往前吃满 tail（不越过头）
+    used = 0
+    tail_start = len(items)
+    for i in range(len(items) - 1, head_end - 1, -1):
+        c = items[i] or ""
+        room = TOOL_RESULT_TAIL_CHARS - used
+        if room <= 0:
+            tail_start = i + 1
+            break
+        if len(c) <= room:
+            out[i] = out[i] + c
+            used += len(c)
+        else:
+            out[i] = out[i] + c[-room:]
+            used += room
+            tail_start = i
+            break
+    # 中间：整段省略（第一条放完整标记，其余放省略号）
+    omitted = total - TOOL_RESULT_HEAD_CHARS - TOOL_RESULT_TAIL_CHARS
+    if head_end < tail_start:
+        out[head_end] = _omission_marker(omitted) + out[head_end]
+        for i in range(head_end + 1, tail_start):
+            out[i] = "…"
+    return out, True
+
+
+# ---------------------------------------------------------------------------
+# 3.1 执行期白名单
+# ---------------------------------------------------------------------------
+
+#: 默认前缀桶：项目自带的 MCP 命名空间（见 app/mcp/protocol.py 的 bridge_to）
+DEFAULT_ALLOWLIST_PREFIXES = ("mcp_aw_", "mcp_fs_")
+
+
+@dataclass(frozen=True)
+class AllowlistPolicy:
+    """白名单策略（两级：精确名 + 前缀）。"""
+
+    exact: frozenset[str]
+    prefixes: tuple[str, ...]
+    from_yaml: bool
+
+
+_ALLOWLIST_POLICY: Optional[AllowlistPolicy] = None
+_ALLOWLIST_LOADED = False
+
+
+def _read_allowlist_yaml() -> Optional[dict]:
+    """读 companion_config.yaml 的 tool_allowlist 段（只读，不改）。
+
+    走 yaml 原文：companion_config 的 dataclass 会丢掉没登记的字段，
+    所以这里直接读 yaml（默认表 + 用户覆盖表合并，语义与它一致）。
+    """
+    try:
+        from app.core import companion_config as cc
+    except Exception as e:  # noqa: BLE001
+        log.debug("读工具白名单失败（companion_config 不可用）：%s", e)
+        return None
+    try:
+        base = cc._read_yaml(cc._default_yaml_path()) or {}
+        user = cc._read_yaml(cc._user_yaml_path()) or {}
+        merged = cc._merge(base, user)
+    except Exception as e:  # noqa: BLE001
+        log.warning("读工具白名单失败：%s", e)
+        return None
+    block = merged.get("tool_allowlist")
+    if not isinstance(block, dict):
+        return None
+    return block
+
+
+def load_tool_allowlist(*, force: bool = False) -> Optional[AllowlistPolicy]:
+    """加载白名单策略（进程内缓存）。返回 None = yaml 里没有该段。
+
+    yaml 段结构::
+
+        tool_allowlist:
+          exact: [open_app, ...]        # 精确允许
+          prefixes: [mcp_aw_, mcp_fs_]  # 前缀允许
+    """
+    global _ALLOWLIST_POLICY, _ALLOWLIST_LOADED
+    if _ALLOWLIST_LOADED and not force:
+        return _ALLOWLIST_POLICY
+    _ALLOWLIST_LOADED = True
+    block = _read_allowlist_yaml()
+    if block is None:
+        _ALLOWLIST_POLICY = None
+        return None
+    exact = frozenset(str(x) for x in (block.get("exact") or [])
+                      if isinstance(x, str) and x)
+    prefixes = tuple(str(x) for x in (block.get("prefixes") or [])
+                     if isinstance(x, str) and x)
+    _ALLOWLIST_POLICY = AllowlistPolicy(exact=exact, prefixes=prefixes,
+                                        from_yaml=True)
+    log.info("工具白名单已加载：精确 %d 个，前缀 %s",
+             len(exact), list(prefixes))
+    return _ALLOWLIST_POLICY
+
+
+def reload_tool_allowlist() -> Optional[AllowlistPolicy]:
+    """强制重读 yaml（改完配置 / 单测用）。"""
+    global _ALLOWLIST_LOADED
+    _ALLOWLIST_LOADED = False
+    return load_tool_allowlist(force=True)
+
+
+# ---------------------------------------------------------------------------
+# 3.4 工具分组（按 companion_config.yaml 的 tool_unlock 解锁层级对齐）
+# ---------------------------------------------------------------------------
+
+#: 解锁层级 → 能力分组。同一层解锁的工具属于同一类能力。
+TOOL_GROUPS: dict[int, dict[str, str]] = {
+    1: {"name": "基础能力",
+        "desc": "时间 / 天气 / 计算 / 桌宠状态 / 读文件 / 打开应用与网页"},
+    2: {"name": "联网检索", "desc": "联网搜索、抓网页正文"},
+    3: {"name": "系统控制", "desc": "音量 / 亮度 / 剪贴板 / 提醒查询"},
+    4: {"name": "文件与提醒编辑", "desc": "改文件、设 / 删提醒"},
+    5: {"name": "记忆与子任务", "desc": "记事实、删记忆、派子任务"},
+    6: {"name": "计时提醒", "desc": "倒计时、取消倒计时"},
+    7: {"name": "多媒体生成", "desc": "生成图片 / 音频"},
+    8: {"name": "高级生成与外部扩展",
+        "desc": "生成视频、MCP 外部工具（活动记录 / 文件沙箱）"},
+    9: {"name": "通知与脚本", "desc": "发通知、跑脚本"},
+    10: {"name": "终极能力", "desc": "杀进程 / 锁屏 / Wi-Fi / 蓝牙"},
+}
+
+#: MCP 外部工具单独一组（它们在 yaml 里按前缀登记）
+MCP_GROUP = "外部扩展（MCP）"
+#: 没在 tool_unlock 里配置的工具（默认 SAFE）
+OTHER_GROUP = "其他工具"
+
+#: 分组名 → 能力说明（提示词按组展示时用）
+TOOL_GROUP_DESCS: dict[str, str] = {
+    **{g["name"]: g["desc"] for g in TOOL_GROUPS.values()},
+    MCP_GROUP: "MCP 外部扩展（电脑活动记录 / 文件沙箱）",
+    OTHER_GROUP: "未分组的小工具",
+}
+
+#: 分组在提示词里的固定顺序（按解锁层级）
+_GROUP_ORDER: dict[str, int] = {g["name"]: lvl
+                              for lvl, g in TOOL_GROUPS.items()}
+_GROUP_ORDER[MCP_GROUP] = 99
+_GROUP_ORDER[OTHER_GROUP] = 100
+
+
+def tool_group_name(name: str) -> str:
+    """工具名 → 分组名（按解锁层级对齐）。"""
+    from . import _unlock
+    if _unlock.is_mcp_tool(name):
+        return MCP_GROUP
+    lvl = _unlock.level_for_tool(name)
+    if lvl is None:
+        return OTHER_GROUP
+    grp = TOOL_GROUPS.get(lvl)
+    return grp["name"] if grp else f"Lv.{lvl} 工具"
+
+
 @dataclass
 class Tool:
     name: str
     description: str
     parameters: dict            # JSON Schema
     fn: Callable[..., str]
+    group: str = ""             # Stage 3.4：能力分组（按 tool_unlock 解锁层级对齐）
 
 
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        # Stage 3.1：执行期白名单的基线快照（生产注册表启动时 seal 一次）
+        self._baseline: Optional[frozenset[str]] = None
+        self._sealed: bool = False
 
     def register(self, tool: Union[Tool, "_DecoratedTool", Callable]) -> None:
         """注册一个 tool,同时支持:
@@ -141,6 +534,92 @@ class ToolRegistry:
             fn=decorated.fn,
         )
 
+    # -- Stage 3.1：执行期白名单 --------------------------------------------
+    def seal_baseline(self) -> int:
+        """把当前注册表**冻结为生产基线**（Stage 3.1）。
+
+        启动时（brain_controller 建完工具、桥接完 MCP 后）调用一次：
+        从这一刻起，白名单按 companion_config.yaml 的 tool_allowlist 段
+        严格执行 —— 段里没有的工具**执行期一律拒绝**（不是只弹窗确认）。
+
+        没 seal 过的注册表（单测 / 子 agent 的临时注册表）走「快照兜底」：
+        以第一次检查时的注册表内容为准，不受 yaml 约束 —— 否则单测里
+        随手注册的假工具会被全部拒掉。
+
+        返回基线里的工具数。
+        """
+        self._baseline = frozenset(self._tools)
+        self._sealed = True
+        log.info("工具白名单基线已冻结：%d 个存量工具", len(self._baseline))
+        return len(self._baseline)
+
+    def _allowlist_allows(self, name: str, *,
+                          capture: bool = True) -> tuple[bool, str]:
+        """白名单检查 → (是否放行, 拒绝时的 error_code)。
+
+        三种情形：
+          1. 生产注册表（seal 过）+ yaml 有 tool_allowlist 段 → yaml 说了算
+             （yaml 里没有的工具一律拒绝）；
+          2. 生产注册表 + yaml 没该段 → 基线快照说了算（= 当前注册表全量）
+             —— 这就是「初始白名单 = 当前注册表快照」；
+          3. 未 seal 的注册表（单测 / 临时注册表）→ 基线快照兜底。
+
+        capture=False：只查不放行（列工具清单时用，不落盘快照）。
+        """
+        policy = load_tool_allowlist()
+        exact: frozenset[str] = frozenset()
+        prefixes: tuple[str, ...] = DEFAULT_ALLOWLIST_PREFIXES
+        if policy is not None and policy.from_yaml:
+            exact = policy.exact
+            prefixes = policy.prefixes or prefixes
+        if self._sealed:
+            if not (policy is not None and policy.from_yaml):
+                exact = (self._baseline if self._baseline is not None
+                         else frozenset(self._tools))
+        else:
+            base = self._baseline
+            if base is None:
+                base = frozenset(self._tools)
+                if capture:
+                    # 第一次执行 = 基线时刻：此后新增的工具默认拒绝
+                    self._baseline = base
+            exact = exact | base
+        if name in exact:
+            return True, ""
+        for p in prefixes:
+            if p and name.startswith(p):
+                return True, ""
+        return False, "not_allowed"
+
+    def allowed_names(self) -> list[str]:
+        """当前白名单放行的工具名（调试 / 提示词用）。"""
+        out = []
+        for n in self._tools:
+            ok, _ = self._allowlist_allows(n)
+            if ok:
+                out.append(n)
+        return out
+
+    # -- Stage 3.4：工具分组 ----------------------------------------------
+    def ensure_groups(self) -> None:
+        """给每个 Tool 填 group 字段（按解锁层级对齐）。"""
+        for t in self._tools.values():
+            if not t.group:
+                t.group = tool_group_name(t.name)
+
+    def grouped_names(self, level: int | None = None) -> dict[str, list[str]]:
+        """按能力分组返回工具名（提示词按组展示，不再平铺 68 个名字）。
+
+        分组见 TOOL_GROUPS（与 companion_config.yaml 的 tool_unlock 层级对齐）。
+        """
+        self.ensure_groups()
+        groups: dict[str, list[str]] = {}
+        for t in self.tools_for_level(level):
+            groups.setdefault(t.group, []).append(t.name)
+        # 固定顺序（按解锁层级）—— 提示词要字节稳定
+        return {name: groups[name]
+                for name in sorted(groups, key=lambda n: _GROUP_ORDER.get(n, 50))}
+
     def names(self, level: int | None = None) -> list[str]:
         """返回工具名列表。level=None 时返全部;否则按 yaml tool_unlock 过滤。
 
@@ -154,11 +633,18 @@ class ToolRegistry:
         return [n for n in self._tools if n in unlocked]
 
     def tools_for_level(self, level: int | None = None) -> list["Tool"]:
-        """返 Tool 对象列表(供 LLM tool_spec 拼接),过滤逻辑同 names(level)。"""
+        """返 Tool 对象列表(供 LLM tool_spec 拼接),过滤逻辑同 names(level)。
+
+        Stage 3.1：白名单外的工具**不下发**给模型（执行期还会再拦一次，
+        模型硬点名也一样被拒）。
+        """
         if level is None:
-            return list(self._tools.values())
-        names_set = set(self.names(level))
-        return [t for t in self._tools.values() if t.name in names_set]
+            tools = list(self._tools.values())
+        else:
+            names_set = set(self.names(level))
+            tools = [t for t in self._tools.values() if t.name in names_set]
+        return [t for t in tools
+                if self._allowlist_allows(t.name, capture=False)[0]]
 
     def to_openai_for_level(self, level: int) -> list[dict]:
         """按等级过滤的 OpenAI tools 格式(供 LLM tool 字段用)。"""
@@ -202,28 +688,50 @@ class ToolRegistry:
             parts.append(f"{key}（必填）" if key in required else f"{key}（可选）")
         return "、".join(parts)
 
-    def execute(self, name: str, arguments: str | dict) -> str:
-        """执行一个工具调用，永远返回字符串（异常也转成错误文本给模型）。"""
+    def execute(self, name: str, arguments: str | dict) -> ToolResult:
+        """执行一个工具调用，返回**结构化结果信封**（Stage 3.2）。
+
+        返回：{"status": "ok"|"error"|"denied", "data": str,
+                "truncated": bool, "error_code": str}
+
+        三道闸的顺序（任一不过都**不执行**工具）：
+          1. 白名单闸（Stage 3.1）—— 未登记的工具一律拒绝；
+          2. 等级闸（tool_unlock）—— 等级不够就拒绝；
+          3. 危险工具人工确认在 agent 层（app/brain/agent.py）。
+        """
         tool = self._tools.get(name)
         if tool is None:
-            return f"错误：未知工具 {name}"
+            return ToolResult("error", f"错误：未知工具 {name}",
+                              error_code="not_found")
+        # 第三道闸：执行期白名单（等级闸 / 危险工具确认之外的一道）
+        allowed, why = self._allowlist_allows(name)
+        if not allowed:
+            log.warning("工具 %s 不在白名单内，执行期拒绝", name)
+            return ToolResult("denied",
+                              f"错误：工具 {name} 未登记到白名单，已拒绝执行。",
+                              error_code=why)
         # 解锁闸:ToolRegistry 自带默认 gate,避免 LangChain 后端漏拦
         from . import _unlock
         if _unlock.is_loaded():
             current_lvl = _get_current_tool_level()
             if not _unlock.is_unlocked(name, current_lvl):
                 req = _unlock.level_for_tool(name) or 1
-                return (f"错误：{name} 需要升级到 Lv.{req} 才能使用。"
-                        f"当前等级 Lv.{current_lvl}。请告诉主人升级到对应等级后再试，"
-                        "或在聊天窗口顶部点「工具解锁」查看进度。")
+                return ToolResult("denied",
+                                  (f"错误：{name} 需要升级到 Lv.{req} 才能使用。"
+                                   f"当前等级 Lv.{current_lvl}。请告诉主人升级到对应等级后再试，"
+                                   "或在聊天窗口顶部点「工具解锁」查看进度。"),
+                                  error_code="level_locked")
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
         except json.JSONDecodeError as e:
-            return f"错误：参数不是合法 JSON（{e}）"
+            return ToolResult("error", f"错误：参数不是合法 JSON（{e}）",
+                              error_code="bad_args")
         if not isinstance(args, dict):
-            return f"错误：参数必须是 JSON 对象，收到 {type(args).__name__}"
+            return ToolResult("error",
+                              f"错误：参数必须是 JSON 对象，收到 {type(args).__name__}",
+                              error_code="bad_args")
         try:
-            return str(tool.fn(**args))
+            raw = tool.fn(**args)
         except TypeError as e:
             # 不把 TypeError 原文回给模型：里面带 register.<locals> 这类内部信息，
             # 对模型毫无意义。改成给出「本工具接受哪些参数」，模型才知道怎么改。
@@ -233,13 +741,29 @@ class ToolRegistry:
             if hint:
                 msg += f"它接受的参数：{hint}。"
             msg += "请按上述参数名重新调用。"
-            return msg
+            return ToolResult("error", msg, error_code="bad_args")
         except Exception as e:  # noqa: BLE001
             log.exception("工具 %s 执行失败", name)
-            return f"错误：{e}"
+            return ToolResult("error", f"错误：{e}", error_code="tool_error")
+        text = raw if isinstance(raw, str) else str(raw)
+        # 工具层判定成败 → 稳定错误码（agent 不再猜关键词）
+        status, code = classify_tool_result(name, text)
+        # 统一后置裁剪（Stage 3.3）：超预算保头保尾 + 省略标记
+        data, truncated = trim_tool_result(text)
+        return ToolResult(status, data, truncated, code)
 
 
-__all__ = ["Tool", "ToolRegistry", "is_under_any"]
+
+__all__ = [
+    "Tool", "ToolRegistry", "ToolResult", "is_under_any",
+    "AllowlistPolicy", "load_tool_allowlist", "reload_tool_allowlist",
+    "classify_tool_result", "classify_legacy_result",
+    "trim_tool_result", "fit_tool_payload",
+    "tool_group_name", "TOOL_GROUPS", "MCP_GROUP", "OTHER_GROUP",
+    "DEFAULT_ALLOWLIST_PREFIXES",
+    "TOOL_RESULT_MAX_CHARS", "TOOL_RESULT_HEAD_CHARS", "TOOL_RESULT_TAIL_CHARS",
+    "TOOL_CALL_TIMEOUT_SECONDS", "TOOL_PHASE_BUDGET_SECONDS",
+]
 
 
 # ---- 工具解锁:当前等级读取器 ----

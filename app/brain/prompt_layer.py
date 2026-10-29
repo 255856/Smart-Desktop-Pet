@@ -360,13 +360,51 @@ def get_memory_block(query: str = "") -> str:
         return ""
 
 
-def build_tool_list(tool_names: str) -> str:
-    """【可用工具列表】段：列出真正可调用的工具名 + 指向 SKILL 文档。"""
-    return (
-        "【可用工具列表】\n"
-        f"你**真正可调用**的工具名（共 {len((tool_names or '').split('、'))} 个）：{tool_names}。\n"
-        "**何时调哪个工具**的规则见上面的 SKILL 文档。"
-    )
+def _group_descriptions() -> dict[str, str]:
+    """分组名 → 能力说明（从工具层拿，提示词层不重复维护）。"""
+    try:
+        from app.engine.tools._core import TOOL_GROUP_DESCS
+        return dict(TOOL_GROUP_DESCS)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def build_tool_list(tool_groups) -> str:
+    """【可用工具列表】段：按能力**分组**列出可调用的工具类别。
+
+    Stage 3.4：原来这里平铺 68 个工具名 —— 工具名已经在上面的 JSON schema
+    里（每个工具都带 name + description），平铺纯属冗余，还把 system prompt
+    撑大。现在只列**分组**，并补一条「按场景点名工具」的协议段
+    （对齐 qq-bridge 的三层分组：命名空间前缀 + 提示词协议段 + 白名单分桶）。
+
+    tool_groups: {分组名: [工具名, ...]}（ToolRegistry.grouped_names()）。
+    """
+    if isinstance(tool_groups, str):
+        # 兼容旧调用方：传进来的是一串平铺的工具名（生产路径不走这里）。
+        names = [n for n in tool_groups.replace("、", " ")
+                 .replace(",", " ").replace("，", " ").split() if n]
+        return (
+            "【可用工具列表】\n"
+            f"你**真正可调用**的工具名（共 {len(names)} 个）：{tool_groups}。\n"
+            "**何时调哪个工具**的规则见上面的 SKILL 文档。"
+        )
+    groups = {}
+    if isinstance(tool_groups, dict):
+        groups = {str(k): list(v or []) for k, v in tool_groups.items()}
+    descs = _group_descriptions()
+    total = sum(len(v) for v in groups.values())
+    lines = ["【可用工具列表】",
+             f"你**真正可调用**的工具共 {total} 个，按能力分成 {len(groups)} 组："]
+    for name, tools in groups.items():
+        desc = descs.get(name, "")
+        suffix = f"：{desc}" if desc else ""
+        lines.append(f"- {name}（{len(tools)} 个）{suffix}")
+    lines.append(
+        "**具体工具名**在上面的 JSON schema 里（每个工具都带 name + description）；"
+        "**先按主人的场景判断该用哪一组，再从那一组里点名调用**，"
+        "不要凭印象猜工具名，也不要把工具名写进给主人的回复里。")
+    lines.append("**何时调哪个工具**的规则见上面的 SKILL 文档。")
+    return "\n".join(lines)
 
 
 def build_session_block(*, skill=None, memory=None, tool_list=None) -> str:
