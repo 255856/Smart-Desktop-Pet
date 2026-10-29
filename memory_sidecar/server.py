@@ -111,6 +111,9 @@ def make_handler(store):
                 except Exception as e:
                     self._json({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 500)
                 return
+            if path == "/graph":
+                self._handle_graph()
+                return
             if path == "/":
                 self._json({"ok": True, "service": "desktop-pet-memory-sidecar", "endpoints": _endpoints()})
                 return
@@ -181,6 +184,29 @@ def make_handler(store):
                 "count": len(cards),
                 "total": total,
             })
+
+        # -- /graph：语义图（节点 = 记忆卡，边 = 余弦近邻） ----------------
+        def _handle_graph(self):
+            store = self.store_
+            q = self._query()
+            try:
+                limit = int(q.get("limit") or 300)
+            except Exception:
+                limit = 300
+            try:
+                top_k = int(q.get("top_k") or q.get("topK") or 4)
+            except Exception:
+                top_k = 4
+            try:
+                payload = store.graph(limit=limit, top_k=top_k)
+            except Exception as e:
+                self._json({
+                    "ok": False, "nodes": [], "edges": [],
+                    "error": "%s: %s" % (type(e).__name__, e),
+                })
+                return
+            # 没有向量时 store.graph 会给 ok=False —— 那是正常降级，不是错误
+            self._json(payload)
 
         # -- /search：绝不 500 ------------------------------------------
         def _handle_search(self, payload):

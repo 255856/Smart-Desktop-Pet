@@ -161,6 +161,14 @@ RERANK_MODEL = os.environ.get(RERANK_MODEL_ENV) or ""
 LIST_DEFAULT_LIMIT = 50
 LIST_MAX_LIMIT = 500
 
+# /graph 的默认规模：节点上限、每个节点的近邻数、相似度下限
+GRAPH_DEFAULT_LIMIT = 300
+GRAPH_MAX_LIMIT = 800
+GRAPH_DEFAULT_TOP_K = 4
+GRAPH_MIN_SIMILARITY = 0.15
+#: 相对阈值：只连「跟自己最像的」达到这个比例的近邻
+GRAPH_RELATIVE_CUT = 0.72
+
 # 各 kind 的半衰期（天）：越短的记得越浅
 HALF_LIFE_DAYS = {
     "thought": 2,       # 心里话
@@ -479,6 +487,38 @@ def _env_or(value, name, default):
     return float(value) if value is not None else _env_float(name, default)
 
 
+def _pca3(matrix):
+    """矩阵（n × d）的主成分投影到 3 维 → (n × 3) ndarray。
+
+    去中心后做 SVD，取前三个右奇异向量。维数不够 3 时补零列，
+    免得只有两条记忆时画图直接崩。
+
+    三个轴各自按标准差开方缩放：PCA 的第一主成分常常吃掉绝大部分方差，
+    不均衡的话整张图会被压成一条线，看不出簇。
+    """
+    import numpy as np
+
+    mat = np.asarray(matrix, dtype="float64")
+    if mat.ndim != 2 or mat.shape[0] < 2:
+        return np.zeros((max(1, mat.shape[0] if mat.ndim == 2 else 0), 3))
+    centered = mat - mat.mean(axis=0, keepdims=True)
+    try:
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        vt = np.eye(centered.shape[1])[:3]
+    comps = vt[:3]
+    if comps.shape[0] < 3:
+        pad = np.zeros((3 - comps.shape[0], comps.shape[1]))
+        comps = np.vstack([comps, pad])
+    out = centered @ comps.T
+    spread = out.std(axis=0)
+    for axis in range(3):
+        if spread[axis] > 1e-9:
+            out[:, axis] = out[:, axis] / (spread[axis] ** 0.5)
+    scale = float(np.max(np.abs(out))) or 1.0
+    return out / scale * 8.5     # 半径 ~8.5，跟面板里球壳的尺寸一致
+
+
 # ── 存储 ──────────────────────────────────────────────────────────────────
 class MemoryStore:
     """记忆卡存储：JSON 真值 + Chroma / BM25 双路索引。
@@ -746,6 +786,118 @@ class MemoryStore:
             n = LIST_DEFAULT_LIMIT  # 传 0 / 负数当「没传」，别返回空
         n = min(n, LIST_MAX_LIMIT)
         return [self._public_card(c) for c in self._listing(kind, include_superseded)[:n]]
+
+    # -- 语义图 ------------------------------------------------------------
+    def graph(self, limit: int = GRAPH_DEFAULT_LIMIT, top_k: int = GRAPH_DEFAULT_TOP_K,
+              min_similarity: float = GRAPH_MIN_SIMILARITY) -> dict:
+        """把记忆卡投影成一张语义图：节点 = 卡，边 = 语义上挨着的两张卡。
+
+        位置取自 Chroma 里已存的向量（归一化的 bge-small-zh，512 维），
+        用 PCA 降到 3 维 —— 意思相近的记忆在图上自然挨着，边也就有意义了。
+        边取每个节点的余弦近邻（向量已归一化，点积即余弦）。
+
+        只读派生索引，不碰模型：向量已经在 Chroma 里，缺模型照样能出图。
+        没有向量 / 少于两张卡就返回 ok=False，让调用方退回自己的布局。
+        """
+        try:
+            n = int(limit if limit is not None else GRAPH_DEFAULT_LIMIT)
+        except Exception:
+            n = GRAPH_DEFAULT_LIMIT
+        n = max(2, min(n, GRAPH_MAX_LIMIT))
+        try:
+            k = max(1, int(top_k or GRAPH_DEFAULT_TOP_K))
+        except Exception:
+            k = GRAPH_DEFAULT_TOP_K
+        try:
+            floor = float(min_similarity)
+        except Exception:
+            floor = GRAPH_MIN_SIMILARITY
+
+        cards = self._listing(include_superseded=False)[:n]
+        ids = [str(c["id"]) for c in cards]
+        if len(ids) < 2:
+            return {"ok": False, "reason": "记忆卡不足两张，画不出语义图",
+                    "nodes": [], "edges": []}
+
+        vecs = self._stored_vectors(ids)
+        if vecs is None or len(vecs) < 2:
+            return {"ok": False, "reason": "向量索引里没有可用的向量",
+                    "nodes": [], "edges": []}
+        vec_ids, matrix = vecs
+        keep = {cid: i for i, cid in enumerate(vec_ids)}
+        picked = [(cid, c) for cid, c in zip(ids, cards) if cid in keep]
+        if len(picked) < 2:
+            return {"ok": False, "reason": "记忆卡和向量对不上",
+                    "nodes": [], "edges": []}
+
+        order = [keep[cid] for cid, _ in picked]
+        mat = matrix[order]
+        positions = _pca3(mat)
+        node_ids = [cid for cid, _ in picked]
+
+        edges = []
+        sims = mat @ mat.T          # 归一化向量 → 点积就是余弦
+        for i in range(len(node_ids)):
+            row = sims[i]
+            best = sorted(
+                (j for j in range(len(node_ids)) if j != i),
+                key=lambda j: -row[j],
+            )[:k]
+            if not best:
+                continue
+            # 相对阈值：只连「跟自己最像的那几个」，而不是一刀切的绝对线。
+            # 绝对线单独用会把弱相似的整簇边砍光，图上只剩孤立的点。
+            cut = max(floor, float(row[best[0]]) * GRAPH_RELATIVE_CUT)
+            for j in best:
+                if row[j] < cut:
+                    continue
+                if i < j:                      # 无向边只留一份
+                    edges.append({
+                        "a": node_ids[i], "b": node_ids[j],
+                        "w": round(float(row[j]), 4),
+                    })
+
+        return {
+            "ok": True,
+            "projection": "pca",
+            "dim": int(mat.shape[1]),
+            "nodes": [
+                {"id": cid, "x": round(float(positions[i][0]), 5),
+                 "y": round(float(positions[i][1]), 5),
+                 "z": round(float(positions[i][2]), 5)}
+                for i, (cid, _) in enumerate(picked)
+            ],
+            "edges": edges,
+            "total": len(cards),
+        }
+
+    def _stored_vectors(self, ids):
+        """从 Chroma 取这些 id 的已存向量 → (ids, ndarray) 或 None。
+
+        向量是派生索引里的东西，读不到就算了 —— 不为了画图去加载模型。
+        """
+        try:
+            import numpy as np
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            with self._index_lock:
+                col = self._ensure_chroma()
+                got = col.get(ids=list(ids), include=["embeddings"])
+        except Exception as e:  # noqa: BLE001
+            self._chroma_error = str(e)
+            return None
+        raw_ids = list(got.get("ids") or [])
+        raw = got.get("embeddings")
+        if raw is None or len(raw_ids) == 0:
+            return None
+        try:
+            mat = np.asarray(raw, dtype="float32")
+        except Exception:  # noqa: BLE001
+            return None
+        if mat.ndim != 2 or mat.shape[0] != len(raw_ids):
+            return None
+        return raw_ids, mat
 
     # -- 挂起队列（写卡记账，检索 / 预热时补索引） ------------------------
     def _mark_pending(self, ids, op):
