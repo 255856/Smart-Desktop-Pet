@@ -132,7 +132,7 @@ class ProactiveBrain(QObject):
         llm_cfg,
         persona: str,
         state,                    # PetState
-        memory,                   # MemoryStore
+        memory,                   # 长期记忆读取口（sidecar 客户端：recent / recent_shared）
         char_name: str,
         min_minutes: int = 25,
         max_minutes: int = 45,
@@ -387,12 +387,15 @@ class ProactiveBrain(QObject):
         from app.engine.state import is_night
         now = datetime.datetime.now()
         wd = "一二三四五六日"[now.weekday()]
-        mem = self.memory.recent(10)
+        # 记忆从 sidecar 客户端读（读不到就是空列表，绝不影响主动发言）
+        try:
+            mem = self.memory.recent(10) if self.memory is not None else []
+        except Exception:  # noqa: BLE001
+            mem = []
         # v56: 共同经历记忆 (我们之间发生过的事), 单独抽出来给规则 8 用
         try:
-            shared = self.memory.recent_shared(3)
-        except AttributeError:
-            # 老版本 MemoryStore 没有 recent_shared, 兜底空
+            shared = self.memory.recent_shared(3) if self.memory is not None else []
+        except Exception:  # noqa: BLE001
             shared = []
         # 下面这些是纯内存/轻量读取，放 GUI 线程没关系。
         context_base = {

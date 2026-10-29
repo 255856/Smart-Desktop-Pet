@@ -5,10 +5,10 @@
 所有数据都落在 pytest 的临时目录里，仓库里的 data/ 一个字节都不动。
 
 覆盖：
-  A1  /api/memory 只注册一次，且答的是 live 库 data/memory_<角色名>.db
+  A1  /api/memory 只注册一次，且**只读 sidecar**（HTTP），不再读本地记忆库
   A2  每个 Tab 的端点都 200 且字段齐全
   A3  API key 不出现在任何响应体里
-  A4  危险操作只走 POST + confirm 标志 + 动手前自动备份，记忆合并只归档不删除
+  A4  危险操作只走 POST + confirm 标志（重建记忆索引由 sidecar 自己干，卡片不动）
   A5  金额标 estimated（真实价目表 Stage 4.1 才落地，这里留了挂载点）
   A6  工具 Tab 报 68 = 61 内置 + 7 MCP（4 ActivityWatch + 3 filesystem）
   A7  测试全程不碰仓库里的 data/
@@ -18,38 +18,29 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sqlite3
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))   # tests/fake_sidecar.py
 
 # --------------------------------------------------------------------------
 # 测试数据（都落在临时目录里）
 # --------------------------------------------------------------------------
-LIVE_ROWS = [
-    # (id, content, category, importance, access_count)
-    ("mlive01", "主人生日在2月4号", "event", 0.8, 3),
-    ("mlive02", "主人的开发者代号是cxxy，是小汐的创造者", "fact", 0.9, 0),
+# 记忆 sidecar 里的卡片（面板只读它，不读任何本地记忆库文件）
+MEMORY_CARDS = [
+    # (content, category, importance, hit_count)
+    ("主人生日在2月4号", "event", 0.8, 3),
+    ("主人的开发者代号是cxxy，是小汐的创造者", "fact", 0.9, 0),
+    ("主人非常喜欢韭菜猪肉馅的饺子", "preference", 0.8, 0),
 ]
-LEGACY_ROWS = [
-    ("mleg01", "主人的生日是2005年2月4号", "fact", 0.5, 0),
-    ("mleg02", "主人非常喜欢韭菜猪肉馅的饺子", "preference", 0.8, 0),
-    ("mleg03", "主人是创造小汐的开发者，名字叫初晓旬依", "person", 1.0, 0),
-    ("mleg04", "共享记忆: 主人叫 X", "fact", 0.5, 0),
-]
-# legacy 里独有、live 里没有的那一条（合并时会被并进 live）
-LEGACY_ONLY_CONTENT = "主人非常喜欢韭菜猪肉馅的饺子"
-# 语义重复（取值兼容）→ 保留 live 那条
-BIRTHDAY_LEGACY = "主人的生日是2005年2月4号"
-BIRTHDAY_LIVE = "主人生日在2月4号"
-# 同主题但**取值不同** → 两条都保留 + 打 conflict 标记
-CREATOR_LEGACY = "主人是创造小汐的开发者，名字叫初晓旬依"
-CREATOR_LIVE = "主人的开发者代号是cxxy，是小汐的创造者"
-# 没填完的模板 → 丢弃
-PLACEHOLDER = "共享记忆: 主人叫 X"
+#: 面板必须能看见的那几条（内容级证明）
+MEMORY_CONTENTS = [c[0] for c in MEMORY_CARDS]
 
 LEDGER_ROWS = [
     {"v": 1, "kind": "request", "session_id": "char:小汐:test", "request_index": 1,
@@ -66,7 +57,7 @@ LEDGER_ROWS = [
 TAB_ENDPOINTS = {
     "运行": ["/api/stats", "/api/runs"],
     "成本": ["/api/tokens/summary", "/api/tokens/series", "/api/tokens/turns"],
-    "记忆": ["/api/memory", "/api/memory/merge-preview"],
+    "记忆": ["/api/memory"],
     "决策": ["/api/companion"],
     "工具": ["/api/tools", "/api/reconciliation"],
     "配置": ["/api/config"],
@@ -78,13 +69,9 @@ TAB_ENDPOINTS = {
 EXPECTED_KEYS = {
     "/api/stats": (("total_runs",), ("success_rate",), ("avg_steps",),
                    ("avg_duration",), ("total_tool_calls",), ("tool_distribution",)),
-    "/api/memory": (("count",), ("store",), ("source",), ("items",),
-                    ("live", "count"), ("live", "by_kind"),
-                    ("live", "by_importance"), ("live", "access_hits"),
-                    ("legacy", "count"), ("duplicates",), ("duplicate_count",)),
-    "/api/memory/merge-preview": (("live_count",), ("legacy_count",),
-                                  ("will_insert",), ("will_keep_live",),
-                                  ("will_keep_both",), ("will_discard",), ("pairs",)),
+    "/api/memory": (("ok",), ("count",), ("source",), ("items",),
+                    ("by_kind",), ("by_importance",), ("access_hits",),
+                    ("stats",), ("sidecar",), ("url",)),
     "/api/companion": (("state",), ("config",), ("decisions",), ("outcomes",)),
     "/api/tokens/summary": (("available",), ("total_tokens",), ("prompt_tokens",),
                             ("completion_tokens",), ("cache_hit_tokens",),
@@ -114,37 +101,41 @@ DANGEROUS_OPS = {
     "/api/maintenance/backup": "backup",
     "/api/maintenance/reset-ledger": "reset-ledger",
     "/api/maintenance/reconciliation": "rerun-reconciliation",
-    "/api/maintenance/merge-memory": "merge-memory",
 }
 
 
 # --------------------------------------------------------------------------
 # 小工具
 # --------------------------------------------------------------------------
-def _write_memory_db(path: Path, rows) -> None:
-    """写一个最小可用的 memories 表（列名对齐 app/brain/memory.py）。"""
-    conn = sqlite3.connect(str(path))
-    try:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'other',
-                importance REAL NOT NULL DEFAULT 0.5,
-                created_at REAL NOT NULL,
-                last_access_ts REAL NOT NULL,
-                access_count INTEGER NOT NULL DEFAULT 0
-            );
-        """)
-        conn.executemany(
-            "INSERT INTO memories (id, content, category, importance, created_at,"
-            " last_access_ts, access_count) VALUES (?,?,?,?,?,?,?)",
-            [(r[0], r[1], r[2], r[3], 1700000000.0, 1700000000.0, r[4])
-             for r in rows],
-        )
-        conn.commit()
-    finally:
-        conn.close()
+def _memory_client_cards(fake):
+    """假 sidecar 里预置几张记忆卡（面板应当原样列出来）。"""
+    from app.brain.memory_client import card_id, category_to_kind
+
+    for n, (text, category, importance, hits) in enumerate(MEMORY_CARDS):
+        cid = card_id(text, kind=category_to_kind(category), key="")
+        fake.cards[cid] = {
+            "id": cid, "key": "", "kind": category_to_kind(category),
+            "category": category, "text": text, "mood": "",
+            "importance": importance, "status": "active",
+            "createdAt": 1700000000000 + n, "updatedAt": 1700000000000 + n,
+            "hitCount": hits,
+        }
+    return fake
+
+
+def _install_fake_sidecar():
+    """把 MemoryClient 的网络换成进程内的假 sidecar。
+
+    面板是独立进程、记忆只走 HTTP —— 测试里既不能连真 sidecar（会写 data/
+    或用真模型），也不能让它去连 8788（机器上可能真有一个在跑）。
+    """
+    from app.brain import memory_client as mc
+    from fake_sidecar import FakeSidecar
+
+    fake = _memory_client_cards(FakeSidecar())
+    mp = pytest.MonkeyPatch()
+    mp.setattr(mc, "_urllib_http", fake.handle)
+    return fake, mp
 
 
 def _build_panel(root: Path):
@@ -165,12 +156,6 @@ def _build_panel(root: Path):
     rec.end_run(rid, final_answer="已设好提醒", status="success")
     rec.close()
 
-    from app.web.dashboard import _character_name, _project_root
-    char = _character_name(_project_root())
-    live_name = ("memory_%s.db" % char) if char else "memory_live.db"
-
-    _write_memory_db(root / live_name, LIVE_ROWS)
-    _write_memory_db(root / "memory.db", LEGACY_ROWS)
     (root / "token-usage.jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in LEDGER_ROWS) + "\n",
         encoding="utf-8")
@@ -181,29 +166,9 @@ def _build_panel(root: Path):
         encoding="utf-8")
 
     from app.web.dashboard import create_app
-    app = create_app(root / "traces.db", root / "memory.json")
-    meta = {
-        "root": root,
-        "live_name": live_name,
-        "live_count": len(LIVE_ROWS),
-        "legacy_count": len(LEGACY_ROWS),
-    }
+    app = create_app(root / "traces.db", "http://127.0.0.1:8788")
+    meta = {"root": root, "memory_count": len(MEMORY_CARDS)}
     return app, meta
-
-
-def _read_memories(path: Path):
-    """读 memories 表（只读）：返回 [(content, topic)]。"""
-    conn = sqlite3.connect("file:" + path.as_posix() + "?mode=ro", uri=True)
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)")}
-        want = ["content"] + (["topic"] if "topic" in cols else [])
-        rows = conn.execute("SELECT " + ", ".join(want)
-                            + " FROM memories ORDER BY content").fetchall()
-        if "topic" in cols:
-            return [(r[0], r[1]) for r in rows]
-        return [(r[0], None) for r in rows]
-    finally:
-        conn.close()
 
 
 def _request(app, method: str, url: str, **kwargs):
@@ -263,6 +228,18 @@ _DATA_SNAPSHOT: dict = {}
 
 
 @pytest.fixture(scope="module", autouse=True)
+def _fake_sidecar():
+    """整个模块用**进程内的假 sidecar** 顶替真记忆服务（离线、可断言）。
+
+    真 sidecar 会加载两个 transformer 模型、还会把卡片写进 data/；
+    机器上也可能正好有一个在 8788 上跑着 —— 两种情况都会让面板测试不稳。
+    """
+    fake, mp = _install_fake_sidecar()
+    yield fake
+    mp.undo()
+
+
+@pytest.fixture(scope="module", autouse=True)
 def _data_dir_guard():
     """A7：整个模块跑完，仓库里的 data/ 必须一字节都没变。"""
     _DATA_SNAPSHOT["before"] = _snapshot(ROOT / "data")
@@ -291,7 +268,7 @@ def fresh_panel(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# A1 · /api/memory 只注册一次，答的是 live 库
+# A1 · /api/memory 只注册一次，且**只读 sidecar**
 # --------------------------------------------------------------------------
 class TestMemoryEndpoint:
     def test_memory_route_registered_exactly_once(self, panel):
@@ -300,49 +277,55 @@ class TestMemoryEndpoint:
             "/api/memory 注册了 %d 次（FastAPI 里先注册的那个赢）"
             % paths.count("/api/memory"))
 
-    def test_memory_answers_from_live_library(self, panel):
+    def test_memory_answers_from_the_sidecar(self, panel):
         data = _get_json(panel["app"], "/api/memory")
-        # 答的是 live 库：行数 == live 库行数
-        assert data["store"] == "live"
-        assert data["count"] == panel["live_count"]
-        assert data["live"]["count"] == panel["live_count"]
-        # legacy 库只是对照
-        assert data["legacy"]["count"] == panel["legacy_count"]
-        # 路径确实是 live 库而不是 legacy 库
-        assert Path(data["live"]["path"]).name == panel["live_name"]
-        assert Path(data["live"]["path"]).name != "memory.db"
-        assert Path(data["live"]["path"]) != Path(data["legacy"]["path"])
-        assert Path(data["live"]["path"]).is_file()
+        assert data["source"] == "sidecar"
+        assert data["ok"] is True
+        assert data["count"] == panel["memory_count"]
+        assert data["url"].startswith("http://")
 
-    def test_memory_items_come_from_live_not_legacy(self, panel):
-        """内容级证明：live 的内容在，legacy 独有的内容不在。"""
+    def test_memory_items_come_from_the_sidecar(self, panel):
+        """内容级证明：卡片是 sidecar 给的那几张。"""
         data = _get_json(panel["app"], "/api/memory")
         contents = [i["content"] for i in data["items"]]
-        assert LIVE_ROWS[0][1] in contents
-        assert LIVE_ROWS[1][1] in contents
-        assert LEGACY_ONLY_CONTENT not in contents
-        # legacy 的内容只在 legacy 段里
-        legacy_contents = [i["content"] for i in data["legacy"]["items"]]
-        assert LEGACY_ONLY_CONTENT in legacy_contents
+        for text in MEMORY_CONTENTS:
+            assert text in contents, text
+        # 每条的字段是面板要的形状
+        first = data["items"][0]
+        for key in ("id", "content", "category", "kind", "importance", "created_at"):
+            assert key in first, key
 
-    def test_memory_reports_access_count_hits_and_distribution(self, panel):
+    def test_memory_reports_hits_and_distribution(self, panel):
         data = _get_json(panel["app"], "/api/memory")
-        # access_count 命中数：只有第一条被召回过
-        assert data["live"]["access_hits"] == 1
+        # hitCount > 0 的只有第一条
+        assert data["access_hits"] == 1
         # kind / importance 分布
-        assert sum(data["live"]["by_kind"].values()) == panel["live_count"]
-        assert sum(data["live"]["by_importance"].values()) == panel["live_count"]
+        assert sum(data["by_kind"].values()) == panel["memory_count"]
+        assert sum(data["by_importance"].values()) == panel["memory_count"]
+        assert isinstance(data["stats"], dict), "/stats 必须原样带回"
 
-    def test_memory_reports_legacy_duplicates(self, panel):
+    def test_memory_reports_sidecar_health(self, panel):
+        """/api/memory 顺带把 sidecar 的 /health 报回来（活着没 / 模型就绪没）。"""
         data = _get_json(panel["app"], "/api/memory")
-        groups = set(data["known_groups"])
-        # 已知的 3 组（docs/baseline-before-alignment.md 第 5 节）
-        assert "生日" in groups
-        assert "创造者身份" in groups
-        assert data["duplicate_count"] >= 2
-        # 共享记忆占位符被标成 invalid / discard
-        invalid = [p for p in data["duplicates"] if p["relation"] == "invalid"]
-        assert invalid and invalid[0]["action"] == "discard"
+        sc = data["sidecar"]
+        assert sc["reachable"] is True
+        assert sc["cards"] == panel["memory_count"]
+        assert sc["models"]["embed"] == "ready"
+
+    def test_memory_is_empty_and_honest_when_the_sidecar_is_down(self, panel):
+        """sidecar 不在 → 200 + ok=False + 空列表（面板显示「没连上」，不是 500）。"""
+        from app.brain import memory_client as mc
+
+        def _refused(method, url, payload, timeout):
+            raise ConnectionRefusedError("nothing on 8788")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", _refused)
+            data = _get_json(panel["app"], "/api/memory")
+        assert data["ok"] is False
+        assert data["items"] == []
+        assert data["count"] == 0
+        assert "sidecar" in data["note"]
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +385,7 @@ class TestNoApiKeyLeak:
         if not key:
             pytest.skip("没有真实 key，跳过")
         urls = ["/", "/api/stats", "/api/runs", "/api/memory",
-                "/api/memory/merge-preview", "/api/companion",
+                "/api/companion",
                 "/api/tokens/summary", "/api/tokens/series", "/api/tokens/turns",
                 "/api/tools", "/api/reconciliation", "/api/config", "/api/state",
                 "/api/health", "/api/overview", "/api/maintenance/status"]
@@ -485,69 +468,6 @@ class TestDangerousOperations:
         assert ledger.read_text(encoding="utf-8") == ""
         assert data["rows_before"] == len(LEDGER_ROWS)
 
-    def test_merge_preview_is_read_only(self, fresh_panel):
-        app, meta = fresh_panel["app"], fresh_panel
-        before = _snapshot(meta["root"])
-        data = _get_json(app, "/api/memory/merge-preview")
-        assert data["live_count"] == meta["live_count"]
-        assert data["legacy_count"] == meta["legacy_count"]
-        # 四类判定都在预览里（口径跟 CLI 脚本完全一致 —— 共享实现）
-        assert len(data["will_insert"]) == 1
-        assert data["will_insert"][0]["legacy_content"] == LEGACY_ONLY_CONTENT
-        # 生日那条：取值兼容 → 语义重复 → 保留 live 那条
-        assert len(data["will_keep_live"]) == 1
-        assert data["will_keep_live"][0]["legacy_content"] == BIRTHDAY_LEGACY
-        # 创造者那条：**取值不同** → 冲突 → 两条都保留
-        # （原来面板按相似度阈值判，把它误判成「重复」，
-        #   结果这条记忆永远进不了 live 库）
-        assert len(data["will_keep_both"]) == 1
-        assert data["will_keep_both"][0]["legacy_content"] == CREATOR_LEGACY
-        assert data["will_keep_both"][0]["live_content"] == CREATOR_LIVE
-        assert len(data["will_discard"]) == 1
-        assert data["will_discard"][0]["legacy_content"] == PLACEHOLDER
-        # 四种 relation 一个都不少
-        assert {p["relation"] for p in data["pairs"]} == {
-            "duplicate", "conflict", "unique", "invalid"}
-        assert _snapshot(meta["root"]) == before, "预览不该动任何文件"
-
-    def test_merge_archives_legacy_by_moving_it(self, fresh_panel):
-        """legacy 库被**移动**到 backups/ 归档（不是复制，更不是删除）。
-
-        原来这个用例断言「legacy 还在 data/ 里」—— 那正是缺陷本身：
-        复制一份留底，data/ 里永远剩**两个**记忆库。
-        """
-        app, meta = fresh_panel["app"], fresh_panel
-        legacy = meta["root"] / "memory.db"
-        before_bytes = legacy.read_bytes()
-        r = _request(app, "POST",
-                     "/api/maintenance/merge-memory"
-                     "?maintenance=1&confirm=merge-memory")
-        assert r.status_code == 200, r.text
-        data = r.json()
-        # legacy 库从 data/ 里移走了（归档 = 移动）
-        assert not legacy.exists(), "legacy 应该被归档走了"
-        # 归档件：字节一模一样、还能打开、行数一条不少
-        archived = Path(data["legacy_archived_to"])
-        assert archived.is_file()
-        assert archived.read_bytes() == before_bytes
-        assert archived.parent == meta["root"] / "backups"
-        assert archived.name.startswith("memory_legacy-")
-        assert archived.name.endswith(".db")
-        rows = _read_memories(archived)
-        assert len(rows) == meta["legacy_count"]
-        # data/ 顶层只剩**一个**记忆库
-        dbs = sorted(p.name for p in meta["root"].glob("memory*.db"))
-        assert dbs == [meta["live_name"]], dbs
-        # live 库多了一条 legacy 独有的 + **一条冲突的**
-        mem = _get_json(app, "/api/memory")
-        contents = [i["content"] for i in mem["items"]]
-        assert LEGACY_ONLY_CONTENT in contents
-        assert CREATOR_LEGACY in contents, "冲突的那条必须进 live 库"
-        assert mem["count"] == meta["live_count"] + 2
-        # legacy 库已经不在 data/ 里了（所以 legacy 计数归零）
-        assert mem["legacy"]["count"] == 0
-        assert mem["legacy"]["exists"] is False
-
     def test_maintenance_status_lists_post_only_operations(self, panel):
         data = _get_json(panel["app"], "/api/maintenance/status")
         ops = {o["endpoint"]: o for o in data["operations"]}
@@ -629,7 +549,9 @@ class TestDataDirUntouched:
     def test_panel_reads_only_from_temp_data_dir(self, panel):
         """面板的数据源都在临时目录里，不依赖主进程的内存态。"""
         mem = _get_json(panel["app"], "/api/memory")
-        assert str(panel["root"]) in mem["live"]["path"]
+        # 记忆只来自 sidecar（HTTP），面板不再读任何本地记忆库文件
+        assert mem["source"] == "sidecar"
+        assert str(panel["root"]) not in json.dumps(mem["items"], ensure_ascii=False)
         state = _get_json(panel["app"], "/api/state")
         assert str(panel["root"]) in state["path"]
         summary = _get_json(panel["app"], "/api/tokens/summary")

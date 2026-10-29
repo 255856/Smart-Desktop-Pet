@@ -15,7 +15,7 @@ Stage 0.1 回归测试，覆盖三件事：
 不是自己 import 一堆工具模块。state 传一个最小 stub（只要 get() /
 stats_summary()），reminders / memory / items 传 None：
 这三个只在**工具被调用时**才用到（reminder 要 ReminderStore、memory 要
-MemoryStore、feed_self 要食物库），注册阶段不碰它们，所以不需要真的造这些对象。
+记忆库、feed_self 要食物库），注册阶段不碰它们，所以不需要真的造这些对象。
 """
 from __future__ import annotations
 

@@ -1,7 +1,6 @@
 """2026-10-20 性能审计修复的回归测试。
 
 覆盖这一批里「行为容易悄悄变掉」的改动：
-    M4  MemoryStore：单条增删只写一行 + 索引延迟重建
     M5  设置面板：set_many 单次落盘 + 300 ms 去抖
     M7  本地图片：data URL 记忆化（不重复读盘 / base64）
     M10 companion_log：尾部读 + 轮转
@@ -25,67 +24,6 @@ sys.path.insert(0, str(ROOT / ".local-packages"))
 sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-
-# ============================================================
-#  M4：MemoryStore 增量写 + 索引延迟重建
-# ============================================================
-
-class TestMemoryStoreIncremental:
-    def _store(self, tmp_path):
-        from app.brain.memory import MemoryStore
-        return MemoryStore(tmp_path / "mem.db")
-
-    def test_add_only_writes_one_row(self, tmp_path):
-        """add() 不应整表重写（原来 DELETE 全表 + 全量 re-INSERT）。"""
-        from app.brain.memory import MemoryStore
-        store = self._store(tmp_path)
-        store.add("第一条记忆", "preference")
-        store.add("第二条记忆", "preference")
-
-        calls = []
-        orig = MemoryStore._insert_item
-
-        def _spy(self, item):
-            calls.append(item.id)
-            return orig(self, item)
-
-        MemoryStore._insert_item = _spy  # type: ignore[assignment]
-        try:
-            store.add("第三条记忆", "preference")
-        finally:
-            MemoryStore._insert_item = orig  # type: ignore[assignment]
-
-        assert len(calls) == 1, f"add 只应写一行，实际写了 {len(calls)} 行"
-        assert store.count() == 3
-
-    def test_search_result_unchanged_after_add(self, tmp_path):
-        """延迟重建索引后，检索结果必须和立即重建完全一致。"""
-        store = self._store(tmp_path)
-        store.add("主人喜欢喝拿铁", "preference", 0.8)
-        store.add("主人养了一只叫豆豆的猫", "other", 0.5)
-
-        hits = store.search("拿铁", limit=5)
-        assert hits, "新加的记忆必须能被检索到"
-        assert any("拿铁" in h.content for h in hits)
-
-    def test_remove_deletes_row(self, tmp_path):
-        store = self._store(tmp_path)
-        item = store.add("会被删掉的记忆", "other")
-        assert store.remove(item.id)
-        assert store.count() == 0
-        # 重新打开应确认磁盘上也删掉了
-        from app.brain.memory import MemoryStore
-        again = MemoryStore(tmp_path / "mem.db")
-        assert again.count() == 0
-
-    def test_index_refit_is_deferred(self, tmp_path):
-        """索引重建应延迟到检索前（标脏 → 用之前才重建）。"""
-        store = self._store(tmp_path)
-        store.add("第一条", "preference")
-        assert store._index_dirty is True, "add 之后索引应标脏"
-        store.search("第一条", limit=3)
-        assert store._index_dirty is False, "检索后索引应已刷新"
 
 
 # ============================================================

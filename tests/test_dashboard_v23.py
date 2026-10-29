@@ -11,18 +11,19 @@ from app.web.dashboard import create_app
 
 @pytest.fixture
 def client(tmp_path):
-    # ⚠️ trace_db / memory_file 必须指向**临时目录**：
+    # ⚠️ trace_db 必须指向**临时目录**：
     #   原来写死 "data/traces.db"（相对 CWD = 仓库根）→ 面板只读打开它时
     #   会把仓库 data/traces.db-shm 摸一遍（用户数据目录被测试改动）。
+    #   记忆 sidecar 地址给一个**没人监听**的端口：面板只读 HTTP，不碰任何本地记忆库。
     app = create_app(trace_db=str(tmp_path / "traces.db"),
-                     memory_file=str(tmp_path / "memory.json"))
+                     sidecar_url="http://127.0.0.1:1")
     from fastapi.testclient import TestClient
     return TestClient(app)
 
 
 def test_create_app_has_companion_route(tmp_path):
     app = create_app(trace_db=str(tmp_path / "traces.db"),
-                     memory_file=str(tmp_path / "memory.json"))
+                     sidecar_url="http://127.0.0.1:1")
     paths = [r.path for r in app.routes]
     assert "/api/companion" in paths, f"应注册 /api/companion. 实际: {paths}"
 
@@ -30,7 +31,7 @@ def test_create_app_has_companion_route(tmp_path):
 def test_html_embeds_companion_in_run_detail_not_tab(tmp_path):
     """删独立 tab, 把桌宠养成反馈嵌到会话详情顶部."""
     app = create_app(trace_db=str(tmp_path / "traces.db"),
-                     memory_file=str(tmp_path / "memory.json"))
+                     sidecar_url="http://127.0.0.1:1")
     from fastapi.testclient import TestClient
     r = TestClient(app).get("/")
     assert r.status_code == 200

@@ -49,7 +49,7 @@ def _make_agent(memory_store=None, **kwargs):
 
 # -------------------- 参数接受 --------------------
 
-class TestMemoryStoreParam:
+class TestMemoryBackendParam:
     def test_accepts_memory_store(self):
         mem = _FakeMemory()
         agent = _make_agent(memory_store=mem)

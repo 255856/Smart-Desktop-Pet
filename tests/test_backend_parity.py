@@ -33,6 +33,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # tests/fake_sidecar.py
 if (ROOT / ".local-packages").is_dir():
     sys.path.insert(0, str(ROOT / ".local-packages"))
 
@@ -43,6 +44,7 @@ from app.brain.prompt_layer import (  # noqa: E402
     build_turn_context,
     load_style_guide,
 )
+from fake_sidecar import install  # noqa: E402
 
 #: 固定的人设 + 会话上下文（模拟 BrainController.chat_context() 拼的那段）
 PERSONA = "你是小汐，住在主人桌面上的桌宠，只跟主人一个人说话。"
@@ -155,8 +157,11 @@ def test_production_path_system_prompts_are_byte_identical(brain):
     from app.brain.langchain_agent import LangChainAgent
     from app.brain.llm_client import LLMClient, LLMConfig
 
-    # 往长期记忆里塞一条 —— 证明记忆块在**两个后端**都在
-    brain.memory.add("主人名字叫小雪", category="fact", importance=0.9)
+    # 往长期记忆里塞一条 —— 证明记忆块在**两个后端**都在。
+    # 长期记忆现在住在独立进程 memory_sidecar 里：HTTP 层换成进程内的假实现
+    # （tests/fake_sidecar.py），这样用例不需要真 sidecar / 网络。
+    install(brain.memory_client)
+    brain.memory_client.add("主人名字叫小雪", kind="fact", importance=0.9)
 
     persona = "你是小汐，住在主人桌面上的桌宠。"
     system_blob = persona + "\n\n" + brain.chat_context()
@@ -209,8 +214,9 @@ def test_memory_block_is_not_in_system_prompt_but_is_in_volatile_channel(brain):
     - 记忆块按本轮 query 召回 ⇒ 每轮都变 ⇒ 只能走易变通道；
     - system 串必须**逐字节**不受 query 影响（否则前缀缓存全废）。
     """
-    brain.memory.add("主人养了一只叫豆豆的猫", category="fact", importance=0.9)
-    brain.memory.add("主人住在杭州", category="fact", importance=0.9)
+    install(brain.memory_client)
+    brain.memory_client.add("主人养了一只叫豆豆的猫", kind="fact", importance=0.9)
+    brain.memory_client.add("主人住在杭州", kind="fact", importance=0.9)
 
     sp = brain.chat_context()
     assert "豆豆" not in sp, "记忆块不许进稳定段（system prompt）"

@@ -356,6 +356,12 @@ def start_demo_subprocess(root: Path, port: int = DEMO_PORT) -> int | None:
         return None
 
 
+def memory_sidecar_url() -> str:
+    """记忆 sidecar 的地址（面板跟主进程读同一份口径）。"""
+    from app.brain.memory_client import default_base_url
+    return default_base_url()
+
+
 def start_dashboard_subprocess(root: Path, port: int = TRACE_PORT) -> int | None:
     """后台启动 FastAPI Agent Trace 进程，返回 PID 或 None。"""
     import subprocess
@@ -366,7 +372,7 @@ def start_dashboard_subprocess(root: Path, port: int = TRACE_PORT) -> int | None
             [sys.executable, "-m", "app.web.dashboard",
              "--port", str(port),
              "--trace-db", str(root / "data" / "traces.db"),
-             "--memory-file", str(root / "data" / "memory.json")],
+             "--sidecar-url", memory_sidecar_url()],
             cwd=str(root),
             stdout=open(log_file, "ab"),
             stderr=subprocess.STDOUT,
@@ -683,7 +689,7 @@ class App:
         self.brain.set_sleeping_checker(
             lambda: self.pet.animator.is_sleeping())
         tool_count = len(self.brain.tool_registry.names()) if self.brain.tool_registry else 0
-        mem_count = self.brain.memory.count()
+        mem_count = self.brain.memory_client.count()
         backend_label = "LangChain 1.0+" if cfg.brain.backend == "standard" else "手写 ReAct"
         banner.ok("BrainController",
                   f"{tool_count} 个工具 · {mem_count} 条记忆 · 后端={backend_label}")
@@ -807,7 +813,8 @@ class App:
 
     @property
     def memory(self):
-        return self.brain.memory
+        """长期记忆的读写口（sidecar 客户端 —— 记忆不在本进程里）。"""
+        return self.brain.memory_client
 
     @property
     def proactive(self):
@@ -1040,7 +1047,8 @@ def _main_inner() -> int:
                 max_iterations=core.cfg.brain.langchain.max_iterations,
                 return_intermediate_steps=core.cfg.brain.langchain.return_intermediate_steps,
             ),
-            memory_store=core.brain.memory,
+            # 长期记忆只有 sidecar 一份：standard 后端拿到的是同一个客户端
+            memory_store=core.brain.memory_client,
             chat_cfg=core.cfg.chat,
             # v27: 桌宠状态拉取器 —— 每次 chat_window._kickoff_llm 创建新
             # LangChainAgent 时拿当前 PetState 注入. 不传这个 callback 的话,

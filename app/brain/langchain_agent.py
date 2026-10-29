@@ -314,7 +314,7 @@ class LangChainAgent:
         # 工具解锁:返回当前桌宠等级 int,LLM 工具列表按等级过滤,未解锁拦截
         self.level_getter = level_getter
         self.cancel_check = cancel_check
-        # 长期记忆（MemoryStore），跨 session 共享；system_prompt 注入时调 memory.system_block()
+        # 长期记忆（记忆 sidecar 客户端），跨 session 共享；注入时调 memory.system_block()
         self.memory_store = memory_store
         # 会话绑定：优先用 session_id 从 session_store 拿 thread_id
         self._session_id: Optional[str] = session_id
@@ -1034,7 +1034,7 @@ class LangChainAgent:
                     return self.memory_store.system_block(query) or ""
                 return ""
             except Exception as e:  # noqa: BLE001
-                log.warning("MemoryStore.system_block 失败,跳过: %s", e)
+                log.warning("memory_store.system_block 失败,跳过: %s", e)
                 return ""
         from app.brain.prompt_layer import get_memory_block
         return get_memory_block(query)

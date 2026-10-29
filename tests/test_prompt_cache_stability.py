@@ -28,6 +28,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # tests/fake_sidecar.py
 if (ROOT / ".local-packages").is_dir():
     sys.path.insert(0, str(ROOT / ".local-packages"))
 
@@ -38,6 +39,7 @@ from app.brain.llm_client import (  # noqa: E402
     build_dynamic_context,
     inject_dynamic_context,
 )
+from fake_sidecar import install  # noqa: E402
 from app.brain.hallucination_guard import grounding_dynamic_prompt  # noqa: E402
 
 
@@ -363,9 +365,14 @@ def test_volatile_channel_is_the_only_thing_that_changes_with_now_state():
 #   所以：system 串对不同 query 必须**逐字节相同**，易变段必须**随 query 变**。
 
 def test_system_prompt_is_byte_identical_for_two_different_queries(brain):
-    """两个不同 query 下 system 串逐字节相同，易变段随 query 变。"""
-    brain.memory.add("主人明天要交房租", category="fact", importance=0.9)
-    brain.memory.add("主人的猫叫团子", category="fact", importance=0.9)
+    """两个不同 query 下 system 串逐字节相同，易变段随 query 变。
+
+    长期记忆现在住在独立进程 memory_sidecar 里：这里把 HTTP 层换成进程内的
+    假实现（tests/fake_sidecar.py），记忆仍按**本轮 query** 召回。
+    """
+    install(brain.memory_client)
+    brain.memory_client.add("主人明天要交房租", kind="fact", importance=0.9)
+    brain.memory_client.add("主人的猫叫团子", kind="fact", importance=0.9)
 
     sp1 = brain.chat_context()
     ctx1 = brain.chat_context_dynamic("记不记得我明天要交房租")

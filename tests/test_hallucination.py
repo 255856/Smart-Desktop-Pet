@@ -152,7 +152,6 @@ class TestToolUsagePrompt:
         from app.engine.state import PetState
         from app.engine.reminder import ReminderStore
         from app.engine.tools import ToolRegistry
-        from app.brain.memory import MemoryStore
         from app.core.qt_compat import QApplication
         import tempfile
         import shutil

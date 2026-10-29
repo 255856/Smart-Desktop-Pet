@@ -139,7 +139,7 @@ class _FakeAWConfig:
 
 
 class _StubMemory:
-    """MemoryStore 替身：只要 .recent() 返列表。"""
+    """记忆替身：只要 .recent() 返列表。"""
     def recent(self, n):
         return []
 

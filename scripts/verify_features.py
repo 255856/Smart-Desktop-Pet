@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 import inspect
 import warnings
 from pathlib import Path
@@ -33,38 +34,80 @@ def note(name: str, detail: str = "") -> None:
     results.append((name, "NOTE", detail))
 
 
-def _probe_detect_conflicts() -> tuple[bool, str]:
-    """**真的调一次** detect_conflicts —— 用临时库，**绝不碰 data/**。
+def _sidecar_port() -> int:
+    """sidecar 端口（跟客户端 / 监督者同一个口径）。"""
+    from app.brain.memory_client import default_port
+    return default_port()
 
-    Stage 2.5：这一项以前是 check("冲突检测", "detect_conflicts" in mem_src)，
-    也就是 **grep 源码文本** —— 函数被改坏了照样「通过」（名字还在就绿）。
-    现在改成真调用 + 真断言：
-      · 相同/相近内容 → 必须命中已有记忆
-      · 完全无关内容 → 不能误报
-    返回 (是否通过, 详情)。
+
+def _sidecar_host() -> str:
+    return "127.0.0.1"
+
+
+def _port_is_open(host: str, port: int) -> bool:
+    """端口上有人在听吗（只连一下就关，不发请求）。"""
+    import socket
+
+    sock = socket.socket()
+    try:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, int(port))) == 0
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _probe_memory_sidecar() -> tuple[str, str]:
+    """**真的问一次**记忆 sidecar：/health、/stats、/search。
+
+    长期记忆只有 sidecar 一份（JSON 卡片是真值，老的进程内记忆库已经删了）。
+    返回 (状态, 详情)，状态是 OK / FAIL / NOTE：
+
+      · **没在跑** → NOTE：离线检查不该因为「服务没启动」判红
+        （python -m memory_sidecar serve --port 8788 是运行时的事）；
+      · **在跑但答得不对** → FAIL：那才是真出问题。
     """
-    import tempfile
+    import time as _time
 
-    from app.brain.memory import MemoryStore
+    from app.brain.memory_client import MemoryClient
 
-    with tempfile.TemporaryDirectory(prefix="desktop-pet-verify-") as td:
-        db = Path(td) / "memory_probe.db"
-        try:
-            # 显式 tfidf：sbert 后端要下模型（离线环境会卡住）
-            store = MemoryStore(db, backend_name="tfidf")
-        except TypeError:      # 构造参数变了 → 退回默认
-            store = MemoryStore(db)
-        store.add("主人的生日是2005年2月4号", category="fact", importance=0.8)
-        store.add("主人喜欢喝冰美式", category="preference", importance=0.7)
-        hits = store.detect_conflicts("主人的生日是2005年2月4号")
-        if not hits:
-            return False, "相同内容没有命中任何已有记忆"
-        if not any("生日" in it.content for it, _ in hits):
-            return False, f"命中 {len(hits)} 条，但都不是生日那条"
-        miss = store.detect_conflicts("量子力学薛定谔方程推导")
-        if miss:
-            return False, f"不相关内容误报 {len(miss)} 条"
-        return True, f"命中 {len(hits)} 条 / 不相关内容 0 误报"
+    client = MemoryClient(timeout=6.0, cooldown=0.0)
+    # 主程序启动时会自己把 sidecar 拉起来（后台线程），而 sidecar 冷启动要先
+    # import torch、再把两个模型（精排有 2 GB）读进来 —— 这段时间里 /health
+    # 偶尔要 1~2s 才答得上来。所以**有界地**等（最多 90s），并把两种情况分开说：
+    #   · 端口上没人听 → 真的没在跑；
+    #   · 端口在听但答不上来 → 在跑、还在预热（不是故障）。
+    # 端口上没人听 = 确实没在跑（主程序启动时才会把它拉起来）→ 立刻给结论，
+    # 不要在这里白等（本检查跑在 App 构造之前）。
+    if not _port_is_open(_sidecar_host(), _sidecar_port()):
+        return "NOTE", ("sidecar 没在跑（python -m memory_sidecar serve --port %d）；"
+                        "主程序启动时会自己把它拉起来" % _sidecar_port())
+    deadline = _time.time() + 90.0
+    health = {}
+    while True:
+        health = client.health(timeout=6.0) or {}
+        if health.get("ok"):
+            break
+        if _time.time() >= deadline:
+            if _port_is_open(_sidecar_host(), _sidecar_port()):
+                return "NOTE", ("sidecar 在跑，但 90s 内没答上来（模型预热中）：%s"
+                                % (client.last_error or "超时"))
+            return "NOTE", ("sidecar 没在跑（python -m memory_sidecar serve --port %d）：%s"
+                            % (_sidecar_port(), client.last_error or "连不上"))
+        _time.sleep(0.5)
+    stats = client.stats() or {}
+    if not isinstance(stats.get("cards"), int):
+        return "FAIL", "/stats 没给出 cards：%s" % (client.last_error or stats)
+    # /search 约定永远 200 + results 数组（哪怕检索腿全挂）
+    rows = client.search("桌面宠物功能验证", top_k=3)
+    if not isinstance(rows, list):
+        return "FAIL", "/search 没返回数组：%s" % (client.last_error or "")
+    return "OK", ("/health %d 张卡 · %s · /stats 活跃 %s · /search 返回 %d 条"
+                  % (int(health.get("cards") or 0),
+                     health.get("models") or {},
+                     stats.get("active"),
+                     len(rows)))
 
 
 def _parse_tool_markers(text):
@@ -131,20 +174,20 @@ def main() -> int:
     check("ProactiveBrain 主动发言", "remark_ready" in dir(ProactiveBrain))
     check("  · [skip] 沉默支持", "[skip]" in inspect.getsource(ProactiveBrain))
 
-    from app.brain.memory import MemoryStore
-    mem_src = inspect.getsource(MemoryStore)
-    check("MemoryStore", True)
-    check("  · 重要性评分（importance）", "importance" in mem_src)
-    check("  · 时间衰减（last_access_ts）", "last_access_ts" in mem_src)
-    # 冲突检测：**真调用**（临时库，不碰 data/）—— 以前是 grep 源码文本
-    _conf_ok, _conf_detail = _probe_detect_conflicts()
-    check("  · 冲突检测（detect_conflicts 真调用）", _conf_ok, _conf_detail)
-    try:
-        from app.brain.memory import TfidfBackend, SentenceTransformerBackend
-        check("  · 向量后端（TfidfBackend / SentenceTransformerBackend）", True,
-              "两个后端都能 import")
-    except Exception as e:
-        check("  · 向量后端", False, str(e))
+    # 长期记忆：只有 sidecar 一份（老的进程内记忆库已删）
+    from app.brain.memory_client import MemoryClient
+    client_src = inspect.getsource(MemoryClient)
+    check("记忆 sidecar 客户端（MemoryClient）", True)
+    check("  · 记忆块 system_block（易变通道）", "def system_block" in client_src)
+    check("  · 三个写入口（upsert / delete / supersede）",
+          all(k in client_src for k in ("/upsert", "/delete", "/supersede")))
+    # 真的问一次 sidecar：/health、/stats、/search（没在跑只算 NOTE，不判红）
+    _mem_status, _mem_detail = _probe_memory_sidecar()
+    if _mem_status == "NOTE":
+        note("  · 记忆 sidecar（/health + /stats + /search）", _mem_detail)
+    else:
+        check("  · 记忆 sidecar（/health + /stats + /search）",
+              _mem_status == "OK", _mem_detail)
 
     from app.engine.tools import ToolRegistry, Tool
     check("ToolRegistry + Tool", True)
@@ -291,7 +334,8 @@ def main() -> int:
         print(f"  [warn] 启动预热失败: {e}")
 
     data_files = [
-        (ROOT / "data" / "memory.json", "长期记忆（JSON，含重要性 + 向量）"),
+        (ROOT / "data" / "memory_sidecar" / "cards.json",
+         "长期记忆卡片（JSON 真值；sidecar 的向量 / BM25 索引是它的派生）"),
         (ROOT / "data" / "traces.db", "Agent Trace（SQLite）"),
         (ROOT / "data" / "chat_history.json", "聊天历史（持久化）"),
         (ROOT / "data" / "foods.json", "食物库（feed_self 工具用）"),
@@ -385,14 +429,22 @@ def main() -> int:
         sm = StateManager(ROOT, cfg, args)
         brain = BrainController(ROOT, cfg, sm.state, sm.reminders)
 
-        # Stage 2.5：MemoryCurator 必须**真的被实例化并跑起来**
-        # （以前它在全仓从未被实例化 → 整理线程从来没启动过）
-        _curator = getattr(brain, "curator", None)
-        _curator_thread = getattr(_curator, "_thread", None)
-        check("MemoryCurator 已实例化且线程存活",
-              _curator is not None and _curator_thread is not None
-              and _curator_thread.is_alive(),
-              "BrainController 启动时构造并启动 MemoryCurator")
+        # 长期记忆的接线：客户端 + 监督者在位，记忆块由它提供
+        # （进程内的老记忆库已经删掉，这里验的是「只有一个后端」）
+        # sidecar 是**后台线程**拉起来的（冷启动要 import torch，几秒），
+        # 所以这里等它一下（有界 30s），别把「刚起步」写成 reachable=False。
+        _status = brain.sidecar_status()
+        _deadline = time.time() + 30.0
+        while not _status.get("reachable") and time.time() < _deadline:
+            time.sleep(0.5)
+            _status = brain.sidecar_status()
+        check("记忆 sidecar 接线（客户端 + 监督者）",
+              brain.memory_client is not None
+              and getattr(brain, "sidecar", None) is not None
+              and "reachable" in _status,
+              "reachable=%s · cards=%s · 端口 %s"
+              % (_status.get("reachable"), _status.get("cards"),
+                 _status.get("port")))
 
         cw = ChatWindow(
             llm_cfg=cfg.llm, char_cfg=cfg.character,

@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from app.brain import memory_merge as _memory_merge
 
 log = logging.getLogger(__name__)
 
@@ -333,24 +332,16 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <!-- ============ Tab 记忆 ============ -->
   <div class="view" id="view-memory">
     <div class="panel" style="padding:18px;">
-      <div class="sub-head" style="margin-top:0;" data-icon="brain">长期记忆库 <span id="memCount" class="mini-tag"></span></div>
+      <div class="sub-head" style="margin-top:0;" data-icon="brain">长期记忆（sidecar） <span id="memCount" class="mini-tag"></span></div>
       <div id="memStoreHint"></div>
       <div class="grid3" id="memKpis" style="margin-top:12px;"></div>
-      <div class="sub-head">live 库分布</div>
+      <div class="sub-head">按 kind / importance 分布</div>
       <div id="memDist"></div>
-      <div class="sub-head">legacy 库重复 / 冲突提示</div>
-      <div id="memDuplicates"></div>
-      <div class="sub-head">逐条内容（live 库）</div>
+      <div class="sub-head">逐条内容（JSON 记忆卡）</div>
       <div class="grid2" id="memGrid"></div>
-      <div class="sub-head">合并 legacy → live（先预览，再执行）</div>
       <div class="danger" style="border-color:#f0d3a0;background:#fffdf7;">
-        <h3 style="color:#a36500;">记忆合并（危险操作）</h3>
-        <div class="hint">先点「预览合并」，看清楚将保留 / 将并入 / 将丢弃再决定。执行前会自动备份**两个记忆库**（不打包整个 data/），legacy 库只归档（移动到 backups/）不删除。</div>
-        <div class="ops">
-          <button class="btn" id="btnMergePreview">预览合并</button>
-          <button class="btn danger-btn" id="btnMergeRun" disabled>执行合并（需二次确认）</button>
-        </div>
-        <div id="mergePreview"></div>
+        <h3 style="color:#a36500;">索引重建（危险操作）</h3>
+        <div class="hint">真值永远是 sidecar 的 JSON 卡片；重建只是让它把 Chroma 向量索引和 BM25 索引按卡片重算一遍，卡片本身不会被改动。要执行请到「健康与维护」Tab 打开维护模式。</div>
       </div>
     </div>
   </div>
@@ -425,7 +416,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div id="healthSamples"></div>
       <div class="sub-head">data/ 文件体检</div>
       <div class="tbl-wrap"><table class="tbl" id="healthFiles"></table></div>
-      <div class="sub-head">向量索引（Chroma + bge-small-zh-v1.5 + bge-reranker-base）</div>
+      <div class="sub-head">记忆 sidecar 的索引（Chroma 向量 + BM25 + 精排 cross-encoder）</div>
       <div class="grid3" id="healthVector"></div>
       <div class="sub-head">危险操作</div>
       <div class="danger">
@@ -443,8 +434,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
           <label class="switch" title="默认不打进 checkpoint 库（仓库里 ~289MB，应用自己会 prune 它）"><input type="checkbox" id="maintIncludeCkpt"> 备份时包含 checkpoint 库（~289MB）</label>
           <button class="btn danger-btn" data-op="reset-ledger" data-confirm="reset-ledger">重置 token 账本</button>
           <button class="btn danger-btn" data-op="reconciliation" data-confirm="rerun-reconciliation">重跑工具对账</button>
-          <button class="btn danger-btn" data-op="merge-memory" data-confirm="merge-memory">合并记忆库</button>
-          <button class="btn danger-btn" data-op="rebuild-vector-index" data-confirm="rebuild-vector-index">重建向量索引</button>
+          <button class="btn danger-btn" data-op="rebuild-vector-index" data-confirm="rebuild-vector-index">重建记忆索引</button>
         </div>
         <div id="maintResult"></div>
       </div>
@@ -556,7 +546,7 @@ function emptyBox(text, ico){
 const state = {
   stats:null, runs:[], selectedId:null, filter:"all", kw:"",
   detail:null, auto:true, companion:null, tab:"runs",
-  memPreview:null, maintOn:false,
+  maintOn:false,
 };
 
 async function api(path){
@@ -840,63 +830,52 @@ function renderCost(summary, series, turns){
 /* ------------------------------------------------------------------
  * Tab 记忆：/api/memory（live 库）+ /api/memory/merge-preview
  * ------------------------------------------------------------------ */
+/* 记忆 sidecar（独立进程：python -m memory_sidecar serve --port 8788）的状态行 */
+function sidecarLine(sc){
+  const ok=!!sc.reachable;
+  const models=(sc&&sc.models)||{};
+  const detail = ok
+    ? ('在线 · '+(sc.cards==null?"?":sc.cards)+' 张卡 · 向量 '+esc(models.embed||"—")+' · 精排 '+esc(models.rerank||"—")
+       +(sc.degraded?' · <b>已降级</b>：'+esc((sc.degradation||[]).join("；")):''))
+    : ('没连上（'+esc(sc.error||"记忆服务没在跑")+'）—— 桌宠照常聊天，只是没有长期记忆');
+  return '<div class="hint '+(ok?"ok":"warn")+'" style="margin-top:8px;">'
+    + icon(ok?"check":"alert")+' 记忆 sidecar：<span class="name">'+esc(sc.url||"")+'</span> · '+detail+'</div>';
+}
+
 function renderMemory(data){
   const items=(data&&data.items)||[];
-  const live=(data&&data.live)||{};
-  const legacy=(data&&data.legacy)||{};
-  const isLive = (data&&data.store)==="live";
-  $("#memCount").textContent=(isLive?"live 库 ":"")+items.length+" 条";
-  $("#memStoreHint").innerHTML =
-    '<div class="hint '+(isLive?"ok":"warn")+'">'
-    + icon(isLive?"check":"alert")
-    + ' 当前展示的是 <b>'+(isLive?"live 库（桌宠真正在用的那份）":"legacy 库（live 库不存在时的回落）")+'</b>：'
-    + '<span class="name">'+esc(live.path||"")+'</span></div>'
+  const sc=(data&&data.sidecar)||{};
+  const ok=!!(data&&data.ok);
+  $("#memCount").textContent=(data&&data.count!=null?data.count:items.length)+" 条";
+
+  const byKind=(data&&data.by_kind)||{}, byImp=(data&&data.by_importance)||{};
+  $("#memStoreHint").innerHTML = sidecarLine(sc)
     + '<div class="hint" style="margin-top:8px;">'+icon("info")+' '+esc((data&&data.note)||"")+'</div>';
 
   $("#memKpis").innerHTML=[
-    kpi("live 库行数", fmtNum(live.count||0), esc(live.path||"")),
-    kpi("legacy 库行数", fmtNum(legacy.count||0), esc(legacy.path||"")),
-    kpi("access_count 命中数", fmtNum(live.access_hits||0), "被召回过的记忆条数", "green"),
-    kpi("重复 / 冲突", fmtNum((data&&data.duplicate_count)||0), "冲突 "+fmtNum((data&&data.conflict_count)||0), "amber"),
+    kpi("活跃卡片", fmtNum(items.length), "JSON 卡片（唯一真值）", ok?"green":"warn"),
+    kpi("被召回过的卡片", fmtNum((data&&data.access_hits)||0), "hitCount > 0", "green"),
+    kpi("向量索引", fmtNum(((data&&data.stats||{}).vector||{}).count||0), "Chroma 行数（派生）"),
+    kpi("BM25 文档", fmtNum(((data&&data.stats||{}).bm25||{}).docs||0), "关键词腿（派生）"),
   ].join("");
 
-  const byKind=live.by_kind||{}, byImp=live.by_importance||{};
   const kTotal=Object.keys(byKind).reduce(function(a,k){return a+byKind[k];},0);
   const iTotal=Object.keys(byImp).reduce(function(a,k){return a+byImp[k];},0);
   let dist="";
   if(!kTotal && !iTotal){
-    dist='<div class="hint">live 库里还没有记忆。</div>';
+    dist = ok ? '<div class="hint">卡片库里还没有记忆。</div>'
+              : '<div class="hint warn">'+icon("alert")+' 记忆 sidecar 没连上，没有可展示的卡片。</div>';
   }else{
-    dist = '<div class="sub-head" style="margin-top:6px;font-size:13px;">按 kind / category</div>'
-      + (Object.keys(byKind).length
-        ? Object.keys(byKind).map(function(k){return barRow(esc(k||"other"),byKind[k],kTotal);}).join("")
-        : '<div class="hint">没有 kind 分布。</div>')
+    dist = '<div class="sub-head" style="margin-top:6px;font-size:13px;">按 kind</div>'
+      + Object.keys(byKind).map(function(k){return barRow(esc(k||"fact"),byKind[k],kTotal);}).join("")
       + '<div class="sub-head" style="margin-top:14px;font-size:13px;">按 importance</div>'
-      + (Object.keys(byImp).length
-        ? Object.keys(byImp).sort(function(a,b){return Number(b)-Number(a);}).map(function(k){return barRow("重要性 "+esc(k),byImp[k],iTotal);}).join("")
-        : '<div class="hint">没有 importance 分布。</div>');
+      + Object.keys(byImp).sort(function(a,b){return Number(b)-Number(a);})
+          .map(function(k){return barRow("重要性 "+esc(k),byImp[k],iTotal);}).join("");
   }
   $("#memDist").innerHTML=dist;
 
-  const dup=(data&&data.duplicates)||[];
-  if(!dup.length){
-    $("#memDuplicates").innerHTML='<div class="hint ok">'+icon("check")+' 没有发现 legacy 重复/冲突。</div>';
-  }else{
-    $("#memDuplicates").innerHTML='<div class="tbl-wrap"><table class="tbl">'
-      + '<thead><tr><th>分组</th><th>关系</th><th>相似度</th><th>legacy 内容</th><th>live 内容</th><th>处理</th></tr></thead>'
-      + '<tbody>'+dup.map(function(d){
-          return '<tr>'
-            + '<td>'+esc(d.group||"—")+'</td>'
-            + '<td><span class="mini-tag '+(d.relation==="conflict"?"warn":(d.relation==="duplicate"?"ok":""))+'">'+esc(d.relation)+'</span></td>'
-            + '<td class="num">'+Number(d.similarity||0).toFixed(2)+'</td>'
-            + '<td>'+esc(d.legacy_content||"")+'</td>'
-            + '<td>'+esc(d.live_content||"—")+'</td>'
-            + '<td>'+esc(d.note||"")+'</td></tr>';
-        }).join("")+'</tbody></table></div>';
-  }
-
   if(!items.length){
-    $("#memGrid").innerHTML=emptyBox("还没有记住任何事","brain");
+    $("#memGrid").innerHTML=emptyBox(ok?"还没有记住任何事":"记忆 sidecar 没在跑","brain");
     return;
   }
   $("#memGrid").innerHTML=items.map(function(m){
@@ -906,35 +885,9 @@ function renderMemory(data){
       + '<span class="cat-tag">'+esc(m.category||m.kind||"未分类")+'</span>'
       + '<span>重要性 '+Number(m.importance||0).toFixed(2)+'</span>'
       + '<span>'+fmtTime(m.created_at)+'</span>'
-      + '<span class="mini-tag '+(Number(m.access_count||0)>0?"ok":"")+'">命中 '+(m.access_count||0)+'</span>'
+      + '<span class="mini-tag '+(Number(m.hit_count||0)>0?"ok":"")+'">命中 '+(m.hit_count||0)+'</span>'
       + '</div></div>';
   }).join("");
-}
-
-function renderMergePreview(pv){
-  state.memPreview=pv||null;
-  const btn=$("#btnMergeRun");
-  if(!pv){
-    $("#mergePreview").innerHTML='<div class="hint">还没有预览。</div>';
-    btn.disabled=true;
-    return;
-  }
-  function sec(title,arr,cls){
-    const list=arr||[];
-    return '<div class="sub-head" style="margin-top:10px;font-size:13px;">'+title
-      + ' <span class="mini-tag '+(cls||"")+'">'+list.length+'</span></div>'
-      + (list.length ? list.map(function(x){
-          return '<div class="config-block">'+esc(x.legacy_content||x.content||"")
-            + (x.note?'<br><span style="color:var(--sub);">'+esc(x.note)+'</span>':"")+'</div>';
-        }).join("") : '<div class="hint">无</div>');
-  }
-  $("#mergePreview").innerHTML=
-      '<div class="hint">live '+pv.live_count+' 条 · legacy '+pv.legacy_count+' 条</div>'
-    + sec("将并入 live",pv.will_insert,"ok")
-    + sec("保留 live（legacy 丢弃）",pv.will_keep_live)
-    + sec("两条都留（冲突）",pv.will_keep_both,"warn")
-    + sec("直接丢弃（占位符）",pv.will_discard,"warn");
-  btn.disabled = !((pv.will_insert||[]).length || (pv.will_keep_both||[]).length);
 }
 
 /* ------------------------------------------------------------------
@@ -1137,8 +1090,8 @@ function renderState(st){
 /* ------------------------------------------------------------------
  * Tab 健康与维护：/api/health + /api/maintenance/status
  * ------------------------------------------------------------------ */
-/* 向量索引状态的中文标签（口径见 app/brain/vector_index.py 的 derive_state） */
-var VSTATE={not_built:"还没建",built:"已建好",drifted:"已漂移",unavailable:"不可用",disabled:"已关闭"};
+/* 记忆 sidecar 的模型状态词（口径见 memory_sidecar/store.py 的 _model_state） */
+var MSTATE={idle:"还没加载",absent:"模型没下载",loading:"加载中",ready:"就绪",failed:"加载失败",disabled:"已关闭"};
 
 function renderHealth(h){
   if(!h){ $("#healthKpis").innerHTML='<div class="hint warn">健康数据读取失败。</div>'; return; }
@@ -1161,15 +1114,15 @@ function renderHealth(h){
   $("#healthFiles").innerHTML='<thead><tr><th>文件</th><th class="num">大小</th></tr></thead>'
     + '<tbody>'+files.map(function(f){return '<tr><td class="name">'+esc(f.name)+'</td><td class="num">'+fmtBytes(f.bytes)+'</td></tr>';}).join("")+'</tbody>';
 
-  const vi=h.vector_index||{};
-  const missing=(vi.models_missing||[]);
-  const modelOk=!missing.length;
+  const ms=h.memory_stats||{}, sc=h.memory_sidecar||{};
+  const vec=ms.vector||{}, bm=ms.bm25||{}, rr=ms.rerank||{};
   $("#healthVector").innerHTML=[
-    kpi("向量索引", VSTATE[vi.state]||vi.state||"—", vi.built?("已索引 "+(vi.n_indexed||0)+" 行"):"还没建过（用下面的按钮重建）", vi.drift?"warn":(vi.built?"green":"")),
-    kpi("索引模型", vi.embed_model||"—", vi.rerank_model||"", ""),
-    kpi("向量模型", modelOk?"已就绪":"没下载", modelOk?"两个模型都在本地缓存里":("缺 "+missing.length+" 个（合计 ≈1.2 GB）"), modelOk?"green":"warn"),
-    kpi("与记忆库一致", vi.drift?"否":"是", vi.drift?("源库 "+(vi.n_source||0)+" 行 / 索引 "+(vi.n_indexed||0)+" 行"):("源库 "+(vi.n_source||0)+" 行"), vi.drift?"warn":"green"),
-  ].join("")+(vi.notice?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.notice).replace(/\n/g,"<br>")+'</div>'):"")+(vi.error?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.error)+'</div>'):"");
+    kpi("卡片（真值）", fmtNum(ms.cards||0), "活跃 "+fmtNum(ms.active||0)+" · 过时 "+fmtNum(ms.superseded||0), ms.cards?"green":"warn"),
+    kpi("向量索引", vec.enabled===false?"已关闭":(MSTATE[vec.state]||vec.state||"—"), "已索引 "+fmtNum(vec.count||0)+" 行 · "+esc(vec.model||"—"), vec.error?"warn":"green"),
+    kpi("BM25 索引", MSTATE[bm.state]||bm.state||"—", "文档 "+fmtNum(bm.docs||0)+" 篇", bm.error?"warn":"green"),
+    kpi("精排", rr.enabled===false?"已关闭":(MSTATE[rr.state]||rr.state||"—"), esc(rr.model||"—"), rr.error?"warn":"green"),
+  ].join("")+sidecarLine(sc)
+    +((ms.degradation||[]).length?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc((ms.degradation||[]).join("；"))+'</div>'):"");
 }
 
 function backupLine(r){
@@ -1395,30 +1348,6 @@ $$(".danger .danger-btn").forEach(function(b){
   b.disabled=true;
   b.onclick=function(){runMaintenance(b.dataset.op,b.dataset.confirm,b.textContent.trim());};
 });
-$("#btnMergePreview").onclick=async function(){
-  $("#mergePreview").innerHTML='<div class="hint">预览中…</div>';
-  try{
-    renderMergePreview(await api("/api/memory/merge-preview"));
-  }catch(e){
-    $("#mergePreview").innerHTML='<div class="hint warn">'+icon("alert")+' 预览失败：'+esc(e.message)+'</div>';
-  }
-};
-$("#btnMergeRun").onclick=async function(){
-  if(!state.memPreview) return;
-  if(!window.confirm("确认把 legacy 记忆并进 live 库？\n\n执行前会自动备份两个记忆库，legacy 库只归档（移动到 backups/）不删除。")) return;
-  $("#mergePreview").innerHTML='<div class="hint">合并中…</div>';
-  try{
-    const r=await apiRaw("/api/maintenance/merge-memory?maintenance=1&confirm=merge-memory",{method:"POST"});
-    var ins=(r.inserted||[]).length, mk=(r.marked||[]).length;
-    $("#mergePreview").innerHTML='<div class="hint ok">'+icon("check")+' 合并完成：并入 '+fmtNum(ins)+' 条；'
-      +'冲突标记 '+fmtNum(mk)+' 对；'
-      +'legacy 归档到 <span class="name">'+esc(r.legacy_archived_to||"—")+'</span>（移动，不是删除）。</div>';
-    renderMemory(await api("/api/memory"));
-  }catch(e){
-    $("#mergePreview").innerHTML='<div class="hint warn">'+icon("alert")+' 合并失败：'+esc(e.message)+'</div>';
-  }
-};
-
 // 填充静态 HTML 中的 data-icon 占位（统一从 ICONS 取 SVG）
 $$("[data-icon]").forEach(function(el){
   const sz = el.dataset.size ? parseInt(el.dataset.size, 10) : 15;
@@ -1577,307 +1506,104 @@ def _secret_values(root: Path) -> set:
     return out
 
 
-def _character_name(root: Path) -> str:
-    """角色名（小汐）—— 决定 live 记忆库叫 data/memory_<角色名>.db。"""
-    cfg = _yaml_load(root / "config.yaml")
-    ch = cfg.get("character") or {}
-    name = str(ch.get("name") or "").strip()
-    rel = str(ch.get("character_file") or "").strip()
-    if not name and rel:
-        p = Path(rel)
-        if not p.is_absolute():
-            p = root / p
-        name = str((_yaml_load(p).get("character") or {}).get("name") or "").strip()
-    return name
+def _sidecar_status(base_url: Optional[str] = None, timeout: float = 0.4) -> dict:
+    """记忆 sidecar（独立进程）的实时状态 —— 面板只读展示，**不写任何东西**。
 
+    面板刷新不能被 sidecar 卡住：0.4s 超时 + 连不上就算「没连上」。
+    （读的是 GET /health，纯只读，不碰 data/。）
+    """
+    from app.brain.memory_client import MemoryClient
 
-def _same_path(a: Path, b: Path) -> bool:
-    """两个路径是不是同一个文件。"""
+    client = MemoryClient(base_url or "", timeout=timeout)
+    health = {}
     try:
-        return a.resolve() == b.resolve()
-    except OSError:
-        return str(a).lower() == str(b).lower()
+        health = client.health() or {}
+    except Exception as e:  # noqa: BLE001 - 面板永远不许因为记忆服务挂掉
+        health = {}
+    reachable = bool(health.get("ok"))
+    return {
+        "reachable": reachable,
+        "url": client.base_url,
+        "port": health.get("port"),
+        "cards": health.get("cards"),
+        "cards_total": health.get("cardsTotal"),
+        "models": health.get("models") or {},
+        "bm25": health.get("bm25"),
+        "degraded": bool(health.get("degraded")),
+        "degradation": health.get("degradation") or [],
+        "data_dir": health.get("dataDir") or "",
+        "error": "" if reachable else (client.last_error or "没连上（sidecar 没在跑）"),
+    }
 
 
-def _memory_stores(data_dir: Path, root: Path, memory_file: Optional[Path] = None):
-    """(live 库路径, legacy 库路径)。
+def _memory_sidecar(base_url: Optional[str] = None, timeout: float = 2.0):
+    """指向记忆 sidecar 的客户端（面板是独立进程 —— 只能走 HTTP）。"""
+    from app.brain.memory_client import MemoryClient
+    return MemoryClient(base_url or "", timeout=timeout)
 
-    live 库 = data/memory_<角色名>.db（MemoryStore 的 per-character 隔离，见
-    app/brain/memory.py:301-322）；legacy 库 = data/memory.db。
 
-    解析顺序：
-      1. 调用方显式点名了一个 .db（--memory-file 指到 sqlite 记忆库）
-         → 那就是"当前在用的这份"；
-      2. --memory-file 指到 json（生产用法 data/memory.json）
-         → 找同名的 memory_<角色名>.db；
-      3. data/memory_<角色名>.db 存在 → 用它；
-      4. data/memory_*.db 里有别的 → 用那个；
-      5. 都没有 → 回落到 legacy 库（端点会把 store 标成 legacy 并写明原因）。
+def _memory_payload(base_url: Optional[str] = None) -> dict:
+    """记忆 Tab 的响应体：**全部来自 sidecar**（JSON 卡片是唯一真值）。
+
+    只读 sidecar 的端点：GET /health（活着没 / 多少张卡 / 模型状态 / 降级原因）、
+    GET /stats（活跃 / 过时 / 按 kind 分布 / 两个索引的状态）、
+    卡片列表（GET /list；还没实现就读 sidecar 自己报的 cards.json）。
+
+    进程内的老记忆库（data/memory*.db + data/vectors/）已经删掉了，
+    这里**不再**读任何本地记忆库文件；sidecar 不在就老实说没连上，
+    依然返回 200（面板显示「没连上」，绝不是 500）。
     """
-    legacy = data_dir / "memory.db"
-    char = _character_name(root)
-    live: Optional[Path] = None
-    if memory_file is not None:
-        mf = Path(memory_file)
-        if mf.suffix.lower() == ".db":
-            # 调用方点名了一个 sqlite 记忆库 → 当前在用的就是它
-            live = mf
-        else:
-            # 生产用法：--memory-file data/memory.json → 同名的 memory_<角色名>.db
-            sibling = mf.with_name(f"{mf.stem}_{char}.db" if char else "")
-            if sibling.is_file():
-                live = sibling
-    if live is None:
-        cand = data_dir / f"memory_{char}.db" if char else None
-        if cand is not None and cand.is_file():
-            live = cand
-        else:
-            cands = sorted(p for p in data_dir.glob("memory_*.db")
-                           if p.name != legacy.name)
-            live = cands[0] if cands else (cand or legacy)
-    if live is None:
-        live = legacy
-    elif not live.is_file() and legacy.is_file():
-        # live 库不存在 → 回落到 legacy（端点会明确标 store=legacy）
-        live = legacy
-    return live, legacy
+    client = _memory_sidecar(base_url)
+    try:
+        health = client.health(timeout=0.6) or {}
+    except Exception:  # noqa: BLE001 - 面板永远不许因为记忆服务挂掉
+        health = {}
+    reachable = bool(health.get("ok"))
+    stats = (client.stats(timeout=1.0) or {}) if reachable else {}
 
-
-def _memory_payload(data_dir: Path, root: Path,
-                    memory_file: Optional[Path]) -> dict:
-    """记忆 Tab 的响应体：**live 库**（桌宠真正在用的那份）+ legacy 对照。
-
-    PLAN.md 5.2：/api/memory 必须读 live 库 data/memory_<角色名>.db ——
-    旧版本读的是 legacy 库 data/memory.db，看的不是桌宠真正在用的那份。
-    现在同一个响应里再带上 legacy 行数 + 两库之间的重复/冲突提示（5.1）。
-    """
-    live_path, legacy_path = _memory_stores(data_dir, root, memory_file)
-    live_items = _read_memory_db(live_path)
-    legacy_items = _read_memory_db(legacy_path)
-    pairs = _classify_legacy(live_items, legacy_items)
-    fallback = _same_path(live_path, legacy_path)
-
+    items: list = []
     by_kind: dict = {}
     by_importance: dict = {}
     access_hits = 0
-    for item in live_items:
-        kind = str(item.get("kind") or item.get("category") or "other")
-        by_kind[kind] = by_kind.get(kind, 0) + 1
-        bucket = "%.1f" % round(float(item.get("importance") or 0.0), 1)
-        by_importance[bucket] = by_importance.get(bucket, 0) + 1
-        if _int(item.get("access_count")) > 0:
-            access_hits += 1
+    if reachable:
+        try:
+            for view in client.all(limit=500):
+                items.append({
+                    "id": view.id,
+                    "content": view.content,
+                    "category": view.category,
+                    "kind": view.kind,
+                    "importance": round(view.importance, 2),
+                    "created_at": view.created_at,
+                    "updated_at": view.updated_at,
+                    "hit_count": view.hit_count,
+                })
+                by_kind[view.kind] = by_kind.get(view.kind, 0) + 1
+                bucket = "%.1f" % round(view.importance, 1)
+                by_importance[bucket] = by_importance.get(bucket, 0) + 1
+                if view.hit_count > 0:
+                    access_hits += 1
+        except Exception:  # noqa: BLE001
+            items = []
 
-    if fallback:
-        note = ("live 库 data/memory_<角色名>.db 不存在，这里回落到 legacy 库 "
-                "data/memory.db（桌宠还没在这台机器上写过记忆）")
-    else:
-        note = ("桌宠实际在用的库是 data/memory_<角色名>.db；"
-                "data/memory.db 是 legacy 库，见 duplicates 里的重复/冲突提示")
-
+    note = ("记忆只有 sidecar 一份真值（JSON 卡片）：data/memory_sidecar/cards.json；"
+            "向量索引 / BM25 都是它派生出来的，随时可以重建。"
+            if reachable else
+            "记忆 sidecar 没在跑（python -m memory_sidecar serve --port 8788）——"
+            "桌宠照常聊天，只是没有长期记忆。")
     return {
-        "items": live_items,
-        "count": len(live_items),
-        "source": str(live_path),
-        "store": "legacy" if fallback else "live",
-        "live": {
-            "path": str(live_path),
-            "exists": live_path.is_file(),
-            "count": len(live_items),
-            "by_kind": by_kind,
-            "by_importance": by_importance,
-            "access_hits": access_hits,
-        },
-        "legacy": {
-            "path": str(legacy_path),
-            "exists": legacy_path.is_file(),
-            "count": len(legacy_items),
-            "items": legacy_items,
-        },
-        "duplicates": pairs,
-        "duplicate_count": sum(
-            1 for p in pairs if p.get("relation") in ("duplicate", "conflict")),
-        "conflict_count": sum(
-            1 for p in pairs if p.get("relation") == "conflict"),
-        "known_groups": sorted({
-            p.get("group") for p in pairs if p.get("group")}),
+        "ok": reachable,
+        "source": "sidecar",
+        "url": client.base_url,
+        "count": len(items),
+        "items": items,
+        "by_kind": by_kind,
+        "by_importance": by_importance,
+        "access_hits": access_hits,
+        "stats": stats,
+        "sidecar": _sidecar_status(base_url),
         "note": note,
     }
-
-
-
-def _vector_index_status(data_dir: Path, root: Path,
-                         memory_file: Optional[Path] = None) -> dict:
-    """向量索引的状态（**只读**：不建库、不加载模型、不写任何东西）。
-
-    面板要回答三个问题：索引在不在？建了多少行？跟记忆库对得上吗？
-    （口径跟 MemoryStore.vector_index_status() **完全一致**：
-      状态用同一套词 —— not_built / built / drifted / unavailable ——
-      并且**绝不跟 n_indexed 打架**。）
-    """
-    out = {
-        "available": False, "built": False, "state": "not_built",
-        "state_reason": "", "path": None, "db": None,
-        "embed_model": None, "rerank_model": None,
-        "n_indexed": 0, "n_source": 0, "drift": False, "in_sync": False,
-        "updated_at": None, "error": None,
-        # —— 向量模型在不在（**只读磁盘**：不加载模型、不联网）+ 降级说明 ——
-        "models": None, "models_missing": [], "models_ready": False,
-        "degraded": False, "degraded_reason": "", "notice": "",
-    }
-    try:
-        from app.brain.vector_index import (derive_state, digest_rows,
-                                            index_dir_for, missing_models_notice,
-                                            models_status)
-    except Exception as exc:  # noqa: BLE001
-        out["error"] = "向量索引模块不可用：%s" % exc
-        out["state"] = "unavailable"
-        out["state_reason"] = out["error"]
-        return out
-    # 模型在不在：**先算**（索引还没建的时候主人更需要知道这个）
-    try:
-        mstat = models_status()
-        out["models"] = mstat
-        missing = list(mstat.get("missing") or [])
-        out["models_missing"] = missing
-        out["models_ready"] = bool(mstat.get("complete"))
-        if missing:
-            out["degraded"] = True
-            out["degraded_reason"] = "models_missing"
-            out["notice"] = missing_models_notice(missing)
-    except Exception:  # noqa: BLE001 - 探测失败不许影响面板
-        pass
-    try:
-        live_path, _legacy = _memory_stores(Path(data_dir), Path(root),
-                                             memory_file)
-        out["db"] = str(live_path)
-        src_rows = _read_memory_db(live_path)
-        out["n_source"] = len(src_rows)
-        idx_dir = index_dir_for(live_path)
-        out["path"] = str(idx_dir)
-        if not idx_dir.is_dir():
-            out["state"], out["state_reason"] = derive_state(
-                enabled=True, built=False, n_indexed=0,
-                n_source=out["n_source"], in_sync=False, drift=False,
-                error=None)
-            return out
-        state = {}
-        state_file = idx_dir / "_index_state.json"
-        if state_file.is_file():
-            try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                state = {}
-        n_indexed = int(state.get("count") or 0)
-        built = bool(state.get("digest")) or n_indexed > 0
-        out["built"] = built
-        out["available"] = built
-        out["n_indexed"] = n_indexed
-        out["embed_model"] = state.get("embed_model")
-        out["rerank_model"] = state.get("rerank_model")
-        out["updated_at"] = state.get("updated_at")
-        # 漂移判定跟 store 同一个口径（**整库摘要**比对）：
-        # 只比行数会漏掉「内容变了、行数没变」的情况。
-        src_digest = digest_rows([
-            {"id": r.get("id"), "content": r.get("content"),
-             "category": r.get("category"), "scope": r.get("scope"),
-             "kind": r.get("kind"), "topic": r.get("topic"),
-             "status": r.get("status")} for r in src_rows])
-        idx_digest = str(state.get("digest") or "")
-        in_sync = bool(idx_digest) and idx_digest == src_digest
-        out["in_sync"] = in_sync
-        out["drift"] = bool(built) and not in_sync
-        out["state"], out["state_reason"] = derive_state(
-            enabled=True, built=built, n_indexed=n_indexed,
-            n_source=out["n_source"], in_sync=in_sync, drift=out["drift"],
-            error=None)
-    except Exception as exc:  # noqa: BLE001
-        out["error"] = "读向量索引状态失败：%s" % exc
-    return out
-
-
-def _read_memory_db(path: Path) -> list:
-    """读 memories 表（只读打开）。表结构变了也不炸：按实际存在的列取。"""
-    if not path.is_file():
-        return []
-    try:
-        conn = sqlite3.connect("file:" + path.as_posix() + "?mode=ro", uri=True)
-    except Exception:
-        return []
-    out = []
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)")}
-        if not cols:
-            return []
-        want = [c for c in ("id", "content", "category", "kind", "scope",
-                             "importance", "created_at", "last_access_ts",
-                             "access_count", "topic", "status") if c in cols]
-        if "content" not in want:
-            return []
-        rows = conn.execute("SELECT " + ", ".join(want) + " FROM memories "
-                            "ORDER BY importance DESC, created_at DESC")
-        for row in rows.fetchall():
-            rec = dict(zip(want, row))
-            try:
-                rec["importance"] = float(rec.get("importance") or 0.0)
-            except (TypeError, ValueError):
-                rec["importance"] = 0.0
-            try:
-                rec["access_count"] = int(rec.get("access_count") or 0)
-            except (TypeError, ValueError):
-                rec["access_count"] = 0
-            out.append(rec)
-    except Exception:
-        out = []
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    return out
-
-
-def _is_placeholder(content: str) -> bool:
-    """占位符内容（内容无效，应当丢弃）—— 判定在共享模块里（同一套口径）。
-
-    面板原来自己写死「共享记忆:」这一句，跟 CLI 的通用占位符判定不是一回事；
-    现在两边都走 §app/brain/memory_merge.py§ 的 §is_placeholder()§。
-    """
-    return _memory_merge.is_placeholder(content)
-
-
-def _classify_groups(live_items: list, legacy_items: list) -> list:
-    """判定（**唯一实现**：§app/brain/memory_merge.py§）→ Group 列表。
-
-    CLI 脚本（§scripts/merge_memory_libraries.py§）调的是同一个模块，
-    所以面板预览看到的四类判定跟 CLI 报告**逐行一致**。
-    """
-    return _memory_merge.classify_items(live_items, legacy_items)
-
-
-def _classify_legacy(live_items: list, legacy_items: list) -> list:
-    """legacy 每一行 vs live 库：判成 duplicate / conflict / unique / invalid。
-
-    口径（PLAN.md 2.6）：
-      duplicate = 语义重复      -> 保留 live 那条，legacy 丢弃
-      conflict  = 主题像但值不同 -> 两条都保留，打 conflict 标记
-      unique    = live 没有     -> 并进 live
-      invalid   = 占位符/内容无效 -> 丢弃
-
-    **判定只有一份实现**：§app/brain/memory_merge.py§。面板原来自己抄了一份
-    分词（§_sim_tokens§）+ 阈值（0.35 / 0.15），跟 CLI 用的
-    MemoryStore.detect_conflicts() 口径不一致 —— 现在两边完全一致。
-    """
-    return [_memory_merge.group_to_dict(g)
-            for g in _classify_groups(live_items, legacy_items)]
-
-
-def _known_group(a: str, b: str) -> str:
-    """已知的 3 组语义重复 —— 共享实现（§app/brain/memory_merge.py§）。
-
-    只影响显示名，不参与任何判定。
-    """
-    return _memory_merge.known_group(a, b)
 
 
 # token 台账的 6 个桶字段（app/brain/token_ledger.py 的 BUCKET_FIELDS）。
@@ -2587,28 +2313,6 @@ def _backup_files(data_dir: Path, stamp: str, names, label: str) -> dict:
     return result
 
 
-def _backup_vector_index(data_dir: Path, idx_dir: Path, stamp: str) -> dict:
-    """备份**向量索引目录**（这次操作真正会动的文件）。
-
-    索引是**派生**的（真相在 SQLite），但重建会覆盖它 —— 按同样的纪律
-    先留一份副本。目录还不存在 → 本次操作不写任何已有文件 → 无需备份。
-    """
-    data_dir = Path(data_dir)
-    idx_dir = Path(idx_dir)
-    srcs = []
-    if idx_dir.is_dir():
-        try:
-            srcs = [p for p in sorted(idx_dir.rglob("*")) if p.is_file()]
-        except OSError:
-            srcs = []
-    if not srcs:
-        return _backup_noop("向量索引还没建过（本次操作不写任何已有文件）")
-    result = _pack_files(srcs, data_dir / "backups" / stamp,
-                         f"vector-index-{stamp}.zip")
-    result["reason"] = "只备份这次操作会动的文件：向量索引目录 %s" % idx_dir
-    return result
-
-
 def _backup_noop(reason: str) -> dict:
     """「这次不需要备份」—— 也要给前端一个统一形状的返回。"""
     return {"ok": True, "dir": None, "archive": None, "bytes": 0,
@@ -2672,28 +2376,13 @@ def _backup_stamp() -> str:
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _merge_into_live(live_path: Path, legacy_path: Path, groups: list,
-                     archive_dir: Path, backup: Optional[dict] = None) -> dict:
-    """把 legacy 并进 live 库 —— 落库走**共享实现**（§app/brain/memory_merge.py§）。
-
-    共享实现负责四件事（跟 CLI 一模一样）：
-      1. 备份（面板那边已经把 zip 备份打好传进来了，备份失败就不许动手）；
-      2. 把 unique / **conflict** 的 legacy 行**插进 live 库**
-         —— 面板原来只插 unique，冲突行**从来没进过 live 库**，
-            那条记忆于是永远召不回来；
-      3. 给 conflict 的两条打标记：§memories.topic='conflict'§ +
-         §memory_conflicts§ 配对表（Stage 2.4 的 supersede() 靠它工作）；
-      4. 把 legacy 库**移动**到 backups/ 归档（**不是删除**，字节不变、仍可打开）。
-
-    live 库正在被桌宠主进程开着 —— 共享实现用事务 + 出错回滚，绝不写坏。
-    """
-    return _memory_merge.apply_merge(live_path, legacy_path, groups,
-                                     archive_dir, archive_dir, backup)
-
-
 def create_app(trace_db: str | Path,
-               memory_file: Optional[str | Path] = None):
-    """构造 FastAPI app。"""
+               sidecar_url: Optional[str | Path] = None):
+    """构造 FastAPI app。
+
+    sidecar_url：记忆 sidecar 的地址（面板是独立进程，记忆只走 HTTP 读它）。
+    传 None / 空串就用默认地址（http://127.0.0.1:8788，端口可被环境变量覆盖）。
+    """
     try:
         from fastapi import FastAPI, HTTPException
         from fastapi.responses import HTMLResponse
@@ -2886,35 +2575,12 @@ def create_app(trace_db: str | Path,
 
     @app.get("/api/memory")
     def memory():
-        """长期记忆：读 **live 库** data/memory_<角色名>.db（桌宠真正在用的那份）。
+        """长期记忆：**全部读自 sidecar**（JSON 卡片是唯一真值）。
 
-        旧版本读的是 legacy 库 data/memory.db —— 看的不是桌宠在用的数据。
-        现在同一个响应里再带上 legacy 行数 + 两库之间的已知重复/冲突（PLAN.md 5.1）。
+        进程内的老记忆库（data/memory*.db / data/vectors/）已经删掉了：
+        面板跟桌宠一样，只是一个 HTTP 客户端。
         """
-        return _memory_payload(_data_dir, _root,
-                               Path(memory_file) if memory_file else None)
-
-    @app.get("/api/memory/merge-preview")
-    def memory_merge_preview():
-        """合并 legacy/live 的预览（只读，不动任何文件）。"""
-        live_path, legacy_path = _memory_stores(
-            _data_dir, _root,
-            Path(memory_file) if memory_file else None)
-        live_items = _read_memory_db(live_path)
-        legacy_items = _read_memory_db(legacy_path)
-        pairs = _classify_legacy(live_items, legacy_items)
-        return {
-            "live_path": str(live_path),
-            "legacy_path": str(legacy_path),
-            "store": "legacy" if _same_path(live_path, legacy_path) else "live",
-            "live_count": len(live_items),
-            "legacy_count": len(legacy_items),
-            "will_insert": [p for p in pairs if p.get("action") == "insert"],
-            "will_keep_live": [p for p in pairs if p.get("action") == "keep_live"],
-            "will_keep_both": [p for p in pairs if p.get("action") == "keep_both"],
-            "will_discard": [p for p in pairs if p.get("action") == "discard"],
-            "pairs": pairs,
-        }
+        return _memory_payload(sidecar_url)
 
     @app.get("/api/tools")
     def tools():
@@ -2943,9 +2609,12 @@ def create_app(trace_db: str | Path,
     def health():
         """健康与维护 Tab：429 限流 / 崩溃 / 账本污染 / data/ 文件体检。"""
         payload = _health_report(_data_dir, trace_db)
-        # 向量索引状态（只读）：索引在不在 / 建了多少 / 漂移没漂移
-        payload["vector_index"] = _vector_index_status(
-            _data_dir, _root, Path(memory_file) if memory_file else None)
+        # 记忆 sidecar 的两个索引（向量 / BM25 + 精排）现在归 sidecar 自己管，
+        # 面板只读它 /health + /stats 报出来的状态 ——
+        # 不再有「本进程的向量索引」这回事（那个模块已经删了）。
+        mem = _memory_payload(sidecar_url)
+        payload["memory_sidecar"] = mem.get("sidecar") or {}
+        payload["memory_stats"] = mem.get("stats") or {}
         return payload
 
     @app.get("/api/overview")
@@ -2953,20 +2622,15 @@ def create_app(trace_db: str | Path,
         """顶部卡片数据（8 张卡片一次拿全，前端不用发 8 个请求）。"""
         stats = _recorder.stats()
         tokens = _token_summary(_data_dir)
-        live_path, legacy_path = _memory_stores(
-            _data_dir, _root,
-            Path(memory_file) if memory_file else None)
-        live_items = _read_memory_db(live_path)
-        legacy_items = _read_memory_db(legacy_path)
+        mem = _memory_payload(sidecar_url)
         inv = _tool_inventory(trace_db)
         return {
             "stats": stats,
             "tokens": tokens,
             "memory": {
-                "live_count": len(live_items),
-                "legacy_count": len(legacy_items),
-                "live_path": str(live_path),
-                "legacy_path": str(legacy_path),
+                "count": mem.get("count", 0),
+                "url": mem.get("url", ""),
+                "reachable": bool(mem.get("ok")),
             },
             "tools": {
                 "count": inv.get("count", 0),
@@ -3100,122 +2764,30 @@ def create_app(trace_db: str | Path,
         _remember_dangerous_op("rerun-reconciliation", result)
         return result
 
-    @app.post("/api/maintenance/merge-memory")
-    def maintenance_merge_memory(maintenance: int = 0, confirm: str = ""):
-        """合并 legacy/live 记忆库（先备份；legacy **归档**而不是删除）。
-
-        判定与落库都走**共享实现** §app/brain/memory_merge.py§
-        （CLI 脚本 §scripts/merge_memory_libraries.py§ 也用它）——
-        面板预览 = CLI 报告，逐行一致。
-
-        三道闸门不变：POST + maintenance=1 + confirm=merge-memory，
-        而且**动手之前一定先备份**（备份失败就不许动）。
-        """
-        _require_maintenance(maintenance, confirm, "merge-memory")
-        live_path, legacy_path = _memory_stores(
-            _data_dir, _root,
-            Path(memory_file) if memory_file else None)
-        live_items = _read_memory_db(live_path)
-        legacy_items = _read_memory_db(legacy_path)
-        groups = _classify_groups(live_items, legacy_items)
-        pairs = [_memory_merge.group_to_dict(g) for g in groups]
-
-        # 备份：**只备份它会动的两个文件**（两个记忆库）。
-        # 原来是把整个 data/ 打成 zip —— 里面混着 289MB 的
-        # langchain_checkpoints.db，每次维护操作都又慢又占地方。
-        backup = _memory_merge.backup_databases_zip(
-            live_path, legacy_path,
-            _data_dir / "backups" / _backup_stamp())
-        if not backup.get("ok"):
-            raise HTTPException(500, f"备份失败，拒绝继续：{backup.get('error')}")
-
-        if _same_path(live_path, legacy_path):
-            # 没有独立的 live 库（live 库不存在，已回落到 legacy）→ 没有可合并的差异
-            result = {"op": "merge-memory", "backup": backup,
-                      "live_path": str(live_path),
-                      "legacy_path": str(legacy_path),
-                      "inserted": [], "inserted_count": 0,
-                      "marked": [], "marked_count": 0,
-                      "kept_live": 0, "kept_both": 0,
-                      "discarded": 0, "legacy_archived_to": None,
-                      "pairs": pairs,
-                      "note": ("live 库不存在（已回落到 legacy 库），没有可合并的差异；"
-                               "没有改动任何记忆")}
-            _remember_dangerous_op("merge-memory", result)
-            return result
-
-        # 落库（共享实现）：插入 unique **和 conflict** 的行 + 打 conflict
-        # 标记 + 把 legacy 库**移动**到 backups/ 归档（不是删除）。
-        merged = _merge_into_live(live_path, legacy_path, groups,
-                                  _data_dir / "backups", backup)
-        if not merged.get("ok"):
-            raise HTTPException(500, merged.get("error") or "合并失败")
-        archived = (merged.get("archived") or {}).get("to")
-        result = {"op": "merge-memory", "backup": backup,
-                  "live_path": str(live_path),
-                  "legacy_path": str(legacy_path),
-                  "inserted": merged.get("inserted", []),
-                  "inserted_count": len(merged.get("inserted", [])),
-                  "marked": merged.get("marked", []),
-                  "marked_count": len(merged.get("marked", [])),
-                  "kept_live": len([p for p in pairs
-                                    if p.get("action") == "keep_live"]),
-                  "kept_both": len([p for p in pairs
-                                    if p.get("action") == "keep_both"]),
-                  "discarded": len([p for p in pairs
-                                    if p.get("action") == "discard"]),
-                  "legacy_archived_to": archived,
-                  "pairs": pairs,
-                  "note": ("legacy 库已**归档**（移动到 backups/，字节不变、仍可打开），"
-                           "没有删除；冲突的两条都保留并打了 conflict 标记；"
-                           "live 库里原有的行一条没动")}
-        _remember_dangerous_op("merge-memory", result)
-        return result
-
-
     @app.post("/api/maintenance/rebuild-vector-index")
-    def maintenance_rebuild_vector_index(maintenance: int = 0, confirm: str = ""):
-        """重建记忆库的**向量索引**（先备份；只写 data/vectors/<角色>/）。
+    def maintenance_rebuild_index(maintenance: int = 0, confirm: str = ""):
+        """让**记忆 sidecar 自己**重建两个索引（POST /rebuild）。
 
-        三道闸门不变：POST + maintenance=1 + confirm=rebuild-vector-index，
-        而且**动手之前一定先备份**（备份失败就不许动）。
+        真值永远是 JSON 卡片（sidecar 的 cards.json）—— 重建只是把 Chroma
+        向量索引和 BM25 索引按卡片重新算一遍，**一张卡片都不会动**，
+        所以这里不需要备份（以前要备份的是本地 sqlite + data/vectors/，
+        那两个东西已经没了）。
 
-        重建在**后台线程**里跑：第一次可能要下载模型（≈1.2 GB），
-        不能把 HTTP 请求挂在那儿 —— 面板立刻返回，完成后刷新看状态。
+        三道闸门不变：POST + maintenance=1 + confirm=rebuild-vector-index。
         """
         _require_maintenance(maintenance, confirm, "rebuild-vector-index")
-        live_path, _legacy = _memory_stores(
-            _data_dir, _root, Path(memory_file) if memory_file else None)
-        from app.brain.vector_index import index_dir_for
-        idx_dir = index_dir_for(live_path)
-        # 备份：这次操作真正会动的文件 = 向量索引目录里的文件
-        backup = _backup_vector_index(_data_dir, idx_dir, _backup_stamp())
-        if not backup.get("ok"):
-            raise HTTPException(500, f"备份失败，拒绝继续：{backup.get('error')}")
-        state = {"running": True, "ok": None, "error": None, "count": 0}
-
-        def _work() -> None:
-            try:
-                from app.brain.memory import MemoryStore
-                store = MemoryStore(live_path)
-                report = store.rebuild_vector_index(blocking=True)
-                state.update(running=False, ok=bool(report.get("ok")),
-                             error=report.get("error"),
-                             count=report.get("count") or 0)
-            except Exception as exc:  # noqa: BLE001
-                state.update(running=False, ok=False, error=str(exc))
-
-        thread = threading.Thread(target=_work, daemon=True,
-                                  name="VectorIndexRebuild")
-        thread.start()
-        result = {"op": "rebuild-vector-index", "backup": backup,
-                  "backup_archive": backup.get("archive"),
-                  "backup_bytes": backup.get("bytes"),
-                  "backup_files": backup.get("files"),
-                  "db": str(live_path), "index_dir": str(idx_dir),
-                  "started": True, "state": dict(state),
-                  "note": ("重建在后台线程里跑（第一次可能要下载模型 ≈1.2 GB，"
-                           "不会阻塞面板）；完成后刷新本页看状态")}
+        client = _memory_sidecar(sidecar_url, timeout=60.0)
+        rebuilt = client.rebuild() or {}
+        ok = bool(rebuilt) and not (rebuilt.get("errors") or [])
+        result = {
+            "op": "rebuild-vector-index",
+            "ok": ok,
+            "url": client.base_url,
+            "rebuilt": rebuilt,
+            "error": "" if rebuilt else (client.last_error or "sidecar 没在跑"),
+            "note": ("索引由 sidecar 从 JSON 卡片重建（向量腿 + BM25 腿）；"
+                     "卡片本身没动过，所以这次没有备份步骤"),
+        }
         _remember_dangerous_op("rebuild-vector-index", result)
         return result
 
@@ -3232,9 +2804,6 @@ def create_app(trace_db: str | Path,
                     {"name": "rerun-reconciliation",
                      "confirm": "rerun-reconciliation", "method": "POST",
                      "endpoint": "/api/maintenance/reconciliation"},
-                    {"name": "merge-memory", "confirm": "merge-memory",
-                     "method": "POST",
-                     "endpoint": "/api/maintenance/merge-memory"},
                     {"name": "rebuild-vector-index",
                      "confirm": "rebuild-vector-index", "method": "POST",
                      "endpoint": "/api/maintenance/rebuild-vector-index"},
@@ -3250,7 +2819,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--trace-db", default="data/traces.db")
-    parser.add_argument("--memory-file", default="data/memory.json")
+    parser.add_argument("--sidecar-url", default="",
+                        help="记忆 sidecar 地址（默认 http://127.0.0.1:8788）")
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
@@ -3258,11 +2828,7 @@ def main():
     trace_db = Path(args.trace_db)
     if not trace_db.is_absolute():
         trace_db = Path.cwd() / trace_db
-    memory_file = Path(args.memory_file)
-    if not memory_file.is_absolute():
-        memory_file = Path.cwd() / memory_file
-
-    app = create_app(trace_db, memory_file)
+    app = create_app(trace_db, args.sidecar_url or None)
     try:
         import uvicorn
     except ImportError:
@@ -3270,7 +2836,7 @@ def main():
 
     print(f"Dashboard 启动: http://{args.host}:{args.port}")
     print(f"   trace db: {trace_db}")
-    print(f"   memory:   {memory_file}")
+    print(f"   memory:   sidecar {args.sidecar_url or '（默认 127.0.0.1:8788）'}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

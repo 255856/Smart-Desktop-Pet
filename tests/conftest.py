@@ -40,13 +40,13 @@ for _mod in ("attr", "attrs"):
     except Exception:  # noqa: BLE001 - 没装就算了，不影响别的测试
         pass
 
-# ⚠️ Windows DLL 顺序（向量索引要用 chromadb 的原生扩展）：
+# ⚠️ Windows DLL 顺序（记忆 sidecar 用的是 chromadb 的原生扩展）：
 #    PyQt5 自带一份**旧版** MSVC 运行时（PyQt5/Qt5/bin/msvcp140.dll 等），
 #    并把那个目录加进 DLL 搜索路径 —— 之后加载的原生扩展会捡到那份旧运行时，
 #    chromadb 的 Rust 绑定就是这么炸的（access violation，整进程崩）。
 #    趁 Qt 还没加载（下面的 ASR fixture 会 import PyQt5），先把**系统**那份
 #    MSVC 运行时预加载进来，全进程就都用系统那份 → 不再抢。
-from app.brain.vector_index import preload_system_msvc_runtime  # noqa: E402
+from app.core.msvc_runtime import preload_system_msvc_runtime  # noqa: E402
 
 preload_system_msvc_runtime()
 
@@ -164,8 +164,9 @@ def _isolate_repo_data_dir(tmp_path_factory):
       · app/brain/_companion_log.py —— _default_log_path() → data/companion_log.txt：
         写一条决策 trace 就往用户的真实日志里追加一行。
 
-    数据红线：测试不许碰用户数据（跟记忆库那条闸同源，
-    见 tests/test_memory_lifecycle_supersede.py::test_a6_*）。
+    数据红线：测试不许碰用户数据。（记忆那边同样有一条闸：
+    整套用例**不许**拉起真的 sidecar 子进程，见
+    tests/test_memory_tools_sidecar.py::test_brain_never_spawns_a_sidecar_inside_the_test_suite。）
     """
     tmp = tmp_path_factory.mktemp("repo_data_isolation")
 

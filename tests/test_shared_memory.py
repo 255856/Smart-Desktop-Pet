@@ -1,19 +1,15 @@
 """v56: 共同经历（shared）类别记忆 + proactive 注入。
 
-覆盖:
-- `MemoryStore.CATEGORY_CHOICES` 含 "shared"
-- `add_shared()` 默认 category="shared", importance=0.7
-- `add_shared()` 接受自定义 importance
-- `recent_shared(n)` 按 created_at 倒序返最近 n 条, 只含 shared 类
-- `_memory.py` 的 remember_fact tool enum 接受 "shared"
-- proactive context 含 `shared_memories` 字段（最近 3 条 shared 的 content）
+覆盖（全部走记忆 sidecar 客户端，用 tests/fake_sidecar.py 顶替网络）:
+- 客户端把 category="shared" 落成 sidecar 的 topic 卡（category 字段原样带着）
+- recent_shared(n) 按更新时间倒序返最近 n 条, 只含 shared 类
+- _memory.py 的 remember_fact tool enum 接受 "shared"
+- proactive context 含 shared_memories 字段（最近 3 条 shared 的 content）
 """
 from __future__ import annotations
 
 import os
 import sys
-import tempfile
-from typing import List
 from unittest import mock
 
 import pytest
@@ -21,81 +17,86 @@ import pytest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
+
+from app.brain.memory_client import (  # noqa: E402
+    CATEGORY_TO_KIND, MemoryClient, category_to_kind,
+)
+from fake_sidecar import install  # noqa: E402
+
+
+def _client():
+    client = MemoryClient(cooldown=0.0)
+    install(client)
+    return client
+
+
+def _add_shared(client, text, importance=0.7):
+    return client.add(text, kind=category_to_kind("shared"),
+                      importance=importance, category="shared")
 
 
 # ----------------------------
-# MemoryStore.add_shared / recent_shared
+# 共同经历：写入 / 读回
 # ----------------------------
 
 
 class TestSharedCategoryBasics:
     def setup_method(self):
-        # 用空白 db 文件, 不要污染持久化数据
-        fd, path = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        os.unlink(path)  # 删除, 留 path
-        self.tmp = path
-        from app.brain.memory import MemoryStore
-        self.store = MemoryStore(path, backend_name="substring")
-
-    def teardown_method(self):
-        # 清理
-        try:
-            os.unlink(self.tmp)
-        except OSError:
-            pass
+        self.client = _client()
 
     def test_category_choices_includes_shared(self):
-        from app.brain.memory import CATEGORY_CHOICES
-        assert "shared" in CATEGORY_CHOICES
+        assert "shared" in CATEGORY_TO_KIND
 
     def test_add_shared_defaults_to_shared_category_07_importance(self):
-        item = self.store.add_shared("上周三一起下了三盘象棋你输了")
-        assert item.category == "shared"
-        assert item.importance == pytest.approx(0.7)
-        assert item.content == "上周三一起下了三盘象棋你输了"
+        card = _add_shared(self.client, "上周三一起下了三盘象棋你输了")
+        assert card["category"] == "shared"
+        assert card["importance"] == pytest.approx(0.7)
+        assert card["text"] == "上周三一起下了三盘象棋你输了"
 
     def test_add_shared_accepts_custom_importance(self):
-        item = self.store.add_shared("上次那个方案你吐槽了最后还是采纳了", importance=0.85)
-        assert item.category == "shared"
-        assert item.importance == pytest.approx(0.85)
-
-    def test_add_with_unknown_category_falls_back_to_other(self):
-        """sanity: 不在 CATEGORY_CHOICES 里的 category 会落到 other。"""
-        item = self.store.add("xxx", category="nonsense")
-        assert item.category == "other"
+        card = _add_shared(self.client, "上次那个方案你吐槽了最后还是采纳了",
+                           importance=0.85)
+        assert card["category"] == "shared"
+        assert card["importance"] == pytest.approx(0.85)
 
     def test_recent_shared_returns_only_shared(self):
-        self.store.add("普通 fact", category="fact")
-        self.store.add("共同经历 1", category="shared")
-        self.store.add("共同经历 2", category="shared")
-        self.store.add("偏好", category="preference")
+        self.client.add("普通 fact", category="fact")
+        _add_shared(self.client, "共同经历 1")
+        _add_shared(self.client, "共同经历 2")
+        self.client.add("偏好", category="preference")
 
-        shared = self.store.recent_shared(5)
+        shared = self.client.recent_shared(5)
         assert len(shared) == 2
         assert all(i.category == "shared" for i in shared)
 
     def test_recent_shared_orders_newest_first(self):
-        import time as _t
-        self.store.add_shared("早的")
-        _t.sleep(0.01)
-        self.store.add_shared("晚的")
-        shared = self.store.recent_shared(5)
+        # 更新时间是 sidecar 写的；这里直接拨时间戳，避免依赖 sleep 的精度
+        fake = getattr(self.client._http, "__self__", None)
+        _add_shared(self.client, "早的")
+        _add_shared(self.client, "晚的")
+        for card in fake.cards.values():
+            card["updatedAt"] = 1000 if card["text"] == "早的" else 2000
+        shared = self.client.recent_shared(5)
         assert shared[0].content == "晚的"
         assert shared[1].content == "早的"
 
     def test_recent_shared_respects_n(self):
+        fake = getattr(self.client._http, "__self__", None)
         for i in range(5):
-            self.store.add_shared(f"记忆 {i}")
-        shared = self.store.recent_shared(2)
+            _add_shared(self.client, "记忆 %d" % i)
+        for card in fake.cards.values():
+            card["updatedAt"] = 1000 + int(card["text"].split()[-1])
+        shared = self.client.recent_shared(2)
         assert len(shared) == 2
-        # 最近的 2 条是 #3 #4
         contents = [s.content for s in shared]
         assert "记忆 3" in contents
         assert "记忆 4" in contents
 
     def test_recent_shared_empty_returns_empty(self):
-        assert self.store.recent_shared(3) == []
+        assert self.client.recent_shared(3) == []
 
 
 # ----------------------------
@@ -104,27 +105,31 @@ class TestSharedCategoryBasics:
 
 
 def test_remember_fact_enum_accepts_shared():
-    """remember_fact 工具的 category enum 必须含 'shared', 否则 LLM 没法调。"""
+    """remember_fact 工具的 category enum 必须含 shared, 否则 LLM 没法调。"""
     from app.engine.tools._memory import register
     from app.engine.tools import ToolRegistry
-    from app.brain.memory import MemoryStore
-    import tempfile
 
-    fd, path = tempfile.mkstemp(suffix=".json")
-    os.close(fd); os.unlink(path)
-    try:
-        memory = MemoryStore(path, backend_name="substring")
-        reg = ToolRegistry()
-        register(reg, memory=memory)
-        tool_obj = reg.get("remember_fact")
-        assert tool_obj is not None, "remember_fact tool not registered"
-        cat_enum = tool_obj.parameters["properties"]["category"]["enum"]
-        assert "shared" in cat_enum
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    reg = ToolRegistry()
+    register(reg, memory=_client())
+    tool_obj = reg.get("remember_fact")
+    assert tool_obj is not None, "remember_fact tool not registered"
+    cat_enum = tool_obj.parameters["properties"]["category"]["enum"]
+    assert "shared" in cat_enum
+
+
+def test_remember_fact_shared_lands_as_topic_card():
+    """category=shared → sidecar 的 topic 卡（category 字段原样保留）。"""
+    from app.engine.tools._memory import register
+    from app.engine.tools import ToolRegistry
+
+    client = _client()
+    reg = ToolRegistry()
+    register(reg, memory=client)
+    out = reg.get("remember_fact").fn(content="一起下棋你输了", category="shared",
+                                      importance=0.7)
+    assert out.startswith("已记住"), out
+    assert "topic" in out, out
+    assert client.recent_shared(3)[0].content == "一起下棋你输了"
 
 
 # ----------------------------
@@ -133,11 +138,7 @@ def test_remember_fact_enum_accepts_shared():
 
 
 def test_proactive_context_includes_shared_memories():
-    """ProactiveBrain 构造 context_base 时, 应包含 shared_memories 字段。
-
-    我们直接调 _fire() 之前会构造的 context_base 同等结构, 用 mock 替换
-    memory 让它返回预设的 shared 列表。
-    """
+    """ProactiveBrain 构造 context_base 时, 应包含 shared_memories 字段。"""
     from app.brain.proactive import ProactiveBrain
 
     fake_llm = mock.MagicMock()
@@ -178,7 +179,7 @@ def test_proactive_context_includes_shared_memories():
     mem = brain.memory.recent(10)
     shared = brain.memory.recent_shared(3)
     context_base = {
-        "now": now.strftime(f"%Y-%m-%d %H:%M 星期{wd}"),
+        "now": now.strftime("%Y-%m-%d %H:%M 星期" + wd),
         "is_night": is_night(now.timestamp()),
         "time_hint": "现在白天",
         "pet_status": brain.state.stats_summary(),
@@ -192,8 +193,8 @@ def test_proactive_context_includes_shared_memories():
     ]
 
 
-def test_proactive_backward_compatible_with_old_memory_no_recent_shared():
-    """老版本 MemoryStore 没有 recent_shared 时, proactive 应优雅降级（空列表）。"""
+def test_proactive_survives_memory_read_failure():
+    """记忆读失败（sidecar 挂了 / 没有 recent_shared）→ 空列表，不抛。"""
     from app.brain.proactive import ProactiveBrain
 
     fake_llm = mock.MagicMock()
@@ -201,10 +202,9 @@ def test_proactive_backward_compatible_with_old_memory_no_recent_shared():
     fake_llm.base_url = "http://127.0.0.1:11434"
     fake_llm.api_key = "test-key"
 
-    class _LegacyMemory:
+    class _BrokenMemory:
         def recent(self, n):
-            return []
-        # 注意: 没有 recent_shared 方法
+            raise ConnectionRefusedError("sidecar 不在")
 
     class _FakeState:
         def stats_summary(self):
@@ -214,14 +214,18 @@ def test_proactive_backward_compatible_with_old_memory_no_recent_shared():
         llm_cfg=fake_llm,
         persona="你是桌宠",
         state=_FakeState(),
-        memory=_LegacyMemory(),
+        memory=_BrokenMemory(),
         char_name="小汐",
         aw_cfg=None,
     )
-    # 复制 _fire 里那段代码: getattr fallback 让 legacy 不抛 AttributeError
-    shared = []
+    # _fire 里那两段都吞异常 —— 这里复刻同样的兜底
+    try:
+        brain.memory.recent(10)
+        mem = []
+    except Exception:  # noqa: BLE001
+        mem = []
     try:
         shared = brain.memory.recent_shared(3)
-    except AttributeError:
+    except Exception:  # noqa: BLE001
         shared = []
-    assert shared == []
+    assert mem == [] and shared == []

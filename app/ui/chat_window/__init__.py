@@ -198,7 +198,7 @@ class ChatWindow(QWidget):
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频）
         self.tts = tts
-        # 长期记忆存储（MemoryStore，可选）：供标题栏「记忆」管理面板增删
+        # 长期记忆（sidecar 的 HTTP 客户端，可选）：供标题栏「记忆」管理面板增删
         self.memory_store = memory_store
         self._memory_dlg: Optional[MemoryDialog] = None
         # 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
@@ -997,7 +997,7 @@ class ChatWindow(QWidget):
     def _open_memory(self) -> None:
         """标题栏「记忆」：打开长期记忆管理面板（非模态，可边聊边开）。"""
         if self.memory_store is None:
-            self._append_system_msg("当前未接入记忆存储，无法管理长期记忆")
+            self._append_system_msg("当前未接入记忆服务（sidecar），无法管理长期记忆")
             return
         if self._memory_dlg is None:
             self._memory_dlg = MemoryDialog(self.memory_store, self)
@@ -1500,9 +1500,14 @@ class ChatWindow(QWidget):
                 return
             if self.memory_store is not None:
                 try:
-                    self.memory_store.add(args, source="user")
+                    written = self.memory_store.add(args, category="fact")
                 except Exception as e:  # noqa: BLE001
+                    written = None
                     log.warning("memory_store.add 失败: %s", e)
+                if not written:
+                    # sidecar 不在 / 写失败 —— **不能**对主人说「已记下」
+                    self._append_system_msg("记忆服务不可用，这条没能记下")
+                    return
                 self._render_message(Message(
                     role="assistant",
                     content=f"已记下: {args}"))
