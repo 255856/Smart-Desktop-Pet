@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -424,6 +425,8 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div id="healthSamples"></div>
       <div class="sub-head">data/ 文件体检</div>
       <div class="tbl-wrap"><table class="tbl" id="healthFiles"></table></div>
+      <div class="sub-head">向量索引（Chroma + bge-small-zh-v1.5 + bge-reranker-base）</div>
+      <div class="grid3" id="healthVector"></div>
       <div class="sub-head">危险操作</div>
       <div class="danger">
         <h3>默认只读 · 要操作得显式打开维护模式</h3>
@@ -441,6 +444,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
           <button class="btn danger-btn" data-op="reset-ledger" data-confirm="reset-ledger">重置 token 账本</button>
           <button class="btn danger-btn" data-op="reconciliation" data-confirm="rerun-reconciliation">重跑工具对账</button>
           <button class="btn danger-btn" data-op="merge-memory" data-confirm="merge-memory">合并记忆库</button>
+          <button class="btn danger-btn" data-op="rebuild-vector-index" data-confirm="rebuild-vector-index">重建向量索引</button>
         </div>
         <div id="maintResult"></div>
       </div>
@@ -1133,6 +1137,9 @@ function renderState(st){
 /* ------------------------------------------------------------------
  * Tab 健康与维护：/api/health + /api/maintenance/status
  * ------------------------------------------------------------------ */
+/* 向量索引状态的中文标签（口径见 app/brain/vector_index.py 的 derive_state） */
+var VSTATE={not_built:"还没建",built:"已建好",drifted:"已漂移",unavailable:"不可用",disabled:"已关闭"};
+
 function renderHealth(h){
   if(!h){ $("#healthKpis").innerHTML='<div class="hint warn">健康数据读取失败。</div>'; return; }
   const rl=h.rate_limited||{}, cr=h.crashes||{}, lg=h.ledger||{};
@@ -1153,6 +1160,13 @@ function renderHealth(h){
   const files=h.files||[];
   $("#healthFiles").innerHTML='<thead><tr><th>文件</th><th class="num">大小</th></tr></thead>'
     + '<tbody>'+files.map(function(f){return '<tr><td class="name">'+esc(f.name)+'</td><td class="num">'+fmtBytes(f.bytes)+'</td></tr>';}).join("")+'</tbody>';
+
+  const vi=h.vector_index||{};
+  $("#healthVector").innerHTML=[
+    kpi("向量索引", VSTATE[vi.state]||vi.state||"—", vi.built?("已索引 "+(vi.n_indexed||0)+" 行"):"还没建过（用下面的按钮重建）", vi.drift?"warn":(vi.built?"green":"")),
+    kpi("索引模型", vi.embed_model||"—", vi.rerank_model||"", ""),
+    kpi("与记忆库一致", vi.drift?"否":"是", vi.drift?("源库 "+(vi.n_source||0)+" 行 / 索引 "+(vi.n_indexed||0)+" 行"):("源库 "+(vi.n_source||0)+" 行"), vi.drift?"warn":"green"),
+  ].join("")+(vi.error?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.error)+'</div>'):"");
 }
 
 function backupLine(r){
@@ -1689,6 +1703,79 @@ def _memory_payload(data_dir: Path, root: Path,
 
 
 
+def _vector_index_status(data_dir: Path, root: Path,
+                         memory_file: Optional[Path] = None) -> dict:
+    """向量索引的状态（**只读**：不建库、不加载模型、不写任何东西）。
+
+    面板要回答三个问题：索引在不在？建了多少行？跟记忆库对得上吗？
+    （口径跟 MemoryStore.vector_index_status() **完全一致**：
+      状态用同一套词 —— not_built / built / drifted / unavailable ——
+      并且**绝不跟 n_indexed 打架**。）
+    """
+    out = {
+        "available": False, "built": False, "state": "not_built",
+        "state_reason": "", "path": None, "db": None,
+        "embed_model": None, "rerank_model": None,
+        "n_indexed": 0, "n_source": 0, "drift": False, "in_sync": False,
+        "updated_at": None, "error": None,
+    }
+    try:
+        from app.brain.vector_index import (derive_state, digest_rows,
+                                            index_dir_for)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = "向量索引模块不可用：%s" % exc
+        out["state"] = "unavailable"
+        out["state_reason"] = out["error"]
+        return out
+    try:
+        live_path, _legacy = _memory_stores(Path(data_dir), Path(root),
+                                             memory_file)
+        out["db"] = str(live_path)
+        src_rows = _read_memory_db(live_path)
+        out["n_source"] = len(src_rows)
+        idx_dir = index_dir_for(live_path)
+        out["path"] = str(idx_dir)
+        if not idx_dir.is_dir():
+            out["state"], out["state_reason"] = derive_state(
+                enabled=True, built=False, n_indexed=0,
+                n_source=out["n_source"], in_sync=False, drift=False,
+                error=None)
+            return out
+        state = {}
+        state_file = idx_dir / "_index_state.json"
+        if state_file.is_file():
+            try:
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                state = {}
+        n_indexed = int(state.get("count") or 0)
+        built = bool(state.get("digest")) or n_indexed > 0
+        out["built"] = built
+        out["available"] = built
+        out["n_indexed"] = n_indexed
+        out["embed_model"] = state.get("embed_model")
+        out["rerank_model"] = state.get("rerank_model")
+        out["updated_at"] = state.get("updated_at")
+        # 漂移判定跟 store 同一个口径（**整库摘要**比对）：
+        # 只比行数会漏掉「内容变了、行数没变」的情况。
+        src_digest = digest_rows([
+            {"id": r.get("id"), "content": r.get("content"),
+             "category": r.get("category"), "scope": r.get("scope"),
+             "kind": r.get("kind"), "topic": r.get("topic"),
+             "status": r.get("status")} for r in src_rows])
+        idx_digest = str(state.get("digest") or "")
+        in_sync = bool(idx_digest) and idx_digest == src_digest
+        out["in_sync"] = in_sync
+        out["drift"] = bool(built) and not in_sync
+        out["state"], out["state_reason"] = derive_state(
+            enabled=True, built=built, n_indexed=n_indexed,
+            n_source=out["n_source"], in_sync=in_sync, drift=out["drift"],
+            error=None)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = "读向量索引状态失败：%s" % exc
+    return out
+
+
 def _read_memory_db(path: Path) -> list:
     """读 memories 表（只读打开）。表结构变了也不炸：按实际存在的列取。"""
     if not path.is_file():
@@ -1704,7 +1791,7 @@ def _read_memory_db(path: Path) -> list:
             return []
         want = [c for c in ("id", "content", "category", "kind", "scope",
                              "importance", "created_at", "last_access_ts",
-                             "access_count") if c in cols]
+                             "access_count", "topic", "status") if c in cols]
         if "content" not in want:
             return []
         rows = conn.execute("SELECT " + ", ".join(want) + " FROM memories "
@@ -2480,6 +2567,28 @@ def _backup_files(data_dir: Path, stamp: str, names, label: str) -> dict:
     return result
 
 
+def _backup_vector_index(data_dir: Path, idx_dir: Path, stamp: str) -> dict:
+    """备份**向量索引目录**（这次操作真正会动的文件）。
+
+    索引是**派生**的（真相在 SQLite），但重建会覆盖它 —— 按同样的纪律
+    先留一份副本。目录还不存在 → 本次操作不写任何已有文件 → 无需备份。
+    """
+    data_dir = Path(data_dir)
+    idx_dir = Path(idx_dir)
+    srcs = []
+    if idx_dir.is_dir():
+        try:
+            srcs = [p for p in sorted(idx_dir.rglob("*")) if p.is_file()]
+        except OSError:
+            srcs = []
+    if not srcs:
+        return _backup_noop("向量索引还没建过（本次操作不写任何已有文件）")
+    result = _pack_files(srcs, data_dir / "backups" / stamp,
+                         f"vector-index-{stamp}.zip")
+    result["reason"] = "只备份这次操作会动的文件：向量索引目录 %s" % idx_dir
+    return result
+
+
 def _backup_noop(reason: str) -> dict:
     """「这次不需要备份」—— 也要给前端一个统一形状的返回。"""
     return {"ok": True, "dir": None, "archive": None, "bytes": 0,
@@ -2813,7 +2922,11 @@ def create_app(trace_db: str | Path,
     @app.get("/api/health")
     def health():
         """健康与维护 Tab：429 限流 / 崩溃 / 账本污染 / data/ 文件体检。"""
-        return _health_report(_data_dir, trace_db)
+        payload = _health_report(_data_dir, trace_db)
+        # 向量索引状态（只读）：索引在不在 / 建了多少 / 漂移没漂移
+        payload["vector_index"] = _vector_index_status(
+            _data_dir, _root, Path(memory_file) if memory_file else None)
+        return payload
 
     @app.get("/api/overview")
     def overview():
@@ -3040,6 +3153,52 @@ def create_app(trace_db: str | Path,
         return result
 
 
+    @app.post("/api/maintenance/rebuild-vector-index")
+    def maintenance_rebuild_vector_index(maintenance: int = 0, confirm: str = ""):
+        """重建记忆库的**向量索引**（先备份；只写 data/vectors/<角色>/）。
+
+        三道闸门不变：POST + maintenance=1 + confirm=rebuild-vector-index，
+        而且**动手之前一定先备份**（备份失败就不许动）。
+
+        重建在**后台线程**里跑：第一次可能要下载模型（≈1.2 GB），
+        不能把 HTTP 请求挂在那儿 —— 面板立刻返回，完成后刷新看状态。
+        """
+        _require_maintenance(maintenance, confirm, "rebuild-vector-index")
+        live_path, _legacy = _memory_stores(
+            _data_dir, _root, Path(memory_file) if memory_file else None)
+        from app.brain.vector_index import index_dir_for
+        idx_dir = index_dir_for(live_path)
+        # 备份：这次操作真正会动的文件 = 向量索引目录里的文件
+        backup = _backup_vector_index(_data_dir, idx_dir, _backup_stamp())
+        if not backup.get("ok"):
+            raise HTTPException(500, f"备份失败，拒绝继续：{backup.get('error')}")
+        state = {"running": True, "ok": None, "error": None, "count": 0}
+
+        def _work() -> None:
+            try:
+                from app.brain.memory import MemoryStore
+                store = MemoryStore(live_path)
+                report = store.rebuild_vector_index(blocking=True)
+                state.update(running=False, ok=bool(report.get("ok")),
+                             error=report.get("error"),
+                             count=report.get("count") or 0)
+            except Exception as exc:  # noqa: BLE001
+                state.update(running=False, ok=False, error=str(exc))
+
+        thread = threading.Thread(target=_work, daemon=True,
+                                  name="VectorIndexRebuild")
+        thread.start()
+        result = {"op": "rebuild-vector-index", "backup": backup,
+                  "backup_archive": backup.get("archive"),
+                  "backup_bytes": backup.get("bytes"),
+                  "backup_files": backup.get("files"),
+                  "db": str(live_path), "index_dir": str(idx_dir),
+                  "started": True, "state": dict(state),
+                  "note": ("重建在后台线程里跑（第一次可能要下载模型 ≈1.2 GB，"
+                           "不会阻塞面板）；完成后刷新本页看状态")}
+        _remember_dangerous_op("rebuild-vector-index", result)
+        return result
+
     @app.get("/api/maintenance/status")
     def maintenance_status():
         """最近一次危险操作的结果（面板用它显示"刚才做了什么"）。"""
@@ -3056,6 +3215,9 @@ def create_app(trace_db: str | Path,
                     {"name": "merge-memory", "confirm": "merge-memory",
                      "method": "POST",
                      "endpoint": "/api/maintenance/merge-memory"},
+                    {"name": "rebuild-vector-index",
+                     "confirm": "rebuild-vector-index", "method": "POST",
+                     "endpoint": "/api/maintenance/rebuild-vector-index"},
                 ],
                 "last_results": list(_DANGEROUS_OPS_LOG.values()),
                 "backups_dir": str(_data_dir / "backups")}
