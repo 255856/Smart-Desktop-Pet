@@ -1162,11 +1162,14 @@ function renderHealth(h){
     + '<tbody>'+files.map(function(f){return '<tr><td class="name">'+esc(f.name)+'</td><td class="num">'+fmtBytes(f.bytes)+'</td></tr>';}).join("")+'</tbody>';
 
   const vi=h.vector_index||{};
+  const missing=(vi.models_missing||[]);
+  const modelOk=!missing.length;
   $("#healthVector").innerHTML=[
     kpi("向量索引", VSTATE[vi.state]||vi.state||"—", vi.built?("已索引 "+(vi.n_indexed||0)+" 行"):"还没建过（用下面的按钮重建）", vi.drift?"warn":(vi.built?"green":"")),
     kpi("索引模型", vi.embed_model||"—", vi.rerank_model||"", ""),
+    kpi("向量模型", modelOk?"已就绪":"没下载", modelOk?"两个模型都在本地缓存里":("缺 "+missing.length+" 个（合计 ≈1.2 GB）"), modelOk?"green":"warn"),
     kpi("与记忆库一致", vi.drift?"否":"是", vi.drift?("源库 "+(vi.n_source||0)+" 行 / 索引 "+(vi.n_indexed||0)+" 行"):("源库 "+(vi.n_source||0)+" 行"), vi.drift?"warn":"green"),
-  ].join("")+(vi.error?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.error)+'</div>'):"");
+  ].join("")+(vi.notice?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.notice).replace(/\n/g,"<br>")+'</div>'):"")+(vi.error?('<div class="hint warn" style="margin-top:10px;">'+icon("alert")+' '+esc(vi.error)+'</div>'):"");
 }
 
 function backupLine(r){
@@ -1718,15 +1721,32 @@ def _vector_index_status(data_dir: Path, root: Path,
         "embed_model": None, "rerank_model": None,
         "n_indexed": 0, "n_source": 0, "drift": False, "in_sync": False,
         "updated_at": None, "error": None,
+        # —— 向量模型在不在（**只读磁盘**：不加载模型、不联网）+ 降级说明 ——
+        "models": None, "models_missing": [], "models_ready": False,
+        "degraded": False, "degraded_reason": "", "notice": "",
     }
     try:
         from app.brain.vector_index import (derive_state, digest_rows,
-                                            index_dir_for)
+                                            index_dir_for, missing_models_notice,
+                                            models_status)
     except Exception as exc:  # noqa: BLE001
         out["error"] = "向量索引模块不可用：%s" % exc
         out["state"] = "unavailable"
         out["state_reason"] = out["error"]
         return out
+    # 模型在不在：**先算**（索引还没建的时候主人更需要知道这个）
+    try:
+        mstat = models_status()
+        out["models"] = mstat
+        missing = list(mstat.get("missing") or [])
+        out["models_missing"] = missing
+        out["models_ready"] = bool(mstat.get("complete"))
+        if missing:
+            out["degraded"] = True
+            out["degraded_reason"] = "models_missing"
+            out["notice"] = missing_models_notice(missing)
+    except Exception:  # noqa: BLE001 - 探测失败不许影响面板
+        pass
     try:
         live_path, _legacy = _memory_stores(Path(data_dir), Path(root),
                                              memory_file)

@@ -83,6 +83,43 @@ python main.py
 4. **无 API key**？桌宠用 mock 回复兜底（功能演示完整，但不能调真实 Tavily 搜索 / 真 LLM）
 5. **ActivityWatch 未运行**？桌宠启动时 log 提示 `MCP aw 未启用 (aw-server 未运行?)`，不影响其他功能，mcp_aw_* 工具会回「server 未运行, 请装 ActivityWatch」
 6. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型；设置面板 → 「控制 Tab → 主动关心」段可开 AW SQLite 落盘
+7. **语义记忆检索没开**？桌宠照常用「关键词 + TF-IDF」（零下载）；想开就跑一次 `python scripts/prefetch_models.py`（≈1.2 GB 模型），详见下一节
+
+### 可选：语义记忆检索（第一次要下 ≈1.2 GB 模型）
+
+桌宠的长期记忆有两条腿：
+
+- **关键词 + TF-IDF**：永远可用、零下载、不联网；
+- **语义检索**（Chroma 向量索引 + 向量模型 + 交叉编码器重排）：能想起「意思相近、
+  字面不重合」的记忆（比如问「我不能吃什么」能想起「主人不吃辣」），但要两个模型：
+
+| 模型 | 大小 | 干什么 |
+|---|---|---|
+| `BAAI/bge-small-zh-v1.5` | 91.9 MB | 把记忆变成向量（512 维），找语义相近的 |
+| `BAAI/bge-reranker-base` | 1081.8 MB | 给候选重排，决定最终注入哪几条 |
+
+**桌宠不会自己偷偷下载**（免得主人说的第一句话被 1.2 GB 的下载拖住）。想开语义检索：
+
+```powershell
+# 1) 下载 + 校验两个模型（幂等：下过一次再跑就是 no-op）
+python scripts/prefetch_models.py
+
+# 只看模型在不在（不下载、不加载）
+python scripts/prefetch_models.py --check
+
+# 2) 打开面板（http://127.0.0.1:8766）→「健康与维护」→「重建向量索引」
+```
+
+模型落在 HuggingFace 缓存目录（Windows：`%USERPROFILE%\.cache\huggingface\hub`），
+**不进仓库**（仓库的 `data/` 始终是干净的）。
+
+**不装会怎样**：桌宠照常工作，召回退回「关键词 + TF-IDF」。桌宠会**冒泡告诉主人**
+这件事，面板「健康与维护」里也会写清楚该跑哪条命令 —— 不会让主人莫名其妙地觉得
+「桌宠变笨了」。
+
+> 实在想让桌宠自己把模型备好（不跑脚本）：设环境变量
+> `DESKTOP_PET_VECTOR_ALLOW_DOWNLOAD=1`，下载会发生在后台线程里
+> （不阻塞聊天，但会跟聊天抢磁盘和带宽，**默认不推荐**）。
 
 ### 试用在线 Demo
 
@@ -144,7 +181,7 @@ LLM / TTS / ASR / 提醒 / 记忆 / 快捷指令 全部可调
 
 ### 3. 长期记忆（双记忆引擎 + 重要性 + 冲突检测）
 
-- **检索**：`TF-IDF`（离线）/ `sentence-transformers`（语义）
+- **检索**：`TF-IDF`（离线，永远可用）/ 语义检索（Chroma + bge，**需先跑 `scripts/prefetch_models.py` 下模型**，≈1.2 GB）
 - **重要度评分**（1–10）
 - **时间衰减**（记忆越久越靠后）
 - **冲突检测**（更新与已有记忆冲突时合并）
