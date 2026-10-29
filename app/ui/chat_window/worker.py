@@ -157,6 +157,7 @@ class _StreamWorker(QThread):
     chunk = Signal(str)
     done = Signal(str)             # 完整文本
     failed = Signal(str)
+    meta = Signal(str, dict)       # (kind, payload) — 内部事件（usage 等）
 
     def __init__(self, client: LLMClient, messages: list[ChatMessage]):
         super().__init__()
@@ -183,6 +184,14 @@ class _StreamWorker(QThread):
                     ):
                         full.append(tok)
                         self.chunk.emit(tok)
+                        # v31: usage 事件（UsageEvent 是「空文本的 str 子类」，
+                        # 老消费方只当空串 → UI 一个字都不变）。这里把它单独
+                        # 摘出来走 meta 通道, 让状态栏和 Trace 也能拿到真实
+                        # token 数 —— 以前无工具的纯聊天路径 usage 整个丢了。
+                        payload = getattr(tok, "payload", None)
+                        if isinstance(payload, dict) \
+                                and payload.get("event") == "usage":
+                            self.meta.emit("meta", dict(payload))
                         if self.cancel_event.is_set():
                             # 已收到部分 token；断开 stream 跳出循环
                             break
