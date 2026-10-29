@@ -168,14 +168,23 @@ class TestLangChainAgentIntegration:
         assert agent._skills_dir == str(tmp_path)
         assert agent._auto_load_skills == []
 
-    def test_agent_loads_all_skills_when_no_auto_load(self, tmp_path):
+    def test_agent_loads_no_skills_when_no_auto_load(self, tmp_path):
+        """默认**一个 skill 都不注入**。
+
+        改的是哪条行为：以前是「auto_load_skills 为空 ⇒ 把目录里全部 skill
+        都塞进 system prompt」（load_skills 的 names=None 语义 = 全开）。
+        skills/ 里放的是行为覆盖包（poem.md：任何问题都用七言绝句回答），
+        全开 = 劫持人设 + 吃光 max_tokens 预算 → 主人看到的回复被截成空。
+        现在：默认不注入，要用得显式点名（auto_load_skills）。
+        """
         _write(tmp_path / "a.md", "AAA")
         _write(tmp_path / "b.md", "BBB")
         agent = self._make_agent(skills_dir=str(tmp_path))
         import asyncio
         asyncio.run(agent._ensure_agent())
-        assert "AAA" in agent._cached_skills
-        assert "BBB" in agent._cached_skills
+        assert agent._cached_skills == ""
+        assert "AAA" not in agent._cached_skills
+        assert "BBB" not in agent._cached_skills
 
     def test_agent_loads_only_specified_auto_load_skills(self, tmp_path):
         _write(tmp_path / "a.md", "AAA")
@@ -189,14 +198,39 @@ class TestLangChainAgentIntegration:
         assert "AAA" in agent._cached_skills
         assert "BBB" not in agent._cached_skills
 
-    def test_agent_no_skills_dir_means_empty(self, tmp_path):
+    def test_agent_no_skills_dir_falls_back_to_project_skills(self, tmp_path):
+        """没给 skills_dir → 仍回落**项目根 / skills**（两个后端一致），但默认不注入。
+
+        改的是哪条行为：原来是「没给 skills_dir 就没有 skills」。
+        但 ReAct 后端（轻量）根本拿不到 skills_dir —— 保留旧行为的话，
+        两个后端的 system prompt 就会不一样（Stage 1.1 的红线）。
+        现在统一成「项目根 / skills」，两个后端拿到同一份。
+
+        Stage 1.8：skills 改成**显式激活**才注入 —— 目录位置照旧回落，
+        但默认（auto_load_skills 为空）一个都不进 prompt。
+        """
         agent = self._make_agent()
         import asyncio
         asyncio.run(agent._ensure_agent())
+        # 构造参数本身没变（还是没传 skills_dir）
+        assert agent._skills_dir is None
+        from app.brain.prompt_layer import app_root
+        default_dir = app_root() / "skills"
+        # 默认不注入任何 skill（skills/ 目录里的行为包要显式激活）
         assert agent._cached_skills == ""
+        # 显式点名时，仍然从「项目根 / skills」回落去找
+        named = self._make_agent(auto_load_skills=["poem"])
+        asyncio.run(named._ensure_agent())
+        if default_dir.is_dir() and any(default_dir.iterdir()):
+            assert "[以下是主人激活的 Skills" in named._cached_skills
+        else:
+            assert named._cached_skills == ""
 
     def test_skills_combined_with_project_docs_in_system_prompt(self, tmp_path):
-        """skills 和 AGENTS.md 同时存在时,两者都进 system_prompt。"""
+        """skills 和 AGENTS.md 同时存在时,两者都进 system_prompt。
+
+        skills 要**显式点名**（auto_load_skills）才进 —— 默认不注入。
+        """
         # 写一个 skills
         (tmp_path / "review.md").write_text("REVIEW_SKILL", encoding="utf-8")
         # AGENTS.md 在 cwd
@@ -207,6 +241,7 @@ class TestLangChainAgentIntegration:
         agent = self._make_agent(
             skills_dir=str(tmp_path),
             cwd=str(cwd_dir),
+            auto_load_skills=["review"],
         )
         import asyncio
         asyncio.run(agent._ensure_agent())

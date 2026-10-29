@@ -116,7 +116,7 @@ class TestSkillLoader:
 
 class TestSkillInjection:
     @pytest.fixture
-    def brain(self):
+    def brain(self, tmp_path):
         from app.core.qt_compat import QApplication
         app = QApplication.instance() or QApplication(sys.argv)
         from app.core.config import load_config
@@ -124,8 +124,13 @@ class TestSkillInjection:
         from app.brain.brain_controller import BrainController
 
         cfg = load_config(ROOT / "config.yaml")
-        state_mgr = StateManager(ROOT, cfg, type('Args', (), {'reset_state': False})())
-        return BrainController(ROOT, cfg, state_mgr.state, state_mgr.reminders)
+        # ⚠️ root 必须指向 tmp_path，不能是仓库根：
+        #   BrainController 按 cfg.brain.memory_file 打开 <root>/data/memory_<角色>.db。
+        #   root=ROOT 时打开的是**用户 live 记忆库** —— 每次跑全量测试都会
+        #   迁移真库（补 scope/kind/status 等列）并在 data/ 留下 .bak-* 备份，
+        #   测试绝不能碰用户数据（见 PLAN「验收：data/ 下的既有记录一条没少」）。
+        state_mgr = StateManager(tmp_path, cfg, type('Args', (), {'reset_state': False})())
+        return BrainController(tmp_path, cfg, state_mgr.state, state_mgr.reminders)
 
     def test_skill_loaded_into_chat_context(self, brain):
         ctx = brain.chat_context()
@@ -135,28 +140,36 @@ class TestSkillInjection:
         assert "open_website" in ctx
 
     def test_skill_positioned_first_in_prompt(self, brain):
-        """SKILL 必须在 prompt 第一个位置（让模型第一眼看到）。"""
+        """SKILL 必须在 prompt 第一个位置（让模型第一眼看到）。
+
+        注意：当前时间 / 桌宠实时状态已经搬去 **user 消息**了
+        （易变内容进 system prompt 会作废 MiniMax 的 8192-token 前缀缓存块，
+        实测缓存命中率 98.9% → 1.5%），所以这里改成跟「工具列表」比位置。
+        """
         ctx = brain.chat_context()
-        # 找 SKILL 起始位置（用 HARD RULES 标记）和时间标记位置
+        # 找 SKILL 起始位置（用 HARD RULES 标记）和工具列表位置
         skill_pos = ctx.find("HARD RULES")
         skill_pos_zh = ctx.find("硬规则")
         if skill_pos < 0:
             skill_pos = skill_pos_zh
-        time_pos = ctx.find("【当前时间】")
+        tools_pos = ctx.find("【可用工具列表】")
 
         assert skill_pos >= 0, "chat_context 必须包含 SKILL 内容"
-        assert time_pos >= 0, "chat_context 必须包含时间标记"
-        # SKILL 必须在时间之前
-        assert skill_pos < time_pos, (
-            f"SKILL 应该在 prompt 前部（位置 {skill_pos} < 时间位置 {time_pos}）"
+        assert tools_pos >= 0, "chat_context 必须包含工具列表"
+        # SKILL 必须在工具列表之前
+        assert skill_pos < tools_pos, (
+            f"SKILL 应该在 prompt 前部（位置 {skill_pos} < 工具列表位置 {tools_pos}）"
         )
 
     def test_skill_is_substantial_content(self, brain):
         """SKILL 内容要够丰富（不能只是兜底的几行）。"""
         ctx = brain.chat_context()
         # SKILL 部分应该 > 1000 字符（真实 SKILL.md 有 7000+）
-        skill_end = ctx.find("【当前时间】")
-        skill_part = ctx[:skill_end] if skill_end > 0 else ctx
+        # SKILL 段 = system 上下文的第一段（到长期记忆 / 工具列表之前）
+        ends = [p for p in (ctx.find("【你对主人的长期记忆】"),
+                            ctx.find("【可用工具列表】")) if p > 0]
+        skill_end = min(ends) if ends else len(ctx)
+        skill_part = ctx[:skill_end]
         # 文件版 SKILL > 5000 字符；兜底 < 1000 字符
         # 测试保证文件版被加载（assert 大于 1000）
         assert len(skill_part) > 1000, (
@@ -164,16 +177,18 @@ class TestSkillInjection:
         )
 
     def test_skill_cached_across_calls(self, brain):
-        """_get_skill_text 在 BrainController 里应该缓存（不需要每轮重读）。"""
+        """_get_skill_text 在 BrainController 里应该缓存（不需要每轮重读）。
+
+        顺带锁住一条不变量：chat_context() 是**稳定**的 system 上下文 ——
+        两次调用必须字节一致（易变内容已经搬到 user 消息去了）。
+        """
         # 第一次调用
         ctx1 = brain.chat_context()
         # 第二次调用
         ctx2 = brain.chat_context()
-        # SKILL 内容应该一致（说明缓存生效）
-        # 取 SKILL 部分的 hash
-        s1 = ctx1.split("【当前时间】")[0]
-        s2 = ctx2.split("【当前时间】")[0]
-        assert s1 == s2, "SKILL 内容应该一致（缓存生效）"
+        assert ctx1 == ctx2, "SKILL 内容应该一致（缓存生效）"
+        # 稳定上下文里不许出现每轮变的时间戳
+        assert "[当前时间:" not in ctx1, "system 上下文里不能有时间戳"
 
 
 # ============================================================

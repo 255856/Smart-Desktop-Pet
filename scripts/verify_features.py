@@ -33,6 +33,40 @@ def note(name: str, detail: str = "") -> None:
     results.append((name, "NOTE", detail))
 
 
+def _probe_detect_conflicts() -> tuple[bool, str]:
+    """**真的调一次** detect_conflicts —— 用临时库，**绝不碰 data/**。
+
+    Stage 2.5：这一项以前是 check("冲突检测", "detect_conflicts" in mem_src)，
+    也就是 **grep 源码文本** —— 函数被改坏了照样「通过」（名字还在就绿）。
+    现在改成真调用 + 真断言：
+      · 相同/相近内容 → 必须命中已有记忆
+      · 完全无关内容 → 不能误报
+    返回 (是否通过, 详情)。
+    """
+    import tempfile
+
+    from app.brain.memory import MemoryStore
+
+    with tempfile.TemporaryDirectory(prefix="desktop-pet-verify-") as td:
+        db = Path(td) / "memory_probe.db"
+        try:
+            # 显式 tfidf：sbert 后端要下模型（离线环境会卡住）
+            store = MemoryStore(db, backend_name="tfidf")
+        except TypeError:      # 构造参数变了 → 退回默认
+            store = MemoryStore(db)
+        store.add("主人的生日是2005年2月4号", category="fact", importance=0.8)
+        store.add("主人喜欢喝冰美式", category="preference", importance=0.7)
+        hits = store.detect_conflicts("主人的生日是2005年2月4号")
+        if not hits:
+            return False, "相同内容没有命中任何已有记忆"
+        if not any("生日" in it.content for it, _ in hits):
+            return False, f"命中 {len(hits)} 条，但都不是生日那条"
+        miss = store.detect_conflicts("量子力学薛定谔方程推导")
+        if miss:
+            return False, f"不相关内容误报 {len(miss)} 条"
+        return True, f"命中 {len(hits)} 条 / 不相关内容 0 误报"
+
+
 def _parse_tool_markers(text):
     return [
         {"id": f"c{i}", "name": m.group(1), "arguments": m.group(2)}
@@ -102,7 +136,9 @@ def main() -> int:
     check("MemoryStore", True)
     check("  · 重要性评分（importance）", "importance" in mem_src)
     check("  · 时间衰减（last_access_ts）", "last_access_ts" in mem_src)
-    check("  · 冲突检测（detect_conflicts）", "detect_conflicts" in mem_src)
+    # 冲突检测：**真调用**（临时库，不碰 data/）—— 以前是 grep 源码文本
+    _conf_ok, _conf_detail = _probe_detect_conflicts()
+    check("  · 冲突检测（detect_conflicts 真调用）", _conf_ok, _conf_detail)
     try:
         from app.brain.memory import TfidfBackend, SentenceTransformerBackend
         check("  · 向量后端（TfidfBackend / SentenceTransformerBackend）", True,
@@ -349,6 +385,15 @@ def main() -> int:
         sm = StateManager(ROOT, cfg, args)
         brain = BrainController(ROOT, cfg, sm.state, sm.reminders)
 
+        # Stage 2.5：MemoryCurator 必须**真的被实例化并跑起来**
+        # （以前它在全仓从未被实例化 → 整理线程从来没启动过）
+        _curator = getattr(brain, "curator", None)
+        _curator_thread = getattr(_curator, "_thread", None)
+        check("MemoryCurator 已实例化且线程存活",
+              _curator is not None and _curator_thread is not None
+              and _curator_thread.is_alive(),
+              "BrainController 启动时构造并启动 MemoryCurator")
+
         cw = ChatWindow(
             llm_cfg=cfg.llm, char_cfg=cfg.character,
             sprite_dir=cfg.sprite.directory,
@@ -368,8 +413,11 @@ def main() -> int:
               hasattr(cw, "subtitle_label"))
         check("  · /调试命令（_open_dashboard）",
               hasattr(cw, "_open_dashboard"))
-        check("  · /记忆命令",
-              "/记忆" in (inspect.getsource(cw._handle_command) or ""))
+        # 记忆命令：命令名早就从「/记忆」改成「/memory」（HEAD 的 chat_window
+        # 就是 /memory），这一项还停在旧名字上 → 一直误报 FAIL。两个拼法都认。
+        _cmd_src = inspect.getsource(cw._handle_command) or ""
+        check("  · /记忆命令（/memory）",
+              "/记忆" in _cmd_src or "/memory" in _cmd_src)
         check("  · _on_send（Enter 发送）", callable(cw._on_send))
 
         QTimer.singleShot(200, app.quit)
@@ -394,11 +442,23 @@ def main() -> int:
 
     report_path = ROOT / "data" / "feature_check.txt"
     report_path.parent.mkdir(exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(f"Feature check: {ok} OK, {fail} FAIL, {len(results)} total\n")
-        f.write(f"Generated: {ROOT}\n\n")
-        for n, s, d in results:
-            f.write(f"[{s:4}] {n}: {d}\n")
+    report_lines = [
+        f"Feature check: {ok} OK, {fail} FAIL, {len(results)} total",
+        f"Generated: {ROOT}",
+        "",
+    ]
+    for n, s, d in results:
+        report_lines.append(f"[{s:4}] {n}: {d}")
+    report_text = "\n".join(report_lines) + "\n"
+    # 内容没变就**不重写** —— 免得每次跑验证都动 data/ 的 mtime
+    try:
+        old_text = (report_path.read_text(encoding="utf-8")
+                    if report_path.is_file() else None)
+    except OSError:
+        old_text = None
+    if old_text != report_text:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_text)
     print(f"\n报告: {report_path}")
     return 1 if fail else 0
 

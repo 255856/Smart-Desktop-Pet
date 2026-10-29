@@ -8,19 +8,122 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol
 
 log = logging.getLogger(__name__)
 
 CATEGORY_CHOICES = ("preference", "fact", "event", "skill", "person", "shared", "other")
+
+# Stage 2.2：记忆作用域 / 生命周期分类 / 检索辅助字段
+SCOPE_CHOICES = ("project", "user")
+KIND_CHOICES = ("activeTopic", "pendingThought", "memberImpression", "fact")
+STATUS_CHOICES = ("active", "superseded")
+
+#: 老 category → 新 kind 的映射（迁移回填用，见 _migrate_schema）
+CATEGORY_TO_KIND = {
+    "preference": "memberImpression",   # 偏好 = 对这个人的印象
+    "person": "memberImpression",       # 人 = 对这个人的印象
+    "event": "activeTopic",             # 事件 = 进行中/已发生的话题
+    "shared": "activeTopic",            # 共同经历 = 共同话题
+    "fact": "fact",
+    "skill": "fact",
+    "other": "fact",
+}
+
+#: Stage 2.2 新列（老库靠 _migrate_schema 用 ALTER TABLE 补齐）
+_NEW_COLUMN_DDL: tuple[tuple[str, str], ...] = (
+    ("scope",         "scope TEXT NOT NULL DEFAULT 'project'"),
+    ("kind",          "kind TEXT NOT NULL DEFAULT 'fact'"),
+    ("topic",         "topic TEXT"),
+    ("status",        "status TEXT NOT NULL DEFAULT 'active'"),
+    ("superseded_by", "superseded_by TEXT"),
+    ("hit_count",     "hit_count INTEGER NOT NULL DEFAULT 0"),
+    ("last_hit_at",   "last_hit_at REAL"),
+)
+
+#: Stage 2.2 新列的索引（不能放进 _MEMORY_SCHEMA —— 老库还没这些列，
+#: executescript 会直接报「no such column」把整个加载打断）
+_EXTRA_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)",
+)
+
+#: Stage 2.1：RRF 融合参数（照抄 qq-bridge memory_sidecar/memory_store.py:462-478）
+RRF_K = 60
+FUSION_TOP_N = 30
+
+# ---------------------------------------------------------------------------
+# Stage 2.8：召回**精度**（注入条数 / 相关度门槛 / 门禁阈值）
+# ---------------------------------------------------------------------------
+# 背景（scripts/eval_memory_recall.py 实测）：
+#   旧行为每轮硬塞 6 条，而 6 条里平均只有 ~1.1 条真的跟这句话有关 ——
+#   问「记不记得我明天要交房租」会把「主人怕黑」「主人讨厌香菜」一起塞进来。
+#   代价是 token 浪费 + 桌宠**自信说错话**的风险（近似陷阱）。
+
+#: 每轮最多注入多少条记忆。Stage 2.1：20 → 6；Stage 2.8：6 → 4。
+#: 为什么是 4 而不是 3：实测（同一把尺子 scripts/eval_memory_recall.py）
+#: 注入上限收到 3 会把「答案排在第 4 名」的那条裁掉
+#: （「我是做什么工作的」→ 真答案「主人是程序员…」排第 4），
+#: recall@6 从 0.857 掉到 0.810 —— 低于 0.85 的红线。4 是保召回的最小值。
+DEFAULT_MAX_INJECT = 4
+
+#: 补位行的相关度门槛：融合分 < 顶行融合分 × 该系数 → **不注入**。
+#: 顶行（过了门禁的第一名）永远注入；其余行只有「离顶行够近」才值得占 token。
+#: 0.30 是量出来的（见 scripts/eval_memory_recall.py --curve 的分数比曲线）：
+#:   ≤ 0.28 → 多带噪声行（precision 掉）；≥ 0.32 → 把真答案裁掉（recall 掉到 0.810）。
+DEFAULT_FILLER_RATIO = 0.30
+
+#: 语义腿门禁阈值：余弦相似度 **≥** 该值才算「跟记忆库有关系」。
+#: 旧判断是「相似度 > 0 即算有关系」—— 真正的 embedding 对几乎任何 query
+#: 都会给一个小的正相似度，那个门禁等于没有门禁（安全位置问题）。
+SEMANTIC_GATE_THRESHOLD = 0.35
+
+#: 融合分权重（排序 + 裁剪都用它）：
+#:   W_REL —— 最强证据那一腿的相对强度（0..1）
+#:   W_RRF —— 多路一致性（RRF 相对分，0..1）
+#:   W_IMP —— 重要性（0..1，弱先验，只用来在分数接近时定序）
+W_REL = 0.6
+W_RRF = 0.3
+W_IMP = 0.1
+
+
+def user_memory_dir() -> Path:
+    """用户级记忆目录（默认 ~/.desktop-pet）。
+
+    环境变量 DESKTOP_PET_HOME 可覆盖（测试用，避免往真 home 里写）。
+    """
+    override = (os.environ.get("DESKTOP_PET_HOME") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".desktop-pet"
+
+
+def user_memory_db_path() -> Path:
+    """用户级记忆库路径（scope='user' 的行落在这里）。"""
+    return user_memory_dir() / "user_memory.db"
+
+
+def _sbert_available() -> bool:
+    """sentence-transformers 装了吗？
+
+    只查 spec，不真的 import —— 没装就直接降级，不新增任何依赖。
+    """
+    try:
+        import importlib.util
+        return importlib.util.find_spec("sentence_transformers") is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # SQLite schema：FTS5 虚拟表跟主表 1:1（trigger 同步），全文检索 O(log N)
@@ -32,7 +135,14 @@ CREATE TABLE IF NOT EXISTS memories (
     importance      REAL NOT NULL DEFAULT 0.5,
     created_at      REAL NOT NULL,
     last_access_ts  REAL NOT NULL,
-    access_count    INTEGER NOT NULL DEFAULT 0
+    access_count    INTEGER NOT NULL DEFAULT 0,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    kind            TEXT NOT NULL DEFAULT 'fact',
+    topic           TEXT,
+    status          TEXT NOT NULL DEFAULT 'active',
+    superseded_by   TEXT,
+    hit_count       INTEGER NOT NULL DEFAULT 0,
+    last_hit_at     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_category    ON memories(category);
@@ -81,6 +191,36 @@ def _bigrams(text: str) -> set[str]:
     return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
 
 
+def _has_word_overlap(query: str, items: list) -> bool:
+    """query 里的 ASCII 词有没有出现在某条记忆里（纯英文 query 用）。
+
+    CJK 走二元组规则（见 _bigrams 的注释），英文走整词 —— 否则
+    "rent" 会跟 "parent" 之类的短词串味。
+    """
+    q_words = {t for t in _tokenize(query or "") if t.isascii() and len(t) > 1}
+    if not q_words:
+        return False
+    for it in items:
+        c_words = {t for t in _tokenize(it.content) if t.isascii() and len(t) > 1}
+        if q_words & c_words:
+            return True
+    return False
+
+
+def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
+    """把一路的原始分归一化到 0..1（除以本路最高分）。
+
+    归一化的意义：各路的量纲不一样（substring 路 0..3，向量路 0..1），
+    归一之后才能比较「哪一路更支持这一行」，也才能把多路合成一个分数。
+    """
+    if not scores:
+        return {}
+    top = max(scores.values())
+    if top <= 0:
+        return {k: 0.0 for k in scores}
+    return {k: v / top for k, v in scores.items()}
+
+
 #  MemoryItem
 
 
@@ -93,6 +233,14 @@ class MemoryItem:
     created_at: float = field(default_factory=time.time)
     last_access_ts: float = field(default_factory=time.time)
     access_count: int = 0
+    # Stage 2.2：作用域 / 生命周期分类 / 检索辅助
+    scope: str = "project"
+    kind: str = "fact"
+    topic: Optional[str] = None
+    status: str = "active"
+    superseded_by: Optional[str] = None
+    hit_count: int = 0
+    last_hit_at: Optional[float] = None
 
     def touch(self) -> None:
         """被命中检索时调用，更新访问热度。"""
@@ -298,14 +446,21 @@ class MemoryStore:
         "other": 5,
     }
 
-    def __init__(self, data_file: str | Path, max_inject: int = 20,
+    def __init__(self, data_file: str | Path,
+                 max_inject: int = DEFAULT_MAX_INJECT,
                  backend_name: str = "auto",
-                 character_name: str = ""):
+                 character_name: str = "",
+                 *,
+                 filler_ratio: float = DEFAULT_FILLER_RATIO,
+                 semantic_gate_threshold: float = SEMANTIC_GATE_THRESHOLD):
         """
         Args:
             data_file: JSON 落盘路径 (e.g. "data/memory.json")。
-            max_inject: 注入 system prompt 的最大条数。
+            max_inject: 注入 system prompt 的最大条数（Stage 2.1: 20 → 6；
+                Stage 2.8: 6 → 4，见 DEFAULT_MAX_INJECT 的注释）。
             backend_name: "auto" / "tfidf" / "sbert" / "substring"。
+            filler_ratio: 补位行的相关度门槛（融合分 < 顶行 × 该值 → 不注入）。
+            semantic_gate_threshold: 语义腿门禁阈值（相似度 ≥ 该值才算相关）。
             character_name: v31 — 角色名。非空时 data_file 派生为
                 `data/memory_{name}.db` (per-character 隔离)。空走老路径。
         """
@@ -322,7 +477,10 @@ class MemoryStore:
                      character_name, data_file)
         self.data_file = Path(data_file)
         self.character_name = character_name
-        self.max_inject = max_inject
+        self.max_inject = int(max_inject)
+        # Stage 2.8：补位行门槛 + 语义门禁阈值（可按角色/场景调）
+        self.filler_ratio = float(filler_ratio)
+        self.semantic_gate_threshold = float(semantic_gate_threshold)
         self.backend: VectorBackend = make_backend(backend_name)
         self.backend_name = backend_name
         self._items: list[MemoryItem] = []
@@ -332,6 +490,26 @@ class MemoryStore:
         self._index_dirty = False
         # 最近一次落盘是否成功（remember_fact 据此决定能不能报「已记住」）
         self.last_save_ok = True
+        # Stage 2.7：最近一次 add() 是不是「重复」（内容已存在，没新建行）。
+        # 工具据此把「已记住」改成「已经记过了」—— 原来去重时返回了一个
+        # 从没存进库的 id，桌宠说「已记住」而库里根本没有那条记录。
+        self.last_add_was_duplicate = False
+        # Stage 2.1：本轮主人说的话（system_block() 无参调用时用它做召回）
+        self._current_query: str = ""
+        # Stage 2.2：scope='user' 的记忆库（懒建 + 缓存，~/.desktop-pet/user_memory.db）
+        self._user_store: Optional["MemoryStore"] = None
+        # Stage 2.1：融合用的后端（懒建 + 缓存；sbert 不可用时降级到 tfidf）
+        self._fusion_tfidf: Optional[VectorBackend] = None
+        self._fusion_sbert: Optional[VectorBackend] = None
+        self._fusion_ready: bool = False
+        self._fusion_degraded: tuple[str, ...] = ()
+        #: 最近一次融合**实际参与**的后端 / **被降级**的后端（可观测：面板与测试都看它）
+        self.last_fusion_backends: tuple[str, ...] = ()
+        self.last_fusion_degraded: tuple[str, ...] = ()
+        #: 最近一次召回的诊断（Stage 2.8）：注入了几条、最弱那条离顶行多近。
+        #: 「最弱那条 / 顶行」越接近 1 → 注入里混进了越像噪声的行
+        #: （近似陷阱的早期信号，值得盯）。
+        self.last_recall_stats: dict = {}
         self._load()
         self._refit_backend()
 
@@ -349,8 +527,86 @@ class MemoryStore:
         except sqlite3.Error:  # pragma: no cover - 老 SQLite 不支持
             pass
         conn.executescript(_MEMORY_SCHEMA)
+        # Stage 2.2：老库补列（幂等 + 先备份，见 _migrate_schema）
+        self._migrate_schema(conn)
         conn.commit()
         return conn
+
+    # ---------------------- Stage 2.2：schema 迁移 ----------------------
+
+    def _backup_db(self) -> Optional[Path]:
+        """迁移前把 db 复制成带时间戳的备份（数据红线：先备份，再改 live 库）。
+
+        库还不存在 / 是空文件时不需要备份（返回 None）。
+        备份失败 → 抛异常（宁可不迁移，也不能在没备份的情况下改用户数据）。
+        """
+        src = self.data_file
+        try:
+            if not src.is_file() or src.stat().st_size == 0:
+                return None
+        except OSError:
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        bak = src.with_name(f"{src.name}.bak-{stamp}")
+        n = 1
+        while bak.exists():
+            bak = src.with_name(f"{src.name}.bak-{stamp}-{n}")
+            n += 1
+        shutil.copy2(src, bak)
+        log.info("MemoryStore: 迁移前备份 %s → %s", src, bak)
+        return bak
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> bool:
+        """给老库补 Stage 2.2 的新列并回填。返回是否真的改了库。
+
+        - **幂等**：列都在就直接返回 False（跑第二次不动手，也不会再备份）。
+        - **先备份**：改 live 库之前把 db 复制成带时间戳的备份（_backup_db）。
+        - **行数不变**：只加列 + UPDATE，不删行、不改老字段。
+        """
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)")}
+        except sqlite3.Error:
+            return False
+        if not cols:
+            return False
+        missing = [(name, ddl) for name, ddl in _NEW_COLUMN_DDL if name not in cols]
+        changed = False
+        if missing:
+            # 数据红线：先备份再改
+            self._backup_db()
+            for _name, ddl in missing:
+                try:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {ddl}")
+                except sqlite3.Error as e:  # pragma: no cover - 老 SQLite 语法差异
+                    log.warning("MemoryStore: 加列 %s 失败：%s", _name, e)
+                    return False
+            # 回填（此刻表里全是老行）：
+            #   scope='project' / status='active' / kind 按 category 映射
+            conn.execute("UPDATE memories SET scope='project' "
+                         "WHERE scope IS NULL OR scope=''")
+            conn.execute("UPDATE memories SET status='active' "
+                         "WHERE status IS NULL OR status=''")
+            conn.execute(
+                "UPDATE memories SET kind = CASE category "
+                "WHEN 'preference' THEN 'memberImpression' "
+                "WHEN 'person' THEN 'memberImpression' "
+                "WHEN 'event' THEN 'activeTopic' "
+                "WHEN 'shared' THEN 'activeTopic' "
+                "ELSE 'fact' END")
+            conn.execute("UPDATE memories SET hit_count=0 WHERE hit_count IS NULL")
+            conn.commit()
+            log.info("MemoryStore: schema 迁移完成（补列 %s）",
+                     [n for n, _ in missing])
+            changed = True
+        # 新列的索引单独建（不能放进 _MEMORY_SCHEMA：老库还没有这些列，
+        # executescript 会直接报「no such column」把整个加载打断）
+        for sql in _EXTRA_INDEX_SQL:
+            try:
+                conn.execute(sql)
+            except sqlite3.Error as e:  # pragma: no cover
+                log.debug("建索引失败（忽略）：%s", e)
+        conn.commit()
+        return changed
 
     def _migrate_from_json(self) -> int:
         """从旧 JSON 文件导入记忆到 SQLite(若有)。返回导入条数。"""
@@ -364,7 +620,12 @@ class MemoryStore:
                 r.setdefault("importance", 0.5)
                 r.setdefault("last_access_ts", r.get("created_at", time.time()))
                 r.setdefault("access_count", 0)
-                items.append(MemoryItem(**r))
+                it = MemoryItem(**r)
+                # Stage 2.2：老 JSON 没有 kind → 按 category 映射
+                it.kind = CATEGORY_TO_KIND.get(it.category, "fact")
+                it.scope = "project"
+                it.status = "active"
+                items.append(it)
         except Exception as e:  # noqa: BLE001
             log.warning("MemoryStore: legacy JSON 读失败(%s),跳过迁移", e)
             return 0
@@ -375,12 +636,16 @@ class MemoryStore:
             conn = self._connect()
             try:
                 rows = [(it.id, it.content, it.category, it.importance,
-                         it.created_at, it.last_access_ts, it.access_count)
+                         it.created_at, it.last_access_ts, it.access_count,
+                         it.scope, it.kind, it.topic, it.status,
+                         it.superseded_by, it.hit_count, it.last_hit_at)
                         for it in items]
                 conn.executemany(
                     "INSERT OR REPLACE INTO memories"
                     "(id, content, category, importance, created_at, "
-                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "last_access_ts, access_count, scope, kind, topic, "
+                    "status, superseded_by, hit_count, last_hit_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
                 conn.commit()
@@ -396,6 +661,24 @@ class MemoryStore:
             pass
         return len(items)
 
+    #: 读表用的列顺序（Stage 2.2 加了 scope/kind/topic/status/...）
+    _SELECT_COLUMNS = (
+        "id", "content", "category", "importance", "created_at",
+        "last_access_ts", "access_count", "scope", "kind", "topic",
+        "status", "superseded_by", "hit_count", "last_hit_at",
+    )
+
+    @staticmethod
+    def _row_to_item(row) -> MemoryItem:
+        """一行 DB 记录 → MemoryItem（老行缺字段时用默认值兜底）。"""
+        return MemoryItem(
+            id=row[0], content=row[1], category=row[2], importance=row[3],
+            created_at=row[4], last_access_ts=row[5], access_count=row[6],
+            scope=row[7] or "project", kind=row[8] or "fact", topic=row[9],
+            status=row[10] or "active", superseded_by=row[11],
+            hit_count=int(row[12] or 0), last_hit_at=row[13],
+        )
+
     def _load(self) -> None:
         if not self.data_file.is_file():
             # JSON 还在 + DB 不在 → 迁
@@ -406,15 +689,11 @@ class MemoryStore:
             conn = self._connect()
             try:
                 cur = conn.execute(
-                    "SELECT id, content, category, importance, created_at, "
-                    "last_access_ts, access_count FROM memories"
+                    "SELECT " + ", ".join(self._SELECT_COLUMNS) +
+                    " FROM memories"
                 )
                 self._items = [
-                    MemoryItem(
-                        id=row[0], content=row[1], category=row[2],
-                        importance=row[3], created_at=row[4],
-                        last_access_ts=row[5], access_count=row[6],
-                    )
+                    self._row_to_item(row)
                     for row in cur.fetchall()
                 ]
             finally:
@@ -440,9 +719,13 @@ class MemoryStore:
                 conn.executemany(
                     "INSERT INTO memories"
                     "(id, content, category, importance, created_at, "
-                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "last_access_ts, access_count, scope, kind, topic, "
+                    "status, superseded_by, hit_count, last_hit_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [(it.id, it.content, it.category, it.importance,
-                      it.created_at, it.last_access_ts, it.access_count)
+                      it.created_at, it.last_access_ts, it.access_count,
+                      it.scope, it.kind, it.topic, it.status,
+                      it.superseded_by, it.hit_count, it.last_hit_at)
                      for it in self._items],
                 )
                 conn.commit()
@@ -465,9 +748,13 @@ class MemoryStore:
                 conn.execute(
                     "INSERT OR REPLACE INTO memories"
                     "(id, content, category, importance, created_at, "
-                    "last_access_ts, access_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "last_access_ts, access_count, scope, kind, topic, "
+                    "status, superseded_by, hit_count, last_hit_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (item.id, item.content, item.category, item.importance,
-                     item.created_at, item.last_access_ts, item.access_count),
+                     item.created_at, item.last_access_ts, item.access_count,
+                     item.scope, item.kind, item.topic, item.status,
+                     item.superseded_by, item.hit_count, item.last_hit_at),
                 )
                 conn.commit()
                 return True
@@ -522,6 +809,40 @@ class MemoryStore:
             log.warning("更新记忆访问热度失败:%s", e)
             return False
 
+    def _bump_hits(self, ids: list[str]) -> None:
+        """记录命中次数（Stage 2.2：hit_count / last_hit_at）。
+
+        召回命中时才计数 —— 这是「这条记忆真的被用上了」的证据，
+        跟 access_count（被检索到就 +1）不是一回事。
+        """
+        if not ids:
+            return
+        now = time.time()
+        with self._lock:
+            by_id = {i.id: i for i in self._items}
+            rows = []
+            for mid in ids:
+                it = by_id.get(mid)
+                if it is None:
+                    continue
+                it.hit_count += 1
+                it.last_hit_at = now
+                rows.append((it.hit_count, it.last_hit_at, it.id))
+            if not rows:
+                return
+        try:
+            conn = self._connect()
+            try:
+                conn.executemany(
+                    "UPDATE memories SET hit_count=?, last_hit_at=? WHERE id=?",
+                    rows,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("更新记忆命中次数失败：%s", e)
+
     def _ensure_backend_fresh(self) -> None:
         """索引标脏时重建一次（延迟到真正要用之前）。
 
@@ -538,6 +859,8 @@ class MemoryStore:
 
     def _refit_backend(self) -> None:
         """重新拟合向量后端（在 load / add / remove 之后调用）。"""
+        # Stage 2.1：后端换了 → 融合用的后端缓存也要重建
+        self._fusion_ready = False
         docs = [i.content for i in self._items]
         if not docs:
             return
@@ -560,29 +883,52 @@ class MemoryStore:
             self._index_dirty = False
 
     def add(self, content: str, category: str = "other",
-            importance: float = 0.5) -> MemoryItem:
-        """添加一条记忆。importance ∈ [0, 1]。"""
+            importance: float = 0.5, scope: str = "project",
+            kind: str = "", topic: str = "") -> MemoryItem:
+        """添加一条记忆。importance ∈ [0, 1]。
+
+        Stage 2.2：scope 决定落在哪个库（project=本库 / user=用户级库），
+        kind 是生命周期分类（不给就按 category 映射），topic 是可选检索标签。
+        """
         content = content.strip()
         if category not in CATEGORY_CHOICES:
             category = "other"
         importance = max(0.0, min(1.0, float(importance)))
+        scope = (scope or "project").strip().lower()
+        if scope not in SCOPE_CHOICES:
+            scope = "project"
+        kind = (kind or "").strip() or CATEGORY_TO_KIND.get(category, "fact")
+        if kind not in KIND_CHOICES:
+            kind = "fact"
         item = MemoryItem(
             id=f"m{uuid.uuid4().hex[:10]}",
             content=content,
             category=category,
             importance=importance,
+            scope=scope,
+            kind=kind,
+            topic=(topic or "").strip() or None,
         )
         with self._lock:
-            # 完全相同的文本不重复记
-            if any(i.content == content for i in self._items):
-                log.debug("记忆去重：%s", content[:30])
-                self.last_save_ok = True   # 已存在，无需再写盘
-                return item
+            # Stage 2.7：完全相同的文本不重复记。
+            # ⚠️ 原来这里 return 的是**刚造出来、从来没存进库**的 item ——
+            #    工具据此回「已记住」，可数据库里根本没有那条记录
+            #    （主人重启就没了，模型拿到的 id 也查不到）。
+            # 现在返回**库里真存在的那条**（id 真实有效），
+            # 工具据此说「已经记过了」，并且**不新建行**。
+            for existing in self._items:
+                if existing.content == content:
+                    log.debug("记忆去重：%s", content[:30])
+                    self.last_save_ok = True   # 已存在，无需再写盘
+                    self.last_add_was_duplicate = True
+                    return existing
+            self.last_add_was_duplicate = False
             self._items.append(item)
             # 只写这一行（原来 DELETE 全表 + 全量 re-INSERT）
             self.last_save_ok = self._insert_item(item)
             # 索引标脏：延迟到下次检索前再重建（见 _ensure_backend_fresh）
             self._index_dirty = True
+            self._fusion_ready = False
         log.info("记忆新增 [%s] importance=%.2f: %s", category, importance, content[:60])
         return item
 
@@ -597,7 +943,7 @@ class MemoryStore:
 
     def recent_shared(self, n: int = 3) -> list:
         """v56: 最近 N 条共同经历（按 created_at 倒序）。"""
-        items = [i for i in self.all() if i.category == "shared"]
+        items = [i for i in self._active_items() if i.category == "shared"]
         items.sort(key=lambda i: i.created_at, reverse=True)
         return items[:max(0, int(n))]
 
@@ -609,6 +955,7 @@ class MemoryStore:
             if removed:
                 self._delete_item(mid)
                 self._index_dirty = True
+                self._fusion_ready = False
         return removed
 
     def all(self) -> list[MemoryItem]:
@@ -632,6 +979,7 @@ class MemoryStore:
         category: str = "",
         limit: int = 20,
         use_semantic: bool = True,
+        min_hit: Optional[float] = None,
     ) -> list[MemoryItem]:
         """检索记忆。
 
@@ -646,11 +994,15 @@ class MemoryStore:
             category: 按类别过滤（可选）
             limit: 返回条数
             use_semantic: False 时退回子串匹配（更快，CPU 友好）
+            min_hit: 命中阈值（按**原始语义分**过滤）。
+                None（默认）= 老行为：非 substring 后端 0.10、substring 后端 0.0。
+                **融合路径必须传 0** —— 否则 _MIN_HIT 会把「某一路没命中」
+                的候选在进融合排序之前就预过滤掉了（PLAN 2.1 的核心 bug）。
         """
         # 索引标脏时先重建（否则 scores 与 items 长度对不上，会错位）
         self._ensure_backend_fresh()
-        with self._lock:
-            items = list(self._items)
+        # Stage 2.4：已过时的记忆（superseded）不再参与召回
+        items = self._active_items()
         if not items:
             return []
 
@@ -695,7 +1047,12 @@ class MemoryStore:
             ]
 
         # 命中阈值（按原始语义分过滤，不是综合分）—— 实测 0.10 能保留真实命中并过滤无关召回
-        _MIN_HIT = 0.0 if isinstance(self.backend, SubstringBackend) else 0.10
+        # Stage 2.1：min_hit=None → 老行为不变（对外行为零变化）；
+        # 融合路径显式传 0（不预过滤，候选要能进 RRF 排序）。
+        if min_hit is None:
+            _MIN_HIT = 0.0 if isinstance(self.backend, SubstringBackend) else 0.10
+        else:
+            _MIN_HIT = float(min_hit)
         scored = [(s, i) for s, i in zip(scores, items, strict=False) if s > _MIN_HIT]
         # 综合排序
         scored = [(self._score(i, s), i) for s, i in scored]
@@ -746,7 +1103,12 @@ class MemoryStore:
         return self.search(keyword=keyword, category=category, limit=limit)
 
     def forget_by_keyword(self, keyword: str) -> int:
-        """按关键词删除（保留：keyword 命中的全部删）。"""
+        """按关键词删除（保留：keyword 命中的全部删）。
+
+        数据红线：删行是**破坏性**写入 → 删之前先备份（_backup_db）。
+        （增量写入 add() 不备份：高频、丢一条只是少记一件事；
+         删行 / 改写这种「主人可能后悔」的操作必须留副本。）
+        """
         kw = keyword.strip()
         if not kw:
             return 0
@@ -755,9 +1117,30 @@ class MemoryStore:
             for i in self._items:
                 if kw.lower() in i.content.lower():
                     to_remove.append(i.id)
+        if to_remove:
+            self._backup_db()
         for mid in to_remove:
             self.remove(mid)
         return len(to_remove)
+
+    # ------------------ Stage 2.4：按 id 删 / 按 id 改写 ------------------
+
+    def forget_by_id(self, mid: str) -> bool:
+        """按 id 删一条记忆（Stage 2.4）。
+
+        为什么要有这条路：forget_by_keyword 是**子串**匹配，模型必须先
+        知道旧措辞才能删；记错了、或者旧措辞跟模型记的不一样时，就删不掉。
+        召回结果里带着 id（recall_memory 每次都回 id），按 id 删才精确。
+
+        数据红线：删行之前先备份（_backup_db）。
+        """
+        mid = (mid or "").strip()
+        if not mid:
+            return False
+        if self.get(mid) is None:
+            return False
+        self._backup_db()
+        return self.remove(mid)
 
     def detect_conflicts(self, new_content: str,
                          threshold: float = 0.7) -> list[tuple[MemoryItem, float]]:
@@ -792,6 +1175,107 @@ class MemoryStore:
             return []
         return [(i, s) for i, s in zip(items, sims, strict=False) if s >= threshold and i.category != "other"]
 
+    # ------------------ Stage 2.4：事实改写（supersede） ------------------
+
+    def supersede(self, old_id: str, new_content: str, *,
+                  category: str = "", importance: Optional[float] = None,
+                  scope: str = "", kind: str = "", topic: str = "",
+                  conflict_threshold: float = 0.7) -> Optional[MemoryItem]:
+        """把 old_id 那条记忆**改写**成 new_content（事实变了 → 旧的标过时）。
+
+        - 旧行 status='superseded' + superseded_by=新行 id；
+          **两条不并存为 active**（召回时旧行被过滤，见 _active_items）。
+        - 复用 detect_conflicts()：跟新说法**同样矛盾**的其它 active 行
+          一起标过时（否则库里会同时挂着两个互相矛盾的事实）。
+        - 数据红线：改 live 库之前先备份（_backup_db，Stage 2.2 的约定）。
+        - old_id 不存在 → 返回 None（调用方负责报错，别假装改写成功）。
+        """
+        content = (new_content or "").strip()
+        if not content:
+            return None
+        old = self.get(old_id)
+        if old is None:
+            return None
+        # 新行字段：没显式给的沿用旧行（改写不该顺手改掉分类 / 重要性）
+        cat = category if category in CATEGORY_CHOICES else old.category
+        imp = (old.importance if importance is None
+               else max(0.0, min(1.0, float(importance))))
+        sc = (scope or old.scope or "project").strip().lower()
+        if sc not in SCOPE_CHOICES:
+            sc = old.scope
+        kd = (kind or old.kind or "fact").strip()
+        if kd not in KIND_CHOICES:
+            kd = old.kind
+        tp = topic if topic else old.topic
+
+        # 数据红线：改 live 库之前先备份
+        self._backup_db()
+
+        # 矛盾检测：跟新说法冲突的其它 active 行一起标过时
+        superseded_ids: list[str] = [old.id]
+        try:
+            conflicts = self.detect_conflicts(content,
+                                              threshold=conflict_threshold)
+        except Exception as e:  # noqa: BLE001
+            log.warning("supersede：冲突检测失败（只改写指定那条）：%s", e)
+            conflicts = []
+        for item, _score in conflicts:
+            if item.id == old.id or item.status == "superseded":
+                continue
+            superseded_ids.append(item.id)
+
+        new_item = MemoryItem(
+            id="m" + uuid.uuid4().hex[:10],
+            content=content,
+            category=cat,
+            importance=imp,
+            scope=sc,
+            kind=kd,
+            topic=tp,
+        )
+        with self._lock:
+            self._items.append(new_item)
+            self.last_save_ok = self._insert_item(new_item)
+            for mid in superseded_ids:
+                self._mark_superseded(mid, new_item.id)
+            # 索引标脏：旧行还在向量库里，检索前重建
+            self._index_dirty = True
+            self._fusion_ready = False
+        log.info("记忆改写：%s → %s（旧条目标过时 %d 条）",
+                 old_id, new_item.id, len(superseded_ids))
+        return new_item
+
+    def _mark_superseded(self, mid: str, new_id: str) -> bool:
+        """把一条记忆标成过时（status='superseded' + superseded_by=new_id）。"""
+        with self._lock:
+            for it in self._items:
+                if it.id == mid:
+                    it.status = "superseded"
+                    it.superseded_by = new_id
+                    break
+        try:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "UPDATE memories SET status='superseded', "
+                    "superseded_by=? WHERE id=?", (new_id, mid))
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("标记记忆过时失败(%s)：%s", mid, e)
+            return False
+
+    def _active_items(self) -> list[MemoryItem]:
+        """active 的记忆（status != 'superseded'）。
+
+        过时的记忆**不再**参与召回 / 注入 —— 否则模型会同时看到
+        「主人喜欢冰美式」和「主人喜欢拿铁」两个互相矛盾的事实。
+        """
+        with self._lock:
+            return [i for i in self._items if i.status != "superseded"]
+
     def forget_if_expired(self, max_age_days: int = 90,
                           min_importance: float = 0.3) -> int:
         """删除超过 max_age_days 天 且 importance < min_importance 的记忆。
@@ -813,7 +1297,13 @@ class MemoryStore:
         return removed
 
     def merge_similar(self, threshold: float = 0.95) -> int:
-        """合并高度相似（默认 ≥ 0.95）的记忆，保留 importance 最高那条。"""
+        """合并高度相似（默认 ≥ 0.95）的记忆，保留 importance 最高那条。
+
+        ⚠️ 索引可能标脏：add() 只标脏，_ensure_backend_fresh() 只在**检索**
+        路径上调 ⇒ 这里拿到的向量索引跟 items 对不上，相似度恒为 0 ⇒
+        **什么都合并不了**。所以合并前必须自己刷新一次索引。
+        """
+        self._ensure_backend_fresh()
         with self._lock:
             if len(self._items) < 2:
                 return 0
@@ -864,30 +1354,405 @@ class MemoryStore:
             return 0.0
 
     def recent(self, n: int | None = None) -> list[MemoryItem]:
-        items = self.all()
+        # Stage 2.4：过时的记忆不再进注入列表（避免新旧两条一起出现）
+        items = self._active_items()
         items.sort(key=lambda i: i.created_at)
         return items[-(n or self.max_inject):]
 
-    def system_block(self) -> str:
-        items = self._select_for_injection()
+    # ------------------ Stage 2.1：按 query 召回（RRF 融合） ------------------
+
+    def _ensure_fusion_backends(self, docs: list[str]) -> None:
+        """准备融合用的后端（懒建 + 缓存）。
+
+        三路的可用性：
+            - substring：永远可用（字面 / 二元组，自己算，不占后端对象）
+            - tfidf：永远可用（纯 Python 实现，零外部依赖）
+            - sbert：**不新增依赖** —— 装了 sentence-transformers 才用；
+              没装 / 加载失败 → 降级到 tfidf（融合只剩两路，这是预期行为）
+
+        降级必须**可观测**：写日志 + 记在 last_fusion_degraded 上，
+        面板和测试都能看到「这一轮到底哪几路参与了」。
+        """
+        if self._fusion_ready:
+            return
+        tfidf: VectorBackend
+        if isinstance(self.backend, TfidfBackend):
+            tfidf = self.backend            # 已经在同一批 docs 上 fit 过了
+        else:
+            tfidf = TfidfBackend()
+            try:
+                tfidf.fit(docs)
+            except Exception as e:  # noqa: BLE001
+                log.warning("融合用 tfidf 后端 fit 失败：%s", e)
+        self._fusion_tfidf = tfidf
+        self._fusion_sbert = None
+        degraded: list[str] = []
+        if _sbert_available():
+            try:
+                sbert = SentenceTransformerBackend()
+                sbert.fit(docs)
+                self._fusion_sbert = sbert
+            except Exception as e:  # noqa: BLE001
+                log.warning("sentence-transformers 不可用（%s），融合降级到 tfidf", e)
+                degraded.append("sbert")
+        else:
+            log.info("sentence-transformers 未安装，融合降级为 substring + tfidf")
+            degraded.append("sbert")
+        self._fusion_degraded = tuple(degraded)
+        self._fusion_ready = True
+
+    def _rank_substring(self, query: str, items: list[MemoryItem]
+                        ) -> tuple[list[int], dict[str, float]]:
+        """字面 / 二元组这一路的排名 + 每行的原始分数。
+
+        返回 (下标列表（按相关度降序）, {mid: 原始分数})：
+            - 原始分数 = 字面命中 2.0 + 二元组重叠比例（0..3）；
+            - 字面命中（query 是 content 的子串）权重更高；
+            - 其次按二元组重叠比例（CJK 相邻二元组，避免单字伪命中）。
+        并列时按 id 排序 → 结果可复现。
+        """
+        q_low = (query or "").lower()
+        q_bigrams = _bigrams(query or "")
+        scored: list[tuple[float, int]] = []
+        scores: dict[str, float] = {}
+        for idx, it in enumerate(items):
+            score = 0.0
+            if q_low and q_low in it.content.lower():
+                score += 2.0
+            if q_bigrams:
+                score += len(_bigrams(it.content) & q_bigrams) / len(q_bigrams)
+            scores[it.id] = score
+            if score > 0:
+                scored.append((score, idx))
+        scored.sort(key=lambda t: (-t[0], items[t[1]].id))
+        return [idx for _, idx in scored], scores
+
+    def _rank_vector(self, query: str, items: list[MemoryItem],
+                     backend: VectorBackend, top_n: int = FUSION_TOP_N
+                     ) -> tuple[list[int], float, dict[str, float]]:
+        """向量这一路的排名。
+
+        返回 (下标列表, 最大相似度, {mid: 相似度})：
+            - 下标列表 = 按相似度降序取 top_n（**含 0 分**：PLAN 写的是
+              「每路取 top-30」，0 分的行也参与 RRF，并列时靠 id 定序）；
+            - 最大相似度 = 这一路对 query 最「有信心」的那条有多像
+              （门禁用，**阈值**判断，见 _query_matches_anything）。
+        """
+        try:
+            qv = backend.encode([query])[0]
+            sims = backend.similarity(qv, backend._doc_vecs)  # type: ignore[attr-defined]
+        except Exception as e:  # noqa: BLE001
+            log.warning("向量后端 %s 检索失败：%s", backend.name, e)
+            return [], 0.0, {}
+        n = min(len(items), len(sims))
+        order = sorted(range(n), key=lambda i: (-float(sims[i]), items[i].id))
+        max_sim = max((float(sims[i]) for i in range(n)), default=0.0)
+        sim_by_id = {items[i].id: float(sims[i]) for i in range(n)}
+        return order[:top_n], max_sim, sim_by_id
+
+    def _fusion_ranked_lists(self, query: str,
+                             items: list[MemoryItem]
+                             ) -> tuple[list[tuple[str, list[int]]], float,
+                                        dict[str, dict[str, float]]]:
+        """三路排名（substring / tfidf / sbert）。
+
+        返回 (每路的 (名字, 下标列表), 语义腿最大相似度, 每路的相对强度分)：
+            - 语义腿最大相似度 → 门禁（**阈值**判断，不是「> 0 即算」）；
+            - 相对强度分 = 该路原始分 / 该路最高分（0..1）
+              → 排序 + 裁剪用（见 _candidate_scores）。
+        """
+        lists: list[tuple[str, list[int]]] = []
+        rel: dict[str, dict[str, float]] = {}
+        semantic_sim = 0.0
+
+        sub_order, sub_scores = self._rank_substring(query, items)
+        lists.append(("substring", sub_order))
+        rel["substring"] = _normalize_scores(sub_scores)
+
+        if self._fusion_tfidf is not None:
+            idx, _sim, sims = self._rank_vector(query, items, self._fusion_tfidf)
+            lists.append(("tfidf", idx))
+            rel["tfidf"] = _normalize_scores(sims)
+        if self._fusion_sbert is not None:
+            idx, semantic_sim, sims = self._rank_vector(query, items,
+                                                         self._fusion_sbert)
+            lists.append(("sbert", idx))
+            rel["sbert"] = _normalize_scores(sims)
+        return lists, semantic_sim, rel
+
+    def _query_matches_anything(self, query: str, items: list[MemoryItem],
+                                sub_list: list[int], semantic_sim: float) -> bool:
+        """query 跟记忆库**有没有关系**（门禁）。
+
+        - CJK query：必须共享至少一个**二元组**（跟老 search() 同一条规则：
+          「量子力学」不该命中「小学三年级」那种单字伪命中）；
+        - 纯英文 query：必须共享一个整词；
+        - 语义腿（sbert）：相似度必须 **≥ 阈值**才算有关系。
+
+        ⚠️ 旧判断是「语义后端有正命中（> 0）就算有关系」。那等于**没有门禁**：
+        真 embedding 对几乎任何 query 都会给一个小小的正相似度，
+        于是「问一件跟记忆库完全无关的事」也会硬塞一堆记忆进来。
+        现在改成阈值判断（semantic_gate_threshold），无关问题老老实实走 fallback。
+
+        全都不沾 → 这次提问跟记忆库无关 → 什么都不召回，交给 fallback
+        （按重要性 top-2），而不是硬塞一坨不相关的记忆。
+        """
+        if sub_list:
+            return True
+        if _has_word_overlap(query, items):
+            return True
+        return float(semantic_sim) >= self.semantic_gate_threshold
+
+    def _search_fused(self, query: str, kinds: Optional[list[str]] = None,
+                      limit: Optional[int] = None) -> list[MemoryItem]:
+        """按 query 召回（RRF 融合三路排名 + 相关度裁剪）。
+
+        与 search() 的关键差别：
+            - **不**走 _MIN_HIT 预过滤 —— 融合的输入必须是「各路的原始排名」，
+              否则「某一路没命中」的候选在进融合之前就被滤掉了（PLAN 2.1 的 bug）；
+            - 打分用 RRF：score = Σ 1/(60 + rank + 1)，每路取 top-30；
+            - Stage 2.8：RRF 只用来**提名**候选，最终注入哪几条由
+              _pick_candidates() 按「融合分 + 相关度门槛 + 条数上限」决定。
+
+        Args:
+            query: 本轮主人说的话。
+            kinds: 只召回这些 kind（可选）。
+            limit: 最多返回几条（默认 self.max_inject）。
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        self._ensure_backend_fresh()
+        with self._lock:
+            items = list(self._items)
+        if not items:
+            return []
+        self._ensure_fusion_backends([i.content for i in items])
+        # 只在 active 里找（superseded 是 Stage 2.4 的产物，不该再被召回）
+        pool = [i for i in items if i.status != "superseded"]
+        if kinds:
+            want = set(kinds)
+            pool = [i for i in pool if i.kind in want]
+        if not pool:
+            self.last_fusion_backends = ()
+            self.last_fusion_degraded = self._fusion_degraded
+            return []
+        pool_ids = {i.id for i in pool}
+
+        # 门禁：query 跟记忆库完全无关 → 什么都不召回（交给 fallback）
+        ranked_lists, semantic_sim, leg_rel = self._fusion_ranked_lists(q, items)
+        sub_list = dict(ranked_lists).get("substring", [])
+        if not self._query_matches_anything(q, items, sub_list, semantic_sim):
+            self.last_fusion_backends = ()
+            self.last_fusion_degraded = self._fusion_degraded
+            self.last_recall_stats = {"gate": "closed", "n_injected": 0}
+            log.info("记忆融合召回：query=%r 与记忆库无关，不召回", q[:40])
+            return []
+
+        # RRF 融合（照抄 qq-bridge memory_sidecar/memory_store.py:462-478 的形状）
+        fused: dict[str, float] = {}
+        used: list[str] = []
+        for name, ranked in ranked_lists:
+            if ranked:
+                used.append(name)
+            for rank, idx in enumerate(ranked[:FUSION_TOP_N]):
+                mid = items[idx].id
+                if mid not in pool_ids:
+                    continue
+                fused[mid] = fused.get(mid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        self.last_fusion_backends = tuple(used)
+        self.last_fusion_degraded = self._fusion_degraded
+        if not fused:
+            return []
+        by_id = {i.id: i for i in items}
+        picked = self._pick_candidates(
+            by_id, fused, leg_rel,
+            self.max_inject if limit is None else int(limit))
+        log.info("记忆融合召回：query=%r 后端=%s 降级=%s 命中=%d",
+                 q[:40], list(self.last_fusion_backends),
+                 list(self.last_fusion_degraded), len(picked))
+        self._bump_hits([i.id for i in picked])
+        return picked
+
+    def _candidate_scores(self, by_id: dict[str, MemoryItem],
+                          fused: dict[str, float],
+                          leg_rel: dict[str, dict[str, float]]) -> dict[str, float]:
+        """每个候选的**融合分**（排序 + 裁剪都用它）。
+
+        融合分 = W_REL×最强证据的相对强度
+               + W_RRF×多路一致性（RRF 相对分）
+               + W_IMP×重要性
+
+        - 最强证据的相对强度：这一行在**最支持它的那一路**上的相对分
+          （substring 路 = 字面/二元组命中；向量路 = 余弦相似度），0..1；
+          —— RRF 分只说「排第几」，把幅度信息全丢了（实测第 2~6 名的
+          RRF 分只差 ~0.1，几乎并列 → 谁进 top-N 实际由随机 id 决定）；
+        - RRF 相对分：多路都排在前面的行更高（0..1）；
+        - 重要性：弱先验，只用来在分数接近时定序。
+
+        纯函数、确定：同样的输入 → 同样的分数。
+        """
+        rrf_top = max(fused.values()) if fused else 0.0
+        if rrf_top <= 0:
+            rrf_top = 1.0
+        out: dict[str, float] = {}
+        for mid, rrf in fused.items():
+            item = by_id.get(mid)
+            if item is None:
+                continue
+            rel = 0.0
+            for scores in leg_rel.values():
+                v = scores.get(mid)
+                if v is not None and v > rel:
+                    rel = v
+            out[mid] = (W_REL * rel
+                        + W_RRF * (rrf / rrf_top)
+                        + W_IMP * float(item.importance))
+        return out
+
+    def _pick_candidates(self, by_id: dict[str, MemoryItem],
+                         fused: dict[str, float],
+                         leg_rel: dict[str, dict[str, float]],
+                         max_rows: int) -> list[MemoryItem]:
+        """给候选**排序 + 裁剪**，返回真正要注入的行。
+
+        排序：融合分降序 → 重要性降序 → id 升序
+            （**完全确定**：跟 uuid 无关。旧实现只按 RRF 分排，
+             第 2 名往后几乎并列 → 补位行是谁基本由随机 id 决定）。
+
+        裁剪（Stage 2.8）：
+            - 顶行（过了门禁的第一名）**永远注入**；
+            - 其余行只有「融合分 ≥ 顶行融合分 × filler_ratio」才注入 ——
+              离顶行太远的就是噪声，白占 token，还有让桌宠**说错话**的风险；
+            - 最后按条数上限（max_inject）截断。
+        """
+        cap = max(0, int(max_rows))
+        if cap == 0:
+            return []
+        scores = self._candidate_scores(by_id, fused, leg_rel)
+        if not scores:
+            return []
+        ordered = sorted(scores.items(),
+                         key=lambda kv: (-kv[1], -float(by_id[kv[0]].importance),
+                                         kv[0]))
+        top_score = ordered[0][1]
+        floor = top_score * self.filler_ratio
+        picked: list[MemoryItem] = []
+        picked_scores: list[float] = []
+        for mid, sc in ordered:
+            if picked and sc < floor:
+                break            # 离顶行太远 → 噪声，不注入
+            picked.append(by_id[mid])
+            picked_scores.append(sc)
+            if len(picked) >= cap:
+                break
+        self.last_recall_stats = {
+            "n_candidates": len(scores),
+            "n_injected": len(picked),
+            "cut_ratio": self.filler_ratio,
+            "top_score": round(top_score, 6),
+            # 最弱那条注入行离顶行有多近（1.0 = 与顶行并列，0 = 毫无关系）
+            "min_injected_ratio": (round(min(picked_scores) / top_score, 4)
+                                   if picked_scores and top_score > 0 else 0.0),
+        }
+        return picked
+
+    def _top_by_importance(self, n: int) -> list[MemoryItem]:
+        """按重要性取 top-n（并列时按最近访问、再按 id → 可复现）。"""
+        with self._lock:
+            pool = [i for i in self._items if i.status != "superseded"]
+        pool.sort(key=lambda i: (-i.importance, -i.last_access_ts, i.id))
+        return pool[:max(0, int(n))]
+
+    # ------------------ Stage 2.1：注入 system prompt 的记忆块 ------------------
+
+    def system_block(self, query: str = "") -> str:
+        """渲染注入 system prompt 的长期记忆块。
+
+        query = 本轮主人说的话（Stage 2.1：按这句话检索，而不是固定 top-N）。
+        不传时用 set_current_query() 记下的那句（老调用方就是这么调的）。
+        """
+        items = self._select_for_injection(query)
         if not items:
             return ""
         lines = [f"- [{i.category}★{i.importance:.1f}] ({_format_time(i.created_at)}) {i.content}"
                  for i in items]
         return (
-            "【你对主人的长期记忆】（来自以往相处，回答时可以自然引用；★ 后是重要性 0-1）\n"
+            "【你记得的事】（按你刚才这句话检索出来的，可能相关也可能不准；用不上就别硬扯）\n"
+            "（★ 是重要性 0-1）\n"
             + "\n".join(lines)
         )
 
-    def _select_for_injection(self) -> list[MemoryItem]:
-        """选择注入 system prompt 的记忆：按综合分排序。"""
+    def _select_for_injection(self, query: str = "") -> list[MemoryItem]:
+        """选注入 system prompt 的记忆：**按本轮 query 召回**（Stage 2.1）。
+
+        - 有 query：RRF 融合召回（按相关度裁剪），最多 max_inject（4）条；
+        - 一条都没召回（问题跟记忆无关）：回退到**按重要性 top-2**（不是 top-20），
+          避免「完全无关的问题也硬塞 20 条记忆」；
+        - 没有 query（老调用方拿不到 query）：按重要性取 max_inject 条。
+        """
+        q = (query or "").strip() or self.current_query
+        if q:
+            fused = self._search_fused(q, limit=self.max_inject)
+            if fused:
+                return fused
+            log.info("记忆召回：query=%r 一条都没命中，回退按重要性取 top-2", q[:40])
+            return self._top_by_importance(2)
+        return self._top_by_importance(self.max_inject)
+
+    # ------------------ Stage 2.1 / 2.2：query 通道 + scope 分库 ------------------
+
+    def set_current_query(self, text: str) -> None:
+        """记下本轮主人说的话。
+
+        system_block() 不带参数调用时用它做召回 —— prompt_layer.get_memory_block()
+        就是无参调 provider 的，它拿不到 query。
+        """
         with self._lock:
-            pool = list(self._items)
-        if not pool:
-            return []
-        # 综合分排序（无 query，semantic=0，仅类别+时新度+importance）
-        pool.sort(key=lambda i: self._score(i, 0.0), reverse=True)
-        return pool[: self.max_inject]
+            self._current_query = (text or "").strip()
+
+    @property
+    def current_query(self) -> str:
+        """最近一次 set_current_query() 记下的话（没有则空串）。"""
+        with self._lock:
+            return self._current_query
+
+    def fusion_status(self) -> dict:
+        """融合召回的状态（面板 / 测试用）。
+
+        - backends：上一次融合**实际参与**的后端
+        - degraded：被降级（不可用）的后端
+        """
+        return {
+            "backends": list(self.last_fusion_backends),
+            "degraded": list(self.last_fusion_degraded),
+            "rrf_k": RRF_K,
+            "top_n": FUSION_TOP_N,
+            "max_inject": self.max_inject,
+            "filler_ratio": self.filler_ratio,
+            "semantic_gate_threshold": self.semantic_gate_threshold,
+            "last_recall": dict(self.last_recall_stats),
+        }
+
+    def store_for_scope(self, scope: str) -> "MemoryStore":
+        """按 scope 返回对应的记忆库。
+
+        - project（本库，默认）：原样返回 self（老行为不变）；
+        - user：~/.desktop-pet/user_memory.db（懒建 + 缓存）。
+        """
+        sc = (scope or "project").strip().lower()
+        if sc != "user":
+            return self
+        with self._lock:
+            store = self._user_store
+            if store is None:
+                store = MemoryStore(user_memory_db_path(),
+                                    max_inject=self.max_inject,
+                                    backend_name=self.backend_name)
+                self._user_store = store
+                log.info("MemoryStore: user scope 记忆库 %s",
+                         store.data_file)
+            return store
 
 
 # MemoryCurator
