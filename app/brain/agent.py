@@ -8,7 +8,9 @@ import re
 from typing import AsyncIterator, Callable, Optional
 
 from app.brain.llm_client import (LLMClient, count_request_actions,
-                                  detect_action_intent)
+                                  detect_action_intent, is_low_cjk_reply)
+from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
+                                    build_tool_handbook, load_style_guide)
 from app.engine.tools import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -28,6 +30,12 @@ MAX_CONSECUTIVE_TOOL_ONLY_TURNS = 3
 # 等于把同一个请求重复发 5 次——费钱且慢（实测带历史时可达 5 轮 / 12 秒）。
 _MAX_FORCE_RETRIES = 1
 
+# 「中文占比过低」的重试上限（Stage 1.3）：最多重问一次，绝不连发
+_MAX_LOW_CJK_RETRIES = 1
+
+# 重问时给模型的提示：上一条回复几乎不是中文
+_LOW_CJK_RETRY_HINT = "上一条回复几乎全是英文，请只用简体中文重新回答一遍。"
+
 # 同一个工具连续失败多少次后，本轮对话内不再提供它
 _MAX_SAME_TOOL_FAIL = 2
 
@@ -36,31 +44,12 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 _THINK_TAG_RE = re.compile(r"</?(?:think|reasoning)>", re.I)
 
 # 防工具独白泄漏的 system 附加铁律（幂等标记）
-_STYLE_RULE = (
-    "\n【回复风格铁律】给主人的回复里严禁出现：工具名称（如 open_website/open_app）、"
-    "对内部操作的描述（如「我应该使用XX工具」「这是要打开一个应用」「主人想打开XX，让我来」）、"
-    "复述主人的指令、推理过程、<think> 标记。调用工具的那一轮**不要输出任何说明文字**"
-    "（只给工具调用本身）；只有在不再调用工具、给主人最终答复时，才直接输出一句"
-    "符合角色人设的自然中文。\n\n"
-    "【自主使用工具（重要）】像一个能干的助手一样自主工作：先判断需要什么信息或操作，"
-    "需要时就连续调用工具（搜索、查询、计算、打开应用/网页等），可以多轮调用、边用边分析，"
-    "直到信息足够。当信息足够、且不再需要工具时，**直接基于工具结果给主人完整答案**：\n"
-    "  - 必须把工具结果里的具体内容（具体名称、数字、结论、链接含义）写进答案，"
-    "严禁只说「让我给主人推荐」「我查到了一些」这类空泛过渡话；\n"
-    "  - 对已经执行成功的动作（打开应用/网页、设置提醒等），自然确认一句结果即可，"
-    "不要再描述你将要做什么、该用什么工具；\n"
-    "  - 信息不足或不确定时，应再调用一次工具确认，而不是直接编造或空泛回应。\n"
-    "  - 给最终答复前，先核对工具是否真的成功、结果是否足以回答主人；工具失败/被取消要如实说明，绝不假装成功。\n\n"
-    "【多步任务拆解（重要）】主人的一句话往往包含**不止一个要求**"
-    "（例如「查一下北京天气，然后帮我加到日程」「打开QQ顺便看看今天日程」）。"
-    "收到这类请求时：\n"
-    "  1) 先在心里拆成几步，列出还缺哪些信息；\n"
-    "  2) 一次只推进一步，每步用工具拿到**真实结果**；\n"
-    "  3) **不要在第一步拿到结果后就直接收尾**——只要还有任何一步没做、"
-    "或任何一步的结果还不确定，就继续调用工具往下推进；\n"
-    "  4) 前一步失败时，换个工具/换个参数再试，而不是降级成一句「我查不了」。\n"
-    "  判断标准很简单：**主人的每个要求都落实了吗？** 没落实完就不算答完。\n"
-)
+#
+# Stage 1.1：_STYLE_RULE 已搬进共享层 app/brain/prompt_layer.py，并按
+# Stage 1.6 拆成两段：
+#   【说话方式】    —— 新增，跟 characters/style-guide.md 配套
+#   【任务执行协议】—— 原铁律内容收窄到「确实有工具意图时」
+# ReAct 与 standard 两个后端都从共享层取，system prompt 才长得一样。
 
 
 def _sanitize_reply(text: str) -> str:
@@ -70,7 +59,28 @@ def _sanitize_reply(text: str) -> str:
 
 
 # 模型输出被清洗规则剥光、且无工具结果可兜底时说的话术（宁可给一句自然的「再来一次」也不要空气泡）
-_EMPTY_REPLY_FALLBACK = "唔……刚刚没想好怎么说，主人再说一遍好不好？"
+#
+# Stage 1.3：固定一句会让桌宠反复说同一句话 —— 改成多条**轮换**。
+# _EMPTY_REPLY_FALLBACK 保留为第一条（历史 import 不断），完整话术池见 _EMPTY_REPLY_FALLBACKS。
+_EMPTY_REPLY_FALLBACKS = (
+    "唔……刚刚没想好怎么说，主人再说一遍好不好？",
+    "呜……小汐卡壳啦，主人再叫一次好不好嘛~",
+    "诶？刚刚走神了喵……主人再说一遍好不好？",
+    "唔喵……脑内一片空白，主人稍等一下下~",
+)
+_EMPTY_REPLY_FALLBACK = _EMPTY_REPLY_FALLBACKS[0]
+
+# 轮换指针（进程内）：保证连续两次兜底不会说同一句
+_EMPTY_REPLY_FALLBACK_INDEX = 0
+
+
+def _next_empty_reply_fallback() -> str:
+    """取下一条空回复兜底话术（轮换；连续两次不同）。"""
+    global _EMPTY_REPLY_FALLBACK_INDEX
+    line = _EMPTY_REPLY_FALLBACKS[
+        _EMPTY_REPLY_FALLBACK_INDEX % len(_EMPTY_REPLY_FALLBACKS)]
+    _EMPTY_REPLY_FALLBACK_INDEX += 1
+    return line
 
 # 工具结果工具名 → 中文（用于空总结时的角色化兜底）
 _TOOL_PRETTY = {
@@ -350,7 +360,8 @@ def _format_verify_hint(executed_tools: list, force_final: bool = False) -> str:
             "不要用这一条结果概括整件事；\n"
             "  - 结果缺关键信息（时间/地点/名称/数值） → 继续调用工具补齐，"
             "凭印象填空是严重错误；\n"
-            "  - 确认每条要求都有工具结果支撑 → 才给主人完整、具体、有条理的中文总结。"
+            "  - 确认每条要求都有工具结果支撑 → 按人设口吻自然作答，**内容不遗漏**，"
+            "行文格式由行为层决定。"
         )
     return f"[系统·结果核对] 本轮工具执行结果：\n{tool_list}\n{decision}"
 
@@ -447,6 +458,39 @@ class AgentLoop:
         if lvl > 10:
             return 10
         return lvl
+
+    def assemble_system_prompt(self, persona: str | None = None) -> str:
+        """ReAct 后端的 system prompt 组装路径（唯一入口，Stage 1.1）。
+
+        与 standard 后端（langchain_agent.LangChainAgent.assemble_system_prompt）
+        用**同一套**共享层函数、**同一批**输入 ⇒ 两边发出的 system 字符串
+        逐字节相同（见 tests/test_backend_parity.py）。
+
+        - persona: 人设（+ 上游注入的会话上下文）。None → 取 client 里的原始人设。
+        - 工具手册（【工具解锁】等级提示）只有这边拼得出来：需要工具注册表 + 当前等级。
+        """
+        if persona is None:
+            persona = getattr(self.client, "base_system_prompt", None)
+        if persona is None:
+            persona = getattr(self.client, "system_prompt", "") or ""
+        return build_system_prompt(
+            persona=persona,
+            style_guide=load_style_guide(),
+            tool_handbook=build_tool_handbook(
+                registry=self.registry, level=self._current_level()),
+            dynamic=build_dynamic_block(),
+        )
+
+    def _apply_system_prompt(self) -> None:
+        """把 ReAct 后端最终 system 字符串装到 client 上（共享层拼的）。"""
+        client = self.client
+        if client is None:
+            return
+        base = getattr(client, "base_system_prompt", None)
+        if base is None:
+            # 不是 LLMClient（老路径 / 测试用的假 client）：保持原样，不碰
+            return
+        client.system_prompt = self.assemble_system_prompt(base)
 
     def _select_tools(self, intent: Optional[str],
                       all_tools: Optional[list[dict]]) -> Optional[list[dict]]:
@@ -615,6 +659,8 @@ class AgentLoop:
         failed_tools: dict[str, int] = {}
         # 模型的原始输出被清洗规则全部剥掉（过度清洗）时置 True
         over_sanitized = False
+        # 「中文占比过低」的重试次数（Stage 1.3，最多 1 次）
+        low_cjk_retries = 0
 
         # 抗幻觉第 1 层：意图识别 → 第一轮 force_tool_use
         first_user_text = self._first_user_text(messages)
@@ -637,32 +683,14 @@ class AgentLoop:
                      intent, len(tools), len(all_tools),
                      [t["function"]["name"] for t in tools])
 
-        # 防工具独白泄漏：给 system 追加回复风格铁律（幂等）
+        # Stage 1.1：system 消息**只由共享层**拼（ReAct 与 standard 两个后端
+        # 发出去的 system 字符串必须逐字节相同）。
+        #   - client.system_prompt = 最终 system 字符串（ReAct 真正发出去的那条）
+        #   - messages[0] 若是 system 消息（老调用方 / 测试），也用同一套共享层重拼
+        self._apply_system_prompt()
         if messages and messages[0].get("role") == "system":
-            base = str(messages[0].get("content") or "")
-            if "回复风格铁律" not in base:
-                messages[0]["content"] = base + _STYLE_RULE
-            # 工具解锁状态行:让 LLM 知道"有更高级工具但现在用不了"
-            # 没注入 level_getter 的旧路径(测试 / 无解锁环境)不追加,保持原行为
-            if self.level_getter is not None:
-                from app.engine.tools._unlock import MCP_DEFAULT_LEVEL
-                lvl = self._current_level()
-                try:
-                    visible_n = len(self.registry.names(lvl))
-                    total_n = len(self.registry.names())
-                except TypeError:
-                    visible_n = total_n = len(self.registry.names())
-                unlock_line = (
-                    f"\n\n【工具解锁】当前等级 Lv.{lvl}。"
-                    f"可见工具 {visible_n} / 全部 {total_n} 个。"
-                    "更高级别才能用更高级工具（如联网、写文件、生成图片、系统控制等），"
-                    "调用未解锁工具会被自动拦截并返回'等级不够'提示。"
-                    "不要假装调用成功,直接告诉主人当前等级不能做这件事并提示升级。"
-                )
-                if MCP_DEFAULT_LEVEL and lvl < MCP_DEFAULT_LEVEL:
-                    unlock_line += f"外部扩展 (MCP) 需要 Lv.{MCP_DEFAULT_LEVEL} 才能用。"
-                if "工具解锁" not in base:
-                    messages[0]["content"] += unlock_line
+            messages[0]["content"] = self.assemble_system_prompt(
+                persona=str(messages[0].get("content") or ""))
 
         for turn in range(self.max_turns):
             if cancel_check is not None and cancel_check():
@@ -710,6 +738,26 @@ class AgentLoop:
                 over_sanitized = True
                 log.info("AgentLoop: 模型输出被清洗规则全部剥离（过度清洗），"
                          "raw=%r", raw_text[:120])
+
+            # Stage 1.3：中文占比过低（几乎全是英文 / 乱码）→ **重问一次**。
+            # 旧行为是整条丢掉，主人只能看到兜底话术；
+            # 现在先让模型重答一次（最多一次，绝不连发），仍失败才走兜底。
+            if (raw_text.strip() and not tool_calls and not final_text.strip()
+                    and is_low_cjk_reply(raw_text)
+                    and low_cjk_retries < _MAX_LOW_CJK_RETRIES
+                    and turn + 1 < self.max_turns
+                    and not (cancel_check and cancel_check())):
+                low_cjk_retries += 1
+                log.warning("AgentLoop: 第 %d 轮回复中文占比过低（%r），重问一次",
+                            turn + 1, raw_text[:120])
+                yield ("meta", {"event": "low_cjk_retry",
+                                "reason": "回复中文占比过低",
+                                "turn": turn})
+                # 把「上一条不是中文」告诉模型，重问才有意义
+                messages.append({"role": "assistant", "content": raw_text})
+                messages.append({"role": "user", "content": _LOW_CJK_RETRY_HINT})
+                consecutive_tool_only = 0
+                continue
 
             # 抗幻觉第 2 层：第 1 轮没调工具 → 重试
             # 关键：tools_used == 0 才算「该调没调」，调过工具后给文字就是最终总结
@@ -846,13 +894,13 @@ class AgentLoop:
 
         # 兜底二：模型输出被过度清洗且无工具兜底
         if not final_text.strip() and over_sanitized:
-            final_text = _EMPTY_REPLY_FALLBACK
+            final_text = _next_empty_reply_fallback()
             log.warning("AgentLoop: 输出被过度清洗且无工具兜底，使用空回复话术")
             yield "text", final_text
 
         # 兜底三：无条件兜底（避免主人面对空气泡）
         if not final_text.strip():
-            final_text = _EMPTY_REPLY_FALLBACK
+            final_text = _next_empty_reply_fallback()
             log.warning("AgentLoop: 所有路径都没产出文字，使用空回复兜底话术")
             yield "text", final_text
 

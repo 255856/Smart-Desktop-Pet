@@ -1,8 +1,11 @@
-"""User-wide memory 注入到 LangChainAgent system_prompt 的测试。
+"""User-wide memory 与 LangChainAgent 的接线测试。
 
 memory_store 是跨 session 共享的长期记忆。本测试验证:
 - LangChainAgent 接受 memory_store 参数
-- memory_store.system_block() 内容被拼到 system_prompt
+- **记忆块不进 system_prompt**（Stage 2.1 + 记忆通道搬家：它按本轮 query
+  召回 ⇒ 每轮都变 ⇒ 放 system 会打掉 8192-token 前缀缓存，也会让 agent
+  指纹每轮变 → 每轮重建 agent）。它走**易变通道**（独立 user 消息）。
+- 记忆块**确实**通过易变通道到达模型
 - 没 memory_store 不抛
 - memory_store 没实现 system_block 也不抛
 - system_block 抛异常被吞掉,不污染
@@ -57,13 +60,32 @@ class TestMemoryStoreParam:
         assert agent.memory_store is None
 
 
-# -------------------- 注入到 system_prompt --------------------
+# -------------------- 通道：易变通道（不是 system_prompt） --------------------
 
 class TestMemoryInjection:
-    def test_memory_block_injected_into_system_prompt(self):
+    def test_memory_block_not_injected_into_system_prompt(self):
+        """记忆块**不进** system prompt（它每轮都变 ⇒ 会打掉前缀缓存）。"""
         mem = _FakeMemory(block="主人喜欢喝冰美式。")
         agent = _make_agent(memory_store=mem)
         asyncio.run(agent._ensure_agent())
+        sp = agent.assemble_system_prompt()
+        assert "主人喜欢喝冰美式" not in sp, (
+            "长期记忆块不许进 system prompt —— 它走易变通道")
+
+    def test_memory_block_reaches_the_model_via_volatile_channel(self):
+        """记忆块通过易变通道到达模型（build_turn_context → provider）。"""
+        from app.brain import prompt_layer
+
+        mem = _FakeMemory(block="主人喜欢喝冰美式。")
+        old_provider = prompt_layer._memory_block_provider
+        prompt_layer.register_memory_block_provider(
+            lambda q="": mem.system_block())
+        try:
+            ctx = prompt_layer.build_turn_context(query="我喜欢喝什么")
+        finally:
+            prompt_layer.register_memory_block_provider(old_provider)
+
+        assert "主人喜欢喝冰美式" in ctx, "记忆块必须出现在易变通道里"
         assert mem.call_count == 1, "system_block 必须被调用"
 
     def test_no_memory_store_means_no_call(self):
@@ -96,7 +118,7 @@ class TestMemoryInjection:
 # -------------------- system_prompt 实际内容 --------------------
 
 class TestSystemPromptComposition:
-    """验证最终 system_prompt 同时包含 persona + memory block。"""
+    """验证最终 system_prompt 含 persona，但**不含** memory block。"""
     def test_persona_and_memory_combine(self):
         mem = _FakeMemory(block="主人名字叫小雪。")
         agent = _make_agent(memory_store=mem, persona="我是桌宠")
@@ -123,13 +145,15 @@ class TestSystemPromptComposition:
             agent._agent = None
             asyncio.run(agent._ensure_agent())
 
-        # 第二次跑 create_agent 时,system_prompt 应该有 memory 内容
+        # system_prompt 里有 persona，但**没有** memory block
+        # （记忆块走易变通道：每轮按 query 召回 ⇒ 不能进 system prompt）
         sp = captured.get("system_prompt", "")
         assert "我是桌宠" in sp, "persona 必须还在"
-        assert "主人名字叫小雪" in sp, "memory block 必须拼到 system_prompt"
+        assert "主人名字叫小雪" not in sp, (
+            "memory block 不许拼到 system_prompt —— 它走易变通道")
 
-    def test_memory_added_after_project_docs(self):
-        """memory 应该在 persona + project_docs + skills 之后。"""
+    def test_memory_not_in_system_prompt_at_all(self):
+        """记忆块不在 system 串里（连位置都没有）—— 稳定段顺序不受影响。"""
         import tempfile
         from pathlib import Path
 
@@ -154,10 +178,11 @@ class TestSystemPromptComposition:
                 asyncio.run(agent._ensure_agent())
 
             sp = captured.get("system_prompt", "")
-            # 顺序:PERSONA 在最前,AGENTS 在中间,MEM 在最后
+            # 稳定段顺序：PERSONA 在最前，AGENTS 在中间
             p_pos = sp.find("PERSONA_HERE")
             a_pos = sp.find("AGENTS_HERE")
-            m_pos = sp.find("MEM_HERE")
-            assert p_pos < a_pos < m_pos, (
-                f"顺序错: persona={p_pos}, agents={a_pos}, mem={m_pos}"
-            )
+            assert p_pos >= 0 and a_pos > p_pos, (
+                f"顺序错: persona={p_pos}, agents={a_pos}")
+            # 记忆块**不在** system 串里（走易变通道）
+            assert "MEM_HERE" not in sp, (
+                "memory block 不许进 system_prompt —— 它走易变通道")

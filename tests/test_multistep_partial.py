@@ -198,7 +198,7 @@ def test_agent_never_emits_an_empty_bubble():
 
     这里构造最窄的缝：模型既没调工具、也没吐出任何内容。
     """
-    from app.brain.agent import _EMPTY_REPLY_FALLBACK
+    from app.brain.agent import _EMPTY_REPLY_FALLBACKS
 
     class _SilentClient:
         def __init__(self):
@@ -214,5 +214,6 @@ def test_agent_never_emits_an_empty_bubble():
     _, _, texts = _collect(agent, "你好呀")
     assert texts, "一条文字都没产出——主人会看到空气泡"
     assert "".join(texts).strip(), "产出的是空白"
-    assert "".join(texts) == _EMPTY_REPLY_FALLBACK
+    # Stage 1.3：兜底话术改成多条轮换 → 只要是轮换池里的一条即可
+    assert "".join(texts) in _EMPTY_REPLY_FALLBACKS
 

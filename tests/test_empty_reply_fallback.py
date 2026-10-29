@@ -14,7 +14,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # 项目根目录（按文件位置推导）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.brain.agent import _EMPTY_REPLY_FALLBACK, AgentLoop  # noqa: E402
+from app.brain.agent import (AgentLoop, _EMPTY_REPLY_FALLBACK,  # noqa: E402
+                             _EMPTY_REPLY_FALLBACKS)
 
 
 class GarbageClient:
@@ -65,7 +66,10 @@ def test_prompt_echo_does_not_produce_silence():
     texts = [d for ev, d in evs if ev == "text"]
     assert texts, "没有任何回复，主人会看到空气泡"
     assert any(t.strip() for t in texts), "兜底文案是空的"
-    assert _EMPTY_REPLY_FALLBACK in " ".join(texts)
+    # Stage 1.3：兜底话术改成多条轮换 → 断言「轮换池里任意一条出现」
+    joined = " ".join(texts)
+    assert any(line in joined for line in _EMPTY_REPLY_FALLBACKS), (
+        f"兜底话术不在轮换池里：{joined!r}")
 
 
 def test_tool_monologue_does_not_produce_silence():
@@ -81,7 +85,8 @@ def test_normal_reply_passes_through_untouched():
     texts = [d for ev, d in evs if ev == "text"]
     joined = " ".join(texts)
     assert "出去玩" in joined
-    assert _EMPTY_REPLY_FALLBACK not in joined
+    # 轮换池里**任何**一条兜底话术都不该混进正常回复
+    assert not any(line in joined for line in _EMPTY_REPLY_FALLBACKS)
 
 
 def test_done_event_always_carries_text():

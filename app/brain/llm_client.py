@@ -13,6 +13,15 @@ import httpx
 
 from app.core.config import LLMConfig
 from app.core.api_keys import is_placeholder_key
+from app.brain.token_ledger import next_request_index, record_usage
+from app.brain.prompt_layer import (  # noqa: F401  (兼容导出: CHINESE_SYSTEM_SUFFIX / DYNAMIC_CONTEXT_HEADER)
+    CHINESE_SYSTEM_SUFFIX,
+    DYNAMIC_CONTEXT_HEADER,
+    build_dynamic_block,
+    build_system_prompt,
+    build_turn_context,
+    load_style_guide,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,21 +81,15 @@ THINK_TAG_START = "<think>"
 THINK_TAG_END = "</think>"
 
 # 中文约束片段：以对话示例形式给出，强化但避免被模型当成"待输出文本"复述
-CHINESE_SYSTEM_SUFFIX = (
-    "\n\n你是用简体中文聊天的桌宠，像跟主人面对面说话一样。回答只用最终内容，"
-    "不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、"
-    "不要把上面的要求重复念出来。下面是两个对比——\n\n"
-    "✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n"
-    "❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」"
-    "「唯一允许的输出语言是简体中文。1. xxx 2. xxx」"
-    "「根据角色设定我会……」\n\n"
-    "工具调用只走 tool schema；不要在文字里描述要调什么工具。"
-    "信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），"
-    "必须调 web_search 拿真实信息，不允许编造或说「我不知道」。"
-    "不要用 emoji 和装饰符号。回复 1~3 句。"
-)
+#
+# Stage 1.1：常量搬进共享层 app/brain/prompt_layer.py（两个后端都得有它，
+# 否则 ReAct 与 standard 发出去的 system prompt 长得不一样）。
+# 上面那行 import 保留同名导出，老调用方（tests / scripts）不用改。
+# Stage 1.4：末尾的硬上限「回复 1~3 句」已删，换成共享层里的【回复长度】策略。
 
 
+# emoji 字符范围。Stage 1.3 起**不再全局剥离**（sanitize_text 保留 emoji），
+# 这里保留定义，供需要「显式剥 emoji」的调用方使用。
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001F300-\U0001F5FF"
@@ -104,9 +107,19 @@ _EMOJI_PATTERN = re.compile(
 
 
 # 去掉 LLM 在 content 里夹带的"思考痕迹"（中文模型常见括号式自言自语）
+#
+# ⚠️ 机制修正（Stage 1.3）：旧写法的前缀组里有**空分支**
+#   （`因为|` 之后无内容），于是它匹配的是「任意」3~500 字的括号内容 ——
+#   「（小声地笑）」「（打个哈欠）」这类拟声词也会被吞掉。
+#   现在改成「**先匹配已知规划词，再匹配括号**」：
+#   括号内容必须以规划词开头（让我 / 我要 / 我需要 / 我们刚才 …）才算「规划 / 思考」，
+#   其余括号（拟声、情绪、括注）一律保留。
+_META_NARRATION_PREFIX = (
+    r"(?:我们刚才|刚才|现在|让我|我要|我需要|我打算|我准备|我先|我想|"
+    r"嗯|好的|作为|毕竟|事实上|好了|由于|因为|思考|想想)"
+)
 _META_NARRATION_RE = re.compile(
-    r"[（(]"
-    r"(我们刚才|刚才|现在|让我|我要|嗯|好的|作为|毕竟|事实上|好了|由于|因为|)"
+    r"[（(](?=\s*" + _META_NARRATION_PREFIX + r")"   # 必须以已知规划词开头
     r"[^()（）\n]{3,500}"
     r"[)）]",
     flags=re.UNICODE,
@@ -114,17 +127,46 @@ _META_NARRATION_RE = re.compile(
 # 兜底：任何长得像「（中文思考 200+ 字）」的整段括号
 _LONG_PAREN_RE = re.compile(r"[（(][^)（）\n]{50,}[)）]")
 
+# --------------------------------------------------------------------------
+# 过渡语 vs 工具独白 —— Stage 1.3 的核心判别器
+# --------------------------------------------------------------------------
+# 人话里的自然过渡语：「我来…」「让我…」「我看看…」「我要…」
+# —— 它们让回复像人说话，**不该**被清洗管线删掉。
+# 但「让我调用工具查一下广州天气。」是**工具独白**（在描述要调什么工具），必须删。
+#
+# 判别规则（唯一标准，集中写在这里，避免各正则各写各的）：
+#     **过渡语 + 工具调用标志 = 工具独白（删）；只有过渡语 = 自然过渡（留）**
+#
+# 工具调用标志 = 出现「工具 / 调用 / schema」这类词，
+# 或 snake_case 的工具名（open_app / web_search / add_reminder …）。
+
+#: 过渡语（人话里的自然开场 / 自我规划）
+_TRANSITION_WORDS = (
+    r"想让我|想我要|让我|需要我|应当我|要求我|"
+    r"我需要|我应该|我要|我来|我会|我打算|我将|我准备|我先|我想|我看看|我再"
+)
+
+#: 工具调用标志（正则片段）：「工具 / 调用 / schema」这类词，
+#: 或 snake_case 的工具名（open_app / web_search / add_reminder …）
+_TOOL_CALL_MARKER = (
+    r"(?:工具|调用|schema|calculator|"
+    r"(?:open|web|add|set|get|list|take|memory|recall|calc|run|launch|start|stop|"
+    r"create|delete|update|remove|browse|query|screen|system)_[a-z0-9_]+|"
+    r"[a-z_]+_(?:website|app|tool|reminder|fact))"
+)
+
+#: 工具调用标志（编译好的）
+_TOOL_CALL_MARKER_RE = re.compile(_TOOL_CALL_MARKER, flags=re.IGNORECASE)
+
 # 兜底：模型把"我要做什么工具"类元描述裸句塞进 final answer
+# Stage 1.3：与其它规则统一口径 —— 过渡语 + 工具调用标志才算工具独白
 _META_TOOL_TALK_RE = re.compile(
-    r"(让我|我要|我来|我应该|我会|我将|接下来|"
-    r"我\s*(需要|想要|打算|准备)?)"
+    r"(?:" + _TRANSITION_WORDS + r"|接下来)"
     r"[^。.!?\n]*?"
-    r"(调用|使用|借助|执行|运行)?"
-    r"[^。.!?\n]*?"
-    r"工具"
+    + _TOOL_CALL_MARKER +
     r"[^。.!?\n]*"
     r"[。.!?]?",
-    flags=re.UNICODE,
+    flags=re.UNICODE | re.IGNORECASE,
 )
 # 兜底：「这应该用XX工具来YY」类建议句
 _META_SHOULD_USE_TOOL_RE = re.compile(
@@ -154,14 +196,15 @@ _META_USER_REPEAT_RE = re.compile(
     r"[。.!?]?",
     flags=re.UNICODE,
 )
-# 「我需要/我应该/我要/我来/我会 + 任意动作 + 句号」类内心独白
+# 「过渡语 + 工具调用标志」= 工具独白，整句删（文本级）
 _META_SELF_PLAN_RE = re.compile(
     r"(^|(?<=[。.!?\n]))"
-    r"(想让我|想我要|让我|需要我|应当我|要求我|"
-    r"我需要|我应该|我要|我来|我会|我打算|我将|我准备)"
-    r"[^。.!?\n]{2,80}"
+    r"(?:" + _TRANSITION_WORDS + r")"
+    r"[^。.!?\n]{0,80}?"
+    + _TOOL_CALL_MARKER +
+    r"[^。.!?\n]*"
     r"[。.!?]?",
-    flags=re.UNICODE,
+    flags=re.UNICODE | re.IGNORECASE,
 )
 # 兜底：模型把 system prompt 原文复读出来
 _META_PROMPT_ECHO_RE = re.compile(
@@ -228,17 +271,20 @@ _META_USER_REPEAT_SENT_RE = re.compile(
     r"^\s*(?:用户\s*(?:在?说|想问|想要|想|希望|问的是|说的是|是说)|"
     r"主人\s*(?:在?说|想问|想要|希望|问的是|说的是|是说))"
 )
-# 句首第一人称规划 / 自我过程（需配合 _META_PLAN_CONTEXT_RE 才算污染，避免误伤回答）
+# 句首第一人称过渡 / 自我规划。
+# Stage 1.3：它**只负责认出「这是一句过渡 / 规划」**；
+# 算不算污染由工具调用标志（_TOOL_CALL_MARKER_RE）决定 —— 见 _is_pollution_sentence。
 _META_SELF_PLAN_SENT_RE = re.compile(
-    r"^\s*(?:想让我|需要我|要求我|"
-    r"让我(?:想想|思考|先|来看看|看看|确认|再确认|打开|启动|调用|使用|用|执行|再试|尝试|检查|处理)?|"
-    r"我(?:需要|应该|要|打算|准备|来|将|会|可以|不应该|不能|先|再|这就|马上))"
+    r"^\s*(?:" + _TRANSITION_WORDS + r"|"
+    r"我(?:可以|不应该|不能|这就|马上))"
 )
-# 规划 / 元语境关键词：与句首自我规划搭配出现
+# 规划 / 元语境关键词：与句首自我规划搭配出现。
+# Stage 1.3 收窄：只保留「明显在复述系统设定」的词 ——
+# 「看看 / 试试 / 查询 / 应该 / 需要 / 回答」这类词同样会出现在自然过渡语里
+# （「让我看看。」），不能再当污染依据，否则过渡语会被误删。
 _META_PLAN_CONTEXT_RE = re.compile(
-    r"(角色|人设|回答|回复|简短|简洁|保持|自然|工具|调用|使用|执行|确认|需求|根据|设定|"
-    r"规划|思考|试试|尝试|查询|检查|看看|应该|需要|上面|schema|反馈|再试|没成功|失败|"
-    r"编造|如实|建议用户|相关网站|之前的|成功)"
+    r"(角色|人设|角色卡|性格|设定|根据|依据|按照|指令|要求|规划|"
+    r"schema|提示词|prompt|系统提示|输出规范|输出要求)"
 )
 # 工具元描述（"这应该用 open_website 工具"、"让我调用工具"、"通过 XX 工具来…"）
 _META_TOOL_SENT_RE = re.compile(
@@ -266,7 +312,10 @@ _SENT_SPLIT_RE = re.compile(r"([。！？!?\n]+)")
 
 
 def sanitize_text(text: str, *, is_final: bool = True) -> str:
-    """清洗 LLM 输出：去 emoji + 装饰符号 + 思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
+    """清洗 LLM 输出：去思考痕迹 + 多余空白 + 兜底剥离低中文占比段。
+
+    Stage 1.3 起**不再剥离 emoji / 装饰符号**（回复里带表情才像人发的）。
+    ⚠️ 红线：TTS 走独立管线（app/voice/voice.py），这里改不动音色 / 韵律。
 
     Args:
         text: 待清洗文本
@@ -274,6 +323,9 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
                   此时启用「全文本 CJK 占比 < 15% 则整段丢弃」的兜底。
                   False 表示这是一段流式 chunk（部分内容），不做占比兜底，
                   否则单段 chunk 几乎必然被丢弃，导致流式 / langchain_agent 文本丢失。
+
+    低中文占比被整段丢弃时，调用方（AgentLoop）应据此**重试一次**再走兜底，
+    判据见 is_low_cjk_reply()。
     """
     if not text:
         return text
@@ -285,10 +337,9 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     if is_final:
         text = _EMOTION_TAG_ANY_RE.sub(" ", text)
         text = _EMOTION_TAG_OPEN_RE.sub("", text)
-    # 3) emoji 与装饰符号
-    text = _EMOJI_PATTERN.sub("", text)
-    for sym in ["✨", "★", "☆", "♥", "♡", "♪", "♫"]:
-        text = text.replace(sym, "")
+    # 3) emoji 与装饰符号：**不再剥离**（Stage 1.3）
+    #    旧行为全局删 emoji，回复因此「不像人发的」。
+    #    ⚠️ 红线：TTS 是独立管线（app/voice/voice.py），这里不碰音色 / 韵律。
     # 4) 括号式自言自语与超长括号思考段
     text = _META_NARRATION_RE.sub("", text)
     text = _LONG_PAREN_RE.sub("", text)
@@ -308,10 +359,12 @@ def sanitize_text(text: str, *, is_final: bool = True) -> str:
     text = _drop_leading_low_cjk_paragraphs(text)
     text = _drop_low_cjk_paragraphs(text)
     # 9) 终极兜底：清洗后整段中文占比 < 15% → 整体丢弃
+    #    ⚠️ Stage 1.3：这里不再「静默丢掉」整条回复 ——
+    #    调用方（AgentLoop）用 is_low_cjk_reply() 判定后**重试一次**，仍失败才走兜底。
     cleaned = text.strip()
     if is_final and cleaned:
         body_for_ratio = _EMOTION_TAG_ANY_RE.sub("", cleaned).strip()
-        if _cjk_ratio(body_for_ratio) < 0.15:
+        if _cjk_ratio(body_for_ratio) < _LOW_CJK_RATIO:
             return ""
     return cleaned
 
@@ -353,8 +406,9 @@ _INTERNAL_VOCAB_END = r"[^\n]*?(?:工具都成功执行了|数据来源确认|�
 # 按宽表删会把正文清空。真正只属于内部叙述的是「抓取/爬取页面」「调用了 schema」类描述。
 _NARRATION_SENT_RE = re.compile(
     r"[^。！？\n]*?(?:"
+    # 过渡语 + 查/搜索/看 —— 只有**带工具标志**时才算工具独白（Stage 1.3）
     r"(?:让我|我来|我先)\s*(?:查|搜索|搜|看|打开|抓)[^。！？\n]{0,20}?"
-    r"(?:天气|信息|资料|内容|结果)?"
+    + _TOOL_CALL_MARKER +
     r"|从第?[一二三四五六七八九十\d]*次?(?:抓取|爬取|搜索|访问|打开)[^。！？\n]{0,25}"
     r"|(?:抓取|爬取|爬虫)(?:了)?[^。！？\n]{0,20}"
     r"|调用了?\s*schema[^。！？\n]{0,20}"
@@ -381,6 +435,10 @@ _SCHEMA_ECHO_LINE_RE = re.compile(
 _INTERNAL_CHECKLIST_LINE_RE = re.compile(_LINE_INDEX_RE, re.UNICODE)
 
 
+#: 中文占比低于该值 → 判定「这条回复几乎不是中文」（清洗后会被整段丢弃）
+_LOW_CJK_RATIO = 0.15
+
+
 def _cjk_ratio(text: str) -> float:
     """文本段里中日韩字符的占比（区分英文 CoT 与中文正文）。"""
     if not text:
@@ -388,6 +446,27 @@ def _cjk_ratio(text: str) -> float:
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff"
               or "\u3040" <= ch <= "\u30ff")
     return cjk / len(text)
+
+
+def is_low_cjk_reply(text: str) -> bool:
+    """这条回复是不是「几乎全是英文 / 乱码」。
+
+    Stage 1.3：清洗管线对这类文本会**整段丢弃**（中文占比 < 15%），
+    丢完等于把主人的话弄没了。调用方（AgentLoop）据此判定：
+    **重试一次**，重试仍失败才走空回复兜底。
+
+    Args:
+        text: 模型原始输出（未经清洗）
+
+    Returns:
+        True = 中文占比过低，应当重试；False = 正常（或本来就是空的）
+    """
+    if not text:
+        return False
+    body = _EMOTION_TAG_ANY_RE.sub("", text).strip()
+    if not body:
+        return False
+    return _cjk_ratio(body) < _LOW_CJK_RATIO
 
 
 def _drop_leading_low_cjk_paragraphs(text: str) -> str:
@@ -449,8 +528,12 @@ def _is_pollution_sentence(core: str) -> bool:
             return True
     if _NUMBERED_RULE_RE.search(core):
         return True
-    # 句首自我规划 + 规划语境（两者同时满足才判污染）
-    if _META_SELF_PLAN_SENT_RE.search(core) and _META_PLAN_CONTEXT_RE.search(core):
+    # 句首过渡/规划 +（工具调用标志 或 复述系统设定的语境）→ 污染
+    # ⚠️ Stage 1.3 的判别标准：**过渡语 + 工具标志 = 工具独白（删）；
+    #    只有过渡语 = 自然过渡（留）** —— 「我来帮你查一下。」必须活着。
+    if (_META_SELF_PLAN_SENT_RE.search(core)
+            and (_TOOL_CALL_MARKER_RE.search(core)
+                 or _META_PLAN_CONTEXT_RE.search(core))):
         return True
     # 英文为主的句子（推理模型英文 CoT）
     cjk = sum(1 for ch in core if "\u4e00" <= ch <= "\u9fff")
@@ -588,9 +671,365 @@ _MAX_REASONING_ANSWER_CHARS = 300
 
 
 def _build_full_system_prompt(persona: str) -> str:
-    """拼接 persona + 中文输出约束。"""
-    base = persona or ""
-    return base + CHINESE_SYSTEM_SUFFIX
+    """拼装最终 system 字符串（Stage 1.1：唯一拼装点 = 共享层）。
+
+    这里只拿到「人设 + 上游注入的会话上下文」；中文输出约束 / 说话方式 /
+    任务执行协议 / 防幻觉基线 / 长度策略 / style guide / 项目文档+skills
+    全部由 app.brain.prompt_layer 统一拼 —— 两个后端因此发出**逐字节相同**
+    的 system 字符串。
+
+    ⚠️ 工具手册（【工具解锁】等级提示）需要工具注册表 + 当前等级，
+    LLMClient 拿不到 —— ReAct 后端在起跑前用同一套共享层函数重拼一次
+    （见 app/brain/agent.py 的 AgentLoop.assemble_system_prompt）。
+    """
+    return build_system_prompt(
+        persona=persona or "",
+        style_guide=load_style_guide(),
+        tool_handbook="",
+        dynamic=build_dynamic_block(),
+    )
+
+
+# --------------------------------------------------------------------------
+# 本轮易变上下文（当前时间 / 桌宠实时状态）
+# --------------------------------------------------------------------------
+# 为什么它不能进 system prompt
+# ----------------------
+#   MiniMax 的 prompt cache 按 8192-token 块做前缀缓存。system message 落在
+#   **第一块**里，块里任何一处每轮变化的内容（时间戳！）都会让整块失效 ——
+#   实测缓存命中率从 98.9% 掉到 1.5%（每轮白付 ~8173 个 prompt token）。
+#   所以每轮变的东西一律走 **user 消息**（排在主人这句话前面）。
+#
+# 为什么用「独立的 user 消息」而不是拼进主人那句话
+# --------------------------------------------
+#   主人原话保持字节不变：意图判定（detect_action_intent）和动作计数
+#   （count_request_actions）读的是最后一条 user 消息的原文，前面拼东西
+#   会让这两个判定看到不该看到的内容。
+
+#: 动态上下文消息的标记行（同时用作幂等判断）—— 定义在共享层，这里兼容导出。
+
+
+def build_dynamic_context(state=None, now=None, query: str = "") -> str:
+    """构造本轮易变上下文：当前时间 + 桌宠实时状态 + 状态策略 + 召回的记忆。
+
+    Stage 1.1：真正的拼装在共享层（app.brain.prompt_layer.build_turn_context），
+    这里保留旧名 —— brain_controller / chat_window / langchain_agent 都 import 它。
+
+    state: 可选的 PetState（有 stats_summary 就附上实时状态）
+    now:   可选的 datetime（测试用；默认取当前时间）
+    query: 本轮主人说的话（决定召回哪些长期记忆 —— Stage 2.1）
+    """
+    return build_turn_context(state=state, now=now, query=query)
+
+
+def _msg_role(msg) -> str:
+    """取消息的 role —— dict / ChatMessage 两种形状都认。"""
+    if isinstance(msg, dict):
+        return str(msg.get("role") or "")
+    return str(getattr(msg, "role", "") or "")
+
+
+def _msg_content(msg) -> str:
+    """取消息的 content（字符串化）—— dict / ChatMessage 两种形状都认。"""
+    if isinstance(msg, dict):
+        content = msg.get("content")
+    else:
+        content = getattr(msg, "content", "")
+    return content if isinstance(content, str) else ""
+
+
+def is_dynamic_context(msg) -> bool:
+    """这条消息是不是「本轮易变上下文」消息。"""
+    return DYNAMIC_CONTEXT_HEADER in _msg_content(msg)
+
+
+def inject_dynamic_context(messages: list, context: str | None = None,
+                           state=None, query: str = "") -> list:
+    """在最后一条 user 消息**前面**插一条「本轮易变上下文」user 消息。
+
+    - messages 支持 [{role, content}, ...] 和 ChatMessage 两种形状。
+    - 幂等：最后一条 user 消息前面已经是动态上下文 → 什么都不做。
+    - 返回**新** list（不原地改调用方的 list）。
+    """
+    msgs = list(messages or [])
+    if not msgs:
+        return msgs
+    idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        if _msg_role(msgs[i]) == "user":
+            idx = i
+            break
+    if idx is None:
+        return msgs
+    if idx > 0 and is_dynamic_context(msgs[idx - 1]):
+        return msgs
+    ctx = (context if context is not None
+            else build_dynamic_context(state=state, query=query))
+    if not ctx:
+        return msgs
+    like = msgs[idx]
+    if isinstance(like, dict):
+        new_msg = {"role": "user", "content": ctx}
+    else:
+        try:
+            new_msg = type(like)(role="user", content=ctx)
+        except Exception:  # noqa: BLE001
+            new_msg = {"role": "user", "content": ctx}
+    msgs.insert(idx, new_msg)
+    return msgs
+
+
+# ---------------------------------------------------------------------------
+# usage 归一化：各家 provider 的字段名千奇百怪，统一成一份「桶」字典
+# ---------------------------------------------------------------------------
+#
+# 支持的拼写（provider -> 字段名）：
+#
+#   prompt tokens    prompt_tokens(OpenAI) / input_tokens(Anthropic, LangChain)
+#                    / prompt_token_count(Gemini)
+#   completion       completion_tokens(OpenAI) / output_tokens(Anthropic, LangChain)
+#                    / candidates_token_count(Gemini)
+#   total            total_tokens / total_token_count
+#   cache hit        prompt_tokens_details.cached_tokens(OpenAI)
+#                    prompt_cache_hit_tokens(DeepSeek) / cache_hit_tokens
+#                    cache_read_input_tokens(Anthropic) / cache_read_tokens
+#                    input_token_details.cache_read(LangChain)
+#                    cached_content_token_count(Gemini)
+#   cache write      cache_creation_input_tokens(Anthropic) / cache_write_tokens
+#                    input_token_details.cache_creation(LangChain)
+#   cache miss       prompt_cache_miss_tokens(DeepSeek) / cache_miss_tokens
+#
+# 语义差别（决定「未命中」怎么算，算错就会得出假的命中率）：
+#   subset    命中数是 prompt_tokens 的**子集**（OpenAI / DeepSeek）
+#             -> 未命中 = prompt_tokens - 命中数
+#   exclusive prompt_tokens **不含**命中数（Anthropic 原始载荷）
+#             -> 未命中 = prompt_tokens（写缓存的 token 也要算「没命中」，
+#                因为写缓存同样要现算）
+#   注: LangChain 的 usage_metadata.input_token_details.cache_read 走 subset ——
+#   LangChain 的 input_tokens 就是 OpenAI 的 prompt_tokens（含缓存命中那部分），
+#   这样同一次请求走哪条路径算出来的桶都一样。
+#
+# 认不出来的形状 -> 全 0 + got_real=False（上层回退到字符估算）。
+
+
+def _usage_int(value) -> int:
+    """usage 字段转 int（认不出来的当 0，绝不抛）。"""
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            return int(float(value.strip()))
+        return 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _usage_first(raw: dict, keys: tuple[str, ...]) -> int:
+    """按顺序取第一个能转成 int 的字段值（取不到就 0）。"""
+    for key in keys:
+        if key in raw:
+            value = _usage_int(raw.get(key))
+            if value:
+                return value
+    return 0
+
+
+def _usage_cache_hit(raw: dict) -> tuple[int, str]:
+    """取缓存命中（cache read）数 + 它的语义。
+
+    返回 (tokens, semantics)，semantics ∈ {"subset", "exclusive", "none"}。
+    """
+    details = raw.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        value = _usage_int(details.get("cached_tokens"))
+        if value:
+            return value, "subset"
+    value = _usage_int(raw.get("prompt_cache_hit_tokens"))
+    if value:
+        return value, "subset"
+    for key in ("cache_hit_tokens", "cached_tokens"):
+        value = _usage_int(raw.get(key))
+        if value:
+            return value, "subset"
+    value = _usage_int(raw.get("cache_read_input_tokens"))
+    if value:
+        return value, "exclusive"
+    for key in ("cache_read_tokens", "cache_read_input_token_count"):
+        value = _usage_int(raw.get(key))
+        if value:
+            return value, "exclusive"
+    details = raw.get("input_token_details")
+    if isinstance(details, dict):
+        # LangChain 的 usage_metadata: input_tokens 就是 OpenAI 的 prompt_tokens
+        # （**含**缓存命中那部分）-> subset 语义。
+        # 这样同一次请求无论走轻量路径还是标准路径，算出来的桶完全一样。
+        for key in ("cache_read", "cache_read_tokens"):
+            value = _usage_int(details.get(key))
+            if value:
+                return value, "subset"
+    value = _usage_int(raw.get("cached_content_token_count"))
+    if value:
+        return value, "subset"
+    return 0, "none"
+
+
+def _usage_cache_write(raw: dict) -> int:
+    """取缓存写入（cache creation）数。"""
+    value = _usage_int(raw.get("cache_creation_input_tokens"))
+    if value:
+        return value
+    for key in ("cache_write_tokens", "cache_creation_tokens",
+                "prompt_cache_write_tokens"):
+        value = _usage_int(raw.get(key))
+        if value:
+            return value
+    details = raw.get("input_token_details")
+    if isinstance(details, dict):
+        value = _usage_int(details.get("cache_creation"))
+        if value:
+            return value
+    details = raw.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        value = _usage_int(details.get("cache_creation_tokens"))
+        if value:
+            return value
+    return 0
+
+
+def _usage_cache_miss(raw: dict) -> int:
+    """取缓存未命中数（provider 明确报了才算，0 = 没报）。"""
+    value = _usage_int(raw.get("prompt_cache_miss_tokens"))
+    if value:
+        return value
+    value = _usage_int(raw.get("cache_miss_tokens"))
+    if value:
+        return value
+    details = raw.get("input_token_details")
+    if isinstance(details, dict):
+        value = _usage_int(details.get("cache_miss"))
+        if value:
+            return value
+    return 0
+
+
+#: 认得出来的 usage 字段（用来判断 provider 到底返没返 usage）
+_KNOWN_USAGE_KEYS = (
+    "prompt_tokens", "input_tokens", "prompt_token_count",
+    "completion_tokens", "output_tokens", "candidates_token_count",
+    "total_tokens", "total_token_count",
+    "prompt_tokens_details", "input_token_details",
+    "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+    "cache_hit_tokens", "cached_tokens", "cache_read_input_tokens",
+    "cache_read_tokens", "cache_write_tokens", "cache_creation_input_tokens",
+    "cache_creation_tokens", "cache_miss_tokens", "cached_content_token_count",
+)
+
+
+def normalize_usage(raw) -> dict:
+    """把 provider 的 usage 载荷归一化成统一的「桶」字典。
+
+    返回：
+        {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int,
+         "cache_hit_tokens": int, "cache_miss_tokens": int,
+         "cache_write_tokens": int, "got_real": bool, "cache_hit_rate": float}
+
+    认不出来的形状 -> 全 0、got_real=False、cache_hit_rate=0.0（绝不抛）。
+    """
+    empty = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 0,
+        "cache_write_tokens": 0,
+        "got_real": False,
+        "cache_hit_rate": 0.0,
+    }
+    try:
+        if not isinstance(raw, dict) or not raw:
+            return empty
+        prompt = _usage_first(raw, ("prompt_tokens", "input_tokens",
+                                    "prompt_token_count"))
+        completion = _usage_first(raw, ("completion_tokens", "output_tokens",
+                                        "candidates_token_count"))
+        total = _usage_first(raw, ("total_tokens", "total_token_count"))
+        hit, semantics = _usage_cache_hit(raw)
+        write = _usage_cache_write(raw)
+        miss = _usage_cache_miss(raw)
+        if not miss:
+            if semantics == "subset":
+                # 命中是 prompt 的子集 -> 没命中的就是剩下的
+                miss = max(0, prompt - hit) if prompt else 0
+            elif semantics == "exclusive":
+                # prompt 不含命中部分；写缓存的也算「没命中」（写缓存要现算）
+                miss = prompt + write if prompt else 0
+        if not total and (prompt or completion):
+            total = prompt + completion
+        known = any(key in raw for key in _KNOWN_USAGE_KEYS)
+        out = dict(empty)
+        out.update(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=total,
+            cache_hit_tokens=hit,
+            cache_miss_tokens=miss,
+            cache_write_tokens=write,
+            got_real=known,
+        )
+        denom = hit + miss
+        out["cache_hit_rate"] = round(hit / denom, 4) if denom > 0 else 0.0
+        return out
+    except Exception:  # noqa: BLE001
+        return empty
+
+
+class UsageEvent(str):
+    """usage 事件（str 子类，文本为空）。
+
+    为什么是 str 子类而不是 tuple：
+    chat_stream 的老消费方（chat_window/worker._StreamWorker）只认 str ——
+    它把每个 yield 直接丢进 Signal(str)，PyQt5 收到 tuple 会直接抛
+    TypeError（实测：emit(): argument 1 has unexpected type 'tuple'），
+    整轮聊天会变成一个失败气泡。
+
+    做成「空文本的 str 子类」之后：
+      - 老消费方：当成空字符串 -> UI 一个字都不变；
+      - 新消费方：ev.payload / ev[1] 拿到完整 usage 字典，
+        ev[0] 是 "meta"，tuple(ev) == ("meta", payload)，
+        跟 LangChain 那条路径的事件形状完全一致。
+    """
+
+    __slots__ = ("payload",)
+
+    def __new__(cls, payload: dict):
+        obj = super().__new__(cls, "")
+        obj.payload = dict(payload or {})
+        return obj
+
+    @property
+    def event(self) -> str:
+        return str(self.payload.get("event") or "usage")
+
+    def __getitem__(self, key):
+        # str 的下标访问被换成「元组式」访问：ev[0] -> "meta"，ev[1] -> payload
+        if isinstance(key, str):
+            return self.payload[key]
+        return ("meta", self.payload)[key]
+
+    def __iter__(self):
+        return iter(("meta", self.payload))
+
+
+def build_usage_event(usage: dict) -> UsageEvent:
+    """把归一化后的 usage 打包成事件（两条后端路径形状一致）。"""
+    payload = {"event": "usage"}
+    try:
+        payload.update(usage or {})
+    except Exception:  # noqa: BLE001
+        pass
+    return UsageEvent(payload)
 
 
 class LLMClient:
@@ -605,7 +1044,11 @@ class LLMClient:
         request_timeout_s: int | None = None,
     ):
         self.cfg = cfg
-        self.system_prompt = _build_full_system_prompt(system_prompt or "")
+        # 原始人设（+ 上游注入的会话上下文）留一份：
+        # ReAct 后端（agent.AgentLoop）起跑前要用它 **加工具手册** 重拼一次
+        # —— 工具注册表 / 当前等级只有那边拿得到，两个后端才拼得一模一样。
+        self.base_system_prompt = system_prompt or ""
+        self.system_prompt = _build_full_system_prompt(self.base_system_prompt)
         # 单次 chat 超时：调用方显式传(来自 chat.request_timeout_s)优先,否则用 cfg.timeout。
         self._request_timeout_s = (
             cfg.timeout if request_timeout_s is None else int(request_timeout_s)
@@ -742,15 +1185,15 @@ class LLMClient:
 
         saw_content = False
         reasoning_parts: list[str] = []   # 推理模型的思考痕迹（不 yield 给 UI）
-        # v31: 攒 LLM API 返回的 usage 字段 (prompt/completion/total tokens)。
-        # 多个 chunk 里同一字段会重复, 用 max() 取最后那次的值 (流式协议
-        # 最后一条 SSE 通常带累计总量, 前面的可能只有部分增量)。
-        usage_acc: dict = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "got_real": False,   # API 是否真的返了 usage, 决定走精确值还是 fallback
-        }
+        # v31: 攒 LLM API 返回的 usage 字段 (prompt/completion/total + 缓存三桶)。
+        # 多个 chunk 里同一字段会重复, 后到的覆盖先到的 (流式协议最后一条 SSE
+        # 通常带累计总量, 前面的可能只有部分增量)。
+        # 这里存**原始载荷**, 收完统一交给 normalize_usage() 归一化 ——
+        # 各家 provider 的字段名不一样 (cached_tokens / prompt_cache_hit_tokens /
+        # cache_read_input_tokens ...), 现场按名字读字段必然漏掉缓存桶。
+        usage_acc: dict = {}
+        # 本次请求的序号:台账主键 = (session_id, request_index, backend, retry)
+        request_index = next_request_index()
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -778,13 +1221,9 @@ class LLMClient:
                     if obj.get("usage"):
                         usage = obj["usage"]
                         if isinstance(usage, dict):
-                            usage_acc["prompt_tokens"] = usage.get(
-                                "prompt_tokens", usage_acc["prompt_tokens"])
-                            usage_acc["completion_tokens"] = usage.get(
-                                "completion_tokens", usage_acc["completion_tokens"])
-                            usage_acc["total_tokens"] = usage.get(
-                                "total_tokens", usage_acc["total_tokens"])
-                            usage_acc["got_real"] = True
+                            # 原样收下, 后面统一 normalize_usage() —— 缓存桶
+                            # 的字段名各家不一样, 在这里硬读必然漏。
+                            usage_acc.update(usage)
                     choices = obj.get("choices") or []
                     if not choices:
                         continue
@@ -838,6 +1277,17 @@ class LLMClient:
                 except Exception:  # noqa: BLE001
                     pass
 
+        # v31: usage 归一化 + 落台账 + 抛 usage 事件。
+        # 以前 usage_acc 只写不 yield —— 无工具的纯聊天路径
+        # (chat_window/worker._StreamWorker 直接调 chat_stream) 收不到任何
+        # usage 事件, 状态栏 token 数永远是 0。
+        # 事件形状跟 LangChain 那条路径一致: ("meta", {"event": "usage", ...})
+        usage = normalize_usage(usage_acc)
+        record_usage(usage, backend="lightweight",
+                     model=getattr(self.cfg, "model", ""),
+                     request_index=request_index)
+        usage_event = build_usage_event(usage)
+
         # 推理模型 fallback
         if not saw_content:
             # 优先复用已经流式收到的 reasoning —— 重发一次是**第二次计费**，
@@ -847,12 +1297,14 @@ class LLMClient:
             if answer and len(answer) <= _MAX_REASONING_ANSWER_CHARS:
                 log.info("LLMClient: 流式 content 为空，从 reasoning 提取答案")
                 yield answer
+                yield usage_event
                 return
             # 一个字节都没收到 / 捞出来的只是一整段自述 → 重发一次非流式兜底
             log.info("LLMClient: 流式无有效内容，fallback 到非流式")
             full = await self._fetch_non_streaming(messages)
             if full:
                 yield full
+        yield usage_event
 
     async def chat_stream_events(
         self,
@@ -1041,13 +1493,13 @@ class LLMClient:
     async def _stream_once(self, url, payload, headers, cancel_check=None):
         """真正发一次流式请求（不含重试逻辑）。"""
         saw_content = False
-        # v31: usage 累加器 — 多个 chunk 里 usage 会重复, 用 max() 取最后
-        usage_acc: dict = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "got_real": False,
-        }
+        # v31: usage 累加器 — 多个 chunk 里 usage 会重复, 后到的覆盖先到的。
+        # 存**原始载荷**, 收完统一 normalize_usage() —— 缓存桶的字段名各家
+        # provider 不一样 (cached_tokens / prompt_cache_hit_tokens /
+        # cache_read_input_tokens ...), 在这里硬读字段名必然漏。
+        usage_acc: dict = {}
+        # 台账主键的一部分: 本次请求的序号 (session_id + request_index + backend + retry)
+        request_index = next_request_index()
         reasoning_parts: list[str] = []   # 给 Trace 看，不给 UI 看
         async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
@@ -1076,13 +1528,9 @@ class LLMClient:
                     if obj.get("usage"):
                         usage = obj["usage"]
                         if isinstance(usage, dict):
-                            usage_acc["prompt_tokens"] = usage.get(
-                                "prompt_tokens", usage_acc["prompt_tokens"])
-                            usage_acc["completion_tokens"] = usage.get(
-                                "completion_tokens", usage_acc["completion_tokens"])
-                            usage_acc["total_tokens"] = usage.get(
-                                "total_tokens", usage_acc["total_tokens"])
-                            usage_acc["got_real"] = True
+                            # 原样收下, 后面统一 normalize_usage() —— 缓存桶
+                            # 的字段名各家不一样, 在这里硬读必然漏。
+                            usage_acc.update(usage)
                     choices = obj.get("choices") or []
                     if not choices:
                         continue
@@ -1153,6 +1601,12 @@ class LLMClient:
             # content 做一次最终规范（is_final=True）：保证任何不经过上层
             # _on_done 的消费方（子 agent / 路由之外的文本出口）拿到的也是干净文本。
             final_content = sanitize_text("".join(content_parts), is_final=True)
+            # v31: usage 归一化（多了缓存命中 / 未命中 / 写入三个桶）+ 落台账。
+            # 形状跟 chat_stream 和 LangChain 那条路径完全一致。
+            usage = normalize_usage(usage_acc)
+            record_usage(usage, backend="lightweight",
+                         model=getattr(self.cfg, "model", ""),
+                         request_index=request_index)
             yield ("finish", {
                 "reason": finish_reason,
                 "tool_calls": tool_calls,
@@ -1161,12 +1615,7 @@ class LLMClient:
                 # v31: API 返回的真实 token usage (got_real=True 时) — chat_window
                 # 用这个在状态栏精确显示, 不再走 "字符数 / 4" 粗估。某些 API
                 # (老 ollama / 本地) 不返 usage, got_real=False, 上层 fallback
-                "usage": {
-                    "prompt_tokens": usage_acc.get("prompt_tokens", 0),
-                    "completion_tokens": usage_acc.get("completion_tokens", 0),
-                    "total_tokens": usage_acc.get("total_tokens", 0),
-                    "got_real": usage_acc.get("got_real", False),
-                },
+                "usage": usage,
             })
 
     async def _stream_with_force_prompt(

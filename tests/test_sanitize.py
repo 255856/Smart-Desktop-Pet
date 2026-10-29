@@ -5,25 +5,27 @@ from app.brain.llm_client import sanitize_text, CHINESE_SYSTEM_SUFFIX
 
 
 class TestSanitize:
-    def test_strip_emoji(self):
+    def test_keep_emoji(self):
+        """Stage 1.3：emoji **保留**（原来被全局剥掉，回复因此不像人发的）。"""
         assert sanitize_text("你好世界") == "你好世界"
-        assert sanitize_text("你好😊世界") == "你好世界"
-        assert sanitize_text("🎉恭喜🎊主人") == "恭喜主人"
+        assert sanitize_text("你好😊世界") == "你好😊世界"
+        assert sanitize_text("🎉恭喜🎊主人") == "🎉恭喜🎊主人"
 
-    def test_strip_decorative_symbols(self):
-        assert sanitize_text("你真棒★") == "你真棒"
-        assert sanitize_text("我喜欢你♥") == "我喜欢你"
-        assert sanitize_text("听到♪歌声") == "听到歌声"
+    def test_keep_decorative_symbols(self):
+        """装饰符号（★♥♪）跟 emoji 同属「不再剥离」的一类。"""
+        assert sanitize_text("你真棒★") == "你真棒★"
+        assert sanitize_text("我喜欢你♥") == "我喜欢你♥"
+        assert sanitize_text("听到♪歌声") == "听到♪歌声"
 
-    def test_strip_mixed_unicode_emoji(self):
-        # Emoji 被清掉，前后多余空格也收紧
+    def test_keep_mixed_unicode_emoji(self):
+        # emoji 保留，前后多余空格照旧收紧
         result = sanitize_text("测试 \U0001F600 笑脸")
         assert "测试" in result
         assert "笑脸" in result
-        assert "\U0001F600" not in result
+        assert "\U0001F600" in result
         result2 = sanitize_text("\u2728 闪亮")
         assert "闪亮" in result2
-        assert "\u2728" not in result2
+        assert "\u2728" in result2
 
     def test_collapse_whitespace(self):
         assert sanitize_text("你好   世界") == "你好 世界"
@@ -208,4 +210,19 @@ class TestChineseSuffix:
     def test_suffix_contains_required_constraints(self):
         """中文约束 prompt 必须包含关键规则。"""
         assert "简体中文" in CHINESE_SYSTEM_SUFFIX
-        assert "emoji" in CHINESE_SYSTEM_SUFFIX.lower() or "表情" in CHINESE_SYSTEM_SUFFIX
+
+    def test_suffix_has_no_global_emoji_ban(self):
+        """Stage 1.1/1.3：全局 prompt 不再带 emoji 禁令。
+
+        清洗管线已放开 emoji（Stage 1.3：sanitize_text 保留 emoji 与装饰符号），
+        emoji 策略改由行为层 characters/style-guide.md 承载 —— 中文约束里
+        不该再出现「不要用 emoji」这种全局禁止（否则模型和管线互相打脸）。
+        """
+        import re
+        ban = re.compile(
+            r"(不要|禁止|别用|不许|不能用)[^。\n]{0,8}emoji"
+            r"|emoji[^。\n]{0,8}(禁止|不要|别用)",
+            re.IGNORECASE,
+        )
+        assert not ban.search(CHINESE_SYSTEM_SUFFIX), (
+            f"中文约束里还有全局 emoji 禁令：{CHINESE_SYSTEM_SUFFIX!r}")

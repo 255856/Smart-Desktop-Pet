@@ -4,7 +4,7 @@ from app.brain._companion_registry import (
     set_state_for_thread, get_state_for_thread, clear_state_for_thread, clear_all,
 )
 from app.brain.hallucination_guard import (
-    _strategy_guidance, grounding_dynamic_prompt,
+    _strategy_guidance, build_state_strategy, grounding_dynamic_prompt,
 )
 
 
@@ -97,23 +97,30 @@ def test_strategy_missing_fields_silent():
 
 # ---- grounding_dynamic_prompt 测试 ----
 
-def test_prompt_injects_strategy_when_state_in_registry():
-    """registry 有 state + request 带 thread_id → prompt 含【状态策略】"""
+def test_prompt_has_no_strategy_block_even_when_state_in_registry():
+    """Stage 1.5: 状态策略是**易变**内容, 不再进 system prompt。
+
+    system message 落在 MiniMax 的 8192-token 前缀缓存块里, 块里每轮变一次
+    (心情/饱食/好感) 整块作废 —— 实测缓存命中率 98.9% → 1.5%。
+    策略改由 build_state_strategy() 产出, 走每轮动态上下文 (user 消息)。
+    """
     set_state_for_thread("t-strategy", PetState())  # 默认 HIGH sat+mid mood
     # 构造一个 mock request (LangChain dynamic_prompt 接口)
     class Req:
         system_prompt = "基线"
         config = {"configurable": {"thread_id": "t-strategy"}}
     prompt = grounding_dynamic_prompt(Req())
-    assert "【桌宠状态策略】" in prompt, (
-        f"prompt 应注入策略块. 实际:\n{prompt}"
+    assert "【桌宠状态策略】" not in prompt, (
+        f"状态策略不该进 system prompt. 实际:\n{prompt}"
     )
+    # 策略文本改由 build_state_strategy 提供 (易变通道)
     # 默认 state 是 feeling=80/sat=100/level=1 → HIGH sat + HIGH mood
-    assert "状态好" in prompt, (
-        f"默认 state 应触发探索. 实际:\n{prompt}"
+    strat = build_state_strategy(get_state_for_thread("t-strategy"))
+    assert "状态好" in strat, (
+        f"默认 state 应触发探索. 实际:\n{strat}"
     )
     clear_state_for_thread("t-strategy")
-    print("[OK] grounding_dynamic_prompt: registry 有 state → prompt 注入策略块")
+    print("[OK] grounding_dynamic_prompt: system prompt 不含状态策略")
 
 
 def test_prompt_no_state_no_strategy_block():
@@ -124,7 +131,7 @@ def test_prompt_no_state_no_strategy_block():
         system_prompt = "基线"
         config = {"configurable": {"thread_id": "t-no-state"}}
     prompt = grounding_dynamic_prompt(Req())
-    assert "【桌宠状态策略 (v22-3 策略层)】" not in prompt, (
+    assert "【桌宠状态策略】" not in prompt, (
         f"未匹配 thread 不应注入. 实际:\n{prompt}"
     )
     # 防幻觉基线仍应在

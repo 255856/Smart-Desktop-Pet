@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 from pathlib import Path
@@ -17,7 +18,16 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import StructuredTool
 
-from app.brain.llm_client import LLMConfig, sanitize_text
+from app.brain.llm_client import (
+    LLMConfig,
+    build_usage_event,
+    normalize_usage,
+    sanitize_text,
+)
+from app.brain.token_ledger import next_request_index, record_usage
+from app.brain.tool_schema import tool_to_args_schema
+from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
+                                    build_tool_handbook, load_style_guide)
 from app.engine.tools import Tool, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -77,16 +87,34 @@ def __getattr__(name: str):
 _DERIVED_SESSION_PREFIX = "char:"
 
 
+def _text_fingerprint(text: str) -> str:
+    """文本指纹（sha1 前 16 位）—— 判断「记忆块变了没」。
+
+    Stage 2.8：standard 后端的 agent 只构建一次，记忆块被烘进 system prompt，
+    于是会话中写入的新事实永远进不了 prompt（主人说「记住我明天要交房租」，
+    桌宠下一轮照样当没听见）。共享层（prompt_layer）每次都重算记忆块，
+    **内容**是活的；过期的是 agent 实例。
+
+    这里用记忆块的指纹做廉价变更检测：变了才重建 agent（保住编译好的图 +
+    checkpointer 状态），没变就原样复用 —— 不是每轮重建。
+    """
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]
+
+
 # 内部 Tool → LangChain StructuredTool 的适配器
 def _internal_tool_to_langchain(tool: Tool) -> StructuredTool:
     """把桌宠的 Tool(name, description, parameters, fn) 包装为 LangChain StructuredTool。
 
-    StructuredTool.from_function 会从 fn 的 type hints + 默认值自动生成 args_schema。
+    args_schema 必须来自**手写 JSON Schema**（tool.parameters），不能靠
+    from_function 从 fn 签名反推：反推会把属性描述 / enum / min-max 全丢掉，
+    还会把 run_script 的 args 改名成 v__args（撞 BaseTool.args），
+    两种调用方式都失败。转换见 app/brain/tool_schema.py。
     """
     return StructuredTool.from_function(
         func=tool.fn,
         name=tool.name,
         description=tool.description,
+        args_schema=tool_to_args_schema(tool),
         parse_docstring=False,
     )
 
@@ -183,6 +211,67 @@ class _PersistentLoop:
         return future.result(timeout=timeout)
 
 
+# ---------------------------------------------------------------------------
+# 台账：一次模型调用 = 一条台账行
+# ---------------------------------------------------------------------------
+# 台账主键 = (session_id, request_index, backend, retry)。request_index 必须
+# **按模型调用**分配 —— 一个回合里模型可能被调用多次（模型调工具 → 工具结果 →
+# 再调模型），每次都是一次独立的计费请求。
+#
+# 轻量后端按「每次 provider HTTP 请求」分配（正确）。标准后端以前按「整个
+# astream」分配 —— 一个回合里的多次模型调用共用同一个 request_index，台账按
+# 主键折叠（后到覆盖先到），于是**只有最后一次调用的用量留下来，前几次的
+# token 被静默丢掉**：工具调用越多，少算得越多。
+
+
+def _model_call_key(meta: Any) -> Optional[tuple]:
+    """从 LangGraph 的 stream metadata 里取「这是第几次模型调用」。
+
+    ``langgraph_step`` 在一次 super-step 内恒定、跨 super-step 递增，而一次
+    模型调用恰好对应一个 model super-step（工具节点占另一个 step）。
+    拿不到它 → 返回 None，调用方退回「一次 usage 事件 = 一次模型调用」。
+    """
+    if not meta:
+        return None
+    try:
+        step = meta.get("langgraph_step")
+    except Exception:  # noqa: BLE001
+        return None
+    if step is None:
+        return None
+    try:
+        return ("step", int(step))
+    except Exception:  # noqa: BLE001
+        return ("step", str(step))
+
+
+class _ModelCallUsageTracker:
+    """把「一个回合里的 N 次模型调用」分别记账。
+
+    同一次模型调用里 provider 重复上报 usage 时共用同一个 request_index ——
+    台账按主键折叠（后到覆盖先到），不会被算成两次计费。
+    """
+
+    __slots__ = ("_key", "_request_index", "_fallback_seq")
+
+    def __init__(self) -> None:
+        self._key: Optional[tuple] = None
+        self._request_index: Optional[int] = None
+        self._fallback_seq = 0
+
+    def request_index(self, meta: Any) -> int:
+        """本次 usage 事件所属模型调用的 request_index（同一次模型调用内恒定）。"""
+        key = _model_call_key(meta)
+        if key is None:
+            # 没有 LangGraph 元数据 → 只能按「一次 usage 事件 = 一次模型调用」
+            self._fallback_seq += 1
+            key = ("usage-event", self._fallback_seq)
+        if key != self._key:
+            self._key = key
+            self._request_index = next_request_index()
+        return self._request_index
+
+
 class LangChainAgent:
     """LangChain 1.0+ create_agent 实现的桌宠 Agent。
 
@@ -251,14 +340,18 @@ class LangChainAgent:
         else:
             self.thread_id = thread_id
         # 项目级指令：从 cwd 向上找 AGENTS.md / CLAUDE.md + 主程序注入的 extra_paths
+        # Stage 1.1：加载结果进共享层（app/brain/prompt_layer.build_dynamic_block），
+        # 这里仍然负责「从哪儿读」—— 两个后端必须读到**同一份**内容。
         self._cwd = cwd
         self._extra_docs_paths: list = list(extra_docs_paths or [])
-        # 缓存最近一次加载的项目指令（避免每次 _ensure_agent 重读）
+        # 缓存最近一次加载的项目指令 / skills（测试与调试要看这两个属性）
         self._cached_project_docs: str = ""
         self._skills_dir = skills_dir
         self._auto_load_skills: list = list(auto_load_skills or [])
         self._cached_skills: str = ""
         self._agent: Optional[Any] = None
+        # Stage 2.8：当前 agent 里烘进去的「记忆块指纹」—— 变了才重建 agent
+        self._agent_memory_sig: Optional[str] = None
         self._middlewares: Optional[list] = None  # 给测试/调试用
         # RiskyToolConfirm 控制器：立刻建好，UI 在 agent 构建前可订阅回调
         try:
@@ -438,6 +531,8 @@ class LangChainAgent:
 
         # 保留 _model 不变（不再重建 → 后续 _ensure_agent 走 fast-path 复用）
         self._agent = None
+        # agent 没了，记忆块指纹也一并清掉（下次必然重建）
+        self._agent_memory_sig = None
 
     async def _prune_bloated_checkpoint(self, max_bytes: int = 512 * 1024) -> None:
         """清掉「历史遗留」的臃肿 checkpoint 行。
@@ -545,8 +640,22 @@ class LangChainAgent:
         PR: 不在 _release_checkpointer 里关 httpx client 了——关闭 client 会让 LangChain
         内部缓存的 client 引用下次报 "client has been closed"。保留 _model 让下次重建走
         fast-path（只重建 graph，httpx client 复用）。
+
+        Stage 2.8：agent 只构建一次 ⇒ 记忆块被烘死在 system prompt 里，
+        会话中写入的新事实永远看不见。现在按**记忆块指纹**判断要不要重建：
+          · 记忆没变 → 直接复用现有 agent（不重建，编译好的图 + checkpointer 状态都留着）
+          · 记忆变了 → 重建 agent，把新的记忆块烘进去
         """
-        if self._agent is not None:
+        # Stage 2.1 + 记忆通道搬家：记忆块**不再**进 system prompt（它在易变
+        # 通道，每轮按 query 变）⇒ 指纹必须**恒定**，否则每轮都会重建 agent
+        # （编译好的图 + checkpointer 状态每轮丢掉）。记忆内容对 agent
+        # 完全不可见 ⇒ 指纹恒定 ⇒ agent 只建一次。
+        mem_sig = self._memory_signature()
+        if self._agent is not None and (self._agent_memory_sig is None
+                                       or mem_sig == self._agent_memory_sig):
+            # 记忆没变 —— 不重建（重建会丢掉编译好的图和 checkpointer 状态）
+            # _agent_memory_sig 为 None = 这个 agent **不是我们建的**
+            # （外部注入的替身 / 测试假图）—— 尊重调用方，别偷偷换掉。
             return
         if self._model is None:
             self._model = self._build_model()
@@ -573,40 +682,13 @@ class LangChainAgent:
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
 
-        # system_prompt = persona + 项目级指令（AGENTS.md / CLAUDE.md） + skills
-        # dynamic_prompt middleware 会在这个基础上再加反幻觉 / 时间 / confirm 协议
-        try:
-            from app.brain.project_docs import load_project_docs
-            self._cached_project_docs = load_project_docs(
-                cwd=self._cwd, extra_paths=self._extra_docs_paths,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("ProjectDocs 加载失败,降级无项目指令: %s", e)
-            self._cached_project_docs = ""
-        try:
-            from app.brain.skills import load_skills
-            if self._skills_dir is not None:
-                self._cached_skills = load_skills(
-                    self._skills_dir, self._auto_load_skills or None,
-                )
-            else:
-                self._cached_skills = ""
-        except Exception as e:  # noqa: BLE001
-            log.warning("Skills 加载失败,降级无 skills: %s", e)
-            self._cached_skills = ""
-        base_sp = self.persona or "你是一个有用的桌面助手。"
-        if self._cached_project_docs:
-            base_sp = base_sp + self._cached_project_docs
-        if self._cached_skills:
-            base_sp = base_sp + self._cached_skills
-        # 长期记忆(跨对话 / 跨 session 共享)—— 拼到 system_prompt
-        try:
-            if self.memory_store is not None and hasattr(self.memory_store, "system_block"):
-                mem_block = self.memory_store.system_block()
-                if mem_block:
-                    base_sp = base_sp + "\n\n" + mem_block
-        except Exception as e:  # noqa: BLE001
-            log.warning("MemoryStore.system_block 失败,跳过: %s", e)
+        # Stage 1.1：最终 system 字符串由**共享层**拼（app/brain/prompt_layer.py）——
+        # ReAct 后端走同一套函数、同一批输入 ⇒ 两个后端逐字节相同。
+        #   人设 + 会话上下文（SKILL / 长期记忆 / 可用工具列表）= self.persona
+        #   项目文档 / skills / 风格指南 / 工具手册 / 常量段 = 共享层
+        #   防幻觉基线 + confirm 协议：共享层拼一次，grounding middleware 只做幂等透传
+        #   （当前时间**不在** system prompt 里 —— 见 run() 里的说明）
+        base_sp = self.assemble_system_prompt()
 
         # 延迟 import：langchain.agents 实测 1.00 s（见文件头说明）。
         # 先看模块属性（测试可能用 mock.patch 替换过），没有再走 __getattr__ 懒加载。
@@ -620,6 +702,8 @@ class LangChainAgent:
             checkpointer=checkpointer,
             middleware=middlewares,
         )
+        # 记住这次烘进去的记忆块指纹（下次变了才重建）
+        self._agent_memory_sig = mem_sig
         # 把中间件列表挂在 agent 上,供测试 / 调试取用。
         # CompiledStateGraph 不暴露 .middleware,所以我们手动留一份。
         self._middlewares = middlewares
@@ -791,6 +875,27 @@ class LangChainAgent:
         await self._ensure_agent()
         cancel = cancel_check or self.cancel_check
 
+        # 本轮易变上下文（当前时间 / 桌宠实时状态）作为**独立的 user 消息**
+        # 插在主人本轮发言前面。**不能**进 system prompt —— system message
+        # 落在 MiniMax 的 8192-token 前缀缓存块里，块里每轮变一次（时间戳！）
+        # 整块作废（实测缓存命中率 98.9% → 1.5%）。
+        # chat_window 已经插过的话这里是幂等 no-op；直接调 LangChainAgent 的
+        # 路径（例如 task 子 agent）由这里兜底补上时间。
+        from app.brain.llm_client import inject_dynamic_context
+        # 本轮主人说的话 = 召回长期记忆的 query（易变通道里带上「你记得的事」）
+        query = ""
+        for m in reversed(messages or []):
+            role = (m.get("role") if isinstance(m, dict)
+                    else getattr(m, "role", ""))
+            if role == "user":
+                content = (m.get("content") if isinstance(m, dict)
+                           else getattr(m, "content", ""))
+                query = content if isinstance(content, str) else ""
+                break
+        messages = inject_dynamic_context(
+            messages, state=getattr(self, "_companion_state", None),
+            query=query)
+
         history = self._to_lc_history(messages[:-1] if messages else [])
         last_user = ""
         if messages and messages[-1].get("role") == "user":
@@ -833,6 +938,106 @@ class LangChainAgent:
     # 任务结果（success / failure / rejected）反向更新 PetState。
     # 应用方式：主程序调 set_companion_state(state)，内部所有 task 调用都
     # 走同一个 agent 实例，set 一次永久生效（除非外部显式调用 set_companion_state(None) 解除）。
+
+    def assemble_system_prompt(self, persona: str | None = None) -> str:
+        """standard 后端的 system prompt 组装路径（唯一入口，Stage 1.1）。
+
+        与 ReAct 后端（agent.AgentLoop.assemble_system_prompt）用**同一套**共享层
+        函数、**同一批**输入 ⇒ 两个后端发给 API 的 system 字符串逐字节相同
+        （见 tests/test_backend_parity.py）。
+
+        - persona: 人设（+ 上游注入的会话上下文：SKILL / 可用工具列表）
+        - 项目文档 / skills：走**本 agent 自己的**路径与 store
+          （cwd / extra_docs_paths / skills_dir / auto_load_skills），
+          跟 HEAD 的行为一致 —— 共享层负责「拼在哪、什么顺序」。
+
+        ⚠️ **长期记忆块不在 system prompt 里**（Stage 2.1 + 记忆通道搬家）：
+        记忆块按**本轮 query** 召回 ⇒ 每轮都变。放 system prompt 会打掉
+        MiniMax 的 8192-token 前缀缓存（98.9% → 1.5%），也会让 Stage 2.8
+        的 agent 指纹每轮变（每轮重建 agent，编译好的图 + checkpointer
+        状态全丢）。它现在走**易变通道**：build_turn_context(query=...) →
+        独立的 user 消息（见 inject_dynamic_context）。
+        """
+        if persona is None:
+            persona = self.persona or "你是一个有用的桌面助手。"
+        return build_system_prompt(
+            persona=persona,
+            style_guide=load_style_guide(),
+            tool_handbook=build_tool_handbook(
+                registry=self.registry, level=self._current_level()),
+            dynamic=build_dynamic_block(
+                project_docs=self._load_project_docs(),
+                skills=self._load_skills(),
+            ),
+        )
+
+    def _load_project_docs(self) -> str:
+        """项目级指令（AGENTS.md / CLAUDE.md）+ 额外注入的指令文件。
+
+        没给 cwd 时从**项目根**往上找（与 ReAct 后端同一位置 ⇒ 两边一致）。
+        """
+        try:
+            from app.brain.project_docs import load_project_docs
+            from app.brain.prompt_layer import app_root
+            self._cached_project_docs = load_project_docs(
+                cwd=self._cwd or app_root(),
+                extra_paths=self._extra_docs_paths,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("ProjectDocs 加载失败,降级无项目指令: %s", e)
+            self._cached_project_docs = ""
+        return self._cached_project_docs
+
+    def _load_skills(self) -> str:
+        """skills 目录里的行为说明（没给 skills_dir → 项目根 / skills）。
+
+        **只注入显式点名的 skill**（auto_load_skills）。
+        以前这里是 [self._auto_load_skills or None] —— 而 load_skills 的
+        names=None 语义是「把目录下**全部** skill 都加载」。auto_load_skills
+        为空（默认值）时也就跟着变成「全开」：skills/poem.md（任何问题都用
+        七言绝句回答）被塞进 system prompt，把人设整个劫持了，模型还把
+        max_tokens 预算全花在写诗上，主人看得见的回复被截成空。
+        现在：空列表 ⇒ 一个都不注入；显式列出来的照旧注入。
+        """
+        try:
+            from app.brain.skills import load_skills
+            from app.brain.prompt_layer import app_root
+            skills_dir = self._skills_dir or (app_root() / "skills")
+            if not Path(skills_dir).is_dir():
+                self._cached_skills = ""
+            else:
+                self._cached_skills = load_skills(
+                    skills_dir, list(self._auto_load_skills),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Skills 加载失败,降级无 skills: %s", e)
+            self._cached_skills = ""
+        return self._cached_skills
+
+    def _memory_signature(self) -> str:
+        """记忆库指纹（**恒定**：不随召回内容变）。
+
+        Stage 2.1 + 记忆通道搬家：记忆块不再进 system prompt ⇒ 记忆内容
+        对 agent 不可见 ⇒ 指纹恒定 ⇒ agent 只构建一次（不因写记忆而重建）。
+        """
+        return "memory-in-volatile-channel"
+
+    def _memory_block(self, query: str = "") -> str:
+        """长期记忆块：本 agent 的 memory_store 优先；没有就回落会话默认。
+
+        query: 本轮主人说的话（按这句话召回）。记忆块走**易变通道**
+        （inject_dynamic_context → 独立 user 消息），不进 system prompt。
+        """
+        if self.memory_store is not None:
+            try:
+                if hasattr(self.memory_store, "system_block"):
+                    return self.memory_store.system_block(query) or ""
+                return ""
+            except Exception as e:  # noqa: BLE001
+                log.warning("MemoryStore.system_block 失败,跳过: %s", e)
+                return ""
+        from app.brain.prompt_layer import get_memory_block
+        return get_memory_block(query)
 
     def _current_level(self) -> int:
         """读当前桌宠等级,无 level_getter 时按 Lv10 处理 (全部可见)。"""
@@ -972,6 +1177,13 @@ class LangChainAgent:
 
         # plan 模式简化流程：不跑 checkpoint 救援，只 stream 文本
         final_text_parts: list[str] = []
+        # 台账主键的一部分: **一次模型调用 = 一个 request_index**。
+        # 一个回合里模型可能被调用多次 (模型调工具 -> 工具结果 -> 再调模型),
+        # 每次都是一次独立的计费请求 —— 按 astream 分配会让后面那次调用
+        # 按同一个主键覆盖前面那次, 前几次调用的 token 被静默丢掉。
+        # 同一次模型调用里 usage 被 yield 多次时共用同一个 request_index
+        # -> 台账按 key 折叠, 不会重复计数。
+        usage_calls = _ModelCallUsageTracker()
         try:
             async for chunk, _meta in self._agent.astream(
                 input_payload, config=config, stream_mode="messages",
@@ -989,11 +1201,15 @@ class LangChainAgent:
                             "langchain agent.run: chunk type=%s, usage_meta=%r",
                             type(chunk).__name__, usage_meta)
                         try:
-                            yield ("meta", {"event": "usage",
-                                            "prompt_tokens": int(usage_meta.get("input_tokens", 0) or 0),
-                                            "completion_tokens": int(usage_meta.get("output_tokens", 0) or 0),
-                                            "total_tokens": int(usage_meta.get("total_tokens", 0) or 0),
-                                            "got_real": True})
+                            # v31: 归一化 —— LangChain 的 usage_metadata 里缓存信息
+                            # 在 input_token_details (cache_read / cache_creation),
+                            # 跟 OpenAI 原始字段名不一样, 必须走同一个 normaliser。
+                            usage = normalize_usage(usage_meta)
+                            record_usage(usage, backend="standard",
+                                         model=getattr(self.llm_cfg, "model", ""),
+                                         session_id=getattr(self, "_session_id", "") or "",
+                                         request_index=usage_calls.request_index(_meta))
+                            yield build_usage_event(usage)
                         except Exception:
                             pass
                     text = chunk.content
@@ -1027,6 +1243,13 @@ class LangChainAgent:
           - ("_recovered_retry",)                —— 2013 已清 ckpt,让外层再跑一次
         """
         final_text_parts: list[str] = []
+        # 台账主键的一部分: **一次模型调用 = 一个 request_index**。
+        # 一个回合里模型可能被调用多次 (模型调工具 -> 工具结果 -> 再调模型),
+        # 每次都是一次独立的计费请求 —— 按 astream 分配会让后面那次调用
+        # 按同一个主键覆盖前面那次, 前几次调用的 token 被静默丢掉。
+        # 同一次模型调用里 usage 被 yield 多次时共用同一个 request_index
+        # -> 台账按 key 折叠, 不会重复计数。
+        usage_calls = _ModelCallUsageTracker()
         try:
             async for chunk, _meta in self._agent.astream(input_payload, config=config,
                                                           stream_mode="messages"):
@@ -1039,11 +1262,14 @@ class LangChainAgent:
                     # 累加到 self._accum_tokens, 状态栏精确显示。
                     usage_meta = getattr(chunk, "usage_metadata", None)
                     if usage_meta:
-                        yield ("meta", {"event": "usage",
-                                        "prompt_tokens": int(usage_meta.get("input_tokens", 0) or 0),
-                                        "completion_tokens": int(usage_meta.get("output_tokens", 0) or 0),
-                                        "total_tokens": int(usage_meta.get("total_tokens", 0) or 0),
-                                        "got_real": True})
+                        # v31: 归一化 + 落台账; 事件形状跟轻量后端完全一致
+                        # (多了 cache_hit / cache_miss / cache_write 三个桶)。
+                        usage = normalize_usage(usage_meta)
+                        record_usage(usage, backend="standard",
+                                     model=getattr(self.llm_cfg, "model", ""),
+                                     session_id=getattr(self, "_session_id", "") or "",
+                                     request_index=usage_calls.request_index(_meta))
+                        yield build_usage_event(usage)
                     text = chunk.content
                     if isinstance(text, list):
                         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p)

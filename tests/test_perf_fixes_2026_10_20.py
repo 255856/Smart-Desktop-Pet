@@ -221,9 +221,21 @@ class TestImageDataUrlCache:
 # ============================================================
 
 class TestCompanionLogTailRead:
+    @staticmethod
+    def _log_path_under_cwd():
+        """日志路径：**相对 CWD**（= monkeypatch.chdir 之后的 tmp_path）。
+
+        tests/conftest.py 里把日志整体重定向到临时目录（不许写仓库 data/），
+        这里要测「相对路径 + 轮转」的行为，所以把默认路径恢复成相对 CWD。
+        """
+        p = Path("data") / "companion_log.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
     def test_read_recent_returns_latest(self, tmp_path, monkeypatch):
         from app.brain import _companion_log as cl
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cl, "_default_log_path", self._log_path_under_cwd)
         for i in range(300):
             cl.trace_decision(f"t{i}", "open_app", 1, "ALLOW", "ok", "happy", "Lv1")
         recs = cl.read_recent(limit=10)
@@ -233,6 +245,7 @@ class TestCompanionLogTailRead:
     def test_kind_filter(self, tmp_path, monkeypatch):
         from app.brain import _companion_log as cl
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cl, "_default_log_path", self._log_path_under_cwd)
         for i in range(50):
             cl.trace_decision(f"d{i}", "open_app", 1, "ALLOW", "ok", "happy", "Lv1")
             cl.trace_outcome(f"o{i}", "done", "open_app", 0.1, 0.0, 0.0, 1.0, 1, 2, True)
@@ -245,6 +258,7 @@ class TestCompanionLogTailRead:
     def test_rotation_keeps_file_bounded(self, tmp_path, monkeypatch):
         from app.brain import _companion_log as cl
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cl, "_default_log_path", self._log_path_under_cwd)
         monkeypatch.setattr(cl, "_MAX_LOG_BYTES", 4096)
         for i in range(200):
             cl.trace_decision(f"t{i}", "open_app", 1, "ALLOW", "ok", "happy", "Lv1")
