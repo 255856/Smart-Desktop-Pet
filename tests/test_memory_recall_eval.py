@@ -55,6 +55,17 @@ def accept(tmp_path_factory):
     return E.acceptance_check(E.STORE_ROWS, tmp, E.CONFIGS["both"])
 
 
+@pytest.fixture(scope="module")
+def json_payload(tmp_path_factory):
+    """整套配置的 --json 产物（**含三档 dense**：要真模型，跑一次约 1 分钟）。"""
+    import json
+
+    tmp = tmp_path_factory.mktemp("d1-json")
+    out = tmp / "d1.json"
+    assert E.main(["--json", str(out)]) == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # A1：离线、可复现、不依赖真实用户的记忆行
 # ---------------------------------------------------------------------------
@@ -244,21 +255,56 @@ def test_a4_semantic_leg_upper_bound_is_derived_from_unreachable_rows(aggs, resu
     assert upper <= 1.0
 
 
-def test_a4_upper_bound_is_reported_in_json_payload(tmp_path):
-    """--json 产物里必须有消融数字、验收行结果、语义腿上界素材。"""
-    import json
+def test_a4_upper_bound_is_reported_in_json_payload(json_payload):
+    """--json 产物里必须有消融数字、验收行结果、语义腿上界素材。
 
-    out = tmp_path / "d1.json"
-    assert E.main(["--json", str(out)]) == 0
-    data = json.loads(out.read_text(encoding="utf-8"))
-    assert set(data["configs"]) == {"substring", "tfidf", "both"}
-    for key in ("substring", "tfidf", "both"):
+    Stage 2.9 之后配置多了三档 dense（dense / dense_sparse / dense_sparse_rerank）：
+    老三档是 before 对照，新三档是**现在的生产配置** —— 六档都得在产物里。
+    """
+    data = json_payload
+    assert set(E.LEGACY_CONFIGS) <= set(data["configs"]), data["configs"].keys()
+    assert set(E.VECTOR_CONFIGS) <= set(data["configs"]), data["configs"].keys()
+    assert data["primary_config"] == E.PRIMARY_CONFIG
+    assert data["primary_config"] in data["configs"]
+    for key in data["configs"]:
         agg = data["configs"][key]["agg"]
         assert "recall@6" in agg and "precision@6" in agg and "hit_rate" in agg
         assert len(data["configs"][key]["queries"]) == len(E.QUERIES)
     assert data["plain_matches_two_leg"] is True
     assert data["acceptance"]["unrelated_pass"] is True
     assert "variant_no_owner_prefix" in data
+
+
+def test_stage29_dense_config_meets_the_acceptance_targets(json_payload):
+    """Stage 2.9 的红线（向量索引 + cross-encoder 重排）：
+
+    - recall@6 **不低于**老配置（0.857）—— 答案必须还找得到；
+    - 近似陷阱 ≤ 1/3 —— 这就是重排器的存在意义；
+    - 无关问题仍然 ≤ 2 条注入、**100%** 走 fallback。
+    """
+    primary = json_payload["configs"][E.PRIMARY_CONFIG]["agg"]
+    assert primary["recall@6"] >= 0.857, primary
+    assert primary["nearmiss_trap_ratio"] <= 1 / 3, primary
+    assert primary["none_max_injected"] <= 2, primary
+    assert primary["none_fallback_ratio"] == 1.0, primary
+
+
+def test_stage29_semantic_case_is_reachable(json_payload):
+    """「我不能吃什么」→「主人不吃辣」：零字面重叠，重排分必须很高。
+
+    （老门禁只看字面二元组，正是它毙掉了这一类；重排器必须把它捞回来。）
+    """
+    pairs = {(p["query"], p["doc"]): p
+             for p in json_payload.get("semantic_reachability") or []}
+    hit = pairs.get(("主人不能吃什么", "主人不吃辣"))
+    assert hit is not None, json_payload.get("semantic_reachability")
+    assert hit["score"] >= 0.5, hit
+    # 近似陷阱（「主人喜欢香菜」）与无关项必须明显更低
+    trap = pairs.get(("主人不能吃什么", "主人喜欢香菜"))
+    none = pairs.get(("主人不能吃什么", "主人明天要交房租"))
+    assert trap is not None and none is not None
+    assert hit["score"] > trap["score"], (hit, trap)
+    assert hit["score"] > none["score"], (hit, none)
 
 
 def test_a5_sensitivity_variant_is_measured(tmp_path):

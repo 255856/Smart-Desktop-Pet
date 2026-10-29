@@ -10,9 +10,45 @@ ROOT = Path(__file__).resolve().parent.parent
 # 将项目根目录添加到 sys.path，使 `from app.xxx import ...` 可用
 sys.path.insert(0, str(ROOT))
 # 本地依赖包（pydantic_settings / edge-tts / faster-whisper 等装在这里）
+#
+# ⚠️ 放在 sys.path **末尾**（兜底），不是最前面（影子）：
+#    .local-packages 里有一批**版本比 site-packages 新**的包（attrs 26.1 等），
+#    如果它排在前面，就会跟 site-packages 里同名的老版本**混搭**：
+#    例如某个 pytest 插件先从 site-packages 导入了 attr(25.3)，
+#    之后 import attrs(26.1) 就会炸
+#        ImportError: cannot import name 'ClassProps' from 'attr._make'
+#    而 chromadb 的依赖链正好 import attrs → 向量索引（Chroma）打不开。
+#    放末尾之后：site-packages 里的正式版本优先，.local-packages 只补缺的。
 _local = ROOT / ".local-packages"
 if _local.is_dir():
-    sys.path.insert(0, str(_local))
+    sys.path.append(str(_local))
+
+# ⚠️ attr / attrs 的版本必须**自洽**（否则整套测试里向量索引都打不开）：
+#    十几个测试模块在 import 时会 sys.path.insert(0, ".local-packages") ——
+#    那之后 "import attrs" 解析到 .local-packages 的 **26.1**，
+#    而 "attr._make" 可能早就从 site-packages 导入了 **25.3**，
+#    于是 attrs 26.1 里那句 "from attr._make import ClassProps" 直接炸：
+#        ImportError: cannot import name 'ClassProps' from 'attr._make'
+#    依赖链（chromadb → jsonschema → attrs）一断，Chroma 就打不开，
+#    所有要真索引的测试全挂（跟用例本身没关系，是**导入顺序**的事）。
+#    办法：在这里（conftest 导入时，.local-packages 还在 sys.path 末尾）
+#    **先把两个都按 site-packages 的版本导进来** —— 同一个来源 → 版本自洽；
+#    之后各测试模块再怎么调 sys.path，也改不动已经进 sys.modules 的模块。
+for _mod in ("attr", "attrs"):
+    try:
+        __import__(_mod)
+    except Exception:  # noqa: BLE001 - 没装就算了，不影响别的测试
+        pass
+
+# ⚠️ Windows DLL 顺序（向量索引要用 chromadb 的原生扩展）：
+#    PyQt5 自带一份**旧版** MSVC 运行时（PyQt5/Qt5/bin/msvcp140.dll 等），
+#    并把那个目录加进 DLL 搜索路径 —— 之后加载的原生扩展会捡到那份旧运行时，
+#    chromadb 的 Rust 绑定就是这么炸的（access violation，整进程崩）。
+#    趁 Qt 还没加载（下面的 ASR fixture 会 import PyQt5），先把**系统**那份
+#    MSVC 运行时预加载进来，全进程就都用系统那份 → 不再抢。
+from app.brain.vector_index import preload_system_msvc_runtime  # noqa: E402
+
+preload_system_msvc_runtime()
 
 # ---------------------------------------------------------------------------
 # token 台账路径覆盖（Stage 0.2）
