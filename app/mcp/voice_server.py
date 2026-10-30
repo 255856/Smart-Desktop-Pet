@@ -202,6 +202,59 @@ def _human_kb(size: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 语音产物的**结构化旁路文件**（给界面用，不给模型看）
+# ---------------------------------------------------------------------------
+#
+# 为什么不在工具结果文本里塞路径 / 时长的结构化字段：
+#   工具结果文本是**给模型看的**，必须保持人话原样（模型看见机器标记
+#   就会被带偏，主人也会看到一串乱码）。所以结构化信息走**旁路文件**：
+#   语音产物落盘时，顺手在同一个目录写一份 <产物名>.voice.json，
+#   里面是准确的路径 / 时长 / 体积。模型永远看不见它，界面拿得到。
+#
+# 约定（生产端写、界面端读，两边必须一致）：
+#   · 文件名 = 产物文件名 + VOICE_META_SUFFIX
+#   · 内容 = {"kind", "path", "file_name", "duration", "size", "created", "text"}
+
+#: 语音产物旁路文件的后缀。
+VOICE_META_SUFFIX = ".voice.json"
+
+
+def voice_out_dir(cfg: Optional[dict] = None) -> Path:
+    """语音产物目录（绝对路径）。
+
+    生产端和界面端共用这一个函数 —— 两边各自算目录一定会算歪，
+    界面就找不到语音产物了。
+    """
+    return _out_dir(cfg if cfg is not None else _cfg())
+
+
+def write_voice_meta(wav_path: Path, kind: str, duration: float,
+                     size: int, text: str = "") -> Optional[Path]:
+    """给语音产物写一份结构化旁路文件（.voice.json）。
+
+    写失败**不影响语音本身**：语音已经合成、已经放给主人听了，
+    旁路文件只是给界面补一份准确信息，写不动就当没有（界面会退化成
+    普通工具行，不会编造路径）。
+    """
+    try:
+        meta = {
+            "kind": str(kind or ""),
+            "path": str(wav_path),
+            "file_name": wav_path.name,
+            "duration": round(float(duration), 3),
+            "size": int(size),
+            "created": time.time(),
+            "text": str(text or "")[:200],
+        }
+        out = wav_path.with_name(wav_path.name + VOICE_META_SUFFIX)
+        out.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("写语音旁路文件失败 %s：%s", wav_path, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # 本机资产盘点（绝不下载）
 # ---------------------------------------------------------------------------
 
@@ -375,6 +428,8 @@ def handle_speak(args: dict) -> dict:
     if size <= 0:
         return _fail("写文件失败：%s 是空的。" % out)
 
+    # 结构化旁路文件：给界面做语音条用（模型看不到它）
+    write_voice_meta(out, "speak", dur, size, text)
     played = _play(out)
     lines = ["念完了：%s（%s，%.1f 秒）。" % (text, _human_kb(size), dur)]
     if emo_name:
@@ -475,6 +530,8 @@ def handle_sing(args: dict) -> dict:
         return _fail("唱歌失败：RVC 返回码 %s，最后一行：%s" % (proc.returncode, detail))
 
     size, dur = _wav_info(out)
+    # 结构化旁路文件：给界面做语音条用（模型看不到它）
+    write_voice_meta(out, "sing", dur, size, lyrics)
     played = _play(out)
     lines = ["唱完了（%s，%.1f 秒）。" % (_human_kb(size), dur),
              "旋律是按这段词现编的调（seed=%d，基准 %.0f Hz）。" % (seed, base),

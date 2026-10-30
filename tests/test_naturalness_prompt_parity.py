@@ -55,14 +55,31 @@ def script():
 
 
 @pytest.fixture(scope="module")
-def production(script):
-    """生产 system prompt（临时 root：不碰 data/ 下的真库）。"""
-    from app.core.config import load_config
+def cfg_xiaoxi():
+    """配置**钉在小汐**。
+
+    评测集里的 fragments 是按小汐录的，所以这些测试的主体就是
+    「小汐的生产 prompt」。它**不能**跟着运行时的角色选择走 ——
+    主人把桌宠切到大肥鱼（data/character_selection.yaml）之后，这些测试会
+    假失败（片段对不上大肥鱼的 prompt）。**测试不能依赖运行时状态。**
+    """
+    from app.core.config import load_config, load_character_entry
 
     cfg = load_config(str(ROOT / "config.yaml"))
+    entry = load_character_entry(ROOT, "characters/xiaoxi.yaml")
+    if entry.ok:
+        cfg.character.name = entry.name
+        cfg.character.persona = entry.persona
+        cfg.character.character_file = entry.path
+    return cfg
+
+
+@pytest.fixture(scope="module")
+def production(script, cfg_xiaoxi):
+    """生产 system prompt（临时 root：不碰 data/ 下的真库）。"""
     with tempfile.TemporaryDirectory(prefix="naturalness_parity_") as tmp:
         built = script.build_production_prompt(
-            cfg, root=ROOT, tmp_root=Path(tmp))
+            cfg_xiaoxi, root=ROOT, tmp_root=Path(tmp))
         return built
 
 
@@ -122,16 +139,13 @@ def test_fixture_fragments_keep_the_chinese_suffix_and_length_strategy(
             f"{case.get('id')} 的片段里还残留硬上限")
 
 
-def test_fixture_fragments_match_a_fresh_cut(production, cases, script):
+def test_fixture_fragments_match_a_fresh_cut(production, cases, script, cfg_xiaoxi):
     """片段 = 从生产 prompt 现切的三段（人设开头 / 中文约束 / 长度策略）。
 
     录制脚本写回的就是这三段 —— 这里钉住，防止有人手改片段。
     """
-    from app.core.config import load_config
-
-    cfg = load_config(str(ROOT / "config.yaml"))
     expected = script._build_fragments(
-        production["system_prompt"], cfg.character.persona)
+        production["system_prompt"], cfg_xiaoxi.character.persona)
     for case in cases:
         assert case.get("system_prompt_fragments") == expected, (
             f"{case.get('id')} 的片段跟现切的不一致")

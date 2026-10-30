@@ -397,10 +397,10 @@ CHAT_BUBBLE_CSS = (
     "td.bubble{line-height:1.55;font-size:10pt;border-left:3px solid #E89AAE;}"
     # 用户消息气泡: 右边 3px 主色 (跟主系统樱粉呼应)
     "td.user_bubble{border-left:none;border-right:3px solid #E89AAE;}"
-    # 工具调用记录（紧凑小卡片）
-    "div.tools{font-size:9pt;color:#3f3f46;background-color:#f5f3ff;"
-    "border:1px solid #e9e3ff;border-radius:8px;padding:6px 9px;"
-    "margin:2px 0 8px 0;}"
+    # 工具调用记录（安静的一行行痕迹，不抢主人回复的戏）
+    "div.tools{font-size:8.5pt;color:#6b7280;background-color:transparent;"
+    "border:none;border-left:2px solid #e2e8f0;border-radius:0;"
+    "padding:1px 0 1px 8px;margin:2px 0 8px 0;}"
     # 代码块 / 行内代码
     "pre{background:#232337;color:#e5e7eb;padding:10px 12px;"
     "border-radius:10px;font-family:Consolas,Monaco,monospace;"
@@ -420,21 +420,31 @@ CHAT_BUBBLE_CSS = (
     "background:#f6f6fb;padding:6px 10px;border-radius:0 4px 4px 0;"
     "color:#6b7280;font-size:9pt;line-height:1.5;}"
     # 工具步骤的状态 / 附注（跟 CHAT_MD_CSS 一一对应，两套样式不许漂移）
-    "div.tools .tool-row .tool-num{color:#a0a0b4;margin-right:6px;}"
-    "div.tools .tool-row .tool-target{color:#6b7280;margin:0 4px;}"
-    "div.tools .tool-row .tool-mark-cell{margin-left:8px;}"
-    "div.tools .tool-row.ok .tool-name{color:#15803d;}"
+    "div.tools .tools-head-link{color:#9ca3af;text-decoration:none;font-size:8.5pt;}"
+    "div.tools .tool-row .tool-num{color:#a0a0b4;margin-right:5px;}"
+    "div.tools .tool-row .tool-cn{color:#a0a0b4;font-size:8pt;margin-left:5px;}"
+    "div.tools .tool-row .tool-target{color:#9ca3af;margin:0 4px;}"
+    "div.tools .tool-row .tool-mark-cell{margin-left:6px;}"
+    "div.tools .tool-row.ok .tool-name{color:#475569;}"
     "div.tools .tool-row.failed .tool-name{color:#b91c1c;}"
     "div.tools .tool-row.cancelled .tool-name{color:#9ca3af;}"
     "div.tools .tool-row.rejected .tool-name{color:#a45b2e;}"
-    "div.tools .tool-mark.tool-ok{color:#16a34a;}"
+    "div.tools .tool-mark.tool-ok{color:#9ca3af;}"
     "div.tools .tool-mark.tool-failed{color:#dc2626;font-weight:600;}"
     "div.tools .tool-mark.tool-cancelled{color:#9ca3af;}"
     "div.tools .tool-mark.tool-rejected{color:#a45b2e;font-weight:600;}"
-    "div.tools .tool-reason{color:#dc2626;font-size:8.5pt;margin:1px 0 3px 20px;}"
-    "div.tools .tool-note{color:#6b7280;font-size:8.5pt;margin:1px 0 3px 20px;}"
-    "div.tools .tools-preview{color:#9ca3af;font-size:9pt;margin:2px 0 0 0;}"
+    "div.tools .tool-reason{color:#dc2626;font-size:8pt;margin:1px 0 2px 18px;}"
+    "div.tools .tool-note{color:#9ca3af;font-size:8pt;margin:1px 0 2px 18px;}"
+    "div.tools .tools-preview{color:#9ca3af;font-size:8.5pt;margin:1px 0 0 0;}"
     "div.tools .tools-tail{color:#dc2626;}"
+    # 语音条（voice bubble）：语音是「一条消息」，独立于工具块
+    "div.voice-bubble{font-size:9.5pt;color:#1f2937;background-color:#f5f3ef;"
+    "border:1px solid #e4ded3;border-radius:8px;padding:6px 10px;margin:2px 0 8px 0;}"
+    "div.voice-bubble .voice-play{color:#4f46e5;text-decoration:none;font-weight:600;}"
+    "div.voice-bubble .voice-dur{color:#475569;margin-left:8px;}"
+    "div.voice-bubble .voice-file{color:#a0a0b4;font-size:8pt;margin-left:8px;}"
+    "div.voice-bubble .voice-text{color:#475569;font-size:9pt;margin-left:8px;}"
+    "div.voice-bubble .voice-missing{color:#dc2626;font-size:9pt;margin-left:8px;}"
     "div.msg-notice{color:#6b7280;font-size:10pt;font-style:italic;"
     "border-left:3px solid #a45b2e;padding:2px 10px;margin:4px 0;}"
 )
@@ -492,24 +502,32 @@ _CHAT_MD_TEMPLATE = string.Template(
 .msg-body a:hover{text-decoration:underline;}
 .msg-body strong{font-weight:600;color:$text_strong;}
 .msg-body em{font-style:italic;color:$text_italic;}
-div.tools{font-size:9.5pt;color:$text_msg;background-color:$bg_panel;border:1px solid $border_panel;border-radius:6px;padding:8px 12px;margin:6px 0 10px 0;}
-div.tools .tool-row{display:block;margin:2px 0;}
-div.tools .tool-row .tool-num{color:$text_muted;margin-right:6px;}
-div.tools .tool-row .tool-name{color:$text_tool_name;font-weight:600;}
-div.tools .tool-row .tool-target{color:$text_quiet;margin:0 4px;}
-div.tools .tool-row .tool-mark-cell{margin-left:8px;}
-div.tools .tool-row.ok .tool-name{color:$text_row_ok;}
-div.tools .tool-row.failed .tool-name{color:$text_row_fail;}
-div.tools .tool-row.cancelled .tool-name{color:$text_mark_cancel;}
+div.tools{font-size:8.5pt;color:$text_sub;background-color:transparent;border:none;border-left:2px solid $border_panel;border-radius:0;padding:1px 0 1px 8px;margin:4px 0 8px 0;}
+div.tools .tools-head-link{color:$text_muted;text-decoration:none;font-size:8.5pt;}
+div.tools .tool-row{display:block;margin:1px 0;}
+div.tools .tool-row .tool-num{color:$text_muted;margin-right:5px;}
+div.tools .tool-row .tool-name{color:$text_quiet;font-weight:600;font-family:Consolas,Menlo,monospace;}
+div.tools .tool-row .tool-cn{color:$text_muted;font-size:8pt;margin-left:5px;}
+div.tools .tool-row .tool-target{color:$text_muted;margin:0 4px;}
+div.tools .tool-row .tool-mark-cell{margin-left:6px;}
+div.tools .tool-row.ok .tool-name{color:$text_quiet;}
+div.tools .tool-row.failed .tool-name{color:$text_mark_fail;}
+div.tools .tool-row.cancelled .tool-name{color:$text_muted;}
 div.tools .tool-row.rejected .tool-name{color:$text_mark_rejected;}
-div.tools .tool-mark.tool-ok{color:$text_mark_ok;}
+div.tools .tool-mark.tool-ok{color:$text_muted;}
 div.tools .tool-mark.tool-failed{color:$text_mark_fail;font-weight:600;}
-div.tools .tool-mark.tool-cancelled{color:$text_mark_cancel;}
+div.tools .tool-mark.tool-cancelled{color:$text_muted;}
 div.tools .tool-mark.tool-rejected{color:$text_mark_rejected;font-weight:600;}
-div.tools .tool-reason{color:$text_mark_fail;font-size:8.5pt;margin:1px 0 3px 20px;}
-div.tools .tool-note{color:$text_sub;font-size:8.5pt;margin:1px 0 3px 20px;}
-div.tools .tools-preview{color:$text_preview;font-size:9pt;margin:2px 0 0 0;}
+div.tools .tool-reason{color:$text_mark_fail;font-size:8pt;margin:1px 0 2px 18px;}
+div.tools .tool-note{color:$text_muted;font-size:8pt;margin:1px 0 2px 18px;}
+div.tools .tools-preview{color:$text_muted;font-size:8.5pt;margin:1px 0 0 0;}
 div.tools .tools-tail{color:$text_mark_fail;}
+div.voice-bubble{font-size:9.5pt;color:$text_msg;background-color:$bg_voice;border:1px solid $border_voice;border-radius:8px;padding:6px 10px;margin:4px 0 8px 0;}
+div.voice-bubble .voice-play{color:$text_accent;text-decoration:none;font-weight:600;}
+div.voice-bubble .voice-dur{color:$text_quiet;margin-left:8px;}
+div.voice-bubble .voice-file{color:$text_muted;font-size:8pt;margin-left:8px;font-family:Consolas,Menlo,monospace;}
+div.voice-bubble .voice-text{color:$text_quiet;font-size:9pt;margin-left:8px;}
+div.voice-bubble .voice-missing{color:$text_mark_fail;font-size:9pt;margin-left:8px;}
 
 div.thinking{font-size:9.5pt;color:$text_quiet;background-color:$bg_soft;border-left:3px solid $text_terminal_head;padding:8px 12px;margin:4px 0 8px 0;border-radius:0 4px 4px 0;}
 div.thinking .thinking-head{color:$text_think_head;font-weight:600;margin-bottom:2px;}
@@ -552,6 +570,7 @@ _CHAT_MD_LIGHT = {
     "bg_row_alt": "#fafbfc",
     "bg_file_edit": "#fef3c7",
     "bg_plan": "#fbf7ff",
+    "bg_voice": "#f5f3ef",
     "bg_terminal": "#0f172a",
     "border_line": "#ebe3d6",
     "border_soft": "#e5e7eb",
@@ -562,6 +581,7 @@ _CHAT_MD_LIGHT = {
     "border_file_edit_block": "#f59e0b",
     "border_file_edit_row": "#fbbf24",
     "border_plan": "#d9c9f5",
+    "border_voice": "#e4ded3",
     "accent": "#E89AAE",
     "text_body": "#4a3d6e",
     "text_msg": "#1f2937",
@@ -616,6 +636,7 @@ _CHAT_MD_DARK = {
     "bg_row_alt": "#262130",
     "bg_file_edit": "#3a2f18",
     "bg_plan": "#262036",
+    "bg_voice": "#2a2533",
     "bg_terminal": "#0b1220",
     "border_line": "#3a3346",
     "border_soft": "#3b3547",
@@ -626,6 +647,7 @@ _CHAT_MD_DARK = {
     "border_file_edit_block": "#b45309",
     "border_file_edit_row": "#b45309",
     "border_plan": "#4a3f66",
+    "border_voice": "#3d3750",
     "accent": "#f0a8bd",
     "text_body": "#e8e4f2",
     "text_msg": "#e6e2f0",

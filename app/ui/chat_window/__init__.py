@@ -148,8 +148,9 @@ class _NoCmdNavQTextBrowser(QTextBrowser):
 # 工具 UI 元数据 + 工具结果状态 + 工具元组解包 — 拆到 chat_window.utils
 from .utils import (  # noqa: F401
     _TOOL_UI_META, _CIRCLED_NUMS, _TOOL_FAIL_MARKERS,
-    _unpack_tool, _tool_label, _tool_status, _unpack_status_mark,
-    _tool_step_class, _tool_fail_reason, _voice_result_note,
+    _unpack_tool, _tool_label, _tool_display, _tool_status,
+    _unpack_status_mark, _tool_step_class, _tool_fail_reason,
+    _voice_result_note, resolve_voice_artifact, _VOICE_KIND,
 )
 
 
@@ -3343,6 +3344,22 @@ class ChatWindow(QWidget):
             if real:
                 self._show_image_popup(real)
             return
+        # voice-play: 点语音条上的「播放」—— 只放声音，不打扰聊天
+        if scheme == "voice-play":
+            raw = ""
+            try:
+                raw = url.path() if hasattr(url, "path") else ""
+            except Exception:  # noqa: BLE001
+                raw = ""
+            if not raw:
+                raw = str(url).split(":", 1)[-1].split("#", 1)[0].split("?", 1)[0]
+            try:
+                from urllib.parse import unquote as _unquote
+                path = _unquote(raw)
+            except Exception:  # noqa: BLE001
+                path = raw
+            self._play_voice_artifact(path)
+            return
         if scheme == "cmd":
             try:
                 cmd = url.path().lstrip("/") if hasattr(url, "path") else str(url).split(":", 1)[-1]
@@ -3367,6 +3384,39 @@ class ChatWindow(QWidget):
                 QDesktopServices.openUrl(url)
             except Exception:  # noqa: BLE001
                 log.warning("打开外部链接失败: %s", url)
+
+    def _play_voice_artifact(self, path: str) -> None:
+        """播放一条语音产物（后台放，不打扰聊天）。
+
+        点了就响：**不弹窗、不抢焦点、不动滚动条**。
+        放不出来只在光标处冒一句提示 + 记日志，不打断主人的阅读。
+        """
+        try:
+            p = Path(str(path or ""))
+        except Exception:  # noqa: BLE001
+            return
+        if not p.is_file():
+            self._voice_play_hint("音频文件已经不在了")
+            return
+        ok = False
+        try:
+            from app.voice.voice import play_audio_file
+            ok = bool(play_audio_file(p))
+        except Exception as e:  # noqa: BLE001
+            log.warning("播放语音失败 %s：%s", p, e)
+        if not ok:
+            self._voice_play_hint("语音没放出来：本机没有可用的播放器")
+
+    def _voice_play_hint(self, text: str) -> None:
+        """播放失败时冒一句提示（不弹窗、不抢焦点、不动滚动）。"""
+        log.warning("语音条：%s", text)
+        try:
+            from PyQt5.QtGui import QCursor
+            from PyQt5.QtWidgets import QToolTip
+            view = getattr(self, "chat_view", None)
+            QToolTip.showText(QCursor.pos(), text, view)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _show_image_popup(self, url: str) -> None:
         """点击 chat 缩略图弹原图 QDialog, Esc / 点 × 关闭。
@@ -4326,7 +4376,7 @@ class ChatWindow(QWidget):
         return '<span class="tools-tail">（另有 %s）</span>' % "、".join(words)
 
     def _tool_steps_html(self, tools: list, msg_id: int = 0) -> str:
-        """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
+        """把工具调用渲染成步骤卡片（编号 + 英文工具名 + 中文小提示 + 动作目标 + 成败状态）。
 
         工具先于最终回答执行，故卡片置于气泡正文上方；工具结果不进 TTS。
         head 文本里只显示「已执行操作 · N ▾ / ▴」,不再出现"点击展开"字样。
@@ -4338,7 +4388,8 @@ class ChatWindow(QWidget):
         states = []
         for i, t in enumerate(tools):
             name, args, result, tool_status = _unpack_tool(t)
-            cn, target = _tool_label(name, args)
+            # 英文工具名是**主**（专业、像日志），中文标签只当副的小提示
+            en_name, cn_name, target = _tool_display(name, args)
             # 成败用**信封状态**（有的话），不再从结果文本猜（Stage 3.5）
             status = _tool_status(result, tool_status)
             states.append(status)
@@ -4360,10 +4411,15 @@ class ChatWindow(QWidget):
                 f'<span class="tool-target">· <b>{_html_escape(target)}</b></span>'
                 if target else ""
             )
+            cn_html = (
+                f'<span class="tool-cn">{_html_escape(cn_name)}</span>'
+                if cn_name else ""
+            )
             rows.append(
                 f'<div class="tool-row {state}">'
                 f'<span class="tool-num">{num}</span>'
-                f'<span class="tool-name">{_html_escape(cn)}</span>'
+                f'<span class="tool-name">{_html_escape(en_name)}</span>'
+                f'{cn_html}'
                 f'{target_html}'
                 f'<span class="tool-mark-cell">{mark}</span>'
                 '</div>'
@@ -4378,10 +4434,12 @@ class ChatWindow(QWidget):
             # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
             # 不出现"点击展开"字样,只靠箭头指示
             first_name, first_args, first_result, first_status = _unpack_tool(tools[0])
-            first_cn, first_target = _tool_label(first_name, first_args)
+            first_en, first_cn, first_target = _tool_display(first_name, first_args)
             preview = (
                 '<div class="tools-preview">'
-                '▸ ' + _html_escape(first_cn) +
+                '▸ ' + _html_escape(first_en) +
+                (f'<span class="tool-cn">{_html_escape(first_cn)}</span>'
+                 if first_cn else '') +
                 (' · ' + _html_escape(first_target[:40]) if first_target else '') +
                 '  ' + (_unpack_status_mark(first_result, first_status)) +
                 self._tools_tail_summary(states) +
@@ -4404,6 +4462,62 @@ class ChatWindow(QWidget):
             '<div class="tools-body">' + "".join(rows) + '</div>'
             '</div>'
         )
+
+    def _voice_bubbles_html(self, tools: list, msg_ts: float = 0.0) -> str:
+        """语音条：一次语音一条独立消息（时长 / 文件名 / 再听一遍）。
+
+        语音是**听得见的消息**，不能只缩在「已执行操作」里面 ——
+        主人要一眼看到「念了多久、音频在哪、能不能再听一遍」。
+        解析不出产物就**不出声**（退化成普通工具行），不编路径。
+        """
+        if not tools:
+            return ""
+        rows = []
+        for t in tools:
+            name, args, result, status = _unpack_tool(t)
+            if name not in _VOICE_KIND:
+                continue
+            # 只有真成了才出语音条（失败的那步在工具块里已经标红）
+            if _tool_status(result, status) != "ok":
+                continue
+            art = resolve_voice_artifact(name, args, result, at=msg_ts)
+            if not art:
+                continue
+            rows.append(self._voice_bubble_html(art))
+        return "".join(rows)
+
+    def _voice_bubble_html(self, art: dict) -> str:
+        """一条语音条（voice bubble）的 HTML。
+
+        音频文件不在了就说没有 —— **不给点了没反应的死按钮**。
+        """
+        dur = float(art.get("duration") or 0.0)
+        dur_txt = ("%.1f 秒" % dur) if dur > 0 else "时长未知"
+        file_name = _html_escape(str(art.get("file_name") or ""))
+        spoken = str(art.get("text") or "")
+        spoken_html = (
+            '<span class="voice-text">%s</span>' % _html_escape(spoken)
+            if spoken else ""
+        )
+        if art.get("exists"):
+            try:
+                from urllib.parse import quote as _quote
+                href = "voice-play:" + _quote(str(art.get("path") or ""), safe="")
+            except Exception:  # noqa: BLE001
+                href = "voice-play:"
+            play = '<a href="%s" class="voice-play">播放</a>' % href
+            cls = "voice-bubble"
+        else:
+            play = '<span class="voice-missing">音频文件已不在</span>'
+            cls = "voice-bubble voice-missing"
+        return (
+            '<div class="%s">'
+            '%s'
+            '<span class="voice-dur">%s</span>'
+            '<span class="voice-file">%s</span>'
+            '%s'
+            '</div>'
+        ) % (cls, play, dur_txt, file_name, spoken_html)
 
     def _thoughts_html(self, thoughts: list) -> str:
         """思考块：折叠展示（默认收起，主人点开看推理过程）。
@@ -4629,7 +4743,10 @@ class ChatWindow(QWidget):
                 self._tool_steps_html(msg.tools, msg_id=id(msg))
                 if (msg.tools and self._show_tool_steps) else ""
             )
-            prepend = thoughts_html + execs_html + file_edits_html + tools_html
+            # 语音条：语音是「一条消息」，不受「显示工具步骤」那个开关影响
+            voice_html = self._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
+            prepend = (thoughts_html + execs_html + file_edits_html
+                       + tools_html + voice_html)
             if prepend:
                 body_html = prepend + body_html
 

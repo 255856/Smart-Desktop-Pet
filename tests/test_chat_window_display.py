@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
@@ -155,7 +156,7 @@ def test_ok_tool_row_has_ok_class():
 
 
 def test_voice_tool_step_shows_name_status_duration_and_file():
-    """A2：语音工具在界面上留痕 —— 中文名 + 真实状态 + 时长 + 音频文件。"""
+    """语音工具在界面上留痕 —— 英文工具名（主）+ 中文小提示 + 真实状态 + 时长 + 体积。"""
     cw = _cw()
     msg = Message(role="assistant", content="念给你听~", tools=[
         ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
@@ -164,14 +165,16 @@ def test_voice_tool_step_shows_name_status_duration_and_file():
     ])
     cw._tools_collapsed_by_msg[id(msg)] = False
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
-    assert "念一段话" in html, "语音工具没有中文名"
+    assert '<span class="tool-name">mcp_voice_speak</span>' in html, (
+        "英文工具名不是主显示")
+    assert '<span class="tool-cn">念一段话</span>' in html, "中文小提示没了"
     assert "[完成]" in html
     assert "3.4 秒" in html, "语音时长没显示"
     assert "24.1 KB" in html, "语音体积没显示"
 
 
 def test_voice_sing_tool_step_shows_produced_file():
-    """唱歌：产物路径要能看到（音频落在哪）。"""
+    """唱歌：产物文件名要能看到（在语音条上，工具块里不刷路径）。"""
     cw = _cw()
     msg = Message(role="assistant", content="唱一段", tools=[
         ("mcp_voice_sing", '{"lyrics":"啦啦啦"}',
@@ -180,9 +183,11 @@ def test_voice_sing_tool_step_shows_produced_file():
     ])
     cw._tools_collapsed_by_msg[id(msg)] = False
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
-    assert "唱几句" in html
+    assert '<span class="tool-name">mcp_voice_sing</span>' in html
     assert "5.0 秒" in html
-    assert "sing_20260101-120000.wav" in html, "音频文件没显示"
+    bubble = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
+    assert "sing_20260101-120000.wav" in bubble, "音频文件没显示"
+    assert "5.0 秒" in bubble, "语音条上没显示时长"
 
 
 def test_voice_tool_failure_follows_envelope_status():
@@ -430,3 +435,198 @@ def test_rebuild_rerenders_history_so_tools_can_expand():
     cw._rebuild_chat_view_from_history()
     assert "已执行操作" in cw.chat_view.toPlainText()
     print("[OK] 重建真的重建了：展开/折叠两种状态都能渲染")
+
+# ---------------------------------------------------------------------------
+# 语音条（voice bubble）：语音是「一条消息」，不是工具块里的一行字
+# ---------------------------------------------------------------------------
+
+def _voice_artifact(tmp_path, *, name="speak_20260101-120000.wav", kind="speak",
+                    duration=3.4, size=24647, make_wav=True):
+    """造一份语音产物（wav + 旁路文件），返回 wav 路径。
+
+    旁路文件 = 生产端（app/mcp/voice_server.py）落盘时写下的那份结构化信息
+    （路径 / 时长 / 体积）—— 模型看不到它，界面靠它做语音条。
+    """
+    from app.mcp import voice_server
+    out_dir = tmp_path / "voice_out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wav = out_dir / name
+    if make_wav:
+        wav.write_bytes(b"RIFF0000WAVEfmt ")
+    meta = out_dir / (name + voice_server.VOICE_META_SUFFIX)
+    meta.write_text(json.dumps({
+        "kind": kind, "path": str(wav), "file_name": wav.name,
+        "duration": duration, "size": size, "created": time.time(),
+        "text": "",
+    }, ensure_ascii=False), encoding="utf-8")
+    return wav
+
+
+def _patch_voice_out(monkeypatch, tmp_path):
+    """让语音产物解析指向临时目录（不碰真的 data/voice_out）。"""
+    from app.ui.chat_window import utils as _u
+    monkeypatch.setattr(_u, "_voice_meta_settings",
+                        lambda: (tmp_path / "voice_out", ".voice.json"))
+    _u._VOICE_ARTIFACT_CACHE.clear()
+    return _u
+
+
+def test_voice_bubble_shows_duration_file_name_and_play_link(tmp_path, monkeypatch):
+    """A1：语音工具 → 一条语音条：时长 + 文件名 + 播放入口。"""
+    from urllib.parse import quote
+    wav = _voice_artifact(tmp_path)
+    _patch_voice_out(monkeypatch, tmp_path)
+    cw = _cw()
+    msg = Message(role="assistant", content="念给你听~", tools=[
+        ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
+         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
+         "已经放给主人听了。", "ok"),
+    ])
+    html = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
+    assert "voice-bubble" in html, html
+    assert "3.4 秒" in html, "语音条上没有时长"
+    assert wav.name in html, "语音条上没有文件名"
+    assert "voice-play:" in html, "语音条上没有播放入口"
+    assert "播放" in html, "播放入口没有中文文案"
+    assert "今天也要好好吃饭哦" in html, "语音条上没有念的内容"
+    # 播放入口指向的就是那一个 wav
+    assert quote(str(wav), safe="") in html, html
+    # 整条消息里也有（语音条真的进了聊天窗，不只是孤立组件）
+    full = cw._msg_html(msg)
+    assert "voice-bubble" in full, full
+    assert quote(str(wav), safe="") in full, full
+
+
+def test_voice_bubble_is_honest_when_file_is_gone(tmp_path, monkeypatch):
+    """A2：音频文件没了就说没有 —— 不给点了没反应的死按钮。"""
+    _voice_artifact(tmp_path, make_wav=False)
+    _patch_voice_out(monkeypatch, tmp_path)
+    cw = _cw()
+    msg = Message(role="assistant", content="念给你听~", tools=[
+        ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
+         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
+         "已经放给主人听了。", "ok"),
+    ])
+    html = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
+    assert "voice-bubble" in html, html
+    assert "voice-play:" not in html, "文件没了还留着播放按钮（死按钮）"
+    assert "音频文件已不在" in html, "文件没了没说清楚"
+
+
+def test_voice_play_click_plays_that_wav(tmp_path, monkeypatch):
+    """A1：点「播放」真的放那一条 wav（不弹窗、不抢焦点、不动滚动）。"""
+    wav = _voice_artifact(tmp_path)
+    _patch_voice_out(monkeypatch, tmp_path)
+    played = []
+    from app.voice import voice as _voice
+    monkeypatch.setattr(_voice, "play_audio_file",
+                        lambda p, **kw: played.append(str(p)) or True)
+    cw = _cw()
+    cw._play_voice_artifact(str(wav))
+    assert played == [str(wav)], played
+    # 走锚点点击（主人真的点那个链接）也是同一条路
+    from PyQt5.QtCore import QUrl
+    from urllib.parse import quote
+    played.clear()
+    cw._on_chat_anchor_clicked(QUrl("voice-play:" + quote(str(wav), safe="")))
+    assert played == [str(wav)], played
+
+
+def test_voice_bubble_not_shown_when_tool_failed(tmp_path, monkeypatch):
+    """失败的语音不出语音条（失败那步在工具块里标红就够了）。"""
+    _voice_artifact(tmp_path)
+    _patch_voice_out(monkeypatch, tmp_path)
+    cw = _cw()
+    msg = Message(role="assistant", content="念一句", tools=[
+        ("mcp_voice_speak", '{"text":"你好"}', "失败：TTS 服务没响应", "error"),
+    ])
+    assert cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts) == ""
+
+
+def test_tool_row_shows_english_tool_name_first():
+    """A5：工具行主显示**英文工具名**，中文标签只当副的小提示。"""
+    cw = _cw()
+    msg = Message(role="assistant", content="查到了", tools=[
+        ("web_search", '{"query":"今天天气"}', "晴", "ok"),
+    ])
+    cw._tools_collapsed_by_msg[id(msg)] = False
+    html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
+    assert '<span class="tool-name">web_search</span>' in html, html
+    assert '<span class="tool-cn">联网搜索</span>' in html, html
+    # 折叠态预览也是英文名在前
+    cw._tools_collapsed_by_msg[id(msg)] = True
+    preview = cw._tool_steps_html(msg.tools, msg_id=id(msg))
+    assert "▸ web_search" in preview, preview
+
+
+def test_tool_block_is_quiet_but_failure_still_stands_out():
+    """A6：工具块安静下来（更小 / 更淡 / 更少底色），失败那步仍然显眼。"""
+    css = _us.CHAT_MD_CSS
+    block = css.split("div.tools{")[1].split("}")[0]
+    assert "background-color:transparent" in block, block
+    assert "font-size:8.5pt" in block, block
+    assert "border:none" in block, block
+    assert "padding:1px 0 1px 8px" in block, block
+    # 成功那步是低调的灰，失败那步是红色加粗
+    muted = _us._CHAT_MD_LIGHT["text_muted"]
+    fail_col = _us._CHAT_MD_LIGHT["text_mark_fail"]
+    assert "div.tools .tool-mark.tool-ok{color:%s;}" % muted in css, css
+    assert "div.tools .tool-mark.tool-failed{color:%s;font-weight:600;}" % fail_col in css, css
+    assert "div.tools .tool-row.failed .tool-name{color:%s;}" % (
+        _us._CHAT_MD_LIGHT["text_mark_fail"]) in css, css
+    # 暗色主题同步（同一份规则表，只换颜色）
+    dark = _us.CHAT_MD_CSS_DARK
+    assert "div.tools .tool-mark.tool-failed{color:%s;font-weight:600;}" % (
+        _us._CHAT_MD_DARK["text_mark_fail"]) in dark, dark
+
+
+def test_voice_tool_result_text_unchanged_meta_goes_out_of_band(tmp_path, monkeypatch):
+    """A3：模型看到的结果文本原样不变；结构化信息走旁路文件，不进文本。"""
+    from app.mcp import voice_server
+    out_dir = tmp_path / "voice_out"
+    monkeypatch.setattr(voice_server, "_cfg", lambda: {
+        "output_dir": str(out_dir), "tts_url": "http://127.0.0.1:9880",
+    })
+    monkeypatch.setattr(voice_server, "_resolve_ref",
+                        lambda cfg, emo: (Path("ref.wav"), "", "neutral", ""))
+    monkeypatch.setattr(voice_server, "_wav_info", lambda p: (24647, 3.4))
+    monkeypatch.setattr(voice_server, "_play", lambda p: True)
+
+    class _Resp:
+        def read(self):
+            return b"0" * 512
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(voice_server.urllib.request, "urlopen",
+                        lambda *a, **k: _Resp())
+
+    res = voice_server.handle_speak({"text": "今天也要好好吃饭哦"})
+    text = res["content"][0]["text"]
+    assert text == ("念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
+                    "已经放给主人听了。"), text
+    # 模型看到的那段文本里没有机器标记
+    for bad in ("{", "}", ".voice.json", "<", ">"):
+        assert bad not in text, f"模型看到的结果文本里有机器标记：{bad}"
+    # 结构化信息在旁路文件里（不在文本里）
+    metas = list(out_dir.glob("*" + voice_server.VOICE_META_SUFFIX))
+    assert metas, "旁路文件没写"
+    data = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert data["duration"] == 3.4
+    assert data["kind"] == "speak"
+    assert data["path"].endswith(".wav")
+    # 界面渲染也不会把机器标记漏进聊天窗
+    _patch_voice_out(monkeypatch, tmp_path)
+    cw = _cw()
+    msg = Message(role="assistant", content="念给你听~", tools=[
+        ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}', text, "ok"),
+    ])
+    html = cw._msg_html(msg)
+    assert ".voice.json" not in html
+    assert "{" not in html and "}" not in html
+    assert msg.tools[0][2] == text, "界面改了结果文本（模型看到的不一样）"
+

@@ -329,7 +329,8 @@ def test_system_message():
 
 
 def test_tool_calls_display():
-    """工具调用：步骤卡片（中文名 + 目标 + 成败状态），默认折叠态显示 head + 第一条预览。"""
+    """工具调用：步骤卡片（英文工具名为主 + 中文小提示 + 目标 + 成败状态），
+    默认折叠态显示 head + 第一条预览。"""
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -373,8 +374,10 @@ def test_tool_calls_display():
     assert "联网搜索" in html2 and "十月新番" in html2
     # 失败状态
     assert "失败" in html2 and "星穹铁道" in html2
-    # 原始英文工具名 / 原始结果文本不直接展示给主人
-    assert "add_reminder" not in html2
+    # 英文工具名是**主显示**（专业、像日志）；中文标签只当副的小提示
+    assert '<span class="tool-name">add_reminder</span>' in html2
+    assert '<span class="tool-name">web_search</span>' in html2
+    # 原始结果文本不直接展示给主人
     assert "已设置提醒" not in html2
     # 展开态只显示箭头「▴」,不再出现"点击展开/点击收起"字样
     assert "▴" in html2
