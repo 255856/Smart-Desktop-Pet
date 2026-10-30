@@ -15,6 +15,27 @@ from app.core.tray import TrayController
 log = logging.getLogger(__name__)
 
 
+def _is_under(path: Path, base: Path) -> bool:
+    """path 是不是 base 下面的（防目录穿越）。"""
+    try:
+        Path(path).resolve().relative_to(Path(base).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _attr(obj, name: str, default=None):
+    """取实例属性。
+
+    PySide6 的 QObject 在 ``__init__`` 没被调用时，普通 getattr 会抛
+    RuntimeError（而不是 AttributeError），拿不到默认值。
+    """
+    try:
+        return object.__getattribute__(obj, name)
+    except AttributeError:
+        return default
+
+
 class UIController(QObject):
     """封装所有 UI 窗口管理和信号连接。"""
 
@@ -1709,14 +1730,153 @@ class UIController(QObject):
                 return {"ok": False, "error": "帧时长不是数字"}
             self._do_retune_frames(ms)
             return {"ok": True}
+        # -- Live2D：模型 / 场景 / 动作配置 -------------------------------
+        if action == "live2d_models":
+            return {"ok": True, "models": self._live2d_models()}
+        if action == "live2d_switch_model":
+            return self._live2d_switch_model(str(params.get("path") or ""))
+        if action == "live2d_scene_save":
+            return self._live2d_scene_save(
+                str(params.get("scene_id") or ""), params.get("bundle"))
+        if action == "live2d_scene_reset":
+            return self._live2d_scene_reset(str(params.get("scene_id") or ""))
+        if action == "live2d_action_save":
+            return self._live2d_action_save(params)
+        if action == "live2d_action_delete":
+            return self._live2d_action_delete(str(params.get("id") or ""))
+        if action == "live2d_action_play":
+            return self._live2d_action_play(str(params.get("id") or ""))
+        if action == "live2d_preview":
+            return self._live2d_preview(params.get("bundle"))
         return {"ok": False, "error": "未知动作：%s" % action}
 
+    #  Live2D：模型 / 场景 / 动作配置
+    def _live2d_models(self) -> list:
+        """可用的 Live2D 模型列表（当前用的那个标记 current）。"""
+        from app.core.live2d_config import list_models
+        root = _attr(self, "root")
+        if root is None:
+            return []
+        cfg = _attr(self, "cfg")
+        current = ""
+        if cfg is not None:
+            current = str(getattr(cfg.pet.live2d, "model_dir", "") or "")
+        return list_models(Path(root) / "assets" / "live2d", current)
+
+    def _live2d_switch_model(self, rel_path: str) -> dict:
+        """换模型：写进 config.yaml（重启桌宠生效）。
+
+        Live2D 渲染器带 WebView，热切换要整个重建 —— 不在这儿冒险，
+        写好配置、提示重启就行。
+        """
+        rel_path = str(rel_path or "").strip().replace("\\", "/")
+        if not rel_path:
+            return {"ok": False, "error": "没给模型路径"}
+        base = (Path(self.root) / "assets" / "live2d").resolve()
+        target = (Path(self.root) / rel_path).resolve()
+        if not _is_under(target, base):
+            return {"ok": False, "error": "模型路径不在 assets/live2d 里"}
+        if not target.is_dir() or not list(target.glob("*.model3.json")):
+            return {"ok": False, "error": "那目录里没有 *.model3.json"}
+        self.cfg.pet.live2d.model_dir = rel_path
+        self._write_yaml_section({"pet": {"live2d": {"model_dir": rel_path}}})
+        return {"ok": True, "path": rel_path, "restart": True,
+                "note": "模型已切换，重启桌宠后生效"}
+
+    def _write_yaml_section(self, section: dict) -> None:
+        """把一段配置写进 config.yaml（保留文件里其它内容）。"""
+        path = Path(self.root) / "config.yaml"
+        try:
+            import yaml
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            log.exception("读 config.yaml 失败")
+            return
+        for key, value in (section or {}).items():
+            if isinstance(value, dict) and isinstance(raw.get(key), dict):
+                raw[key].update(value)
+            else:
+                raw[key] = value
+        try:
+            path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+                            encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            log.exception("写 config.yaml 失败")
+
+    def _live2d_scene_save(self, scene_id: str, bundle) -> dict:
+        """保存一个触发场景的外观组合。"""
+        from app.core.live2d_config import dict_to_bundle
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        if not scene_id:
+            return {"ok": False, "error": "没给场景 id"}
+        r.set_scene_bundle(scene_id, dict_to_bundle(bundle or {}))
+        return {"ok": True, "scene_id": scene_id}
+
+    def _live2d_scene_reset(self, scene_id: str) -> dict:
+        """恢复一个触发场景的默认外观。"""
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        r.reset_scene_bundle(scene_id)
+        return {"ok": True, "scene_id": scene_id}
+
+    def _live2d_action_save(self, params: dict) -> dict:
+        """新建 / 更新一个自定义动作。"""
+        from app.core.live2d_config import dict_to_bundle
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        params = params or {}
+        name = str(params.get("name") or "").strip() or "未命名动作"
+        hook = str(params.get("hook") or "")
+        bundle = dict_to_bundle(params.get("bundle") or {})
+        hold = int(params.get("hold_ms") or bundle.hold_ms or 0)
+        cid = str(params.get("id") or "")
+        if cid:
+            r.update_custom_action(cid, name=name, hook=hook, bundle=bundle,
+                                   hold_ms=hold)
+        else:
+            r.add_custom_action(name, hook, bundle, hold)
+        return {"ok": True, "id": cid, "name": name}
+
+    def _live2d_action_delete(self, cid: str) -> dict:
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        ok = r.remove_custom_action(cid)
+        return {"ok": bool(ok), "id": cid}
+
+    def _live2d_action_play(self, cid: str) -> dict:
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        r.play_custom_action(cid)
+        return {"ok": True, "id": cid}
+
+    def _live2d_preview(self, bundle) -> dict:
+        """试穿一套外观（约 2.6 秒后恢复）。"""
+        from app.core.live2d_config import dict_to_bundle
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        r.preview_bundle(dict_to_bundle(bundle or {}))
+        return {"ok": True}
+
     def _control_appearance(self) -> dict:
-        """Live2D 外观分类（控制台渲染成 chip 网格）。"""
+        """Live2D 外观：分类 chip + 触发场景配置 + 自定义动作 + 可绑钩子。
+
+        不同模型的表情/发型/配件/手势条目不一样 —— 这里按当前模型给，
+        场景配置存在 ``data/live2d_scenes/<模型目录名>.json``，换模型自动换一份。
+        """
+        from app.core.live2d_config import (action_configs, hook_options,
+                                            item_labels, scene_configs)
         r = self._live2d_renderer()
         if r is None:
             return {"available": False, "groups": [], "active": [],
-                    "renderer": "sprite"}
+                    "renderer": "sprite", "scenes": [], "actions": [],
+                    "hooks": [], "models": self._live2d_models()}
         try:
             groups = r.get_menu_groups()
         except Exception:  # noqa: BLE001
@@ -1725,8 +1885,19 @@ class UIController(QObject):
             active = sorted(r.get_active_items())
         except Exception:  # noqa: BLE001
             active = []
-        return {"available": True, "groups": groups, "active": active,
-                "renderer": "live2d"}
+        return {
+            "available": True,
+            "groups": groups,
+            "active": active,
+            "renderer": "live2d",
+            "model": str(getattr(r, "model_dir", "")),
+            "modelName": str(getattr(getattr(r, "profile", None), "name", "") or ""),
+            "labels": item_labels(r),
+            "scenes": scene_configs(r),
+            "actions": action_configs(r),
+            "hooks": hook_options(r),
+            "models": self._live2d_models(),
+        }
 
     def _control_avatars(self) -> list:
         """可选头像（预设 + 用户上传）。"""

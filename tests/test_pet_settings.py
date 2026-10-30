@@ -287,6 +287,101 @@ def test_dashboard_collects_unchecked_switches(tmp_path):
     )
 
 
+# ── Live2D 模型 / 场景 / 动作配置 ─────────────────────────────────────────
+def test_list_models_finds_model_dirs(tmp_path):
+    """扫模型根目录，找出所有含 *.model3.json 的目录。"""
+    from app.core.live2d_config import list_models
+    repo = tmp_path
+    root = repo / "assets" / "live2d"
+    (root / "cat" / "cat_model").mkdir(parents=True)
+    (root / "cat" / "cat_model" / "cat.model3.json").write_text("{}", encoding="utf-8")
+    (root / "dog" / "dog_model").mkdir(parents=True)
+    (root / "dog" / "dog_model" / "dog.model3.json").write_text("{}", encoding="utf-8")
+    # 不是模型的目录要被忽略
+    (root / "empty").mkdir(parents=True)
+
+    models = list_models(root, current="assets/live2d/dog/dog_model")
+    names = sorted(m["name"] for m in models)
+    assert names == ["cat_model", "dog_model"]
+    current = [m for m in models if m["current"]]
+    assert current and current[0]["name"] == "dog_model"
+    # 路径是相对仓库根的（跟 config.yaml 里 model_dir 一个写法）
+    assert current[0]["path"] == "assets/live2d/dog/dog_model"
+
+
+def test_scene_catalog_covers_all_scene_groups():
+    """场景清单要含聊天情绪 / 状态 / 互动三组 + 游戏场景。"""
+    from app.core.live2d_config import scene_catalog
+    from app.animation.live2d_scene import (SCENE_GROUP_CHAT, SCENE_GROUP_INTERACT,
+                                            SCENE_GROUP_STATE)
+    catalog = scene_catalog()
+    groups = {c["group"] for c in catalog}
+    assert SCENE_GROUP_CHAT in groups
+    assert SCENE_GROUP_STATE in groups
+    assert SCENE_GROUP_INTERACT in groups
+    ids = {c["id"] for c in catalog}
+    assert "touch_head" in ids and "chat_happy" in ids
+    assert "game_win" in ids, "游戏场景也要能配"
+    assert all(c["kind"] in ("persist", "transient") for c in catalog)
+
+
+def test_hook_options_include_tool_and_model_hooks():
+    """钩子 = 工具动作 + 模型自带动作（不同模型不一样）。"""
+    from app.core.live2d_config import hook_options
+
+    class _Profile:
+        actions = {"my_special_move": object()}
+
+    class _Renderer:
+        profile = _Profile()
+
+    hooks = hook_options(_Renderer())
+    keys = [h["key"] for h in hooks]
+    assert "" in keys, "要有「仅手动播放」"
+    assert "eat" in keys, "工具动作没列出来"
+    assert "my_special_move" in keys, "模型自带动作没列出来"
+
+
+def test_bundle_roundtrip():
+    """外观组合 dict ↔ SceneBundle 往返不丢东西。"""
+    from app.core.live2d_config import bundle_to_dict, dict_to_bundle
+    data = {"emotion": "脸红", "hairstyle": "小辫",
+            "toggles": ["比心", "右喵喵拳"], "hold_ms": 1200}
+    bundle = dict_to_bundle(data)
+    assert bundle.emotion == "脸红"
+    assert bundle.hairstyle == "小辫"
+    assert bundle.toggles == ["比心", "右喵喵拳"]
+    assert bundle.hold_ms == 1200
+    assert bundle_to_dict(bundle) == data
+
+
+def test_summarize_marks_natural_emotion():
+    from app.core.live2d_config import dict_to_bundle, summarize
+    out = summarize(dict_to_bundle({"emotion": "natural"}))
+    assert "自然" in out
+    assert summarize(dict_to_bundle({})) == "默认（不改变）"
+
+
+def test_dashboard_has_live2d_config_sections(tmp_path):
+    """控制台要有模型 / 场景 / 动作三个区。"""
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    with fastapi_testclient.TestClient(_panel(tmp_path)) as client:
+        html = client.get("/").text
+    assert 'id="settingsModels"' in html
+    assert 'id="settingsScenes"' in html
+    assert 'id="settingsActions"' in html
+
+
+def test_control_actions_exist_for_live2d_config():
+    """主程序要认这些动作（模型切换 / 场景 / 动作配置）。"""
+    src = (ROOT / "app" / "ui" / "ui_controller.py").read_text(encoding="utf-8")
+    for action in ("live2d_models", "live2d_switch_model",
+                  "live2d_scene_save", "live2d_scene_reset",
+                  "live2d_action_save", "live2d_action_delete",
+                  "live2d_action_play", "live2d_preview"):
+        assert action in src, f"控制服务少了 {action} 动作"
+
+
 def test_dashboard_avatar_preview_rejects_paths_outside_avatars(tmp_path):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
     with fastapi_testclient.TestClient(_panel(tmp_path)) as client:
