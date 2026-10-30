@@ -1,4 +1,4 @@
-# Tools Reference · 桌宠 68 个工具全集
+# Tools Reference · 桌宠 71 个工具全集
 
 > 模型通过 **Function Calling** 协议（OpenAI 格式）调用这些工具。  
 > 用户口语 → 模型选工具 → `ToolRegistry.execute(name, args_json)` → 字符串结果回给模型 → 模型组织自然语言回复。
@@ -16,9 +16,9 @@
 | 五、应用与文件 | 15 | 2 |
 | 六、桌宠自身 | 5 | — |
 | 七、系统控制 | 20 | 5 |
-| 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3） | 7 | — |
+| 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3 + 语音 3） | 10 | — |
 | 九、生成 / 委派 | 4 | 1（run_script） |
-| **合计** | **68** | **9** |
+| **合计** | **71** | **9** |
 
 > 十、语音唤醒（非工具）独立章节。
 
@@ -356,12 +356,12 @@
 
 ---
 
-## 八、MCP 外部工具（7）
+## 八、MCP 外部工具（10）
 
 > 这些不是内置工具，是**运行时**由 MCP（Model Context Protocol）server 桥接进来的，
 > 命名规则 `mcp_<server 别名>_<工具名>`（app/mcp/protocol.py）。
-> 两个 server 在 `mcp_servers.yaml` 里配：`aw`（ActivityWatch，4 个工具）
-> + `fs`（文件系统沙箱，3 个工具）。
+> 三个 server：`aw`（ActivityWatch，4 个工具）+ `fs`（文件系统沙箱，3 个工具）
+> + `voice`（本机语音，3 个工具）。
 
 ### 8.1 ActivityWatch 活动感知（4）
 
@@ -412,7 +412,42 @@
 - **作用**：在沙箱内按 glob 模式搜索文件
 - **参数**：`pattern: str`（glob 模式），`root: str`（沙箱内搜索根目录）
 
-这 7 个 MCP 工具**不在** `_RISKY_TOOLS` 里（只读查询），不被 post-LLM 拦截器改写，跟其他 SAFE 工具一样正常走 confirm / ALLOW 路径。
+### 8.3 本机语音（3）
+
+> 内置的 voice MCP server（`app/mcp/voice_server.py`）。**只复用本机已经装好的模型**：
+> 合成走本机 GPT-SoVITS 服务（默认 `http://127.0.0.1:9880`），唱歌走本机 RVC 权重
+> （默认 `da_fei_yu.pth`，配在 `app/core/companion_config.yaml` 的 `voice.rvc` 段）。
+> **绝不下载任何模型**：本机没有的音色，工具会如实说「音色不在本地」。
+>
+> 语音是**桌宠自己决定**要不要发（默认不朗读每条回复；开关 `voice.auto_read`）。
+> 措辞铁律：语音条前面不加方括号标签；唱的是按这段词现编的调，不许自称原创歌曲；
+> 工具失败了就说失败，不许假装已经发出。
+
+### `mcp_voice_speak`
+- **触发**：「念给我听」「哼一声」/ 只想丢一句很短的俏皮话过去
+- **作用**：用本机音色把一句话念出来，在本机播放并落盘到 `data/voice_out/`
+- **参数**：`text: str`（必填，一两句最好）、`emotion: str`（可选，中性/愤怒/惊讶/悲伤/紧张/恐惧/轻声/耳语）、`speed: float`（0.5~2.0，默认 1.0）
+- **报错**：
+  - 本机没音色 → 「失败：音色不在本地：…（本工具不会下载任何模型）。」
+  - TTS 服务没起 → 「失败：合成失败：TTS 服务 … 没响应（…）。」
+
+### `mcp_voice_sing`
+- **触发**：「唱一句」「唱一段」/ 主人点名要听歌
+- **作用**：用本机 RVC 按旋律唱一段歌词（每个字配一个音高并在字内保持住，所以是唱不是念），在本机播放并落盘
+- **参数**：`lyrics: str`（必填，给文本，别写曲谱）、`speed: float`（0.5~1.5，默认 0.92）、`seed: int`（可选，换一个数就是另一条旋律；不给就随机）、`base: float`（可选，旋律基准音高 Hz，默认 329.63）
+- **报错**：
+  - 本机没 RVC 资产 → 「失败：RVC 解释器不在本机：… / 音色不在本地：…（不会自动下载模型权重）。」
+  - RVC 没产出音频 → 「失败：唱歌失败：没有产出音频。RVC 返回码 …，最后一行：…」
+
+### `mcp_voice_status`
+- **触发**：不确定本机语音能不能用 / 先查再唱
+- **作用**：只读盘点 TTS 服务在线与否、RVC 解释器 / 脚本 / 音色权重、本机情绪参考库
+- **参数**：无
+- **报错**：不报错；缺的东西会直接写明「音色不在本地」并声明不会下载
+
+ActivityWatch 与文件系统那 7 个工具**不在** `_RISKY_TOOLS` 里（只读查询），
+不被 post-LLM 拦截器改写，跟其他 SAFE 工具一样正常走 confirm / ALLOW 路径；
+语音那 3 个工具会在本机播放并写音频文件（只写 `data/voice_out/`），同样不在 `_RISKY_TOOLS` 里。
 
 ---
 
@@ -624,7 +659,7 @@ app/engine/tools/
 
 ## 统计
 
-- **68 个工具**（不含语音唤醒） = 61 个内置 + 7 个 MCP（4 个 ActivityWatch + 3 个 filesystem）+ 1 个语音模块
+- **71 个工具**（不含语音唤醒） = 61 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
 - **8 个弹窗 confirm** + 4 个只 log 不弹窗 = 12 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
 - **1270 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

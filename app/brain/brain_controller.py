@@ -862,13 +862,28 @@ class BrainController(QObject):
 
         MCP server 是独立子进程，握手可能秒级，放后台线程避免卡启动。
         """
-        from app.mcp.protocol import MCPClientRegistry
+        from app.mcp.protocol import MCPClientRegistry, MCPServerConfig
         servers_file = Path(cfg.mcp.servers_file)
         if not servers_file.is_absolute():
             servers_file = root / servers_file
 
         registry = MCPClientRegistry()
         n = registry.load_from_yaml(servers_file)
+        # 内置 voice server：语音从「每条回复都朗读」改成「桌宠自己决定发不发」。
+        # 它不走 mcp_servers.yaml —— 那是主人的外部扩展清单；语音是本项目自带的、
+        # 用本机已有模型（GPT-SoVITS + RVC）的能力，开关在 companion_config.yaml
+        # 的 voice.mcp_enabled。
+        if self._voice_mcp_enabled():
+            registry.register(MCPServerConfig(
+                name="voice",
+                command=sys.executable,
+                args=["-m", "app.mcp.voice_server"],
+                cwd=str(root),
+                description="本机语音（念 / 唱 / 查音色）",
+                # 唱歌要跑一次 RVC 推理（~30 秒），默认 30 秒会先超时
+                call_timeout=240.0,
+            ))
+            n += 1
         if n == 0:
             log.info("MCP：已启用但没有可用的 server 配置（%s）", servers_file)
             return
@@ -885,7 +900,7 @@ class BrainController(QObject):
                 from app.brain.agent import DANGEROUS_TOOLS
                 bridged = registry.bridge_to(
                     self.tool_registry, dangerous_tools=set(DANGEROUS_TOOLS))
-                # MCP 工具也进基线（白名单里它们按 mcp_aw_ / mcp_fs_ 前缀放行）
+                # MCP 工具也进基线（白名单里它们按 mcp_aw_ / mcp_fs_ / mcp_voice_ 前缀放行）
                 self.tool_registry.seal_baseline()
                 log.info("MCP：已桥接 %d 个外挂工具 %s",
                          bridged, list(ok.keys()))
@@ -893,6 +908,19 @@ class BrainController(QObject):
                 log.exception("MCP 加载失败（不影响桌宠本体功能）")
 
         threading.Thread(target=_load, daemon=True, name="mcp-load").start()
+
+    @staticmethod
+    def _voice_mcp_enabled() -> bool:
+        """内置 voice MCP server 是否启用。
+
+        读 companion_config.yaml 的 voice.mcp_enabled（默认开）。
+        读不到就按「开」处理 —— 语音工具挂了不影响桌宠本体。
+        """
+        try:
+            from app.voice.voice import load_voice_settings
+            return bool((load_voice_settings() or {}).get("mcp_enabled", True))
+        except Exception:  # noqa: BLE001
+            return True
 
     def shutdown_mcp(self) -> None:
         """停止所有 MCP server 子进程 + 关闭常驻 loop（进程退出前调用）。"""

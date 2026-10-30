@@ -86,7 +86,7 @@ def test_tts_speak_queue_serialization():
     assert tts._speak_worker_started is True
 
 
-def test_chat_window_tts_drain_no_duplicate_queue():
+def test_chat_window_tts_drain_no_duplicate_queue(monkeypatch):
     """_tts_drain_sentences 多次调用同一段不应重复入队。
 
     流式场景：_on_chunk 每收到一个 token 就调一次 _tts_drain_sentences(accumulated)，
@@ -95,7 +95,13 @@ def test_chat_window_tts_drain_no_duplicate_queue():
 
     不真正构造 ChatWindow（依赖太多），改为直接调 _tts_drain_sentences 并传入
     同一 self / tts 的 mock，确保相同句子只入队一次。
+
+    ⚠️ 自动朗读默认是**关**的（voice.auto_read，默认 false —— 语音改成桌宠
+    自己决定要不要发），所以这里先把开关打开：本用例测的是「逐句切分不重复」，
+    不是「要不要朗读」这个策略。
     """
+    monkeypatch.setattr("app.voice.voice.load_voice_settings",
+                        lambda **kw: {"auto_read": True})
     from app.engine.tools._search import _format_results_md
     # 直接用 ChatWindow 类但只测它的 _tts_drain_sentences 方法（mock char_cfg + tts）
     import sys

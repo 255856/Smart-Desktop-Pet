@@ -431,6 +431,29 @@ def build_session_block(*, skill=None, memory=None, tool_list=None) -> str:
 # 工具手册
 # --------------------------------------------------------------------------
 
+#: 语音工具的用法说明（放进工具手册）。
+#:
+#: 语音从「每条回复都朗读」改成「桌宠**自己决定**要不要发语音」，
+#: 所以手册里得说清楚三件事：**什么时候**适合发语音、**怎么**发、
+#: 以及两条措辞铁律（不加方括号标签 / 不自称原创歌曲）。
+#:
+#: 刻意**不**写成「每轮都发」—— 语音是打断，不是常态。
+VOICE_TOOL_GUIDE = (
+    "【语音】本机装了语音能力，三个工具："
+    "mcp_voice_speak 念一段话、mcp_voice_sing 按旋律唱一段歌词、"
+    "mcp_voice_status 查本机有哪些音色可用。\n"
+    "适合发语音：主人明确说「念给我听」「唱一句」「哼一声」的时候；"
+    "或者你只想丢一句很短的俏皮话过去的时候。\n"
+    "不适合：解释问题、长回答、主人要照着看的内容 —— 那些用文字。\n"
+    "频率：语音是打断，不是每轮都要用。绝大多数回合用文字就好，"
+    "偶尔（主人开口要、或气氛正好）才发一条。\n"
+    "措辞铁律：①语音条**前面不要加方括号标签**（「[语音]」「[翻唱]」那种），"
+    "主人嫌那玩意儿出戏；要说话就另外发一条普通文字消息；"
+    "②唱的是按这段词现编的调，要这么说明，**不要自称原创歌曲**；"
+    "③工具失败了就说失败，**绝不假装已经发出语音**。"
+)
+
+
 def _current_tool_level() -> int:
     """当前桌宠等级（读全局等级读取器；读不到按 Lv10 = 全部可见）。"""
     try:
@@ -470,6 +493,16 @@ def build_tool_handbook(*, registry=None, level=None) -> str:
         MCP_DEFAULT_LEVEL = 0
     if MCP_DEFAULT_LEVEL and lvl < MCP_DEFAULT_LEVEL:
         unlock_line += f"外部扩展 (MCP) 需要 Lv.{MCP_DEFAULT_LEVEL} 才能用。"
+    # 语音工具在册 → 手册里补一段「什么时候该发语音」的用法说明。
+    # 语音改成桌宠**自主决定**要不要发，所以得说清楚「适合 / 不适合 / 频率」，
+    # 但**不能**变成「每轮都发」的命令 —— 那跟原来每条都朗读一样吵。
+    try:
+        has_voice = any(str(n).startswith("mcp_voice_")
+                        for n in registry.names())
+    except Exception:  # noqa: BLE001
+        has_voice = False
+    if has_voice:
+        unlock_line += "\n\n" + VOICE_TOOL_GUIDE
     return unlock_line
 
 

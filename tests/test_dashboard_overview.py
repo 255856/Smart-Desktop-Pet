@@ -196,13 +196,29 @@ def _dig(data, path):
     return node
 
 
+#: 桌宠**运行时自己会追加写**的文件（app 正在跑就会变）。
+#: 这条守卫要抓的是「**测试/面板**往仓库 data/ 里写东西」，不是「主程序在写自己的日志」——
+#: 否则只要桌宠开着跑，日志文件每长一字节这条测试就误伤。
+_VOLATILE_DATA_FILES = frozenset({
+    "companion_log.txt",
+    "token-usage.jsonl",
+})
+
+
+def _is_volatile(path: Path) -> bool:
+    """这个文件是不是运行时自己会变的（日志 / 账本）。"""
+    if path.suffix == ".log":
+        return True
+    return path.name in _VOLATILE_DATA_FILES
+
+
 def _snapshot(path: Path):
-    """目录快照：相对路径 -> (mtime_ns, size)。"""
+    """目录快照：相对路径 -> (mtime_ns, size)。**跳过运行时易变文件**。"""
     out = {}
     if not path.exists():
         return out
     for p in sorted(path.rglob("*")):
-        if p.is_file():
+        if p.is_file() and not _is_volatile(p):
             st = p.stat()
             out[str(p.relative_to(path))] = (st.st_mtime_ns, st.st_size)
     return out
@@ -479,29 +495,257 @@ class TestDangerousOperations:
 
 
 # --------------------------------------------------------------------------
-# A5 · 金额标 estimated
+# A5 · 金额：**人民币**计价 + **诚实**的估算标记
+#
+# 本项目实际调的是 MiniMax 国产平台（https://api.minimaxi.com/v1），
+# 账单按**元**结算 —— 面板以前写死 "$"（美元），是错的。
+# 估算标记也必须诚实：价格已知的模型（MiniMax-M3）不能标「估算」，
+# 价目表里没有的模型必须继续标「估算」。
 # --------------------------------------------------------------------------
 class TestEstimatedAmounts:
-    def test_summary_cost_is_estimated(self, panel):
+    def test_summary_cost_is_cny(self, panel):
         s = _get_json(panel["app"], "/api/tokens/summary")
         cost = s["cost"]
         assert isinstance(cost["estimated"], bool)
-        if cost.get("price_source") == "placeholder":
-            # 真实价目表还没落地（Stage 4.1），金额必须标 estimated
-            assert cost["estimated"] is True
         assert cost["amount"] >= 0
-        assert cost["currency"] == "USD"
+        assert cost["currency"] == "CNY", "本项目按人民币结算，不能报美元"
+        assert cost["symbol"] == "¥"
+        # 价目表来源必须写出来（不能让人以为是国际站的美元账单）
+        assert cost.get("price_table"), "缺价目表来源"
 
-    def test_overview_cost_card_is_estimated(self, panel):
+    def test_known_model_is_not_estimated(self, panel):
+        """台账里的模型是 MiniMax-M3 —— 价目表里查得到 -> 不是估算。"""
+        s = _get_json(panel["app"], "/api/tokens/summary")
+        by_model = s["by_model"] or {}
+        assert "MiniMax-M3" in by_model, by_model
+        cost = by_model["MiniMax-M3"]["cost"]
+        assert cost["estimated"] is False, "价格已知还标估算 = 假诚实"
+        assert cost["currency"] == "CNY"
+
+    def test_unknown_model_stays_estimated(self, panel):
+        """价目表里没有的模型必须继续标「估算」（不许假装是准数）。"""
+        from app.web.dashboard import _estimate_cost
+        known = _estimate_cost({"prompt_tokens": 1000}, model="MiniMax-M3")
+        assert known["estimated"] is False
+        unknown = _estimate_cost({"prompt_tokens": 1000}, model="No-Such-Model-XYZ")
+        assert unknown["estimated"] is True
+        assert unknown["currency"] == "CNY"
+        # 压根没传模型 -> 也是估算（拿兜底价猜的）
+        assert _estimate_cost({"prompt_tokens": 1000})["estimated"] is True
+
+    def test_overview_cost_card_is_cny(self, panel):
         cards = _get_json(panel["app"], "/api/overview")["cards"]
         cost_card = [c for c in cards if c["label"] == "累计花费"]
-        assert cost_card and cost_card[0].get("estimated") is True
+        assert cost_card
+        card = cost_card[0]
+        assert card["currency"] == "CNY"
+        assert card["symbol"] == "¥"
+        # 台账里只有已知模型 -> 汇总不是估算
+        assert card["estimated"] is False
 
-    def test_turns_and_series_costs_are_estimated(self, panel):
+    def test_turns_and_series_costs_are_not_estimated_for_known_model(self, panel):
+        """逐请求 / 时间桶：MiniMax-M3 那一行价格已知 -> 不标估算。"""
         for url in ("/api/tokens/series", "/api/tokens/turns"):
             data = _get_json(panel["app"], url)
             for item in data["items"]:
-                assert item["cost"]["estimated"] is True
+                assert item["cost"]["currency"] == "CNY"
+                assert item["cost"]["estimated"] is False
+
+    def test_cost_panel_uses_backend_currency(self, panel):
+        """前端不许再写死 "$" —— 币种跟后端走。"""
+        html = _request(panel["app"], "GET", "/").text
+        assert "costSymbol" in html
+        assert "costPriceNote" in html
+        assert '"$"+Number(cost.amount' not in html
+
+
+# --------------------------------------------------------------------------
+# 审查 · F2 Live2D「当前模型」只有一个真值
+#
+# 桌宠进程那边有两个来源：渲染器实际加载的 model_dir（权威）跟
+# config.yaml 里写的 pet.live2d.model_dir（切换时写、启才生效）。
+# 面板以前只标 cfg 那一个 -> 换了模型没重启时会把「没生效的」标成当前。
+# --------------------------------------------------------------------------
+class TestLive2dCurrentModel:
+    def test_renderer_model_is_the_single_source_of_truth(self):
+        from app.web.dashboard import _live2d_model_state
+        ap = _live2d_model_state({
+            "available": True,
+            "model": "assets/live2d/real",
+            "models": [
+                {"path": "assets/live2d/real", "current": False},
+                {"path": "assets/live2d/other", "current": True},
+            ],
+        })
+        assert ap["currentModel"] == "assets/live2d/real"
+        assert ap["configuredModel"] == "assets/live2d/other"
+        assert ap["modelMismatch"] is True
+
+    def test_no_mismatch_when_they_agree(self):
+        from app.web.dashboard import _live2d_model_state
+        ap = _live2d_model_state({
+            "model": "assets/live2d/real",
+            "models": [{"path": "assets/live2d/real", "current": True}],
+        })
+        assert ap["modelMismatch"] is False
+        assert ap["currentModel"] == ap["configuredModel"]
+
+    def test_settings_endpoint_exposes_the_truth(self, panel):
+        """桌宠没连上也不能 500；连上时要带出唯一真值。"""
+        data = _get_json(panel["app"], "/api/settings")
+        ap = data["appearance"]
+        for key in ("currentModel", "configuredModel", "modelMismatch"):
+            assert key in ap, key
+
+    def test_frontend_marks_the_renderer_model(self, panel):
+        html = _request(panel["app"], "GET", "/").text
+        assert "currentModel" in html
+        assert "configuredModel" in html
+        assert "modelMismatch" in html
+
+
+# --------------------------------------------------------------------------
+# 审查 · F3 记忆图必须说清「看的是哪一种图」
+# --------------------------------------------------------------------------
+class TestMemoryGraphLabel:
+    def test_page_says_which_graph_it_shows(self, panel):
+        html = _request(panel["app"], "GET", "/").text
+        assert "_graphReason" in html
+        assert "语义图" in html
+        assert "分类图" in html
+        assert "语义图不可用" in html
+
+    def test_graph_endpoint_explains_why_it_is_empty(self, panel):
+        """语义图拿不到时，端点要说清楚为什么（不能默默换个图）。"""
+        data = _get_json(panel["app"], "/api/memory/graph")
+        assert data["ok"] is False
+        assert data["reason"], "必须说明为什么没有语义图"
+
+    def test_memory_payload_carries_the_reason(self, panel):
+        data = _get_json(panel["app"], "/api/memory")
+        graph = data["graph"]
+        assert graph["ok"] is False
+        assert graph["reason"]
+
+
+# --------------------------------------------------------------------------
+# 审查 · F4 sidecar 停掉时，面板**每个**端点都得 200 + 说清楚
+# --------------------------------------------------------------------------
+class TestSidecarDownDegrades:
+    ENDPOINTS = [
+        ("GET", "/api/memory"),
+        ("GET", "/api/memory/graph"),
+        ("GET", "/api/memory/sleep"),
+        ("POST", "/api/memory/sleep/schedule"),
+        ("POST", "/api/memory/sleep/run"),
+        ("GET", "/api/health"),
+        ("GET", "/api/overview"),
+    ]
+
+    @staticmethod
+    def _refused(method, url, payload, timeout):
+        raise ConnectionRefusedError("nothing on 8788")
+
+    def test_every_endpoint_answers_200(self, panel):
+        from app.brain import memory_client as mc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", self._refused)
+            for method, url in self.ENDPOINTS:
+                r = _request(panel["app"], method, url)
+                assert r.status_code == 200, "%s %s -> %s" % (
+                    method, url, r.status_code)
+
+    def test_memory_tab_says_the_service_is_down(self, panel):
+        from app.brain import memory_client as mc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", self._refused)
+            data = _get_json(panel["app"], "/api/memory")
+        assert data["ok"] is False
+        assert data["count"] == 0
+        assert data["items"] == []
+        assert "sidecar" in data["note"]
+        assert data["sidecar"]["reachable"] is False
+        assert data["sidecar"]["error"]
+
+    def test_sleep_plan_says_why(self, panel):
+        from app.brain import memory_client as mc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", self._refused)
+            data = _get_json(panel["app"], "/api/memory/sleep")
+        assert data["ok"] is True
+        assert data["plan"]["ok"] is False
+        assert data["plan"]["reason"]
+
+    def test_health_and_overview_still_work(self, panel):
+        from app.brain import memory_client as mc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", self._refused)
+            health = _get_json(panel["app"], "/api/health")
+            ov = _get_json(panel["app"], "/api/overview")
+        assert health["memory_sidecar"]["reachable"] is False
+        assert ov["memory"]["reachable"] is False
+        assert ov["memory"]["count"] == 0
+
+    def test_rebuild_index_answers_200_when_sidecar_is_down(self, panel):
+        from app.brain import memory_client as mc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mc, "_urllib_http", self._refused)
+            r = _request(panel["app"], "POST",
+                         "/api/maintenance/rebuild-vector-index"
+                         "?maintenance=1&confirm=rebuild-vector-index")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert body["error"]
+
+
+# --------------------------------------------------------------------------
+# 审查 · 工具 Tab 要能看见执行期白名单（放行 / 拦截）
+# --------------------------------------------------------------------------
+class TestToolAllowlist:
+    def test_allowlist_status_is_reported(self, panel):
+        t = _get_json(panel["app"], "/api/tools")
+        al = t["allowlist"]
+        assert al["available"] is True, "仓库的 companion_config.yaml 里有该段"
+        assert al["exact_count"] > 0
+        assert al["prefixes"]
+        names = {x["name"] for x in t["tools"]}
+        assert set(al["allowed"]) | set(al["blocked"]) == names
+        assert not (set(al["allowed"]) & set(al["blocked"]))
+        assert "open_app" in al["allowed"]
+        # 注册表里的 68 个工具都登记过（exact 或前缀）-> 不该有拦截项
+        assert al["blocked"] == []
+        assert al["dead_entries"] == []
+
+    def test_every_tool_row_says_allowlisted(self, panel):
+        t = _get_json(panel["app"], "/api/tools")
+        allowed = set(t["allowlist"]["allowed"])
+        for tool in t["tools"]:
+            assert tool["allowlisted"] is (tool["name"] in allowed), tool["name"]
+
+    def test_tools_page_shows_the_allowlist(self, panel):
+        html = _request(panel["app"], "GET", "/").text
+        assert "toolAllowlist" in html
+        assert "执行期白名单" in html
+
+
+# --------------------------------------------------------------------------
+# 审查 · A5 面板不许再描述**已经删掉**的架构
+# --------------------------------------------------------------------------
+class TestNoStaleArchitectureText:
+    STALE = ("live 库", "access_count", "merge-preview", "memory.db",
+             "data/vectors", "sqlite")
+
+    def test_page_has_no_stale_text(self, panel):
+        html = _request(panel["app"], "GET", "/").text
+        for word in self.STALE:
+            assert word not in html, word
+
+    def test_endpoints_have_no_stale_text(self, panel):
+        for url in ("/api/memory", "/api/health", "/api/overview", "/api/tools"):
+            body = json.dumps(_get_json(panel["app"], url), ensure_ascii=False)
+            for word in ("live 库", "access_count", "memory.db", "data/vectors"):
+                assert word not in body, "%s: %s" % (url, word)
 
 
 # --------------------------------------------------------------------------
@@ -510,19 +754,21 @@ class TestEstimatedAmounts:
 class TestToolsTab:
     def test_tool_inventory_counts(self, panel):
         t = _get_json(panel["app"], "/api/tools")
-        assert t["count"] == 68, t["count"]
+        assert t["count"] == 71, t["count"]
         assert t["builtin_count"] == 61, t["builtin_count"]
-        assert t["mcp_count"] == 7, t["mcp_count"]
+        assert t["mcp_count"] == 10, t["mcp_count"]
         assert t["count"] == t["builtin_count"] + t["mcp_count"]
-        assert len(t["tools"]) == 68
+        assert len(t["tools"]) == 71
 
-    def test_mcp_split_is_activitywatch_and_filesystem(self, panel):
+    def test_mcp_split_is_activitywatch_filesystem_and_voice(self, panel):
         t = _get_json(panel["app"], "/api/tools")
         aw = [x for x in t["tools"] if x["name"].startswith("mcp_aw_")]
         fs = [x for x in t["tools"] if x["name"].startswith("mcp_fs_")]
+        voice = [x for x in t["tools"] if x["name"].startswith("mcp_voice_")]
         assert len(aw) == 4, [x["name"] for x in aw]
         assert len(fs) == 3, [x["name"] for x in fs]
-        assert len(aw) + len(fs) == t["mcp_count"]
+        assert len(voice) == 3, [x["name"] for x in voice]
+        assert len(aw) + len(fs) + len(voice) == t["mcp_count"]
 
     def test_every_tool_has_risk_and_unlock_level(self, panel):
         t = _get_json(panel["app"], "/api/tools")
@@ -535,7 +781,7 @@ class TestToolsTab:
     def test_reconciliation_reads_check_tool_docs(self, panel):
         rec = _get_json(panel["app"], "/api/reconciliation")
         assert rec["available"] is True
-        assert rec["live_count"] == 68
+        assert rec["live_count"] == 71
         assert "sources" in rec and rec["sources"]
 
 

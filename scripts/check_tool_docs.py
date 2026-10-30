@@ -31,7 +31,8 @@ live = app/engine.tools.build_default_tools() 注册的内置工具
        alias 来自 mcp_servers.yaml 的 name（app/mcp/protocol.py 的 start_all
        用它当 key），工具名来自对应 server 模块的 TOOLS 常量。
        shipped 配置 = aw（app/mcp/activitywatch_server.py）4 个
-                    + fs（app/mcp/filesystem_server.py）3 个 = 7 个。
+                    + fs（app/mcp/filesystem_server.py）3 个
+                    + voice（app/mcp/voice_server.py）3 个 = 10 个。
 
 用法
 ----
@@ -90,10 +91,11 @@ QT_ROOTS = ("pyqt5", "pyqt6", "pyside2", "pyside6")
 # 所以 alias 写错 / server 没启用，暴露出来的工具名就跟文档对不上。
 #
 # mcp_servers.yaml 是 .gitignore 的本机文件，CI 上没有 -> 用下面这张默认表兜底。
-# 默认表必须跟 shipped 配置一致：aw 4 个 + fs 3 个 = 7 个。
+# 默认表必须跟 shipped 配置一致：aw 4 个 + fs 3 个 + voice 3 个 = 10 个。
 DEFAULT_MCP_SERVERS: dict = {
     "aw": "app.mcp.activitywatch_server",
     "fs": "app.mcp.filesystem_server",
+    "voice": "app.mcp.voice_server",
 }
 
 # 有意的差异：这些名字在**某一份**参考资料里出现，注册表里故意没有 / 故意换个名。

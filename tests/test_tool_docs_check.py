@@ -2,9 +2,9 @@
 
 钉死几件事：
 
-1. live 工具数 = 68（61 个内置 + 7 个 MCP：aw 4 + fs 3）；
-2. 两份文档都声明 68（且拆成 61 内置 + 7 MCP = 4 ActivityWatch + 3 filesystem）；
-3. 没有 mcp_servers.yaml 时（CI 场景，本机文件被 gitignore）默认表也给出 7 个 MCP 工具；
+1. live 工具数 = 71（61 个内置 + 10 个 MCP：aw 4 + fs 3 + voice 3）；
+2. 两份文档都声明 71（且拆成 61 内置 + 10 MCP = 4 ActivityWatch + 3 filesystem + 3 voice）；
+3. 没有 mcp_servers.yaml 时（CI 场景，本机文件被 gitignore）默认表也给出 10 个 MCP 工具；
 4. **五个文件里的 8 处名字来源都被对账**（文档 / SKILL.md / _risk.py / agent.py /
    companion_config.yaml 的 tool_allowlist 段），注入一个假名字进去必须被报出来，
    且报告要写明差异来自哪个来源；
@@ -28,11 +28,12 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = ROOT / "scripts" / "check_tool_docs.py"
 
-EXPECTED_TOTAL = 68
+EXPECTED_TOTAL = 71
 EXPECTED_BUILTIN = 61
-EXPECTED_MCP = 7
+EXPECTED_MCP = 10
 EXPECTED_AW = 4
 EXPECTED_FS = 3
+EXPECTED_VOICE = 3
 
 QT_ROOTS = ("pyqt5", "pyqt6", "pyside2", "pyside6")
 
@@ -110,14 +111,14 @@ def _drop_name(script, monkeypatch, key, gone):
 # --- 数量 / 文档声明 ----------------------------------------------------
 
 
-def test_live_count_is_68(script):
-    """live = 61 内置 + 7 MCP（aw 4 + fs 3）= 68。"""
+def test_live_count_is_71(script):
+    """live = 61 内置 + 10 MCP（aw 4 + fs 3 + voice 3）= 71。"""
     result = script.collect()
     assert len(result["live_builtin"]) == EXPECTED_BUILTIN
     assert len(result["live_mcp"]) == EXPECTED_MCP
     assert result["live_count"] == EXPECTED_TOTAL
     split = {alias: len(names) for alias, names in result["mcp_by_server"].items()}
-    assert split == {"aw": EXPECTED_AW, "fs": EXPECTED_FS}
+    assert split == {"aw": EXPECTED_AW, "fs": EXPECTED_FS, "voice": EXPECTED_VOICE}
 
 
 def test_no_unexplained_differences(script):
@@ -126,8 +127,8 @@ def test_no_unexplained_differences(script):
     assert result["errors"] == [], result["errors"]
 
 
-def test_docs_declare_68(script):
-    """两份文档都声明 68（= 61 内置 + 7 MCP = 4 aw + 3 fs）。"""
+def test_docs_declare_71(script):
+    """两份文档都声明 71（= 61 内置 + 10 MCP = 4 aw + 3 fs + 3 voice）。"""
     for path, total_patterns in (
         (script.DOC_PATH, script.DOC_COUNT_CLAIMS),
         (script.SKILL_PATH, script.SKILL_COUNT_CLAIMS),
@@ -160,11 +161,11 @@ def test_docs_cover_every_live_tool(script):
 
 
 def test_default_mcp_table_without_yaml(script, tmp_path, monkeypatch):
-    """没有 mcp_servers.yaml（CI）时，默认表也得给出 aw 4 + fs 3 = 7 个。"""
+    """没有 mcp_servers.yaml（CI）时，默认表也得给出 aw 4 + fs 3 + voice 3 = 10 个。"""
     monkeypatch.setattr(script, "MCP_SERVERS_PATH", tmp_path / "no-such-file.yaml")
     inventory = script.mcp_inventory()
     split = {alias: len(names) for alias, names in inventory.items()}
-    assert split == {"aw": EXPECTED_AW, "fs": EXPECTED_FS}
+    assert split == {"aw": EXPECTED_AW, "fs": EXPECTED_FS, "voice": EXPECTED_VOICE}
     assert sum(len(names) for names in inventory.values()) == EXPECTED_MCP
 
 

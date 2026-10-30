@@ -31,6 +31,10 @@ class MCPServerConfig:
     cwd: Optional[str] = None
     description: str = ""
     enabled: bool = True
+    #: 单次 tools/call 的墙钟超时（秒）。默认 30 —— 大多数 MCP 工具都是毫秒级。
+    #: 需要跑模型推理的 server（比如本项目的 voice server 要跑 RVC 转换，
+    #: 单次 ~30 秒）要调大，否则客户端先超时、工具其实还在跑。
+    call_timeout: float = 30.0
 
 
 @dataclass
@@ -260,6 +264,7 @@ class MCPClientRegistry:
                 env=s.get("env", {}) or {},
                 cwd=s.get("cwd"),
                 description=s.get("description", ""),
+                call_timeout=float(s.get("call_timeout", 30.0) or 30.0),
             )
             self._configs[cfg.name] = cfg
         return len(self._configs)
@@ -334,6 +339,14 @@ class MCPClientRegistry:
                 ))
         return out
 
+    def call_timeout_of(self, server_name: str) -> float:
+        """某个 server 的工具调用超时（秒）；没配就用默认 30。"""
+        cfg = self._configs.get(server_name)
+        try:
+            return float(getattr(cfg, "call_timeout", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            return 30.0
+
     def bridge_to(self, registry, dangerous_tools: Optional[set[str]] = None) -> int:
         """把 MCP tools 注册到本地 ToolRegistry，返回注册数量。
 
@@ -352,12 +365,15 @@ class MCPClientRegistry:
             tool_name = mcp_tool.name
             is_dangerous = mcp_tool.dangerous or (
                 local_name in dangerous_tools)
+            # 该 server 自己的工具调用超时（跑推理的 server 要调大）
+            tool_timeout = self.call_timeout_of(mcp_tool.server)
 
-            def make_fn(s=server_name, t=tool_name):
+            def make_fn(s=server_name, t=tool_name, to=tool_timeout):
                 def fn(**kwargs) -> str:
                     try:
                         return self.run_sync(
-                            self.call(s, t, kwargs), timeout=60.0)
+                            self.call(s, t, kwargs, timeout=to),
+                            timeout=to + 15)
                     except Exception as e:  # noqa: BLE001
                         return f"错误：MCP 调用失败：{e}"
                 return fn

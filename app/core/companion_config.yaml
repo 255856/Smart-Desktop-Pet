@@ -292,6 +292,7 @@ tool_allowlist:
   prefixes:                       # MCP 外部工具按命名空间前缀放行
     - mcp_aw_                      # ActivityWatch (aw server)
     - mcp_fs_                      # 文件系统沙箱 (fs server)
+    - mcp_voice_                   # 语音 (voice server)：念 / 唱 / 查本机音色
 
 # 输入侧预算（Stage 4.4）—— 输入 token 的天花板 + 超预算的可见告警
 #
@@ -327,3 +328,42 @@ context_compaction:
   keep_recent: 8            # 最新 N 条永远原文保留（不参与摘要）
   summary_timeout_s: 20     # 摘要请求超时（秒）—— 超时按失败处理（退回丢最旧）
   summary_max_chars: 600    # 摘要正文最长多少字（防止摘要把预算又吃回去）
+
+# ---------------------------------------------------------------------------
+# 语音（Stage：桌宠自主发语音 / 唱歌）
+# ---------------------------------------------------------------------------
+# 语音从「每条回复都朗读」改成「桌宠自己决定要不要发语音」：
+#   - auto_read: false —— 默认**不**朗读每条回复（原来是逐句朗读，见
+#     app/ui/chat_window/__init__.py 的 _tts_drain_sentences）。
+#     主人想恢复原来的行为，把这里改成 true 就行（放在 data/companion_config.yaml
+#     里覆盖也行，改完自动生效，不用重启桌宠）。
+#   - 桌宠**主动**发语音走 MCP 工具 mcp_voice_speak / mcp_voice_sing / mcp_voice_status。
+#     措辞规则（语音条不加方括号标签、不自称原创歌曲、失败不装成功）写在
+#     app/mcp/voice_server.py 的工具描述里，模型看得见。
+#   - 频率：语音是打断，不是每轮都要用 —— 工具描述里也写死了这一点。
+#
+# ⚠️ 本段只放**本机已经装好**的东西。语音工具**绝不会**下载任何模型权重：
+#    本机没有的音色，mcp_voice_status 会写明「音色不在本地」。
+# ⚠️ 这里不放 API key —— 那在 config.yaml。
+#
+# ⚠️ **要关掉整个语音能力，改这里的 mcp_enabled: false**，别去改 mcp_servers.yaml。
+#    voice server 有**两处登记**：运行期是 app/brain/brain_controller.py::_setup_mcp 注册的，
+#    对账期是 scripts/check_tool_docs.py 的 DEFAULT_MCP_SERVERS（脚本只认这个）。
+#    两处指向同一个模块（app.mcp.voice_server），工具名一致（mcp_voice_speak / _sing / _status）。
+#    如果只把 mcp_servers.yaml 里的 voice 设成 enabled: false，运行期照旧有（brain_controller
+#    照注册），但对账脚本看不见它 → 工具清单对账那条「死前缀」断言会红。
+voice:
+  auto_read: false             # 默认不朗读每条回复（桌宠改成自己决定要不要发语音）
+  mcp_enabled: true            # 是否注册内置 voice MCP server
+  output_dir: data/voice_out  # 语音产物目录（wav 落这儿）
+  tts_url: 'http://127.0.0.1:9880'      # 本机 GPT-SoVITS api_v2
+  voice_dir: 'voice/大飞鱼'              # 参考音频 + 情绪参考库所在目录
+  default_emotion: neutral     # 不指定情绪时用哪个
+  rvc:
+    python: 'E:\AI\RVC\venv\Scripts\python.exe'
+    root: 'E:\AI\RVC\Retrieval-based-Voice-Conversion-WebUI-main'
+    sing_script: 'E:\SnowLuma\rvc_sing.py'
+    model: da_fei_yu.pth        # 本机已有的音色权重（**不下载**）
+    sing_speed: 0.92            # 念白语速（放慢更像唱）
+    sing_base: 329.63           # 旋律基准音高 Hz
+    timeout_s: 300              # RVC 推理墙钟上限（秒）

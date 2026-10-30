@@ -588,3 +588,135 @@ class TTS:
                 pygame.time.wait(100)
         except Exception as e:  # noqa: BLE001
             log.warning("播放 TTS 失败：%s（文件=%s）", e, mp3_path.name)
+
+# ---------------------------------------------------------------------------
+# 语音设置（companion_config.yaml 的 voice 段）
+# ---------------------------------------------------------------------------
+#
+# 语音这块现在有两拨消费者：
+#   1. 桌宠本体（app/ui/chat_window）——「要不要自动朗读每条回复」的开关；
+#   2. 语音 MCP server（app/mcp/voice_server.py）——桌宠**自己决定**发语音 /
+#      唱歌时用的那套本机模型配置。
+# 两边读同一个 yaml 段，免得配置散在两处。
+
+_VOICE_SETTINGS_CACHE: dict = {}
+
+
+def _voice_settings_merged() -> dict:
+    """合并读默认表 + 用户覆盖表（和工具白名单同一套读法）。"""
+    from app.core import companion_config as cc
+    base = cc._read_yaml(cc._default_yaml_path()) or {}
+    user = cc._read_yaml(cc._user_yaml_path()) or {}
+    return cc._merge(base, user)
+
+
+def load_voice_settings(*, force: bool = False) -> dict:
+    """读 companion_config.yaml 的 voice 段。
+
+    - 默认表 app/core/companion_config.yaml，用户覆盖表 data/companion_config.yaml
+    - 按两个文件的 mtime 缓存：主人改完 yaml **自动生效**，不用重启桌宠
+    - 读不到 / 没这一段 → 返回 {}（调用方按「默认关闭」处理）
+    """
+    try:
+        from app.core import companion_config as cc
+        paths = [cc._default_yaml_path(), cc._user_yaml_path()]
+        key = tuple(
+            (str(p), p.stat().st_mtime_ns) if p.is_file() else (str(p), 0)
+            for p in paths
+        )
+    except Exception:  # noqa: BLE001
+        key = None
+    if not force and key is not None and _VOICE_SETTINGS_CACHE.get("key") == key:
+        return dict(_VOICE_SETTINGS_CACHE.get("data") or {})
+    try:
+        merged = _voice_settings_merged()
+        data = merged.get("voice") or {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("读 voice 配置失败：%s", e)
+        data = {}
+    _VOICE_SETTINGS_CACHE["key"] = key
+    _VOICE_SETTINGS_CACHE["data"] = data
+    return dict(data)
+
+
+# ---------------------------------------------------------------------------
+# 播放本地音频文件（给 MCP 语音 server 用）
+# ---------------------------------------------------------------------------
+
+def play_audio_file(path, *, wait: bool = False) -> bool:
+    """播放一个本地音频文件（wav / mp3）。返回是否真的把声音放出去了。
+
+    这是给 app/mcp/voice_server.py 用的**独立入口**：桌宠自己合成 / 转换出来的
+    语音条要放给主人听，但**不能**去动 TTS 主链路（那边是多句串行播放 + 口型
+    同步 + 缓存，碰了会出回归）。
+
+    wait=False：起一个后台进程就返回（长音频不占着工具调用）
+    wait=True ：等播完再返回
+    """
+    p = Path(path)
+    if not p.is_file():
+        log.warning("play_audio_file: 文件不存在 %s", p)
+        return False
+
+    # ① ffplay（ffmpeg）—— 最稳：不依赖本进程继承的音频设备
+    ffplay = shutil.which("ffplay")
+    if ffplay:
+        try:
+            dur = _wav_duration(p)
+            proc = subprocess.Popen(
+                [ffplay, "-nodisp", "-autoexit", "-loglevel", "error",
+                 "-hide_banner", "-t", str(dur + 0.5), str(p)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=(subprocess.CREATE_NO_WINDOW
+                               if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
+            )
+            if wait:
+                try:
+                    proc.wait(timeout=dur + 3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("play_audio_file: ffplay 失败 %s：%s", p.name, e)
+
+    # ② winsound（Windows 内置，异步播放）
+    if os.name == "nt":
+        try:
+            import winsound
+            winsound.PlaySound(
+                str(p),
+                winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("play_audio_file: winsound 失败 %s：%s", p.name, e)
+
+    # ③ pygame（跨平台兜底）
+    try:
+        import pygame
+        if not _ensure_mixer():
+            return False
+        pygame.mixer.music.stop()
+        pygame.mixer.music.load(str(p))
+        pygame.mixer.music.play()
+        if wait:
+            while pygame.mixer.music.get_busy():
+                pygame.time.wait(100)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("play_audio_file: pygame 失败 %s：%s", p.name, e)
+        return False
+
+
+def _wav_duration(path: Path) -> float:
+    """wav 时长（秒）；读不出来返回 0.0。"""
+    try:
+        import wave
+        with wave.open(str(path), "rb") as w:
+            rate = w.getframerate() or 1
+            return w.getnframes() / float(rate)
+    except Exception:  # noqa: BLE001
+        return 0.0

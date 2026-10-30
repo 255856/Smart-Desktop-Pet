@@ -1,12 +1,12 @@
 ---
 name: desktop-pet-tool-usage
-description: When and how to call each of the 68 available tools (61 builtin + 7 MCP tools - 4 ActivityWatch + 3 filesystem) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
+description: When and how to call each of the 71 available tools (61 builtin + 10 MCP tools - 4 ActivityWatch + 3 filesystem + 3 voice) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
 user-invocable: false
 ---
 
 # Tool Usage Skill — desktop-pet
 
-You have **68 tools** available (61 内置 + 7 个 MCP 工具（4 个 ActivityWatch + 3 个 filesystem）)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
+You have **71 tools** available (61 内置 + 10 个 MCP 工具（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
 
 > 本文件由 `app/brain/brain_controller.py` 直接注入到 system prompt 最前面。清单必须与
 > `app/engine/tools/` 的实际注册保持一致：2026-10-04 审计发现旧版写着 31 个工具，
@@ -46,6 +46,28 @@ You have **68 tools** available (61 内置 + 7 个 MCP 工具（4 个 ActivityWa
 > 1. 主人问题指向"窗口 / 应用 / 网页" → **必调**，不要凭记忆或"我看不到主人屏幕"推脱
 > 2. 主人说"我刚在 XXX" 然后问你 — LLM 已经知道答案，**不用再查**
 > 3. AW server 未运行时如实告诉主人, 不要假装查不到
+
+### 🎤 语音类（本机语音，用本机已装好的模型，不下载任何东西）
+
+| 主人说 | 调用 |
+|---|---|
+| "念给我听" / "哼一声" / 只想要一句很短的俏皮话 | `mcp_voice_speak(text="……")` |
+| "唱一句" / "唱一段" / 点名要听歌 | `mcp_voice_sing(lyrics="……")` |
+| "语音能用吗" / "本机有哪些音色" | `mcp_voice_status()` |
+
+> **这些工具通过 MCP (Model Context Protocol) 加载** — 名字前缀是 `mcp_voice_`。
+> 用的是本机已经装好的模型（合成走本机 GPT-SoVITS 服务，唱歌走本机 RVC 音色权重），
+> **不会下载任何模型**；本机没有的音色工具会如实说「音色不在本地」。
+>
+> **语音是你自己决定要不要发的**：默认每条回复**不朗读**（想全程朗读就把
+> `app/core/companion_config.yaml` 的 `voice.auto_read` 改成 true）。
+>
+> **规矩（主人明确要求过）**：
+> 1. **语音条前面不加方括号标签**（「[语音]」「[翻唱-清唱版]」那种）——主人嫌那玩意儿出戏；
+>    要说话就**另外发一条普通文字消息**。
+> 2. 唱的是**按这段词现编的调**，要这么说明，**不要说成原创歌曲**。
+> 3. 工具失败了就说失败（哪一步没成），**绝不假装已经发出语音**。
+> 4. **频率**：语音是打断，不是每轮都要用。解释问题、长回答、主人要照着看的内容，一律用文字。
 
 ### 🔧 打开类
 
@@ -171,7 +193,7 @@ You have **68 tools** available (61 内置 + 7 个 MCP 工具（4 个 ActivityWa
 
 ---
 
-## 📋 Quick reference (68 tools: 61 内置 + 7 MCP（4 ActivityWatch + 3 filesystem）)
+## 📋 Quick reference (71 tools: 61 内置 + 10 MCP（4 ActivityWatch + 3 filesystem + 3 voice）)
 
 | 工具 | 必填参数 |
 |---|---|
@@ -243,6 +265,9 @@ You have **68 tools** available (61 内置 + 7 个 MCP 工具（4 个 ActivityWa
 | `mcp_fs_fs_read_file` | `path` |
 | `mcp_fs_fs_list_dir` | `path` |
 | `mcp_fs_fs_search_files` | `pattern` |
+| `mcp_voice_speak` | `text` |
+| `mcp_voice_sing` | `lyrics` |
+| `mcp_voice_status` | (无) |
 
 ---
 

@@ -29,6 +29,17 @@ servers:
   #   command: npx
   #   args: ["-y", "mcp-server-fetch"]
 
+  # 语音 MCP server（桌宠自己决定要不要发语音 / 唱歌）
+  # - 用本机已经装好的模型：GPT-SoVITS 服务 (:9880) + RVC 音色权重，**不下载任何东西**
+  # - 工具：mcp_voice_speak（念一段话）/ mcp_voice_sing（按旋律唱）/ mcp_voice_status（查本机音色）
+  # - 总开关在 app/core/companion_config.yaml 的 voice.mcp_enabled（默认开）
+  # - 这台机器没装语音模型也能起：工具会如实说「音色不在本地」，不会去下载
+  - name: voice
+    description: "本机语音（念一段话 / 按旋律唱 / 查本机音色）"
+    command: python
+    args: ["-m", "app.mcp.voice_server"]
+    enabled: true
+
   # ActivityWatch (aw-server) 集成 — 让桌宠能查主人当下在干嘛。
   # 启用步骤:
   #   1. 下载安装 ActivityWatch: https://activitywatch.net/
