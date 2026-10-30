@@ -164,7 +164,11 @@ def test_plain_chat_ledger_row_carries_window_session_id(tmp_path, monkeypatch):
     row = rows[-1]
     assert row["backend"] == "lightweight"
     assert row["session_id"] == win._session_id
-    assert row["session_id"] == "char:台账测试娘:main"
+    # v58: 人设不再派生 session_id —— 三个人设共用一条（一个钱包），
+    # 所以台账行里不能带人设名。
+    from app.ui.chat_window import SHARED_SESSION_ID
+    assert row["session_id"] == SHARED_SESSION_ID == "char:pet:main"
+    assert "台账测试娘" not in row["session_id"]
     assert row["total_tokens"] == 127
     assert row["cache_hit_tokens"] == 100
 

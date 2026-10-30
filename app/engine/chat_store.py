@@ -19,6 +19,12 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+#: v58 共享历史桶的键。"" = 共享桶 —— 这只桌宠的全部对话，所有人设共读写。
+#: 非空 = 独立桶（v31 时代按人设名分的遗留行、测试残留行）：保留在盘上，
+#: 但不再进共享历史，也不会被清掉。
+SHARED_BUCKET = ""
+
+
 @dataclass
 class StoredMessage:
     role: str
@@ -59,13 +65,19 @@ _CHAR_INDEX = (
 
 
 class ChatStore:
-    """聊天历史存储。v31: 同一 db 文件, 加 character_name 列做 per-character 隔离。
-    不同人设的 chat_window 各自起一个 ChatStore 实例, 各自的 character_name
-    把消息写到同一个 db 但不同行, all(character_name=...) 过滤读出。
+    """聊天历史存储。v58: 同一 db 文件, character_name 变成「桶键」。
+
+    v31~v57 时代 character_name 用来做 per-character 隔离（各人设各一行组，
+    切人设 = 换一份历史）。v58 起主人拍板「一只桌宠一份记忆」：
+    桌宠聊天窗用共享桶（SHARED_BUCKET = ""），三个人设读同一桶、写同一桶；
+    盘上遗留的按人设名分的行（以及测试残留行）留在自己的桶里，不进共享历史，
+    也不会被删。
     """
 
     def __init__(self, data_file: str | Path = "data/chat_history.db",
-                 max_messages: int = 200,
+                 # v58：共享桶里已有 213 条真实历史，200 会让内存列表在下一条消息进来时
+                 # 静默丢掉最老的一批（磁盘不删，但显示上会「历史少了」）。提到 500。
+                 max_messages: int = 500,
                  legacy_json: str | Path | None = "data/chat_history.json",
                  character_name: str = ""):
         # 兼容旧的 `data_file` 指向 JSON —— 检测后缀自动转成 .db
@@ -77,8 +89,8 @@ class ChatStore:
         self.data_file = Path(data_file)
         self.legacy_json = Path(legacy_json) if legacy_json else None
         self.max_messages = max_messages
-        # v31: 实例绑 character_name; add() 自动写入。空字符串 = legacy / 跨角色
-        # (老记录和老 code 路径都按 '' 处理)。
+        # v58: 实例绑一个「桶」; add() 自动写入本桶。默认 "" = 共享桶
+        # （老记录和老 code 路径都按 '' 处理）。非空 = 独立桶（遗留人设 / 测试残留）。
         self.character_name = character_name
         self._messages: list[StoredMessage] = []
         self._load()
@@ -199,70 +211,104 @@ class ChatStore:
             return False
 
     def _prune_old(self) -> None:
-        """保留每个 character_name 最近 max_messages 条 (v31 改成 per-character 限长)。
+        """本桶限长 max_messages 条; 别的桶（遗留人设 / 测试残留）原样留着。
 
-        之前是全局限 max_messages, 切人设后老消息会被挤掉, 破坏隔离。
-        现在按 character_name 分组, 每个角色各自保 max_messages。
-        老记录 (character_name == '') 也单独算一组。
+        v58 起共享桶就是「这只桌宠的全部对话」，所以限长按桶算。
+        裁剪保留整体顺序（不重排），免得历史时间线被打乱。
+        不写盘裁剪 — chat_window reload 时会从 db 重读,
+        真正的 limit 在 _load 后下一轮 add 之前再做。这函数现在只确保
+        self._messages 内存里本桶 ≤ max_messages。
         """
-        by_char: dict[str, list[StoredMessage]] = {}
+        bucket = self.character_name or ""
+        overflow = sum(1 for m in self._messages
+                       if (m.character_name or "") == bucket) - self.max_messages
+        if overflow <= 0:
+            return
+        drop = 0
+        kept: list[StoredMessage] = []
         for m in self._messages:
-            key = m.character_name or ""
-            by_char.setdefault(key, []).append(m)
-        for v in by_char.values():
-            if len(v) > self.max_messages:
-                v[: len(v) - self.max_messages] = []
-        # 不写盘裁剪 — chat_window reload 时会从 db 重读,
-        # 真正的 limit 在 _load 后下一轮 add 之前再做。这函数现在只确保
-        # self._messages 内存里每角色 ≤ max_messages。
-        self._messages = []
-        for v in by_char.values():
-            self._messages.extend(v)
+            if drop < overflow and (m.character_name or "") == bucket:
+                drop += 1
+                continue
+            kept.append(m)
+        self._messages = kept
 
     def add(self, role: str, content: str, emotion: str = "", tools: list = None) -> None:
-        """添加一条消息并持久化。v31: 自动用 self.character_name 标。
+        """添加一条消息并持久化。v58: 自动写进本实例的桶。
 
         add() 一次性把消息标到当前实例的 character_name, 不在外部每条都传。
+        桌宠聊天窗的实例绑的是共享桶 —— 三个人设写的是同一段历史。
         """
         msg = StoredMessage(
             role=role, content=content, emotion=emotion, tools=tools or [],
             character_name=self.character_name,
         )
         self._messages.append(msg)
-        # 写盘前先裁剪，避免 DB 越来越大
-        if len(self._messages) > self.max_messages:
-            self._messages = self._messages[-self.max_messages:]
         # 先 prune 再 add（避免 delete 影响新插的 id）
         self._prune_old()
         self._save_one(msg)
 
     def all(self, character_name: str | None = None) -> list[StoredMessage]:
-        """返消息列表。v31: character_name 过滤 — None = 用 self.character_name
-        (per-character), 显式传 '' 返老 shared 记录, 传具体名返另一角色 (调试用)。
+        """返消息列表。v58: character_name 是「桶键」。
+
+        - None（默认）→ 本实例的桶。桌宠聊天窗用共享桶（""），所以小汐 /
+          大肥鱼 / 小晓 读到的是同一段历史。
+        - 显式传名字 → 只看那个桶（调试用：查某个遗留人设桶 / 测试残留桶）。
         """
         if character_name is None:
             character_name = self.character_name
         if not character_name:
-            # 实例无 character_name, 返全部 (legacy / 调试)
-            return list(self._messages)
+            # 共享桶：只有 character_name 为空的历史行属于它
+            return [m for m in self._messages if not (m.character_name or "")]
         return [m for m in self._messages if (m.character_name or "") == character_name]
 
-    def clear(self) -> None:
-        """清空所有消息并持久化。v31: 只清本 character_name 的记录, 不影响其他人设。"""
-        if self.character_name:
-            self._messages = [m for m in self._messages
-                             if (m.character_name or "") != self.character_name]
-        else:
-            self._messages = []
+    def merge_bucket(self, src: str, dst: str = SHARED_BUCKET) -> int:
+        """把 src 桶的行并进 dst 桶（v58: 合并各人设的聊天历史）。
+
+        v31 时代聊天历史按人设名分行（小汐 / 大肥鱼 / 小晓 各一行组），
+        共享之后这些行要并成一套 —— 内容、时间戳、行 id 原样保留，只改桶
+        标签，所以读出来的顺序跟以前一模一样。
+
+        调用方负责先备份 db（这是写操作）。返回被并过去的行数。
+        """
+        if not src:
+            return 0
         try:
             conn = self._connect()
             try:
-                if self.character_name:
-                    conn.execute(
-                        "DELETE FROM messages WHERE character_name = ?",
-                        (self.character_name,))
-                else:
-                    conn.execute("DELETE FROM messages")
+                cur = conn.execute(
+                    "UPDATE messages SET character_name = ? "
+                    "WHERE character_name = ?",
+                    (dst, src),
+                )
+                conn.commit()
+                moved = max(0, int(cur.rowcount or 0))
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ChatStore: 合并桶 %r → %r 失败:%s", src, dst, e)
+            return 0
+        for m in self._messages:
+            if (m.character_name or "") == src:
+                m.character_name = dst
+        log.info("ChatStore: 桶 %r 的 %d 行已并进 %r", src, moved, dst)
+        return moved
+
+    def clear(self) -> None:
+        """清空本桶的消息并持久化。
+
+        v58: 共享桶（""）只清共享行 —— 遗留人设桶 / 测试残留桶原样留着,
+        不是桌宠的数据, 不由这里删。
+        """
+        bucket = self.character_name or ""
+        self._messages = [m for m in self._messages
+                         if (m.character_name or "") != bucket]
+        try:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "DELETE FROM messages WHERE character_name = ?",
+                    (bucket,))
                 conn.commit()
             finally:
                 conn.close()
@@ -312,4 +358,4 @@ class ChatStore:
         return removed
 
 
-__all__ = ["ChatStore", "StoredMessage"]
+__all__ = ["ChatStore", "StoredMessage", "SHARED_BUCKET"]

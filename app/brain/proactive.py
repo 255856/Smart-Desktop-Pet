@@ -160,7 +160,10 @@ class ProactiveBrain(QObject):
         self._aw_cfg = aw_cfg
         self._timer = None
         self._worker: Optional[_ChatOnceWorker] = None
-        self._last_remarks_by_char: dict[str, list[str]] = {}
+        # v58: 共享记忆 —— 一只桌宠一份「我最近说了什么」。
+        # v31~v57 时代按人设名分桶（_last_remarks_by_char），切人设就换桶，
+        # 小汐说过的话大肥鱼看不见。主人拍板：一只桌宠一份记忆，不分人设。
+        self._last_remarks: list[str] = []
         # v54: 闲置 / 会议感知阈值
         self.idle_skip_minutes = max(1, int(idle_skip_minutes))
         self.meeting_auto_mute_minutes = max(1, int(meeting_auto_mute_minutes))
@@ -405,7 +408,7 @@ class ProactiveBrain(QObject):
             "pet_status": self.state.stats_summary(),
             "memories": [m.content for m in mem],
             "shared_memories": [s.content for s in shared],
-            "recent_remarks": self._last_remarks_by_char.get(self.char_name, [])[-3:],
+            "recent_remarks": list(self._last_remarks[-3:]),
             # v57: 规律 hint — RoutineProfiler 读盘是轻量 IO, GUI 线程没关系
             "routine_hint": self._routine_hint_for_now(),
         }
@@ -535,11 +538,10 @@ class ProactiveBrain(QObject):
         remark = sanitize_text(parsed.text).strip()
         if not remark:
             return
-        # v31: per-character 隔离 — 旧 self._last_remarks 改 dict
-        bucket = self._last_remarks_by_char.setdefault(self.char_name, [])
-        bucket.append(remark)
-        # 限长: 每个角色最多保留 5 句 (但 prompt 只取 -3)
-        if len(bucket) > 5:
-            self._last_remarks_by_char[self.char_name] = bucket[-5:]
+        # v58: 共享 remark 桶 —— 不按人设分桶, 切人设后旧话照样算数
+        self._last_remarks.append(remark)
+        # 限长: 最多保留 5 句 (但 prompt 只取 -3)
+        if len(self._last_remarks) > 5:
+            self._last_remarks = self._last_remarks[-5:]
         self.emotion_hint.emit(parsed.emotion)
         self.remark_ready.emit(remark)

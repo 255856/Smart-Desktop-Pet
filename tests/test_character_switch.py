@@ -332,7 +332,9 @@ class TestChatWindowSwitch:
         ok, msg = cw.switch_character("characters/beta.yaml")
         assert ok, msg
         assert cw.history == before, "换角色不能动聊天历史"
-        assert len(cw.history) == 2
+        # v58: 聊天历史是共享的 —— 新窗口可能已经载入了共享桶里的旧消息，
+        # 所以这里断言「我们刚加的两条还在」，而不是绝对条数。
+        assert [m.content for m in cw.history][-2:] == ["你好呀", "主人好~"]
 
     def test_switch_dialog_lists_all_characters(self, tmp_path, qapp, monkeypatch):
         """对话框把 characters/*.yaml 全列出来，当前角色选中。"""
@@ -377,4 +379,5 @@ class TestChatWindowSwitch:
         assert ok is False
         assert "阿尔法" in cw.title_label.text()
         assert cw.char_cfg.name == "阿尔法"
-        assert len(cw.history) == 1
+        # v58: 共享历史桶 —— 断言刚加的那条还在（不写死总条数）
+        assert cw.history[-1].content == "你好呀"
