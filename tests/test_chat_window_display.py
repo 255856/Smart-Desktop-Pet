@@ -384,3 +384,49 @@ def test_ui_fallback_claim_is_kept_when_tool_succeeded():
     html = cw._msg_html(msg)
     assert _UI_TOOL_DONE_TEXT in html
     assert "msg-notice" not in html
+
+
+def test_streaming_shows_text_live_when_not_reading_aloud():
+    """默认不朗读时，文字要**立刻**流式出。
+
+    老设计：文字等 TTS 音频备好再一起出（音画同步）。但默认改成不朗读之后，
+    那条链路不跑了 → 文字只剩「最后一次性蹦出来」一种表现。
+    """
+    char_cfg = CharacterConfig(name="小汐")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    # 有 TTS、但不朗读 → 立刻流式出
+    cw.tts = object()
+    cw._voice_auto_read_enabled = lambda: False
+    assert cw._streaming_shows_live() is True
+
+    # 有 TTS、而且要朗读 → 保持老行为（文字跟着音频一起出）
+    cw._voice_auto_read_enabled = lambda: True
+    assert cw._streaming_shows_live() is False
+
+    # 根本没有 TTS → 立刻流式出
+    cw.tts = None
+    assert cw._streaming_shows_live() is True
+    print("[OK] 流式文字与 TTS 已解耦：不朗读时立刻出字")
+
+
+def test_rebuild_rerenders_history_so_tools_can_expand():
+    """点开「已执行操作」要有内容 —— 这个重建函数以前是空的（只做滚动位置）。"""
+    char_cfg = CharacterConfig(name="小汐")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    msg = Message(role="assistant", content="查到了")
+    msg.tools = [("web_search", '{"query":"天气"}', "晴", "")]
+    cw.history = [msg]
+    cw._tools_collapsed_by_msg[0] = False   # 展开态
+    cw._rebuild_chat_view_from_history()
+    text = cw.chat_view.toPlainText()
+    assert "已执行操作" in text
+    assert "web_search" in text or "联网搜索" in text
+    # 折叠态也要能渲染出来（同一个函数，两种状态）
+    cw._tools_collapsed_by_msg[0] = True
+    cw._rebuild_chat_view_from_history()
+    assert "已执行操作" in cw.chat_view.toPlainText()
+    print("[OK] 重建真的重建了：展开/折叠两种状态都能渲染")

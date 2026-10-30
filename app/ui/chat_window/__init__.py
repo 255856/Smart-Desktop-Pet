@@ -3822,16 +3822,22 @@ class ChatWindow(QWidget):
         # 清洗整段累积文本是 O(累积长度)；每个 token 都做一遍 → 总开销 O(n²)。
         # 改成按累积增长量节流：值跟以前完全一样（同一个函数、同一个输入），
         # 只是更新点变稀。第一块 token 必算（气泡要立刻有内容）。
+        changed = False
         if (len(self._streaming_raw) - self._san_len) >= self._SAN_STEP or self._san_len == 0:
             self._san_len = len(self._streaming_raw)
             sanitized = sanitize_text(self._streaming_raw).strip()
             self._streaming_san = sanitized
+            changed = True
         else:
             sanitized = self._streaming_san
-        # 累积 content 但**不**实时刷 chat_view ——等 TTS prepare 完成才显示
-        # （实现「文字与语音同步」：声音准备好后文字才一起出现）
         self._current_bot_msg.content = sanitized
-        # chat_view 保持「准备语音…」占位（_refresh_streaming_message 故意不调）
+        # 文字什么时候刷到 chat_view：
+        #   以前是「等 TTS prepare 完 → sentence_ready → 刷新」（音画同步）。
+        #   但默认**不朗读**（voice.auto_read=false）时，这条链路根本不跑 →
+        #   文字会一直等到最后**一次性蹦出来**（owner 报的「一下子全输出了」）。
+        #   所以：TTS 不接管文字的时候，文字**立刻**流式出（更快，也更对）。
+        if changed and self._streaming_shows_live():
+            self._refresh_streaming_message()
         # Trace：累计的原始文本。原先每个 token 写一行（一次 sqlite commit + fsync，
         # 实测 6.5 ms/token → 40 tok/s 时每秒白占 260 ms GUI 线程）。
         # 现在攒批 + 定时 flush：Dashboard 只取最后一条 accumulated
@@ -3846,6 +3852,25 @@ class ChatWindow(QWidget):
             self.streaming_chunk.emit(sanitized)
             # **逐句 prepare**：每收完一句话立即启动后台 QThread 准备 TTS
             self._tts_drain_sentences(sanitized)
+
+    def _streaming_shows_live(self) -> bool:
+        """流式期间文字要不要**立刻**显示（不等 TTS 音频）。
+
+        老设计：文字等音频备好再一起出现（音画同步）—— 那条链路是
+        「逐句 prepare → sentence_ready → _refresh_streaming_message」。
+
+        但默认已经**不朗读**（§voice.auto_read§ 默认 false，Stage 6 改的）：
+        那条链路根本不会跑，文字就只剩「最后一次性蹦出来」一种表现
+        （owner 反馈：「回复不是一句一句的，而是一下子全部输出了」）。
+
+        所以规则很简单：
+        - 没有 TTS（§tts_enabled§ 关 / §tts§ 为空）→ 立刻流式出；
+        - 有 TTS 但**不朗读** → 立刻流式出（没有任何理由等音频）；
+        - 有 TTS 且要朗读 → 保持老行为（文字跟着音频一起出）。
+        """
+        if not getattr(self.char_cfg, "tts_enabled", False) or self.tts is None:
+            return True
+        return not self._voice_auto_read_enabled()
 
     def _flush_trace_text(self) -> None:
         """把攒下的 token 批量写成一条 trace 事件（一次 commit 顶 N 次）。"""
@@ -5007,13 +5032,27 @@ class ChatWindow(QWidget):
 
         这是 cmd:toggle_tools 点击处理用的最稳路径,不动 anchor/cursor,
         用全量重渲染替代「从 anchor 删到末尾再 insertHtml」(后者某些状态会擦白 chat)。
+
+        **这个函数以前是空的**（步骤号从 1 直接跳到 4）：docstring 说要「重建」，
+        实际既没清空也没重渲染 —— 点「已执行操作」时折叠状态改了，界面却一点没变
+        （owner 报「点开已执行操作后就会空白」）。现在按 docstring 实现：
+        清空 → 重渲染历史 → 重建 streaming 占位。
         """
-        # 1. 滚到底 (重渲染后还要在底部)
+        # 1. 记下滚动位置（重渲染后还要在底部）
         sb = self.chat_view.verticalScrollBar()
         was_at_bottom = (sb.value() >= sb.maximum() - 4)
+        # 2. 「是否还在流式」要在清 anchor **之前**记（清了就取不到了）
+        streaming = (self._current_bot_msg is not None
+                     and getattr(self, "_streaming_anchor_pos", None) is not None)
+        # 3. 清空 + 重渲染历史
+        #    **必须先清 anchor**：旧的 anchor 是上一次占位的位置，留着会让随后的
+        #    _refresh_streaming_message 从错误的位置删到末尾，把内容擦白。
+        self.chat_view.clear()
+        self._streaming_anchor_pos = None
+        for msg in list(self.history or []):
+            self._render_message(msg)
         # 4. 重建 streaming 占位 (如果还在 streaming)
-        if (self._current_bot_msg is not None
-                and getattr(self, "_streaming_anchor_pos", None) is not None):
+        if streaming:
             self._streaming_anchor_pos = self._insert_placeholder(
                 self._current_bot_msg
             )
