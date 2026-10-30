@@ -410,6 +410,14 @@ CHAT_BUBBLE_CSS = (
     "span.system-msg{display:inline-block;background:#ececf4;"
     "color:#6b7280;padding:4px 12px;border-radius:10px;font-size:9pt;"
     "margin:6px 0;}"
+    # 压缩摘要条目（Stage 4.3）：**不是**主人说的话，用虚线边 + 淡底区分
+    "div.msg-summary{margin:8px 0;}"
+    "div.msg-summary .msg-label .who{color:#8b8ba3;"
+    "font-weight:600;font-size:8.5pt;}"
+    "div.msg-summary .msg-label .ts{color:#a0a0b4;font-size:8pt;}"
+    "div.msg-summary .summary-body{border-left:3px dashed #c9c9de;"
+    "background:#f6f6fb;padding:6px 10px;border-radius:0 4px 4px 0;"
+    "color:#6b7280;font-size:9pt;line-height:1.5;}"
 )
 
 
@@ -527,6 +535,14 @@ CHAT_MD_CSS = (
     "span.system-msg{display:inline-block;background:#f1f5f9;"
     "color:#64748b;padding:4px 12px;border-radius:12px;font-size:9pt;"
     "margin:6px 0;}"
+    # 压缩摘要条目（Stage 4.3）：**不是**主人说的话，用虚线边 + 淡底区分
+    "div.msg-summary{margin:8px 0;}"
+    "div.msg-summary .msg-label .who{color:#7c8aa0;"
+    "font-weight:600;font-size:8.5pt;}"
+    "div.msg-summary .msg-label .ts{color:#94a3b8;font-size:8pt;}"
+    "div.msg-summary .summary-body{border-left:3px dashed #cbd5e1;"
+    "background:#f8fafc;padding:6px 10px;border-radius:0 4px 4px 0;"
+    "color:#64748b;font-size:9pt;line-height:1.5;}"
     # 旧的"气泡"结构 (历史消息可能仍渲染): 保持视觉一致
     "td.bubble{line-height:1.55;font-size:10pt;}"
     # 三点跳动等待动画

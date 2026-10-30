@@ -47,7 +47,7 @@ def test_format_time_short():
 
 
 def test_msg_html_user_alignment():
-    """用户消息：msg-user div + 浅灰底 + 'You' label。"""
+    """用户消息：msg-user div + 浅灰底 + 「主人」label。"""
     char_cfg = CharacterConfig(name="小汐")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -57,8 +57,9 @@ def test_msg_html_user_alignment():
     assert "msg msg-user" in html
     assert "msg-body" in html
     assert "msg-label" in html
-    # 用户消息: 标识 "You"
-    assert ">You<" in html
+    # 用户消息: 标识「主人」（中文应用 + 人设里桌宠就是这么称呼主人的）
+    assert ">主人<" in html
+    assert ">You<" not in html
     # 不再使用 table 布局 / 头像 col / 气泡 class
     assert "avatar-col user" not in html
     assert "bubble user" not in html
@@ -4092,3 +4093,21 @@ def test_v35_main_passes_state_provider():
         )
     assert found, "v35: main.py 应该至少有一处 ChatWindow(...) 调用"
     print("[OK] v35: main.py 创建 ChatWindow 已传 state_provider")
+
+
+def test_summary_entry_is_not_labelled_as_the_owner():
+    """压缩摘要条目是**系统生成的上下文**，不能标成「主人」说的话。"""
+    char_cfg = CharacterConfig(name="小汐")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    msg = Message(role="user",
+                  content="【历史摘要】（更早的对话已经压缩成下面这段）\n主人交代了 A 项目的进度。")
+    html = cw._msg_html(msg)
+    assert "msg msg-summary" in html
+    assert "历史摘要" in html
+    # 绝不能标成主人在说话
+    assert ">主人<" not in html
+    # 也不能退化成普通用户气泡
+    assert "msg msg-user" not in html
+    print("[OK] Summary entry renders as its own block, not as the owner speaking")

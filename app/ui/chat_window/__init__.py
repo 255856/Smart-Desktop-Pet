@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import logging
 import re
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -76,6 +77,7 @@ from app.brain.llm_client import ChatMessage, LLMClient
 from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
 # Stage 4.3：上下文压缩（摘要并遗忘）—— 阈值 / 保留比例 / 摘要请求
 from app.brain.compaction import (
+    SUMMARY_MARKER,
     SUMMARY_PERSONA,
     CompactionSettings,
     apply_compaction,
@@ -90,7 +92,7 @@ from app.brain.compaction import (
 from app.brain.langchain_config import LangChainAgentConfig
 from app.engine.tools import ToolRegistry
 from app.voice.asr import SpeechRecognizer, asr_available
-from app.engine.chat_store import ChatStore
+from app.engine.chat_store import SHARED_BUCKET, ChatStore
 
 # 危险工具的中文标签（弹窗里给主人看）+ 等待上限 — 拆到 chat_window.utils
 from .utils import _DANGEROUS_LABELS, _CONFIRM_TIMEOUT_S  # noqa: F401
@@ -247,6 +249,103 @@ class _CharacterSwitchDialog(QDialog):
         return self._entries[row]
 
 
+# ---------------------------------------------------------------------------
+# v58: 一只桌宠一份记忆 —— 共享会话 id + 旧线程迁移
+# ---------------------------------------------------------------------------
+
+#: 全部人设共用的会话 id。它同时是三样东西：
+#:   1) LangGraph 的 thread_id（聊天历史线程）
+#:   2) token 台账的 session_id（成本记账 —— 一个钱包）
+#:   3) 聊天窗口内部的 session key
+#: 切人设不再换线程，也不再换账本桶。
+SHARED_SESSION_ID = "char:pet:main"
+
+#: v31~v57 时代按人设名派生的会话 id（形如 char:小汐:main）—— 迁移用。
+_LEGACY_CHAR_SESSION_RE = re.compile(r"^char:(.+):main$")
+
+
+def _backup_checkpoint_db(db_path: Path) -> Path:
+    """备份 checkpoint db，返回备份文件路径。
+
+    用 SQLite 的 backup API（不是 shutil.copy）—— 跟在线连接共存时也能拿到
+    一致的快照，不会拷到写了一半的 db。
+    """
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dst = backup_dir / ("%s.bak-%s" % (db_path.name, stamp))
+    src = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        out = sqlite3.connect(str(dst))
+        try:
+            src.backup(out)
+        finally:
+            out.close()
+    finally:
+        src.close()
+    return dst
+
+
+def _migrate_legacy_char_checkpoints(db_path,
+                                     shared_id: str = SHARED_SESSION_ID) -> dict:
+    """把旧的 per-character checkpoint 线程改名成共享线程。
+
+    v31~v57 时代 session_id 按人设名派生（char:小汐:main），每个人设一条
+    LangGraph 线程 —— 切人设 = 换线程 = 记忆分叉。v58 起所有人设共用一条。
+
+    这里只**改名**：checkpoint 链（parent_checkpoint_id）和 blob 一行都不动，
+    所以对话历史不丢。改之前先把整个 db 备份到 <db 同级>/backups/。
+
+    返回 {"migrated": [...], "backup": "...", "rows": n}；盘上没有旧线程时
+    返回空 dict（不备份、不写盘）。
+    """
+    result: dict = {"migrated": [], "backup": "", "rows": 0}
+    if not db_path:
+        return result
+    p = Path(db_path)
+    if not p.is_file():
+        return result
+    try:
+        conn = sqlite3.connect(str(p), timeout=30)
+    except Exception as e:  # noqa: BLE001
+        log.warning("合并旧人设聊天线程失败（打不开 db）: %s", e)
+        return result
+    try:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "checkpoints" not in tables:
+            return result
+        legacy = [row[0] for row in conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints "
+            "WHERE thread_id LIKE 'char:%'")]
+        legacy = [t for t in legacy
+                  if t != shared_id and _LEGACY_CHAR_SESSION_RE.match(t)]
+        if not legacy:
+            return result
+        # 改线程名是写操作 —— 先把整个 db 备份一份
+        backup = _backup_checkpoint_db(p)
+        result["backup"] = str(backup)
+        for old in legacy:
+            moved = 0
+            for table in ("checkpoints", "writes"):
+                if table not in tables:
+                    continue
+                cur = conn.execute(
+                    "UPDATE %s SET thread_id = ? WHERE thread_id = ?" % table,
+                    (shared_id, old))
+                moved += max(0, int(cur.rowcount or 0))
+            conn.commit()
+            result["migrated"].append(old)
+            result["rows"] += moved
+        log.info("旧人设聊天线程已并到共享线程 %s：%s（%d 行），备份 %s",
+                 shared_id, ", ".join(legacy), result["rows"], backup)
+    except Exception as e:  # noqa: BLE001
+        log.warning("合并旧人设聊天线程失败: %s", e)
+    finally:
+        conn.close()
+    return result
+
+
 class ChatWindow(QWidget):
     """独立聊天窗。"""
 
@@ -318,9 +417,24 @@ class ChatWindow(QWidget):
         self._memory_dlg: Optional[MemoryDialog] = None
         # 引擎层上下文 —— 全存下来,LangChainAgent 构造时透传
         self._cwd = cwd
-        # v31: 默认从 char_cfg.name 派生 per-character session_id, 让 LangGraph
-        # checkpoint 天然按角色隔离。手工传 session_id 时仍以传入值为准。
-        self._session_id = session_id or (f"char:{char_cfg.name}:main" if char_cfg else None)
+        # v58: 全部人设共用一个 session id —— 一只桌宠一份记忆。
+        # v31 时代按 char_cfg.name 派生 per-character session_id, 让 LangGraph
+        # checkpoint 按角色隔离 —— 那正是「切人设 = 换一条记忆线」的根源。
+        # 现在固定用共享 id（同时也是 token 台账的 session_id）。
+        # 手工传 session_id 时仍以传入值为准。
+        self._session_id = session_id or (SHARED_SESSION_ID if char_cfg else None)
+        # 磁盘上还留着的旧 per-character 线程 → 改名并到共享线程。
+        # 只迁一次（改之前先备份 db），没传 langchain_cfg 的调用方不碰盘。
+        if (langchain_cfg is not None
+                and self._session_id == SHARED_SESSION_ID
+                and getattr(langchain_cfg, "enable_checkpointer", True)):
+            try:
+                _migrate_legacy_char_checkpoints(
+                    getattr(langchain_cfg, "checkpoint_db", None),
+                    shared_id=SHARED_SESSION_ID,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("合并旧人设聊天线程失败: %s", e)
         self._session_store = session_store
         self._skills_dir = skills_dir
         self._auto_load_skills = list(auto_load_skills or [])
@@ -376,8 +490,8 @@ class ChatWindow(QWidget):
         # 32 字 ≈ 3~4 个 token ≈ 每秒 10 次更新，肉眼无感，
         # 但把 sanitize_text 的调用次数降到 1/5（总开销 O(n²) 的常数因子大降）。
         self._SAN_STEP = 32
-        # v31: 按角色隔离 — 切人设重启后, 各自一份独立历史, 不串味
-        self.chat_store = ChatStore(character_name=self.char_cfg.name)  # 聊天历史持久化
+        # v58: 共享历史桶 —— 一只桌宠一份记忆, 三个人设读写同一段历史
+        self.chat_store = ChatStore(character_name=SHARED_BUCKET)  # 聊天历史持久化
 
         # 语音识别（ASR）：按住说话 → 松开识别 → 自动发送
         self.asr: Optional[SpeechRecognizer] = None
@@ -417,8 +531,8 @@ class ChatWindow(QWidget):
         self._worker: Optional[_StreamWorker] = None
         self._generating = False
         self._mic_busy = False
-        # v31: 按角色隔离 — 切人设重启后, 各自一份独立历史, 不串味
-        self.chat_store = ChatStore(character_name=self.char_cfg.name)  # 聊天历史持久化
+        # v58: 共享历史桶 —— 一只桌宠一份记忆, 三个人设读写同一段历史
+        self.chat_store = ChatStore(character_name=SHARED_BUCKET)  # 聊天历史持久化
         _ico = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.ico"
         if _ico.is_file():
             from app.core.qt_compat import QIcon
@@ -717,11 +831,11 @@ class ChatWindow(QWidget):
             return False, msg
         self._rebuild_system_prompt()
         self._refresh_character_ui()
-        # 落盘的聊天记录跟着新角色走（内存里的历史不动 —— 人设和历史是两回事）
+        # v58: 聊天历史是共享的 —— 切人设不换历史库的身份（同一个共享桶）
         store = getattr(self, "chat_store", None)
         if store is not None:
             try:
-                store.character_name = self.char_cfg.name
+                store.character_name = SHARED_BUCKET
             except Exception as e:  # noqa: BLE001
                 log.warning("同步聊天记录的角色标记失败: %s", e)
         return True, msg
@@ -3710,6 +3824,23 @@ class ChatWindow(QWidget):
     # 中文/英文/数字标点都算句末边界。GPT-SoVITS 一次合成一句短句的体感最自然
     _TTS_SENT_END = re.compile(r"[。！？!?\n;；]+")
 
+    def _voice_auto_read_enabled(self) -> bool:
+        """自动朗读开关（默认**关**）。
+
+        语音改成「桌宠**自己决定**要不要发」（走 MCP 工具 mcp_voice_speak / mcp_voice_sing），
+        所以这里默认**不**再逐句朗读每条回复。开关在 companion_config.yaml 的
+        voice.auto_read（默认 false）——改成 true 就恢复原来的逐句朗读。
+
+        读的是 app/voice/voice.py 的 load_voice_settings：按 yaml 的 mtime 缓存，
+        主人改完 yaml 自动生效，不用重启桌宠。读不到就按「关」处理（宁可安静，
+        也不要对着每句话聒噪）。
+        """
+        try:
+            from app.voice.voice import load_voice_settings
+            return bool((load_voice_settings() or {}).get("auto_read", False))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _tts_drain_sentences(self, accumulated: str) -> None:
         """逐句准备 TTS：累积内容里每出现句末标点，启动后台 QThread 调 tts.prepare(句子)。
 
@@ -3723,6 +3854,9 @@ class ChatWindow(QWidget):
         出，可能跳变（修整段落 / 剥离 think 标签），前缀匹配会失效。
         """
         if not self.char_cfg.tts_enabled or self.tts is None:
+            return
+        # 默认不朗读：语音改成桌宠自己决定要不要发（voice.auto_read，默认 false）
+        if not self._voice_auto_read_enabled():
             return
         sent_tail = getattr(self, "_tts_sent_tail", 0)
         if sent_tail > len(accumulated):
@@ -3802,7 +3936,8 @@ class ChatWindow(QWidget):
         如果 _tts_tail 还有内容（最后一段无句末标点），这里启动它的 prepare。
         """
         tail = (self._tts_tail or "").strip()
-        if tail and self.char_cfg.tts_enabled and self.tts is not None:
+        if (tail and self.char_cfg.tts_enabled and self.tts is not None
+                and self._voice_auto_read_enabled()):
             self._launch_sentence_prepare(tail)
         # 重置（避免下次会话污染）
         self._tts_tail = ""
@@ -4290,12 +4425,28 @@ class ChatWindow(QWidget):
             )
 
         is_user = msg.role == "user"
-        role_label = "You" if is_user else _html_escape(
+        # 主人的消息标「主人」：中文应用，而且人设里桌宠就是这么称呼主人的
+        role_label = "主人" if is_user else _html_escape(
             self.char_cfg.name or "桌宠")
 
         # 空 content + 无 tools → 灰色 placeholder 提示
         # 流式时跳过 placeholder,由 _typing_dots_html 负责显示 dots
         raw = msg.content or ""
+
+        # 压缩摘要条目：role 仍是 "user"（它要进 LLM 的历史，role 不能改），
+        # 但**显示上绝不能冒充主人说话** —— 它是系统生成的上下文摘要，
+        # 标成「主人」会让主人以为刚才那句是自己说的。渲染成一条独立的居中说明。
+        if SUMMARY_MARKER in raw:
+            body = _html_escape(raw).replace("\n", "<br/>")
+            return (
+                '<div class="msg msg-summary">'
+                '<div class="msg-label">'
+                '<span class="who">历史摘要</span>'
+                '<span class="ts">更早的对话已压缩</span>'
+                "</div>"
+                f'<div class="msg-body summary-body">{body}</div>'
+                "</div>"
+            )
         if (not raw.strip() and not (msg.tools or []) and not streaming_meta):
             time_str = _format_time_short(msg.ts)
             label_html = (

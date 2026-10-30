@@ -38,6 +38,10 @@ _CONFIRM_TIMEOUT_S = 60.0
 
 # 工具名 -> (中文名, 动作目标参数键，按优先级)
 _TOOL_UI_META = {
+    # 语音 MCP（Stage 6）：桌宠自己决定要不要发语音/唱歌
+    "mcp_voice_speak": ("念一段话", ["text"]),
+    "mcp_voice_sing": ("唱几句", ["lyrics"]),
+    "mcp_voice_status": ("查本机音色", []),
     "web_search": ("联网搜索", ["query", "q", "keyword"]),
     "open_website": ("打开网页", ["url", "website", "query"]),
     "open_app": ("启动应用", ["app_name", "name", "app"]),
