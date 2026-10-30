@@ -391,7 +391,8 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .danger h3{margin:0 0 6px;font-size:14px;color:#b42318;}
   .danger .ops{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
   button.btn{border:1px solid var(--border);background:#fff;color:var(--text);border-radius:10px;
-    padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer;transition:.15s;}
+    padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer;transition:.15s;
+    white-space:nowrap;flex:none;}
   button.btn:hover{border-color:var(--accent-lt);color:var(--accent-d);background:var(--accent-bg);}
   button.btn.danger-btn{border-color:#f0b4b4;color:#b42318;background:#fff;}
   button.btn.danger-btn:hover{background:var(--red-bg);}
@@ -425,6 +426,39 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .set-avatar.on{border-color:var(--accent);}
   .set-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;}
 
+  /* Live2D 模型 / 场景 / 动作 */
+  .set-models{display:flex;gap:9px;flex-wrap:wrap;}
+  .set-model{border:1px solid var(--border);background:#fff;border-radius:10px;padding:7px 13px;
+    font-size:12.5px;font-family:inherit;color:var(--text);cursor:pointer;transition:.15s;}
+  .set-model:hover{border-color:var(--accent-lt);background:var(--accent-bg);}
+  .set-model.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-d);font-weight:600;}
+  .set-model small{display:block;font-size:10px;color:var(--faint);font-weight:400;}
+  .set-scene{display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;padding:8px 0;
+    border-bottom:1px solid var(--line);font-size:12.5px;color:var(--text);}
+  .set-scene:last-child{border-bottom:0;}
+  .set-scene .lft{flex:1 1 150px;min-width:0;display:flex;flex-direction:column;gap:2px;}
+  .set-scene .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .set-scene .sum{color:var(--sub);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .set-scene .rgt{flex:0 0 auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+  .set-scene .tag{flex:none;font-size:10.5px;color:var(--faint);}
+  .set-scene .tag.over{color:var(--accent-d);font-weight:600;}
+  .set-mini{border:1px solid var(--border);background:#fff;border-radius:7px;padding:3px 10px;
+    font-size:11.5px;font-family:inherit;color:var(--sub);cursor:pointer;flex:none;}
+  .set-mini:hover{border-color:var(--accent-lt);color:var(--accent-d);background:var(--accent-bg);}
+  .set-mini.danger:hover{border-color:#f0b4b4;color:#b42318;background:var(--red-bg);}
+  .set-editor{margin:8px 0 14px;padding:14px 16px;background:var(--surface-sunken);
+    border:1px solid var(--line);border-radius:12px;}
+  .set-editor.plain{margin:4px 0 0;padding:10px 12px;background:#fff;}
+  .set-editor h5{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--accent-d);}
+  .set-field{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
+  .set-field > .cap{width:70px;flex:none;font-size:12.5px;color:var(--sub);font-weight:600;}
+  .set-field select,.set-field input[type=text],.set-field input[type=number]{
+    border:1px solid var(--border);border-radius:8px;padding:5px 9px;font-size:12.5px;
+    font-family:inherit;color:var(--text);background:#fff;min-width:150px;}
+  .set-toggle-grid{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px;}
+  .set-toggle-grid .set-chip.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .set-editor .row{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap;}
+
   ::-webkit-scrollbar{width:9px;height:9px;}
   ::-webkit-scrollbar-track{background:transparent;}
   ::-webkit-scrollbar-thumb{background:#cdd4e0;border-radius:6px;border:2px solid var(--bg);}
@@ -446,12 +480,12 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   <nav class="nav">
     <button type="button" class="tab active" data-tab="runs" data-view="runs" data-icon="chat" title="会话记录：最近会话 / 最近错误 / 工具调用分布 / 耗时分布">运行</button>
     <button type="button" class="tab" data-tab="cost" data-view="cost" data-icon="zap">成本</button>
-    <button type="button" class="tab" data-tab="memory" data-view="memory" data-icon="brain" title="长期记忆：live 库行数 / kind 与 importance 分布 / access_count 命中数 / 逐条内容">记忆</button>
+    <button type="button" class="tab" data-tab="memory" data-view="memory" data-icon="brain" title="长期记忆：sidecar 的 JSON 卡片 / kind 与 importance 分布 / 命中数 / 逐条内容">记忆</button>
     <button type="button" class="tab" data-tab="decision" data-view="decision" data-icon="compass">决策</button>
   </nav>
   <div class="nav-label">系统</div>
   <nav class="nav">
-    <button type="button" class="tab" data-tab="tools" data-view="tools" data-icon="wrench" title="工具统计：61 内置 + 7 MCP 清单 / 风险等级 / 解锁等级 / 文档对账差异">工具</button>
+    <button type="button" class="tab" data-tab="tools" data-view="tools" data-icon="wrench" title="工具统计：内置 + MCP 清单 / 风险等级 / 解锁等级 / 执行期白名单 / 文档对账差异">工具</button>
     <button type="button" class="tab" data-tab="settings" data-view="settings" data-icon="zap" title="桌宠设置：视觉 / 行为 / 语音 / 模型（改完立刻生效）">设置</button>
     <button type="button" class="tab" data-tab="config" data-view="config" data-icon="info">配置</button>
     <button type="button" class="tab" data-tab="state" data-view="state" data-icon="heart">状态</button>
@@ -506,6 +540,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div class="sub-head" style="margin-top:0;" data-icon="zap">成本总览 <span id="costSource" class="mini-tag"></span></div>
       <div class="grid3" id="costKpis"></div>
       <div id="costErr"></div>
+      <div id="costPriceNote"></div>
       <div class="sub-head">缓存命中（按时间桶）</div>
       <div id="costSeries"></div>
       <div class="sub-head">按会话 / 模型 / 后端拆分</div>
@@ -531,7 +566,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div class="mem-net" id="memNet">
         <canvas id="memCanvas"></canvas>
         <div class="mem-net-legend" id="memLegend"></div>
-        <span class="mem-net-badge" id="memGraphBadge" style="display:none;"></span>
+        <span class="mem-net-badge" id="memGraphBadge"></span>
         <button type="button" class="mem-net-reset" id="memReset">重置视角</button>
         <div class="mem-tip" id="memTip"></div>
         <div class="mem-net-empty" id="memNetEmpty" style="display:none;"></div>
@@ -588,6 +623,8 @@ _HTML_PAGE = r"""<!DOCTYPE html>
       <div id="toolErr"></div>
       <div class="sub-head">风险等级分布</div>
       <div id="toolRisk"></div>
+      <div class="sub-head">执行期白名单（tool_allowlist）</div>
+      <div id="toolAllowlist"></div>
       <div class="sub-head">全部工具</div>
       <div class="tbl-wrap"><table class="tbl" id="toolTable"></table></div>
       <div class="sub-head">对账结果（文档 ↔ 注册表）</div>
@@ -607,8 +644,16 @@ _HTML_PAGE = r"""<!DOCTYPE html>
         <span class="hint" style="margin:0;">改动点「保存」后立刻在桌宠上生效。</span>
       </div>
       <div id="settingsGroups" class="set-grid"></div>
+      <div class="sub-head">Live2D 模型</div>
+      <div id="settingsModels"></div>
       <div class="sub-head">Live2D 外观</div>
       <div id="settingsAppearance"></div>
+      <div class="sub-head">触发场景配置</div>
+      <div class="hint">给某个场景配一套外观 —— 触发时自动换上（如「摸头」时脸红 + 比心）。每个模型各配各的。</div>
+      <div id="settingsScenes"></div>
+      <div class="sub-head">自定义动作</div>
+      <div class="hint">自己命名一个动作、配上外观，可以绑到钩子（工具动作或模型自带动作），也会出现在右键「玩一下」里。</div>
+      <div id="settingsActions"></div>
       <div class="sub-head">桌宠头像</div>
       <div id="settingsAvatars"></div>
     </div>
@@ -823,10 +868,28 @@ async function apiRaw(path, opts){
 /* ------------------------------------------------------------------
  * 顶部卡片（8 张）：/api/overview 一次拿全
  * ------------------------------------------------------------------ */
-function fmtCardValue(label, value, est){
+/* 金额：**币种跟着后端走**（本项目是人民币 ¥）。
+   以前这里写死 "$"，面板显示的是美元，实际账单是人民币 —— 差 7 倍。 */
+function costSymbol(c){
+  const c2=c||{};
+  if(c2.symbol) return c2.symbol;
+  return c2.currency==="USD"?"$":"¥";
+}
+function costAmount(c){
+  const c2=c||{};
+  const v=(c2.amount!=null?c2.amount:c2.value);
+  return Number(v||0).toFixed(6);
+}
+function costMoney(c){ return costSymbol(c)+costAmount(c); }
+function costCell(c){
+  const c2=c||{};
+  return costMoney(c2)+(c2.estimated!==false?'<span class="est-tag">估算</span>':"");
+}
+function fmtCardValue(c){
+  const label=(c&&c.label)||"", value=c&&c.value;
   if(label.indexOf("成功率")>=0 || label.indexOf("命中率")>=0) return String(value);
   if(label.indexOf("耗时")>=0) return fmtDur(value);
-  if(label.indexOf("花费")>=0) return "$"+Number(value||0).toFixed(6)+(est?'<span class="est-tag">估算</span>':"");
+  if(label.indexOf("花费")>=0) return costCell(c);
   if(typeof value==="number") return fmtNum(value);
   return esc(value);
 }
@@ -837,7 +900,7 @@ function renderCards(ov){
   $("#stats").innerHTML = ov.cards.map(function(c,i){
     return '<div class="stat '+cls[i%cls.length]+'"><div class="bar"></div>'
     + '<div class="ico">'+icon(ico[i%ico.length])+'</div>'
-    + '<div class="num">'+fmtCardValue(c.label,c.value,c.estimated)+'</div>'
+    + '<div class="num">'+fmtCardValue(c)+'</div>'
     + '<div class="label">'+esc(c.label)+'</div>'
     + '</div>';
   }).join("");
@@ -1005,17 +1068,26 @@ async function selectRun(id){
 function renderCost(summary, series, turns){
   const t=summary||{};
   const cost=t.cost||{};
+  const cur=cost.currency||"CNY";
+  const src=cost.price_source||"";
+  const est=cost.estimated!==false;
   $("#costSource").textContent=shortPath(t.source);
   $("#costErr").innerHTML = t.error
     ? '<div class="hint amber" style="margin-top:12px;">'+icon("alert")+' '+esc(t.error)+'</div>' : "";
+  $("#costPriceNote").innerHTML='<div class="hint" style="margin-top:10px;">'+icon("info")
+    +' 价目表：<span class="name">'+esc(cost.price_table||"（未标注）")+'</span> · 币种 <b>'
+    +esc(cur)+' '+esc(costSymbol(cost))+'</b>'
+    +(src?' · 按模型 '+esc(src):'')
+    +(est?' · <b>含估算成分</b>（价目表里没这个模型，用兜底价猜的）':'')
+    +'</div>';
   const hit=Number(t.cache_hit_tokens||0), miss=Number(t.cache_miss_tokens||0);
   $("#costKpis").innerHTML=[
     kpi("累计 token", fmtNum(t.total_tokens), "prompt "+fmtNum(t.prompt_tokens)+" / completion "+fmtNum(t.completion_tokens)),
     kpi("缓存命中率", pct(t.cache_hit_rate), "命中 "+fmtNum(hit)+" / 未命中 "+fmtNum(miss), "green"),
     kpi("请求数", fmtNum(t.requests), "会话数 "+fmtNum(t.sessions)),
     kpi("每轮平均 token", fmtNum(t.avg_tokens_per_turn), "按请求平均"),
-    kpi("累计花费（估算）", "$"+Number(cost.amount||0).toFixed(6),
-        (cost.price_source||"placeholder")+" · estimated="+(cost.estimated!==false), "amber"),
+    kpi("累计花费", costMoney(cost),
+        cur+" "+(est?"· 含估算成分":"· 准数"), "amber"),
     kpi("缓存写入 token", fmtNum(t.cache_write_tokens), "cache_write_tokens"),
   ].join("");
 
@@ -1044,14 +1116,14 @@ function renderCost(summary, series, turns){
     brk.push('<div class="sub-head" style="margin-top:14px;font-size:13px;">按'+label+'</div>'
       + '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>'+label+'</th><th class="num">请求</th>'
       + '<th class="num">token</th><th class="num">命中</th><th class="num">未命中</th><th class="num">命中率</th>'
-      + '<th class="num">花费(估)</th></tr></thead><tbody>'
+      + '<th class="num">花费（'+esc(cur)+'）</th></tr></thead><tbody>'
       + rows.map(function(row){
           const k=row[0], v=row[1];
           return '<tr><td class="name">'+esc(k||"(无)")+'</td>'
             + '<td class="num">'+fmtNum(v.requests)+'</td><td class="num">'+fmtNum(v.total_tokens)+'</td>'
             + '<td class="num">'+fmtNum(v.cache_hit_tokens)+'</td><td class="num">'+fmtNum(v.cache_miss_tokens)+'</td>'
             + '<td class="num">'+pct(v.cache_hit_rate)+'</td>'
-            + '<td class="num">$'+Number((v.cost||{}).amount||0).toFixed(6)+'</td></tr>';
+            + '<td class="num">'+costCell(v.cost)+'</td></tr>';
         }).join("")
       + '</tbody></table></div>');
   });
@@ -1064,7 +1136,7 @@ function renderCost(summary, series, turns){
     const rows=turnsItems.slice().sort(function(a,b){return (b.total_tokens||0)-(a.total_tokens||0);}).slice(0,100);
     $("#costTurns").innerHTML='<thead><tr><th>时间</th><th>session</th><th>#</th><th>后端</th><th>模型</th>'
       + '<th class="num">prompt</th><th class="num">completion</th><th class="num">total</th>'
-      + '<th class="num">命中</th><th class="num">未命中</th><th class="num">命中率</th><th class="num">花费(估)</th></tr></thead>'
+      + '<th class="num">命中</th><th class="num">未命中</th><th class="num">命中率</th><th class="num">花费（'+esc(cur)+'）</th></tr></thead>'
       + '<tbody>'+rows.map(function(r){
           return '<tr>'
             + '<td class="num">'+esc(fmtTime(r.ts))+'</td>'
@@ -1077,13 +1149,13 @@ function renderCost(summary, series, turns){
             + '<td class="num">'+fmtNum(r.cache_hit_tokens)+'</td>'
             + '<td class="num">'+fmtNum(r.cache_miss_tokens)+'</td>'
             + '<td class="num">'+pct(r.cache_hit_rate)+'</td>'
-            + '<td class="num">$'+Number((r.cost||{}).amount||0).toFixed(6)+'</td></tr>';
+            + '<td class="num">'+costCell(r.cost)+'</td></tr>';
         }).join("")+'</tbody>';
   }
 }
 
 /* ------------------------------------------------------------------
- * Tab 记忆：/api/memory（live 库）+ /api/memory/merge-preview
+ * Tab 记忆：/api/memory（sidecar 的 JSON 卡片）+ /api/memory/sleep
  * ------------------------------------------------------------------ */
 /* 记忆 sidecar（独立进程：python -m memory_sidecar serve --port 8788）的状态行 */
 function sidecarLine(sc){
@@ -1272,6 +1344,7 @@ const MemNet = (function(){
   let nodes=[],segs=[],edgeLinks=[];
   let layoutKind="kind";
   let graphMode="neighbors";
+  let graphReason="";
   let rotXv=0.25,rotYv=0,dist=16,dragging=false,last=[0,0],hover=-1,selected=-1,hovering=false;
   let raf=0,running=false,pxr=1,mvp=ident();
   let nbPos,nbCol,nbGlow,ebSt,ebEn,ebSf,ebCol,nodeCount=0,edgeVCount=0,ready=false;
@@ -1288,6 +1361,14 @@ const MemNet = (function(){
     const phi=Math.acos(1-2*k/n),theta=g*i;
     return [Math.sin(phi)*Math.cos(theta),Math.cos(phi),Math.sin(phi)*Math.sin(theta)];}
 
+  function _graphReason(data, graph){
+    if(!(data&&data.ok)) return "记忆 sidecar 没在跑";
+    if(!graph||!graph.ok) return (graph&&graph.reason)||"sidecar 没给出语义向量（向量索引没建起来或已关闭）";
+    const n=(graph.nodes||[]).length;
+    if(n<=1) return "只有 "+n+" 张记忆卡，画不出语义图";
+    return "语义图不可用";
+  }
+
   function build(data){
     const all=(data&&data.items)||[];
     const graph=(data&&data.graph)||null;
@@ -1295,6 +1376,9 @@ const MemNet = (function(){
     all.forEach(m=>{byId[m.id]=m;});
 
     const real=!!(graph&&graph.ok&&Array.isArray(graph.nodes)&&graph.nodes.length>1);
+    /* 语义图拿不到时，**说清楚在看的是哪一种图** —— 分类图长得像语义图，
+       但连线只表示「同类」，意思完全不一样。 */
+    graphReason=real?"":_graphReason(data,graph);
     let list=all.slice().sort((a,b)=>(b.importance||0)-(a.importance||0));
     if(list.length>MAX_NODES)list=list.slice(0,MAX_NODES);
     const keep=new Set(list.map(x=>x.id));
@@ -1597,7 +1681,7 @@ const MemNet = (function(){
       ? (graphMode==="all"
           ? '位置 = 向量主成分 · 连线 = 全部相似关系'
           : '位置 = 向量主成分 · 连线 = 余弦近邻')
-      : '按类别摆位，没有向量可用';
+      : '分类图：按 kind 摆位，连线只表示「同类」，不代表语义 —— '+graphReason;
     document.getElementById("memLegend").innerHTML=rows
       +'<div class="lg-note">'+note+'<br>拖拽旋转 · 滚轮缩放 · 点击节点看近邻'
       +'<br>选中节点时它的连线会更亮'
@@ -1634,10 +1718,10 @@ const MemNet = (function(){
     const badge=document.getElementById("memGraphBadge");
     if(badge){
       badge.textContent=layoutKind==="semantic"
-        ? (nodes.length+" 个节点 · "+edgeLinks.length
+        ? ("语义图 · "+nodes.length+" 个节点 · "+edgeLinks.length
            +(graphMode==="all"?" 条连线（全部）":" 条语义关联"))
-        : "分类布局";
-      badge.style.display=layoutKind==="semantic"?"":"none";
+        : ("分类图 · 语义图不可用："+graphReason);
+      badge.style.display="";
     }
     uploadGL();
     if(keepId){
@@ -1708,7 +1792,9 @@ function renderTools(inv, recon){
 
   const mcpNames=Object.keys(servers);
   $("#toolKpis").innerHTML=[
-    kpi("工具总数", fmtNum((inv&&inv.count)||0), "61 内置 + 7 MCP", "violet"),
+    kpi("工具总数", fmtNum((inv&&inv.count)||0),
+        fmtNum((inv&&inv.builtin_count)||0)+" 内置 + "
+        +fmtNum((inv&&inv.mcp_count)||0)+" MCP", "violet"),
     kpi("内置工具", fmtNum((inv&&inv.builtin_count)||0), "app/engine/tools/*.py"),
     kpi("MCP 工具", fmtNum((inv&&inv.mcp_count)||0),
         mcpNames.map(function(s){return s+" "+(servers[s]||[]).length;}).join(" · "), "blue"),
@@ -1729,11 +1815,42 @@ function renderTools(inv, recon){
     ? Object.keys(riskCount).sort().map(function(k){return barRow(esc(k),riskCount[k],rTotal);}).join("")
     : '<div class="hint">没有工具数据。</div>';
 
+  const al=(inv&&inv.allowlist)||null;
+  if(!al){
+    $("#toolAllowlist").innerHTML='<div class="hint warn">'+icon("alert")
+      +' 读不到执行期白名单（app/core/companion_config.yaml 的 tool_allowlist 段）。</div>';
+  }else{
+    const blocked=al.blocked||[], dead=al.dead_entries||[], deadP=al.dead_prefixes||[];
+    let html='<div class="hint">'+(al.available
+      ? ('来源：app/core/companion_config.yaml 的 tool_allowlist 段 · 精确名 '
+         +fmtNum(al.exact_count)+' 个 · 前缀桶 '
+         +((al.prefixes||[]).map(function(p){return esc(p);}).join("、")||"（无）"))
+      : esc(al.note||"（白名单不可用）"))+'</div>';
+    html+='<div class="grid3" style="margin-top:10px;">'
+      +kpi("放行", fmtNum((al.allowed||[]).length), "执行期允许调用", "green")
+      +kpi("拦截", fmtNum(blocked.length), "白名单没覆盖 → 执行期硬拒", blocked.length?"warn":"")
+      +kpi("白名单死条目", fmtNum(dead.length+deadP.length), "登记了但注册表里没有", (dead.length||deadP.length)?"amber":"")
+      +'</div>';
+    if(blocked.length){
+      html+='<div class="hint warn" style="margin-top:10px;">'+icon("alert")
+        +' 这 '+blocked.length+' 个工具注册表里有、白名单没登记，执行期会被拒：'
+        +'<span class="name">'+blocked.map(esc).join("、")+'</span></div>';
+    }
+    if(dead.length||deadP.length){
+      html+='<div class="hint amber" style="margin-top:10px;">'+icon("info")
+        +' 白名单里有、注册表里没有的死条目：<span class="name">'
+        +dead.map(esc).join("、")
+        +(deadP.length?("（前缀 "+deadP.map(esc).join("、")+"）"):"")
+        +'</span></div>';
+    }
+    $("#toolAllowlist").innerHTML=html;
+  }
+
   if(!tools.length){
     $("#toolTable").innerHTML='<tbody><tr><td style="color:var(--faint);">没有工具数据</td></tr></tbody>';
   }else{
     $("#toolTable").innerHTML='<thead><tr><th>工具</th><th>来源</th><th>MCP server</th><th>风险等级</th>'
-      + '<th>解锁等级</th><th class="num">调用</th><th class="num">失败</th><th class="num">失败率</th></tr></thead>'
+      + '<th>解锁等级</th><th>白名单</th><th class="num">调用</th><th class="num">失败</th><th class="num">失败率</th></tr></thead>'
       + '<tbody>'+tools.map(function(t){
           return '<tr>'
             + '<td class="name">'+esc(t.name)+'</td>'
@@ -1741,6 +1858,9 @@ function renderTools(inv, recon){
             + '<td>'+esc(t.server||"—")+'</td>'
             + '<td>'+esc(t.risk_label||"—")+(t.risk_level!=null?' <span class="mini-tag">'+t.risk_level+'</span>':"")+'</td>'
             + '<td>'+(t.unlock_level==null?"—":esc(t.unlock_level))+'</td>'
+            + '<td>'+(t.allowlisted===false
+                ? '<span class="mini-tag warn">拦截</span>'
+                : '<span class="mini-tag ok">放行</span>')+'</td>'
             + '<td class="num">'+fmtNum(t.calls)+'</td>'
             + '<td class="num">'+fmtNum(t.failures)+'</td>'
             + '<td class="num">'+pct(t.failure_rate)+'</td></tr>';
@@ -1783,7 +1903,7 @@ function renderTools(inv, recon){
 /* ------------------------------------------------------------------
  * Tab 设置：/api/settings（走桌宠进程的控制端口，改完立刻生效）
  * ------------------------------------------------------------------ */
-const SETTINGS = {schema:[], values:{}, appearance:{}, avatars:[], dirty:{}};
+const SETTINGS = {schema:[], values:{}, appearance:{}, avatars:[], editing:""};
 
 function _setRowControl(item, value){
   const id="set_"+item.key;
@@ -1855,6 +1975,196 @@ function renderSettings(){
           ' style="background-image:url(\'/api/avatar?path='+encodeURIComponent(a.path)+'\')"></button>';
       }).join("")+'</div>'
     : '<div class="hint">没有可用头像。</div>';
+
+  renderL2dModels();
+  renderL2dScenes();
+  renderL2dActions();
+}
+
+/* ---- Live2D：模型 / 场景 / 动作 ---- */
+function _l2d(){
+  return SETTINGS.appearance||{};
+}
+
+function renderL2dModels(){
+  const ap=_l2d();
+  const models=ap.models||[];
+  /* 当前模型只有一个真值：**渲染器实际加载的那个**（ap.currentModel）。
+     桌宠进程那边还有第二个来源（config.yaml 里写的，重启才生效）——
+     两者不一致时两个都摆出来，别让人以为已经换掉了。 */
+  if(!models.length){
+    $("#settingsModels").innerHTML='<div class="hint">没找到可用模型（assets/live2d 下没有 *.model3.json）。</div>';
+    return;
+  }
+  const cur=ap.currentModel||"";
+  const cfg=ap.configuredModel||"";
+  const names={};
+  models.forEach(function(m){names[m.path]=m.name||m.path;});
+  let html='<div class="set-models">'+models.map(function(m){
+    return '<button type="button" class="set-model'+((cur&&m.path===cur)?" on":"")+'" data-model="'+esc(m.path)+'">'+
+      esc(m.name)+'<small>'+esc(m.path)+'</small></button>';
+  }).join("")+'</div>';
+  if(ap.modelMismatch){
+    html+='<div class="hint warn" style="margin-top:8px;">'+icon("alert")+
+      ' 当前实际跑着的是 '+esc(names[cur]||cur)+'（'+esc(cur)+'）；配置里写的是 '+
+      esc(names[cfg]||cfg)+'（'+esc(cfg)+'）—— 改配置要重启桌宠才生效。</div>';
+  }else if(cur){
+    html+='<div class="hint" style="margin-top:8px;">当前模型：'+esc(names[cur]||cur)+
+      '（'+esc(cur)+'）—— 渲染器实际加载的就是它。</div>';
+  }
+  $("#settingsModels").innerHTML=html+
+    (ap.current!==undefined&&ap.current===false
+      ? '<div class="hint" style="margin-top:8px;">换模型要重启桌宠才生效（每个模型各存一份场景配置）。</div>'
+      : '');
+}
+
+function renderL2dScenes(){
+  const ap=_l2d();
+  const scenes=ap.scenes||[];
+  if(!ap.available){
+    $("#settingsScenes").innerHTML='<div class="hint">当前不是 Live2D 渲染器，没有场景可配。</div>';
+    return;
+  }
+  const groups={};
+  scenes.forEach(function(s){ (groups[s.group]=groups[s.group]||[]).push(s); });
+  let html="";
+  Object.keys(groups).forEach(function(g){
+    html+='<div class="set-card" style="margin-bottom:12px;"><h4>'+esc(g)+'</h4>';
+    groups[g].forEach(function(s){
+      html+='<div class="set-scene"><div class="lft"><span class="nm">'+esc(s.title)+'</span>'+
+        '<span class="sum">'+esc(s.summary||"")+'</span></div><div class="rgt">'+
+        '<span class="tag'+(s.overridden?" over":"")+'">'+
+          (s.overridden?"已自定义":(s.kind==="transient"?"一次性":"持续"))+'</span>'+
+        '<button type="button" class="set-mini" data-scene-edit="'+esc(s.id)+'">配置</button>'+
+        (s.overridden?'<button type="button" class="set-mini danger" data-scene-reset="'+esc(s.id)+'">恢复</button>':"")+
+        '</div></div>';
+      if(SETTINGS.editing==="scene:"+s.id){
+        html+=_bundleEditor("scene:"+s.id,s.title+" · 外观",s.bundle,s.kind==="transient");
+      }
+    });
+    html+='</div>';
+  });
+  $("#settingsScenes").innerHTML=html||'<div class="hint">没有场景。</div>';
+}
+
+function renderL2dActions(){
+  const ap=_l2d();
+  const actions=ap.actions||[];
+  if(!ap.available){
+    $("#settingsActions").innerHTML='<div class="hint">当前不是 Live2D 渲染器。</div>';
+    return;
+  }
+  let html='<div class="set-card">';
+  actions.forEach(function(a){
+    html+='<div class="set-scene"><div class="lft"><span class="nm">'+esc(a.name)+'</span>'+
+      '<span class="sum">'+esc(a.summary||"")+'</span></div><div class="rgt">'+
+      '<span class="tag">'+esc(_hookLabel(a.hook))+'</span>'+
+      '<button type="button" class="set-mini" data-action-play="'+esc(a.id)+'">播放</button>'+
+      '<button type="button" class="set-mini" data-action-edit="'+esc(a.id)+'">编辑</button>'+
+      '<button type="button" class="set-mini danger" data-action-del="'+esc(a.id)+'">删除</button>'+
+      '</div></div>';
+    if(SETTINGS.editing==="action:"+a.id){
+      html+=_actionEditor(a);
+    }
+  });
+  html+='<div class="row" style="margin-top:12px;">'+
+    '<button type="button" class="btn" data-action-new="1">＋ 新建动作</button></div>';
+  if(SETTINGS.editing==="action:new")html+=_actionEditor(null);
+  html+='</div>';
+  $("#settingsActions").innerHTML=html;
+}
+
+function _hookLabel(hook){
+  if(!hook)return "仅手动";
+  const hooks=_l2d().hooks||[];
+  const hit=hooks.filter(function(h){return h.key===hook;})[0];
+  return hit?hit.label:hook;
+}
+
+/* 外观组合编辑器（表情单选 / 发型单选 / 三类多选 / 时长）
+   withActions=false 时只渲染字段，交给外层编辑器统一放按钮 */
+function _bundleEditor(key,title,bundle,withHold,withActions){
+  const ap=_l2d();
+  const groups=ap.groups||[];
+  const emotion=groups.filter(function(g){return g.kind==="emotion";})[0];
+  const hair=groups.filter(function(g){return g.kind==="hairstyle";})[0];
+  const toggles=groups.filter(function(g){return g.kind!=="emotion"&&g.kind!=="hairstyle";});
+  bundle=bundle||{emotion:"",hairstyle:"",toggles:[],hold_ms:0};
+  let html='<div class="set-editor'+(withActions===false?" plain":"")+'"><h5>'+esc(title)+'</h5>';
+  if(emotion){
+    html+='<div class="set-field"><span class="cap">表情</span><select data-bd="emotion" data-bk="'+esc(key)+'">'+
+      '<option value=""'+(bundle.emotion?"":" selected")+'>不改变（保持当前）</option>'+
+      '<option value="natural"'+(bundle.emotion==="natural"?" selected":"")+'>恢复自然（普通眼）</option>'+
+      (emotion.items||[]).filter(function(it){return it[0]!=="__default__";}).map(function(it){
+        return '<option value="'+esc(it[0])+'"'+(bundle.emotion===it[0]?" selected":"")+'>'+esc(it[1])+'</option>';
+      }).join("")+'</select></div>';
+  }
+  if(hair){
+    html+='<div class="set-field"><span class="cap">发型</span><select data-bd="hairstyle" data-bk="'+esc(key)+'">'+
+      '<option value=""'+(bundle.hairstyle?"":" selected")+'>不改变（保持当前）</option>'+
+      (hair.items||[]).map(function(it){
+        const label=it[0]==="__default__"?"默认发型":it[1];
+        return '<option value="'+esc(it[0])+'"'+(bundle.hairstyle===it[0]?" selected":"")+'>'+esc(label)+'</option>';
+      }).join("")+'</select></div>';
+  }
+  toggles.forEach(function(g){
+    html+='<div class="set-field"><span class="cap">'+esc(g.label)+'</span></div>'+
+      '<div class="set-toggle-grid" data-tg="'+esc(g.id)+'" data-bk="'+esc(key)+'">'+
+      (g.items||[]).map(function(it){
+        const on=(bundle.toggles||[]).indexOf(it[0])>=0;
+        return '<button type="button" class="set-chip'+(on?" on":"")+'" data-tg-item="'+esc(it[0])+'">'+esc(it[1])+'</button>';
+      }).join("")+'</div>';
+  });
+  if(withHold){
+    html+='<div class="set-field"><span class="cap">持续时长</span>'+
+      '<input type="number" data-bd="hold_ms" data-bk="'+esc(key)+'" value="'+esc(bundle.hold_ms||1600)+'" step="200" min="400" max="15000"> 毫秒</div>';
+  }
+  if(withActions!==false){
+    html+='<div class="row"><button type="button" class="btn" data-bd-preview="'+esc(key)+'">试穿预览</button>'+
+      '<button type="button" class="btn" data-bd-save="'+esc(key)+'">保存</button>'+
+      '<button type="button" class="btn" data-bd-cancel="1">取消</button></div>';
+  }
+  html+='</div>';
+  return html;
+}
+
+function _actionEditor(a){
+  const hooks=_l2d().hooks||[];
+  const cur=a||{name:"",hook:"",bundle:{emotion:"",hairstyle:"",toggles:[],hold_ms:1600},hold_ms:1600};
+  const key="action:"+(a?a.id:"new");
+  let html='<div class="set-editor"><h5>'+(a?"编辑动作":"新建动作")+'</h5>';
+  html+='<div class="set-field"><span class="cap">名称</span>'+
+    '<input type="text" data-act="name" value="'+esc(cur.name)+'" placeholder="例如：打招呼"></div>';
+  html+='<div class="set-field"><span class="cap">触发方式</span><select data-act="hook">'+
+    hooks.map(function(h){
+      return '<option value="'+esc(h.key)+'"'+(cur.hook===h.key?" selected":"")+'>'+esc(h.label)+'</option>';
+    }).join("")+'</select></div>';
+  html+=_bundleEditor(key,"动作外观",cur.bundle,true,false);
+  html+='<div class="row"><button type="button" class="btn" data-bd-preview="'+esc(key)+'">试穿预览</button>'+
+    '<button type="button" class="btn" data-act-save="'+esc(key)+'">保存</button>'+
+    '<button type="button" class="btn" data-act-cancel="1">取消</button></div>';
+  html+='</div>';
+  return html;
+}
+
+/* 编辑器里的当前取值 */
+function _bundleOf(key){
+  const ap=_l2d();
+  const out={emotion:"",hairstyle:"",toggles:[],hold_ms:0};
+  const root=document.querySelector('[data-bk="'+key.replace(/"/g,'&quot;')+'"]');
+  $$("[data-bk]").forEach(function(el){
+    if(el.dataset.bk!==key)return;
+    if(el.dataset.bd)out[el.dataset.bd]=(el.dataset.bd==="hold_ms")?Number(el.value||0):el.value;
+  });
+  $$("[data-tg][data-bk]").forEach(function(g){
+    if(g.dataset.bk!==key)return;
+    const picked=[];
+    $$("[data-tg-item]",g).forEach(function(c){
+      if(c.classList.contains("on"))picked.push(c.dataset.tgItem);
+    });
+    out.toggles=(out.toggles||[]).concat(picked);
+  });
+  return out;
 }
 
 function _collectSettings(){
@@ -1921,7 +2231,13 @@ async function settingsAction(action, params){
     const r=await apiRaw("/api/settings/action",{method:"POST",
       headers:{"content-type":"application/json"},
       body:JSON.stringify({action:action,params:params||{}})});
-    if(r&&r.ok)await loadSettings();
+    if(r&&r.ok){
+      // 配置类动作做完就收起编辑器（场景/动作保存后不用再手动关）
+      if(action.indexOf("live2d_scene_")===0||action.indexOf("live2d_action_")===0){
+        SETTINGS.editing="";
+      }
+      await loadSettings(r.note?r.note:null);
+    }
     else $("#settingsErr").innerHTML='<div class="hint warn">'+icon("alert")+' '+
       esc((r&&r.error)||"操作失败")+'</div>';
   }catch(e){
@@ -2250,10 +2566,10 @@ $$(".tab").forEach(function(t){
                    tools:"工具清单",config:"生效配置",state:"桌宠状态",health:"健康与维护"};
     var _descs = {
       runs:"会话记录、成功率与工具调用概览",
-      cost:"Token 用量、缓存命中与花费估算",
-      memory:"记忆卡片、向量索引与召回情况",
+      cost:"Token 用量、缓存命中与花费（人民币计价）",
+      memory:"记忆卡片、语义图与 sidecar 状态",
       decision:"工具决策、风险拦截与养成结果",
-      tools:"内置与 MCP 工具、风险等级与解锁",
+      tools:"内置与 MCP 工具、风险等级、解锁与执行期白名单",
       config:"模型、密钥与工具解锁配置",
       state:"养成数值、等级与解锁进度",
       health:"进程健康、文件体检与维护操作"};
@@ -2305,18 +2621,73 @@ document.addEventListener("input",function(e){
   }
 });
 document.addEventListener("click",function(e){
-  const el=e.target.closest?e.target.closest("[data-l2d],[data-l2d-reset],[data-avatar]"):null;
+  const el=e.target.closest?e.target.closest(
+    "[data-l2d],[data-l2d-reset],[data-avatar],[data-model],"+
+    "[data-scene-edit],[data-scene-reset],[data-action-play],[data-action-edit],"+
+    "[data-action-del],[data-action-new],[data-tg-item],[data-bd-preview],"+
+    "[data-bd-save],[data-bd-cancel],[data-act-save],[data-act-cancel]"):null;
   if(!el)return;
-  if(el.dataset.l2dReset){
-    settingsAction("live2d_reset");
+  const d=el.dataset;
+  if(d.l2dReset){ settingsAction("live2d_reset"); return; }
+  if(d.l2d){ settingsAction("live2d_activate",{group_id:d.l2d,item_id:d.l2dItem}); return; }
+  if(d.avatar){ settingsAction("set_avatar",{path:d.avatar}); return; }
+  if(d.model){
+    if(!window.confirm("换到模型「"+d.model+"」？\n\n要重启桌宠才生效，"+
+      "每个模型各存一份场景配置。"))return;
+    settingsAction("live2d_switch_model",{path:d.model});
     return;
   }
-  if(el.dataset.l2d){
-    settingsAction("live2d_activate",{group_id:el.dataset.l2d,item_id:el.dataset.l2dItem});
+  if(d.sceneEdit){ SETTINGS.editing="scene:"+d.sceneEdit; renderL2dScenes(); return; }
+  if(d.sceneReset){ settingsAction("live2d_scene_reset",{scene_id:d.sceneReset}); return; }
+  if(d.actionPlay){ settingsAction("live2d_action_play",{id:d.actionPlay}); return; }
+  if(d.actionEdit){ SETTINGS.editing="action:"+d.actionEdit; renderL2dActions(); return; }
+  if(d.actionDel){
+    if(!window.confirm("删掉这个自定义动作？"))return;
+    settingsAction("live2d_action_delete",{id:d.actionDel});
     return;
   }
-  if(el.dataset.avatar){
-    settingsAction("set_avatar",{path:el.dataset.avatar});
+  if(d.actionNew){ SETTINGS.editing="action:new"; renderL2dActions(); return; }
+  if(d.tgItem){
+    el.classList.toggle("on");
+    return;
+  }
+  if(d.bdPreview){
+    settingsAction("live2d_preview",{bundle:_bundleOf(d.bdPreview)});
+    return;
+  }
+  if(d.bdSave){
+    const key=d.bdSave;
+    if(key.indexOf("scene:")===0){
+      settingsAction("live2d_scene_save",{
+        scene_id:key.slice(6), bundle:_bundleOf(key)});
+    }else{
+      const id=key.slice(6);
+      const act=(SETTINGS.appearance.actions||[]).filter(function(a){return a.id===id;})[0];
+      const nameEl=document.querySelector('[data-act="name"]');
+      const hookEl=document.querySelector('[data-act="hook"]');
+      settingsAction("live2d_action_save",{
+        id:id==="new"?"":id,
+        name:nameEl?nameEl.value:(act?act.name:""),
+        hook:hookEl?hookEl.value:"",
+        bundle:_bundleOf(key),
+        hold_ms:(_bundleOf(key).hold_ms||1600)});
+    }
+    return;
+  }
+  if(d.bdCancel||d.actCancel){ SETTINGS.editing=""; renderL2dScenes(); renderL2dActions(); return; }
+  if(d.actSave){
+    const key=d.actSave;
+    const id=key.slice(6);
+    const nameEl=document.querySelector('[data-act="name"]');
+    const hookEl=document.querySelector('[data-act="hook"]');
+    const bundle=_bundleOf(key);
+    settingsAction("live2d_action_save",{
+      id:id==="new"?"":id,
+      name:nameEl?nameEl.value:"",
+      hook:hookEl?hookEl.value:"",
+      bundle:bundle,
+      hold_ms:(bundle.hold_ms||1600)});
+    return;
   }
 });
 
@@ -2483,15 +2854,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOLS_TTL = 60.0
 _tools_cache: dict = {}
 
-# 占位价目表（每百万 token，USD）。
-# MiniMax 的真实价目表两个仓库里都没有（docs/baseline-before-alignment.md 第 8 节），
-# Stage 4.1 的 app/brain/model_prices.py 还没落地 —— 所以面板算出来的金额
-# 一律标 estimated=true，并把用到的单价原样吐出来，方便人纠正。
-_PLACEHOLDER_PRICE_USD_PER_MILLION = {
-    "input": 0.30,
-    "output": 0.60,
-    "cache_hit": 0.03,
-    "cache_write": 0.30,
+# 本项目实际调的是 MiniMax **国产平台**（https://api.minimaxi.com/v1），
+# 账单按**元**结算 —— 所以面板的成本 Tab 一律用人民币口径。
+# 美元表（DEFAULT_PRICE_TABLE，国际站）留在 app/brain/model_prices.py 里做对照，
+# 面板**不混币种**：一个总数里只可能出现一种货币。
+COST_CURRENCY = "CNY"
+COST_SYMBOL = "¥"
+COST_TABLE_LABEL = "MiniMax 国产平台官方价（api.minimaxi.com）"
+
+# 占位价目表（每百万 token，**人民币**）—— 只在 app/brain/model_prices.py
+# 拿不到时兜底（那时金额一律标 estimated=true，并把用到的单价原样吐出来，
+# 方便人纠正）。数字取自国产平台 MiniMax-M3 标准档官方价。
+_PLACEHOLDER_PRICE_CNY_PER_MILLION = {
+    "input": 2.10,
+    "output": 8.40,
+    "cache_hit": 0.42,
+    "cache_write": 2.10,
 }
 
 
@@ -2599,7 +2977,36 @@ def _pet_control(base_url: Optional[str] = None, timeout: float = 8.0):
     return PetControlClient(base_url or "", timeout=timeout)
 
 
-def _memory_payload(base_url: Optional[str] = None) -> dict:
+def _live2d_model_state(appearance: dict) -> dict:
+    """Live2D「当前模型」只有一个真值：**渲染器实际加载的那个**。
+
+    桌宠进程那边有两个来源：
+      - 渲染器的 model_dir —— 真正跑着的模型（权威）；
+      - config.yaml 的 pet.live2d.model_dir —— 切换模型时写进去的
+        （要重启桌宠才生效）。
+    两者不一致时（换了模型还没重启），面板必须**两个都说出来** ——
+    只标一个「当前」会让人以为已经换掉了。
+
+    桌宠进程那边（app/ui/ui_controller.py）两个来源本来就各算各的：
+    _live2d_models() 用 cfg 标 current，_control_appearance() 报渲染器的
+    model_dir。面板不替它们选边，只把差异如实摊开。
+    """
+    ap = dict(appearance or {})
+    renderer_model = str(ap.get("model") or "")
+    configured_model = ""
+    for m in ap.get("models") or []:
+        if isinstance(m, dict) and m.get("current"):
+            configured_model = str(m.get("path") or "")
+            break
+    ap["currentModel"] = renderer_model
+    ap["configuredModel"] = configured_model
+    ap["modelMismatch"] = bool(renderer_model and configured_model
+                                and renderer_model != configured_model)
+    return ap
+
+
+def _memory_payload(base_url: Optional[str] = None,
+                    with_graph: bool = True) -> dict:
     """记忆 Tab 的响应体：**全部来自 sidecar**（JSON 卡片是唯一真值）。
 
     只读 sidecar 的端点：GET /health（活着没 / 多少张卡 / 模型状态 / 降级原因）、
@@ -2649,14 +3056,20 @@ def _memory_payload(base_url: Optional[str] = None) -> dict:
             "记忆 sidecar 没在跑（python -m memory_sidecar serve --port 8788）——"
             "桌宠照常聊天，只是没有长期记忆。")
 
-    graph = {"ok": False, "nodes": [], "edges": []}
-    if reachable:
+    graph = {"ok": False, "nodes": [], "edges": [],
+             "reason": "记忆 sidecar 没在跑"}
+    if reachable and with_graph:
         try:
             # 默认就把所有够格的连线都画出来；选中节点时前端只留它那几条
             graph = client.graph(limit=MEM_NET_MAX_NODES, top_k=4,
                                  mode="all", timeout=15.0)
         except Exception:  # noqa: BLE001
-            graph = {"ok": False, "nodes": [], "edges": []}
+            graph = {"ok": False, "nodes": [], "edges": [],
+                     "reason": "sidecar 没给回语义图"}
+        if not graph.get("reason"):
+            graph["reason"] = ""
+    elif reachable:
+        graph["reason"] = "（这次没要语义图）"
 
     return {
         "ok": reachable,
@@ -2734,9 +3147,8 @@ def _hit_rate(hit: int, miss: int) -> float:
 def _load_model_prices():
     """Stage 4.1 的挂载点：app/brain/model_prices.py。
 
-    那个模块现在还不存在（Stage 4.1 才做），所以这里返回 None，
-    面板继续用占位价目表 —— 金额一律标 estimated=true。
-    落地之后：只要它提供 estimate_cost(buckets) -> dict，
+    拿不到就返回 None —— 面板退回占位价目表，金额一律标 estimated=true。
+    落地之后：只要它提供 estimate_cost(buckets, model=..., table=...) -> dict，
     面板会自动改用它的结果（这里不用再改）。
     """
     try:
@@ -2747,44 +3159,141 @@ def _load_model_prices():
     return fn if callable(fn) else None
 
 
-def _estimate_cost(buckets: dict) -> dict:
-    """按价目表算钱。金额一律标 estimated=true。
+def _price_table():
+    """本项目实际用的价目表：**人民币**（MiniMax 国产平台）。
 
-    价目表来源：Stage 4.1 的 app/brain/model_prices.py（还没落地）。
-    在那之前用占位价目表算，并把用到的单价原样吐出来，方便人纠正。
+    app/brain/model_prices.py 里现在有两张表：
+      - DEFAULT_PRICE_TABLE：美元（国际站）
+      - CNY_PRICE_TABLE：人民币（国产平台）—— 本项目实际调的就是它
+    一张表一个币种，面板只报人民币，绝不把两种币种加进同一个总数。
     """
-    price = _PLACEHOLDER_PRICE_USD_PER_MILLION
+    try:
+        from app.brain import model_prices
+    except Exception:  # noqa: BLE001
+        return None
+    tbl = getattr(model_prices, "CNY_PRICE_TABLE", None)
+    return tbl if isinstance(tbl, dict) and tbl else None
+
+
+def _cost_at_ms(ts) -> float:
+    """台账时间戳 -> 毫秒（台账存的是秒；有些行是毫秒）。"""
+    try:
+        v = float(ts or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0:
+        return 0.0
+    return v * 1000.0 if v < 1e11 else v
+
+
+def _estimate_cost(buckets: dict, model: Optional[str] = None,
+                   at: Optional[float] = None) -> dict:
+    """按价目表算钱（**人民币**）。
+
+    估算标记是诚实的：
+      - 传了 model 且价目表里查得到 -> estimated=False（这是准数）；
+      - 模型不在表里 / 压根没传模型 -> estimated=True
+        （拿兜底价去猜，天然是估的，不能当账单）。
+
+    以前这里只调 estimate_cost(buckets) 不带模型名 -> 面板**每一行**都标
+    「估算」，连价格已知的 MiniMax-M3 也是 —— 那是假的诚实。
+    """
+    price = _PLACEHOLDER_PRICE_CNY_PER_MILLION
     hit = _int(buckets.get("cache_hit_tokens"))
     miss = _int(buckets.get("cache_miss_tokens"))
     write = _int(buckets.get("cache_write_tokens"))
     prompt = _int(buckets.get("prompt_tokens"))
     completion = _int(buckets.get("completion_tokens"))
     uncached = max(0, prompt - hit - miss)
-    usd = (hit * price["cache_hit"] + miss * price["input"]
+    cny = (hit * price["cache_hit"] + miss * price["input"]
            + uncached * price["input"] + write * price["cache_write"]
            + completion * price["output"]) / 1000000.0
     out = {
-        "amount": round(usd, 6),
-        "currency": "USD",
+        "amount": round(cny, 8),
+        "currency": COST_CURRENCY,
+        "symbol": COST_SYMBOL,
         "estimated": True,
         "price_source": "placeholder",
+        "price_table": COST_TABLE_LABEL,
         "rates_per_million": dict(price),
-        "note": ("MiniMax 真实价目表未落地（Stage 4.1 / app/brain/model_prices.py），"
+        "note": ("真实价目表（app/brain/model_prices.py）没加载上，"
                  "这里的金额是占位价目表算出的估算值"),
     }
     real = _load_model_prices()
     if real is not None:
+        got = None
+        kwargs = {"model": model or None}
+        if at:
+            kwargs["at"] = float(at)
+        tbl = _price_table()
+        if tbl is not None:
+            kwargs["table"] = tbl
         try:
-            got = real(dict(buckets))
+            got = real(dict(buckets or {}), **kwargs)
+        except TypeError:
+            # 价目表模块的签名变了（老版本没有 model/table 参数）—— 退回最老口径
+            try:
+                got = real(dict(buckets or {}))
+            except Exception:  # noqa: BLE001
+                got = None
         except Exception:  # noqa: BLE001
             got = None
         if isinstance(got, dict) and got.get("amount") is not None:
             out.update({k: v for k, v in got.items() if k != "note"})
-            out["amount"] = round(float(got.get("amount") or 0.0), 6)
-            out.setdefault("estimated", True)
-            out["price_source"] = got.get("price_source", "model_prices")
+            out["amount"] = round(float(got.get("amount") or 0.0), 8)
+            out["currency"] = str(got.get("currency") or COST_CURRENCY)
+            out["symbol"] = str(got.get("symbol") or COST_SYMBOL)
+            out["estimated"] = bool(got.get("estimated"))
+            out["price_source"] = got.get("price_source") or "model_prices"
+            out["price_table"] = COST_TABLE_LABEL
             out["note"] = "金额来自 app/brain/model_prices.py"
+    if model:
+        out["model"] = str(model)
     return out
+
+
+def _new_cost_bucket() -> dict:
+    """一个待累加的金额桶（金额 + 币种 + 是否含估算成分）。"""
+    return {"amount": 0.0, "currency": "", "symbol": "",
+            "estimated": False, "price_source": "", "price_table": COST_TABLE_LABEL,
+            "rates_per_million": {}, "tier": "", "models": []}
+
+
+def _cost_accumulate(dst: dict, src: dict) -> dict:
+    """把一行的金额并进某个汇总（**只允许同币种相加**）。"""
+    if not isinstance(src, dict) or src.get("amount") is None:
+        return dst
+    cur = str(src.get("currency") or "")
+    if cur and dst.get("currency") and cur != dst["currency"]:
+        # 币种对不上 —— 宁可少算也不能把两种币种混进一个总数
+        dst["estimated"] = True
+        dst["note"] = "有行的币种与汇总不一致，已排除（不混币种）"
+        return dst
+    dst["amount"] = round(float(dst.get("amount") or 0.0)
+                          + float(src.get("amount") or 0.0), 8)
+    if cur:
+        dst["currency"] = cur
+    if src.get("symbol"):
+        dst["symbol"] = src["symbol"]
+    if src.get("estimated"):
+        dst["estimated"] = True
+    model = str(src.get("model") or "")
+    if model and model not in dst["models"]:
+        dst["models"].append(model)
+    if src.get("rates_per_million"):
+        dst["rates_per_million"] = src["rates_per_million"]
+    if src.get("tier"):
+        dst["tier"] = src["tier"]
+    return dst
+
+
+def _cost_finish(dst: dict) -> dict:
+    """汇总完成：把用到的模型清单写进 price_source（面板要能看出按谁的价格算的）。"""
+    models = dst.get("models") or []
+    dst["price_source"] = ("、".join(models) if models
+                           else (dst.get("price_source") or "unknown"))
+    dst.pop("models", None)
+    return dst
 
 
 def _aggregate_ledger(rows: list) -> dict:
@@ -2799,6 +3308,7 @@ def _aggregate_ledger(rows: list) -> dict:
     by_model: dict = {}
     by_backend: dict = {}
     by_session: dict = {}
+    total_cost = _new_cost_bucket()
     for row in rows:
         kind = str(row.get("kind") or "request")
         n = _int(row.get("n")) if kind == "aggregate" else 1
@@ -2811,30 +3321,37 @@ def _aggregate_ledger(rows: list) -> dict:
         buckets = {b: _int(row.get(b)) for b in _LEDGER_BUCKETS}
         for b, v in buckets.items():
             totals[b] += v
+        # 金额**逐行**算：每一行都知道自己是哪个模型 -> 估算标记才诚实
+        # （汇总之后再算就只能拿兜底价猜，整张表都会变成「估算」）。
+        row_cost = _estimate_cost(buckets, model=model,
+                                  at=_cost_at_ms(row.get("ts")))
         for table, key in ((by_model, model), (by_backend, backend),
                            (by_session, sid)):
             rec = table.setdefault(key, {
                 "requests": 0, "total_tokens": 0, "prompt_tokens": 0,
                 "completion_tokens": 0, "cache_hit_tokens": 0,
                 "cache_miss_tokens": 0, "cache_hit_rate": 0.0, "last_ts": 0.0,
+                "_cost": _new_cost_bucket(),
             })
             rec["requests"] += n
             for b, v in buckets.items():
                 rec[b] = rec.get(b, 0) + v
             rec["last_ts"] = max(_float(rec.get("last_ts")),
                                  _float(row.get("ts")))
+            _cost_accumulate(rec["_cost"], row_cost)
+        _cost_accumulate(total_cost, row_cost)
     for rec in (list(by_model.values()) + list(by_backend.values())
                 + list(by_session.values())):
         rec["cache_hit_rate"] = _hit_rate(_int(rec.get("cache_hit_tokens")),
                                           _int(rec.get("cache_miss_tokens")))
-        rec["cost"] = _estimate_cost(rec)
+        rec["cost"] = _cost_finish(rec.pop("_cost"))
     totals["cache_hit_rate"] = _hit_rate(totals["cache_hit_tokens"],
                                          totals["cache_miss_tokens"])
     totals["requests"] = requests
     totals["sessions"] = len(sessions)
     totals["avg_tokens_per_turn"] = (round(totals["total_tokens"] / requests, 2)
                                       if requests else 0.0)
-    totals["cost"] = _estimate_cost(totals)
+    totals["cost"] = _cost_finish(total_cost)
     totals["by_model"] = by_model
     totals["by_backend"] = by_backend
     totals["by_session"] = by_session
@@ -2882,17 +3399,22 @@ def _token_series(data_dir: Path, bucket_ms: int) -> dict:
             "ts": key, "requests": 0, "prompt_tokens": 0,
             "completion_tokens": 0, "total_tokens": 0,
             "cache_hit_tokens": 0, "cache_miss_tokens": 0,
-            "cache_write_tokens": 0,
+            "cache_write_tokens": 0, "_cost": _new_cost_bucket(),
         })
         slot["requests"] += 1
         for b in _LEDGER_BUCKETS:
             slot[b] += _int(row.get(b))
+        # 一个时间桶里的行可能来自不同模型 -> 逐行算再累加
+        _cost_accumulate(slot["_cost"], _estimate_cost(
+            {b: _int(row.get(b)) for b in _LEDGER_BUCKETS},
+            model=str(row.get("model") or "unknown"),
+            at=_cost_at_ms(row.get("ts"))))
     items = []
     for key in sorted(buckets):
         slot = buckets[key]
         slot["cache_hit_rate"] = _hit_rate(slot["cache_hit_tokens"],
                                            slot["cache_miss_tokens"])
-        slot["cost"] = _estimate_cost(slot)
+        slot["cost"] = _cost_finish(slot.pop("_cost"))
         items.append(slot)
     out["items"] = items
     return out
@@ -2923,7 +3445,9 @@ def _token_turns(data_dir: Path, session_id: Optional[str], limit: int) -> dict:
         item["retry"] = _int(row.get("retry"))
         item["cache_hit_rate"] = _hit_rate(item["cache_hit_tokens"],
                                            item["cache_miss_tokens"])
-        item["cost"] = _estimate_cost(item)
+        # 逐请求：这一行知道自己是哪个模型 -> 估算标记才诚实
+        item["cost"] = _estimate_cost(item, model=item["model"] or None,
+                                      at=_cost_at_ms(item["ts"]))
         items.append(item)
     out["items"] = items
     return out
@@ -3039,7 +3563,10 @@ def _trace_tool_stats(trace_db) -> dict:
 
 
 def _tool_inventory(trace_db, force: bool = False) -> dict:
-    """68 个工具（61 内置 + 7 MCP）+ 风险等级 + 解锁等级 + 调用统计 + 对账结果。"""
+    """工具清单 + 风险等级 + 解锁等级 + 调用统计 + 对账结果。
+
+    数字**不写死**：实际数量来自下面的盘点（数据源是 check_tool_docs.py 的对账结果），
+    这里只给人看一句话 —— 工具集变了，写死的数字就会过期。"""
     import time
     now = time.time()
     if not force:
@@ -3084,8 +3611,11 @@ def _tool_inventory(trace_db, force: bool = False) -> dict:
                      "server": server_of.get(str(name))})
 
     stats = _trace_tool_stats(trace_db)
+    allow = _tool_allowlist_status([r["name"] for r in rows])
+    allowed_set = set(allow.get("allowed") or [])
     for row in rows:
         name = row["name"]
+        row["allowlisted"] = name in allowed_set
         row["risk_level"] = risk.get(name)
         row["risk_label"] = {0: "SAFE", 1: "LOW", 2: "MEDIUM", 3: "HIGH",
                              4: "IRREVERSIBLE"}.get(row["risk_level"])
@@ -3106,10 +3636,60 @@ def _tool_inventory(trace_db, force: bool = False) -> dict:
         "unlock_total": len(unlock),
         "mcp_default_level": mcp_default_level,
         "tools": rows,
+        "allowlist": allow,
         "reconciliation": _reconciliation_summary(recon),
     }
     _tools_cache["inventory"] = out
     _tools_cache["ts"] = now
+    return out
+
+
+def _tool_allowlist_status(names: list) -> dict:
+    """执行期白名单（companion_config.yaml 的 tool_allowlist 段）状态。
+
+    口径跟工具层**同一份**（app/engine/tools/_core.load_tool_allowlist）：
+    精确名命中 or 命中某个前缀桶 = 放行；否则**执行期一律拒绝**
+    （模型硬点名也拦得住）。
+
+    yaml 里没有该段 -> 运行期退回基线快照（全放行），面板如实这么说，
+    绝不假装有一份白名单。
+    """
+    out = {
+        "available": False, "exact_count": 0, "prefixes": [],
+        "allowed": [], "blocked": [],
+        "dead_entries": [], "dead_prefixes": [], "note": "",
+    }
+    names = [str(n) for n in (names or [])]
+    policy = None
+    default_prefixes = ()
+    try:
+        from app.engine.tools._core import (DEFAULT_ALLOWLIST_PREFIXES,
+                                            load_tool_allowlist)
+        default_prefixes = DEFAULT_ALLOWLIST_PREFIXES
+        policy = load_tool_allowlist(force=True)
+    except Exception:  # noqa: BLE001 - 读不到 yaml 不该让面板崩
+        policy = None
+    if policy is None:
+        out["allowed"] = names
+        out["note"] = ("companion_config.yaml 里没有 tool_allowlist 段 —— "
+                       "运行期退回基线快照（全部放行）")
+        return out
+    exact = set(policy.exact or ())
+    prefixes = tuple(p for p in (policy.prefixes or default_prefixes) if p)
+    out["available"] = True
+    out["exact_count"] = len(exact)
+    out["prefixes"] = list(prefixes)
+    for n in names:
+        if n in exact or any(n.startswith(p) for p in prefixes):
+            out["allowed"].append(n)
+        else:
+            out["blocked"].append(n)
+    live = set(names)
+    out["dead_entries"] = sorted(exact - live)
+    out["dead_prefixes"] = sorted(p for p in prefixes
+                                  if not any(n.startswith(p) for n in live))
+    out["note"] = ("放行 %d 个 / 拦截 %d 个（执行期硬拒，模型硬点名也拦得住）"
+                   % (len(out["allowed"]), len(out["blocked"])))
     return out
 
 
@@ -3670,12 +4250,25 @@ def create_app(trace_db: str | Path,
 
     @app.get("/api/memory/graph")
     def memory_graph(mode: str = "all", limit: int = MEM_NET_MAX_NODES, top_k: int = 4):
-        """语义图。默认把所有超过相似度下限的连线都算出来。"""
+        """语义图。默认把所有超过相似度下限的连线都算出来。
+
+        sidecar 没在跑 -> **200 + ok=False + 为什么没有**（绝不是 500）。
+        """
         client = _memory_sidecar(sidecar_url, timeout=20.0)
         try:
-            return client.graph(limit=limit, top_k=top_k, mode=mode, timeout=15.0)
+            graph = client.graph(limit=limit, top_k=top_k, mode=mode,
+                                 timeout=15.0)
         except Exception:  # noqa: BLE001
-            return {"ok": False, "nodes": [], "edges": []}
+            graph = {"ok": False, "nodes": [], "edges": []}
+        if not isinstance(graph, dict):
+            graph = {"ok": False, "nodes": [], "edges": []}
+        graph.setdefault("ok", False)
+        graph.setdefault("nodes", [])
+        graph.setdefault("edges", [])
+        if not graph.get("ok") and not graph.get("reason"):
+            graph["reason"] = (client.last_error
+                               or "记忆 sidecar 没在跑（没有语义图）")
+        return graph
 
     @app.get("/api/memory/sleep")
     def memory_sleep():
@@ -3684,26 +4277,41 @@ def create_app(trace_db: str | Path,
             plan = _sleep_service.plan()
         except Exception:  # noqa: BLE001
             plan = {"ok": False}
-        return {"ok": True, "state": _sleep_service.state(), "plan": plan}
+        if not isinstance(plan, dict):
+            plan = {"ok": False}
+        if plan.get("ok") is False and not plan.get("reason"):
+            plan["reason"] = "记忆 sidecar 没在跑（算不出这一觉的计划）"
+        try:
+            state = _sleep_service.state()
+        except Exception:  # noqa: BLE001
+            state = {}
+        return {"ok": True, "state": state, "plan": plan}
 
     @app.post("/api/memory/sleep/schedule")
     def memory_sleep_schedule(payload: Optional[dict] = None):
         """改定时睡觉的设置（enabled / time）。"""
         payload = payload or {}
-        state = _sleep_service.set_schedule(
-            enabled=payload.get("enabled"), time=payload.get("time"))
+        try:
+            state = _sleep_service.set_schedule(
+                enabled=payload.get("enabled"), time=payload.get("time"))
+        except Exception as e:  # noqa: BLE001 - 面板不许因为这个 500
+            return {"ok": False, "error": "改定时睡觉的设置失败：%s" % e,
+                    "state": {}}
         return {"ok": True, "state": state}
 
     @app.post("/api/memory/sleep/run")
     def memory_sleep_run(payload: Optional[dict] = None):
         """现在睡一觉：模型写摘要 → sidecar 归组 / 模糊 / 遗忘。"""
         payload = payload or {}
-        return _sleep_service.run(dry_run=bool(payload.get("dry_run")),
-                                  trigger="manual")
+        try:
+            return _sleep_service.run(dry_run=bool(payload.get("dry_run")),
+                                      trigger="manual")
+        except Exception as e:  # noqa: BLE001 - 面板不许因为这个 500
+            return {"ok": False, "error": "睡觉失败：%s" % e}
 
     @app.get("/api/tools")
     def tools():
-        """工具 Tab：68 个工具（61 内置 + 7 MCP）+ 风险/解锁等级 + 调用统计 + 对账。"""
+        """工具 Tab：工具清单（数量动态）+ 风险/解锁等级 + 执行期白名单 + 调用统计 + 对账。"""
         return _tool_inventory(trace_db)
 
     @app.get("/api/reconciliation")
@@ -3722,7 +4330,8 @@ def create_app(trace_db: str | Path,
             "controlUrl": client.base_url,
             "schema": client.schema().get("schema") or [],
             "values": client.settings().get("values") or {},
-            "appearance": client.appearance().get("appearance") or {},
+            "appearance": _live2d_model_state(
+                client.appearance().get("appearance") or {}),
             "avatars": client.avatars().get("avatars") or [],
         }
 
@@ -3780,7 +4389,9 @@ def create_app(trace_db: str | Path,
         # 记忆 sidecar 的两个索引（向量 / BM25 + 精排）现在归 sidecar 自己管，
         # 面板只读它 /health + /stats 报出来的状态 ——
         # 不再有「本进程的向量索引」这回事（那个模块已经删了）。
-        mem = _memory_payload(sidecar_url)
+        # 健康 Tab 只要 sidecar 的状态，不要语义图 —— /graph 是一次全量
+        # PCA 投影（sidecar 慢的时候能卡十几秒），不该拖住健康检查。
+        mem = _memory_payload(sidecar_url, with_graph=False)
         payload["memory_sidecar"] = mem.get("sidecar") or {}
         payload["memory_stats"] = mem.get("stats") or {}
         return payload
@@ -3790,7 +4401,8 @@ def create_app(trace_db: str | Path,
         """顶部卡片数据（8 张卡片一次拿全，前端不用发 8 个请求）。"""
         stats = _recorder.stats()
         tokens = _token_summary(_data_dir)
-        mem = _memory_payload(sidecar_url)
+        # 概览只报记忆的条数/连通性，不要语义图（同上：别拖住概览）
+        mem = _memory_payload(sidecar_url, with_graph=False)
         inv = _tool_inventory(trace_db)
         return {
             "stats": stats,
@@ -3819,8 +4431,12 @@ def create_app(trace_db: str | Path,
                  "value": round(float(stats.get("avg_duration") or 0), 1)},
                 {"label": "累计 token", "value": tokens.get("total_tokens", 0)},
                 {"label": "累计花费",
-                 "value": tokens.get("cost", {}).get("amount", 0.0),
-                 "estimated": True},
+                 "value": (tokens.get("cost") or {}).get("amount", 0.0),
+                 "currency": (tokens.get("cost") or {}).get("currency")
+                             or COST_CURRENCY,
+                 "symbol": (tokens.get("cost") or {}).get("symbol")
+                           or COST_SYMBOL,
+                 "estimated": bool((tokens.get("cost") or {}).get("estimated"))},
                 {"label": "缓存命中率",
                  "value": str(round(float(tokens.get("cache_hit_rate") or 0) * 100))
                           + "%"},

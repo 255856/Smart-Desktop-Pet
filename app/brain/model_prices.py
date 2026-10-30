@@ -24,8 +24,8 @@ MiniMax 官方没有分时定价 -> 1 倍）。
 
 **一张表一个币种**（绝不把两种币种加在一起）
 ------------------------------------------
-- `DEFAULT_PRICE_TABLE`：**美元**，MiniMax 国际站的官方价 —— 面板的契约是
-  `cost.currency == "USD"`（app/web/dashboard.py 及其测试都这么要求）。
+- `DEFAULT_PRICE_TABLE`：**美元**，MiniMax 国际站的官方价 —— 保留下来做**对照**
+  （本项目不走这条路：账单不是按美元结的，面板现在报的是 **CNY / ¥**）。
 - `CNY_PRICE_TABLE`：**人民币**，MiniMax 国产平台的官方价 + qq-bridge 的
   DeepSeek 那张表。本项目实际调的是 `https://api.minimaxi.com/v1`，
   账单按**元**结算 —— 想看「真账单」就用这张表
