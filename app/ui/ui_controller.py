@@ -1310,6 +1310,17 @@ class UIController(QObject):
             r.set_max_fps(int(fps))
             self.settings_store.set("max_fps", int(fps))
 
+    def _on_live2d_idle_fps_changed(self, fps: int) -> None:
+        """Live2D：静置（无人看）帧率上限。
+
+        交互时还是 max_fps；这个只影响“没人看它的那段时间”。
+        透明窗叠合每帧都要重做，帧率是开销的主要来源。
+        """
+        r = self._live2d_renderer()
+        if r is not None and hasattr(r, "set_idle_fps"):
+            r.set_idle_fps(int(fps))
+            self.settings_store.set("live2d_idle_fps", int(fps))
+
     def _on_tts_config_changed(self, cfgd: dict) -> None:
         """TTS 引擎与参数：持久化 + 后台线程重建引擎（热切换）。"""
         store = self.settings_store
@@ -1514,6 +1525,10 @@ class UIController(QObject):
                 mf = store.get("max_fps", None)
                 if mf is not None and hasattr(r, "set_max_fps"):
                     r.set_max_fps(int(mf))
+                # Live2D 静置帧率（启动时就应用，不要等到保存）
+                idf = store.get("live2d_idle_fps", None)
+                if idf is not None and hasattr(r, "set_idle_fps"):
+                    r.set_idle_fps(int(idf))
             # 主动关心（间隔与开关）
             pe = store.get("proactive_enabled", None)
             if pe is not None and getattr(self.brain, "proactive", None) is not None:
@@ -1598,6 +1613,8 @@ class UIController(QObject):
             self._on_fps_monitor_toggled(bool(changes["fps_monitor"]))
         if "max_fps" in changes:
             self._on_max_fps_changed(int(changes["max_fps"]))
+        if "live2d_idle_fps" in changes:
+            self._on_live2d_idle_fps_changed(int(changes["live2d_idle_fps"]))
 
         # -- 行为 --------------------------------------------------------
         if any(k in changes for k in ("motion_idle_s", "motion_walk_s",

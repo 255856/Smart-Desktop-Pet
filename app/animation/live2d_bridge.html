@@ -44,12 +44,13 @@ window.live2d = {
     fitFactor: 0.94,   // 模型占画布比例（留一点边距）
     hiddenWatermarkDrawables: [],  // 被隐藏的水印图层 index
 
-    // 闲置降帧（性能）：无交互、非说话、非动作 4s 后降到 _idleFps。
-    // 透明窗口每帧都要重新合成，静置时 15fps 对呼吸/眨眼/待机物理完全足够，
-    // 能把 WebEngine 渲染与宿主透明合成开销减半。
+    // 帧率（性能）：交互时 _activeFps，静置 4s 后降到 _idleFps。
+    // 透明窗口每帧都要重新合成，桌宠静置时没人看 —— 待机帧率调低能把
+    // WebEngine 渲染 + 宿主透明合成这两份开销一起砍掉（实测省一半以上）。
+    // _idleFps 由 Python 端下发（loadModel 的第 6 个参数 / setIdleFps），
+    // 取值永远 <= _activeFps：用户的「渲染帧率上限」是硬上限，静置也不能超过它。
     _activeFps: 30,
-    _idleFps: 30,   // 用户要求实时跟踪：闲置也不降帧（Win11 后台窗口浏览器
-                    // 会自动限频 RAF 到 1Hz，那是浏览器行为；不要在 JS 里再加层节流）
+    _idleFps: 12,
     _lastActive: 0,
     _isIdle: false,
 
@@ -83,7 +84,7 @@ window.live2d = {
     // settingsName: *.model3.json 的文件名（Python 端 glob 得到，避免硬编码）
     // fitFactor: 0~1，模型在画布中的占比
     // hideWm: 是否隐藏模型自带的 WaterMark 水印图层（默认 true）
-    async loadModel(httpBase, settingsName, fitFactor, hideWm, maxFps) {
+    async loadModel(httpBase, settingsName, fitFactor, hideWm, maxFps, idleFps) {
         const base = String(httpBase).replace(/\/+$/, "");
         const settingsUrl = base + "/model/" +
             encodeURIComponent(settingsName).replace(/%2F/g, "/");
@@ -212,11 +213,13 @@ window.live2d = {
             this.ready = true;
             // 渲染帧率封顶（性能）：Live2D 待机 30fps 足够顺滑，rAF 满帧（60/144）
             // 只会让 GPU/CPU 空转、风扇狂转
-            try {
-                this.app.ticker.maxFPS = (maxFps === undefined || maxFps === null)
-                    ? 30 : Math.max(5, Number(maxFps));
-            } catch (err) { /* 旧版 ticker 无 maxFPS */ }
-            this._activeFps = this.app.ticker.maxFPS;
+            this._activeFps = this._setFps(
+                (maxFps === undefined || maxFps === null) ? 30 : maxFps);
+            // 静置帧率：不能超过用户给的上限（min）
+            this._idleFps = Math.max(5, Math.min(
+                (idleFps === undefined || idleFps === null)
+                    ? this._activeFps : Number(idleFps),
+                this._activeFps));
             this._lastActive = performance.now();
             this._init_idle_watch();
             console.log("Live2D model loaded, expressions:", this.expressions);
@@ -226,6 +229,24 @@ window.live2d = {
             this._py("onError", String(err && (err.stack || err.message || err)));
             throw err;
         }
+    },
+
+    // 设置渲染帧率。
+    //
+    // ⚠️ PIXI v7 的坑：`ticker.maxFPS = x` 的 setter 写法是
+    //    `set maxFPS(t) { e = Math.max(this.minFPS, t); _minElapsedMS = 1/(e/1000) }`
+    // —— **只会取大**。先设 30fps 再设 12fps，它会因为 minFPS=30
+    // 而继续保持在 30fps（降不下来）。所以必须先把 **minFPS**
+    // 压下去（它控制 _maxElapsedMS），再设 maxFPS（它控制真正的帧间隔）。
+    _setFps(fps) {
+        const v = Math.max(5, Math.min(60, Number(fps) || 30));
+        try {
+            const t = this.app && this.app.ticker;
+            if (!t) return v;
+            t.minFPS = v;     // 先压下限（否则后面的 maxFPS 设不下来）
+            t.maxFPS = v;     // 再设真正的帧率上限
+        } catch (e) { /* 旧版 ticker 无这两个属性 */ }
+        return v;
     },
 
     // ---------- 缩放 / 居中 ----------
@@ -566,7 +587,7 @@ window.live2d = {
                 this.app.ticker.start();
                 // 重置闲置状态：重新给 4s 宽限评估，避免恢复后仍停在低帧/mask
                 this._isIdle = false;
-                this.app.ticker.maxFPS = this._activeFps;
+                this._setFps(this._activeFps);
                 this._lastActive = performance.now();
                 this._py("onIdleExit", "1");
             }
@@ -577,9 +598,21 @@ window.live2d = {
     setMaxFps(fps) {
         try {
             if (this.app) {
-                this.app.ticker.maxFPS = Math.max(5, Number(fps) || 30);
-                if (!this._isIdle) this._activeFps = this.app.ticker.maxFPS;
+                const v = Math.max(5, Number(fps) || 30);
+                this._activeFps = v;
+                // 静置时立即生效（否则下次恢复会回到旧值）
+                this._idleFps = Math.max(5, Math.min(this._idleFps, v));
+                this._setFps(this._isIdle ? this._idleFps : v);
             }
+        } catch (e) { /* ignore */ }
+    },
+
+    // 运行时调整**静置**帧率上限（没人看它的那段时间）
+    setIdleFps(fps) {
+        const v = Math.max(5, Number(fps) || 0);
+        this._idleFps = Math.max(5, Math.min(v, this._activeFps));
+        try {
+            if (this.app && this._isIdle) this._setFps(this._idleFps);
         } catch (e) { /* ignore */ }
     },
 
@@ -607,7 +640,7 @@ window.live2d = {
             }
             if (!busy && performance.now() - this._lastActive > 4000) {
                 this._isIdle = true;
-                try { this.app.ticker.maxFPS = this._idleFps; } catch (e) { /* ignore */ }
+                this._setFps(this._idleFps);
                 this._py("onIdleEnter", "1");   // 通知 python 停 mask 采样
             }
         });
@@ -618,7 +651,7 @@ window.live2d = {
         this._lastActive = performance.now();
         if (wasIdle) {
             this._isIdle = false;
-            try { this.app.ticker.maxFPS = this._activeFps; } catch (e) { /* ignore */ }
+            this._setFps(this._activeFps);
             this._py("onIdleExit", "1");    // 通知 python 恢复 mask 采样
         }
     },
@@ -664,6 +697,10 @@ window.addEventListener("DOMContentLoaded", () => {
             typeof PIXI !== "undefined" ? PIXI.VERSION : "missing",
             "core:", typeof Live2DCubismCore !== "undefined",
             "plugin:", !!(PIXI.live2d && PIXI.live2d.Live2DModel));
+        // 桥就绪了：告诉 Python “现在可以 loadModel”。
+        // 之前只能盲等固定的 400ms（不知道桥什么时候就绪），
+        // 启动时那 400ms 是纯浪费（白等一个浏览器进程启动）。
+        window.live2d._py("onBridgeReady", "1");
     });
 });
 </script>

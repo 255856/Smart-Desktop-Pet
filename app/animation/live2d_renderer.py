@@ -44,7 +44,9 @@ mimetypes.add_type("application/octet-stream", ".moc3")
 mimetypes.add_type("application/octet-stream", ".vbridger")
 
 try:
-    from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+    from PyQt5.QtWebEngineWidgets import (
+        QWebEngineView, QWebEnginePage, QWebEngineProfile,
+    )
     try:
         from PyQt5.QtWebChannel import QWebChannel  # PyQt5 5.15.4+
     except ImportError:
@@ -66,6 +68,15 @@ _DEFAULT_QUICK_PLAY = ['jump', 'eat', 'spin', 'stretch']
 
 # 随机表情一次展示时长（ms）
 _RANDOM_HOLD_MS = 4000
+
+#: 桥（QWebChannel）就绪的兜底超时（ms）。
+#: 正常路径是 JS 主动通知（onBridgeReady），只有桥不可用时才走兜底。
+_BRIDGE_READY_FALLBACK_MS = 5000
+
+#: 静置帧率上限默认值（交互时用 max_fps）。
+#: 看不看都是这个场景：静置时减到 12fps，能把“透明窗叠合”的
+#: CPU 开销砍掉一半（口型/呼吸/眨眼在 12fps 下仍然顺畅）。
+DEFAULT_IDLE_FPS = 12
 
 
 class _BridgeProxy(QObject):
@@ -93,6 +104,11 @@ class _BridgeProxy(QObject):
     @Slot(str)
     def onIdleExit(self, _payload: str) -> None:
         self._renderer.on_idle_state(False)
+
+    @Slot(str)
+    def onBridgeReady(self, _payload: str) -> None:
+        """JS 侧桥就绪（此刻 loadModel 一定能成功）。"""
+        self._renderer.on_bridge_ready()
 
 
 class _ConsolePage(QWebEnginePage):
@@ -258,6 +274,7 @@ class Live2DRenderer(PetRenderer):
                  scale: float = 0.5, hide_watermark: bool = True,
                  random_exp_cfg: Optional[dict] = None,
                  max_fps: int = 30,
+                 idle_fps: int = DEFAULT_IDLE_FPS,
                  scene_dir: Optional["Path"] = None):
         if not _WEB_ENGINE_AVAILABLE:
             raise ImportError(
@@ -271,6 +288,9 @@ class Live2DRenderer(PetRenderer):
         self.hide_watermark = hide_watermark
         # 渲染帧率上限（性能）：桌宠待机 30fps 足够顺滑
         self.max_fps = max(5, int(max_fps))
+        # 静置（无人看）帧率上限：交互时用 max_fps，静置 4s 后降到它。
+        # 不能超过 max_fps（那是用户的硬上限）。
+        self.idle_fps = max(5, min(int(idle_fps), self.max_fps))
         self._ready = False
         self._sleeping = False
         self._thinking = False
@@ -332,6 +352,7 @@ class Live2DRenderer(PetRenderer):
         # 自定义 Page：透明背景 + console 转发
         self._page = _ConsolePage(self.view)
         self.view.setPage(self._page)
+        self._tune_webengine()
         from PyQt5.QtGui import QColor
         self._page.setBackgroundColor(QColor(0, 0, 0, 0))
 
@@ -373,12 +394,53 @@ class Live2DRenderer(PetRenderer):
             scene_path = self._scene_dir / f"{self.model_dir.name}.json"
             self.scene_store = SceneStore(scene_path, self.profile)
 
+    def _tune_webengine(self) -> None:
+        """关掉这个场景用不到的 Chromium 子系统（省内存 + 少几个后台线程）。
+
+        本项目只用一个本地页面：没有拼写检查、没有插件、没有弹窗、
+        没有全屏、不存任何站点数据。开着它们只是白占内存、白跑后台任务。
+        """
+        try:
+            settings = self._page.settings()
+        except Exception:  # noqa: BLE001
+            return
+        for name in ("SpellCheckEnabled", "PluginsEnabled",
+                     "JavascriptCanOpenWindows", "FullScreenSupportEnabled",
+                     "LocalStorageEnabled", "DnsPrefetchEnabled",
+                     "ErrorPageEnabled", "ScreenCaptureEnabled",
+                     "LinksIncludedInFocusChain", "AllowRunningInsecureContent"):
+            attr = getattr(settings, name, None)
+            if attr is None:
+                continue    # 版本早没这个开关
+            try:
+                settings.setAttribute(attr, False)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            profile = self._page.profile()
+            profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.NoPersistentCookies)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _on_page_loaded(self, ok: bool) -> None:
-        """WebView 页面加载完成 → 触发 JS loadModel。"""
+        """WebView 页面加载完成。
+
+        不再盲等固定的 400ms：JS 侧桥就绪后会主动通知（onBridgeReady），
+        那一刻 loadModel 一定能成功（否则 onReady 回调会丢）。
+        这 400ms 是启动时的纯浪费（白等一个浏览器进程启动），
+        看不看让人等。这里只留一个兜底定时器（桥不可用时也能加载）。
+        """
         if not ok or self._load_attempted:
             return
+        QTimer.singleShot(_BRIDGE_READY_FALLBACK_MS, self.on_bridge_ready)
+
+    def on_bridge_ready(self) -> None:
+        """JS 桥就绪 → 立即 loadModel（不再盲等）。"""
+        if self._load_attempted:
+            return
         self._load_attempted = True
-        QTimer.singleShot(400, self._js_load_model)
+        self._js_load_model()
 
     def _js_load_model(self) -> None:
         fit = 0.9  # 模型在画布中的占比（上下留边，避免头顶/脚底贴到窗口边缘）
@@ -390,7 +452,7 @@ class Live2DRenderer(PetRenderer):
             f"window.live2d.loadModel("
             f"{json.dumps(self._http_base)}, "
             f"{json.dumps(self._settings_name)}, {fit}, {hide_wm}, "
-            f"{int(self.max_fps)});"
+            f"{int(self.max_fps)}, {int(self.idle_fps)});"
         )
         self._page.runJavaScript(js)
         QTimer.singleShot(10000, self._check_ready_timeout)
@@ -595,7 +657,19 @@ class Live2DRenderer(PetRenderer):
     def set_max_fps(self, fps: int) -> None:
         """运行时调整渲染帧率上限。"""
         self.max_fps = max(5, int(fps))
-        self._js(f"if(window.live2d){{window.live2d.setMaxFps({self.max_fps});}}")
+        # 静置帧率不能超过新上限（否则静置时会反向抬高帧率）
+        self.idle_fps = max(5, min(self.idle_fps, self.max_fps))
+        self._js(f"if(window.live2d){{window.live2d.setMaxFps({self.max_fps});"
+                 f"window.live2d.setIdleFps({self.idle_fps});}}")
+
+    def set_idle_fps(self, fps: int) -> None:
+        """运行时调整**静置**（无人看）帧率上限。
+
+        只影响静置一段（无交互 4s 以后）的帧率；交互时仍然是 max_fps。
+        不能超过 max_fps（用户的硬上限）。
+        """
+        self.idle_fps = max(5, min(int(fps), self.max_fps))
+        self._js(f"if(window.live2d){{window.live2d.setIdleFps({self.idle_fps});}}")
 
     def is_random_expressions_enabled(self) -> bool:
         return self._random_enabled

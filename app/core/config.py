@@ -199,6 +199,9 @@ class Live2DConfig(BaseModel):
     random_expression_max_s: int = 70
     # 渲染帧率上限：隐藏到托盘时渲染会完全暂停（零开销）
     max_fps: int = 24
+    # 静置（无人看）帧率上限：交互时用 max_fps，静置 4s 后降到它。
+    # 透明窗叠合每帧都要重做，静置时降帧能把这部分开销直接省掉。
+    idle_fps: int = 12
 
 
 class PetConfig(BaseModel):

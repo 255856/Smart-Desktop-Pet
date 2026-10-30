@@ -113,6 +113,7 @@ class PetWindow(QWidget):
                  live2d_hide_watermark: bool = True,
                  live2d_random_exp_cfg: dict | None = None,
                  live2d_max_fps: int = 30,
+                 live2d_idle_fps: int = 12,
                  live2d_scene_dir: str | Path | None = None,
                  foods_path: str | Path | None = None):
         super().__init__()
@@ -135,6 +136,7 @@ class PetWindow(QWidget):
             live2d_hide_watermark=live2d_hide_watermark,
             live2d_random_exp_cfg=live2d_random_exp_cfg,
             live2d_max_fps=live2d_max_fps,
+            live2d_idle_fps=live2d_idle_fps,
             live2d_scene_dir=Path(live2d_scene_dir) if live2d_scene_dir else None,
         )
         self.animator = self.renderer  # 旧代码兼容：self.animator.xxx() 仍可用

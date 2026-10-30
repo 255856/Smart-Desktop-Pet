@@ -49,8 +49,12 @@ def _endpoints():
     }
 
 
-def make_handler(store):
-    """把 store 绑到处理器上（每个 server 一份，不用模块级全局）。"""
+def make_handler(store, on_search=None):
+    """把 store 绑到处理器上（每个 server 一份，不用模块级全局）。
+
+    on_search: “第一次 /search”的回调（可选）。用来把**模型预热**推到
+    “第一次真的需要语义检索”的时候（见 MemorySidecarServer._on_search）。
+    """
 
     class MemoryHandler(BaseHTTPRequestHandler):
         server_version = "DesktopPetMemorySidecar/1.0"
@@ -250,6 +254,12 @@ def make_handler(store):
         def _handle_search(self, payload):
             store = self.store_
             query = payload.get("query", "")
+            # 首次检索 → 触发推后的模型预热（否则永远不预热）
+            if on_search is not None:
+                try:
+                    on_search()
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 top_k = payload.get("top_k", payload.get("topK", 8))
                 res = store.search(
@@ -310,11 +320,15 @@ class MemorySidecarServer:
         self._httpd = None
         self._thread = None
         self._warmup_thread = None
+        #: 预热是否还没起过（推后预热：等第一次检索再热）
+        self._warmup_pending = bool(warmup)
         self._stop_lock = threading.Lock()
 
     # -- 组装 ------------------------------------------------------------
     def _make_httpd(self):
-        httpd = ThreadingHTTPServer((self.host, self.requested_port), make_handler(self.store))
+        httpd = ThreadingHTTPServer((self.host, self.requested_port),
+                                   make_handler(self.store,
+                                               on_search=self._on_search))
         httpd.daemon_threads = True  # 关服务时不陪长连接耗着
         httpd.sidecar_port = int(httpd.server_address[1])
         httpd.started_at = time.time()
@@ -337,7 +351,6 @@ class MemorySidecarServer:
             target=httpd.serve_forever, name="memory-sidecar-http", daemon=True
         )
         self._thread.start()
-        self._start_warmup()
         return self.port
 
     def serve_forever(self):
@@ -350,11 +363,10 @@ class MemorySidecarServer:
                 self.url(),
                 self.store.data_dir,
                 len(self.store._active_cards()),
-                "开" if self.warmup else "关",
+                "开（首次检索时）" if self.warmup else "关",
             ),
             flush=True,
         )
-        self._start_warmup()
         try:
             httpd.serve_forever(poll_interval=0.2)
         except KeyboardInterrupt:
@@ -395,6 +407,22 @@ class MemorySidecarServer:
             thread.join(timeout=5)
 
     # -- 预热 ------------------------------------------------------------
+    def _on_search(self):
+        """第一次检索到了 → 这才开始预热模型。
+
+        为什么推后：模型预热要 import torch + 加载两个 transformers 模型（本机约 12s+，
+        精排模型还要 2.2GB 内存）。这些都是**派生数据**（可以从卡片重建），
+        而且只有语义检索用得上 —— 服务起来就热清白白浪费一轮 CPU，
+        而主人启动桌宠那几秒正是最忙的时候。
+
+        功能不变：BM25 词面腿不依赖模型，从启动就能用；首次语义检索会自己把模型
+        加载起来（store.search 里那套“预算内等不完就先拿词面结果”的机制已经在）。
+        """
+        if not self._warmup_pending:
+            return
+        self._warmup_pending = False
+        self._start_warmup()
+
     def _start_warmup(self):
         if not self.warmup or self._warmup_thread is not None:
             return

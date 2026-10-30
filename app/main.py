@@ -36,41 +36,12 @@ except Exception:  # noqa: BLE001
     pass
 
 
-def _detect_nvidia_gpu() -> bool:
-    """检测系统是否有 NVIDIA 独立 GPU。强启 GPU 加速可能让无 GPU / 集显机器渲染崩，
-    所以只对检测到 NVIDIA 驱动的机器加 --ignore-gpu-blacklist（绕过 Chromium 黑名单）。
-    其他情况让 Chromium 默认决策。
-    """
-    if sys.platform != "win32":
-        return True    # macOS / Linux 默认有 GPU
-    # 1) NVIDIA 控制面板 / 驱动目录存在？
-    for prefix_var in ("ProgramW6432", "ProgramFiles"):
-        prefix = os.environ.get(prefix_var)
-        if prefix and (Path(prefix) / "NVIDIA Corporation").exists():
-            return True
-    # 2) NVIDIA 驱动 DLL 存在？
-    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
-    if (Path(sys_root) / "System32" / "nvapi64.dll").exists():
-        return True
-    return False
+# Chromium(WebEngine) 启动参数：GPU 加速 + 身份瘦身（少进程 / 少后台任务）。
+# 详见 app/core/webengine_env.py（与 scripts/measure_startup_cost.py 共用同一份，
+# 否则测量的数据与真实运行不可比）。
+from .core.webengine_env import configure_webengine_env  # noqa: E402
 
-
-_HAVE_NVIDIA = _detect_nvidia_gpu()
-# 启用 PyQtWebEngine 的 GPU 加速 —— 不然 Chromium 默认在 Windows + PyQt5 上经常走软件渲染，
-# pixi.js + Cubism Web 全靠 CPU 跑，桌宠一启动 CPU 就冲高、GPU 几乎不动。
-# 实测：用户 RTX 4060 + 最新驱动下未启用时，桌宠主进程 CPU 高，
-# QtWebEngineProcess 子进程 CPU 也高（软件路径）。开启后两者都降，GPU 起来。
-# 关键：Chromium 进程命令行实测拿到了 --use-gl=desktop 但 GPU 仍 0%——说明 desktop GL
-# context 创建失败（驱动 / 黑名单），静默 fallback 到 swiftshader 软渲染。
-# 修法：强制走 ANGLE（Chromium 在 Windows 上的稳定 GL 路径，DirectX 11 桥）+ 显式 D3D11 backend。
-# --ignore-gpu-blacklist：仅当检测到 NVIDIA 驱动时启用（绕过 Chromium 对某些驱动的黑名单误判）
-# --enable-gpu-rasterization：让 2D canvas 也走 GPU 合成（pixi 用 canvas）
-# --enable-zero-copy：避免 WebView 复制帧到主进程
-_GPU_FLAGS = "--use-gl=angle --use-angle=gl-d3d11"
-if _HAVE_NVIDIA:
-    _GPU_FLAGS += " --ignore-gpu-blacklist"
-_GPU_FLAGS += " --enable-gpu-rasterization --enable-zero-copy"
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _GPU_FLAGS)
+configure_webengine_env()
 
 try:
     import faster_whisper  # noqa: F401
@@ -656,6 +627,8 @@ class App:
                 "max_s": int(getattr(cfg.pet.live2d, "random_expression_max_s", 70)),
             },
             live2d_max_fps=int(getattr(cfg.pet.live2d, "max_fps", 30)),
+            # 静置帧率（无人看时降到这个；设置面板可实时改）
+            live2d_idle_fps=int(getattr(cfg.pet.live2d, "idle_fps", 12)),
             # 触发场景动作配置（按模型一份 JSON：data/live2d_scenes/<模型名>.json）
             live2d_scene_dir=root / "data" / "live2d_scenes",
             # 食物库（右键「喂食」子菜单：图片贴纸 + desc 气泡 + 状态变化）

@@ -40,6 +40,8 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "fps_monitor": {"label": "头顶 FPS 气泡", "type": "bool", "group": "帧时长"},
     "max_fps": {"label": "渲染帧率上限", "type": "int", "group": "帧时长",
                 "min": 5, "max": 60, "step": 1},
+    "live2d_idle_fps": {"label": "Live2D 待机帧率", "type": "int", "group": "帧时长",
+                        "min": 5, "max": 60, "step": 1},
     # -- 行为 ------------------------------------------------------------
     "motion_idle_s": {"label": "IDLE 持续（秒）", "type": "int", "group": "行为",
                       "min": 10, "max": 180, "step": 1},
