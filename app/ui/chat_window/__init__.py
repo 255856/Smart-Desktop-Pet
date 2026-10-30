@@ -11,6 +11,28 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+#: 模型这一轮没给出文字、但确实跑了工具时，**界面**替它补的一句。
+#: 只在工具真的成了时才成立 —— 工具失败时这句是假的（主人以为成功了），
+#: 渲染层会按工具真实状态换成诚实的说法（落库的原文不动）。
+_UI_TOOL_DONE_TEXT = "好的，已经帮主人搞定啦~"
+
+#: 人设口癖 → 开场白语气词（顺序即优先级，先认出哪个用哪个）。
+#: 认不出来就不加语气词 —— 宁可平一点，也不能替人设乱加口癖
+#: （原来写死「喵~」，大肥鱼是条鲸鱼，对着主人喵喵叫是把人设说错了）。
+_PERSONA_TONES = (
+    ("喵", "喵~"),
+    ("哼", "哼~"),
+    ("呜", "呜~"),
+    ("嗷", "嗷~"),
+    ("诶", "诶~"),
+)
+
+#: 上面那句在工具失败时的诚实版本。
+_UI_TOOL_DONE_FAIL_TEXT = (
+    "唔…刚才那一步没能成功，主人看看上面的操作记录，"
+    "要的话我再试一次~"
+)
+
 # 头像目录：随代码提交（assets/ 默认进 git）。
 # 预设头像 assets/avatars/presets/, 用户上传 assets/avatars/uploads/
 # （uploads 已在 .gitignore 排除）。
@@ -127,6 +149,7 @@ class _NoCmdNavQTextBrowser(QTextBrowser):
 from .utils import (  # noqa: F401
     _TOOL_UI_META, _CIRCLED_NUMS, _TOOL_FAIL_MARKERS,
     _unpack_tool, _tool_label, _tool_status, _unpack_status_mark,
+    _tool_step_class, _tool_fail_reason, _voice_result_note,
 )
 
 
@@ -1574,11 +1597,28 @@ class ChatWindow(QWidget):
                 return
 
     def _append_system_welcome(self) -> None:
+        """开场白。
+
+        语气词**按人设走**：原来写死「喵~」—— 可大肥鱼是条鲸鱼，
+        对着主人喵喵叫是把人设说错了（小晓是雌小鬼，也不该喵）。
+        这里从人设文本里认它自己的口癖（喵 / 哼 / 呜 / 嗷 / 诶），
+        认不出来就不加语气词 —— 宁可平一点，也不能替人设乱加口癖。
+        """
         self._render_message(Message(
             role="assistant",
-            content=f"喵~ 主人你好呀！我是 {self.char_cfg.name}，有什么我能帮你的吗？",
+            content=f"{self._persona_tone()}主人你好呀！我是 "
+                    f"{self.char_cfg.name}，有什么我能帮你的吗？",
             emotion=Emotion.HAPPY,
+            speaker=self.char_cfg.name,
         ))
+
+    def _persona_tone(self) -> str:
+        """人设自己的口癖（开场白用）。认不出来返回空串。"""
+        persona = self.char_cfg.persona or ""
+        for keyword, tone in _PERSONA_TONES:
+            if keyword in persona:
+                return tone
+        return ""
 
     def _load_history(self) -> None:
         """从 ChatStore 加载上次的聊天记录到界面。"""
@@ -1607,8 +1647,11 @@ class ChatWindow(QWidget):
                     pass
             # 把 ChatStore 反序列化的 list-of-lists 还原成 tuple
             tools_loaded = _convert_loaded_tools(sm.tools)
+            # ts 必须**用库里那条**：Message 的默认值是「现在」，
+            # 不传的话昨天说的话会标成今天的时间（界面上骗人）。
             msg = Message(role=sm.role, content=sm.content,
-                          emotion=emotion, tools=tools_loaded)
+                          emotion=emotion, tools=tools_loaded,
+                          ts=float(getattr(sm, "ts", 0) or 0) or time.time())
             self._render_message(msg)
             self.history.append(msg)
         # 历史是从磁盘读的，可能远超过条数/字符上限（ChatStore 存 200 条）。
@@ -1990,11 +2033,10 @@ class ChatWindow(QWidget):
         from app.ui.chat_window.utils import _html_escape
         safe = _html_escape(plan_text)
         html = (
-            '<div style="margin:8px 0 14px 0;padding:10px 12px;'
-            'background:#fbf7ff;border:1px solid #d9c9f5;border-radius:8px;">'
-            '<div style="color:#7c5cf0;font-weight:600;margin-bottom:6px;">'
-            '[计划] (不会自动执行,主人说「按计划做」才会执行)</div>'
-            f'<div style="white-space:pre-wrap;color:#2c2c38;line-height:1.55;">{safe}</div>'
+            '<div class="plan-card">'
+            '<div class="plan-card-head">'
+            '[计划]（不会自动执行，主人说「按计划做」才会执行）</div>'
+            f'<div class="plan-card-body">{safe}</div>'
             '</div>'
         )
         # 直接插入到 chat_view(不动 history / chat_store)
@@ -3107,7 +3149,8 @@ class ChatWindow(QWidget):
             )
 
         # 占位气泡：插入一个占位 div 并记下 cursor 作为 streaming patch anchor
-        self._current_bot_msg = Message(role="assistant", content="")
+        self._current_bot_msg = Message(role="assistant", content="",
+                                         speaker=self.char_cfg.name)
         self._streaming_raw = ""   # 流式原始累积（最终规范前），供逐帧清洗显示
         # 流式清洗的节流状态：sanitize_text 是 O(累积长度)，每 token 都整段重算
         # 会让总开销变成 O(n²)（实测 2088 字回复累计 199 ms GUI 占用，
@@ -4204,6 +4247,59 @@ class ChatWindow(QWidget):
             pass
         super().changeEvent(event)
 
+    @staticmethod
+    def _tools_failed(tools: list) -> bool:
+        """这一轮的工具有没有没成的（按信封状态判，不看文本）。
+
+        用来判断界面补的那句「已经帮主人搞定啦~」还成不成立。
+        """
+        for t in (tools or []):
+            try:
+                _name, _args, result, status = _unpack_tool(t)
+            except Exception:  # noqa: BLE001
+                continue
+            if _tool_status(result, status) != "ok":
+                return True
+        return False
+
+    def _tool_note_html(self, name: str, status: str, result: str) -> str:
+        """工具步骤下面的附注：失败原因 / 语音产物。
+
+        - 不是成功 → 工具自己给的**原因**（第一行，截断）；
+          原来卡片只写一个「[失败]」，主人看不到失败在哪一步。
+        - 语音工具成功 → 时长 / 体积 / 音频落盘路径；
+          语音是听得见的动作，界面上必须留痕。
+
+        两样都来自工具自己的结果文本，不是界面编的；解析不出来就不显示。
+        """
+        if status != "ok":
+            reason = _tool_fail_reason(result)
+            if not reason:
+                return ""
+            return '<div class="tool-reason">%s</div>' % _html_escape(reason)
+        note = _voice_result_note(name, result)
+        if not note:
+            return ""
+        return '<div class="tool-note">%s</div>' % _html_escape(note)
+
+    @staticmethod
+    def _tools_tail_summary(states: list) -> str:
+        """折叠态预览行尾的汇总：后面几步有没有没成的。
+
+        原来折叠态只显示第一条工具的状态 —— 第一步成功、第五步失败时，
+        主人只看到一片成功标记，失败被藏起来了。这里如实说出来。
+        """
+        rest = list(states[1:]) if len(states) > 1 else []
+        words = []
+        for st, label in (("fail", "失败"), ("cancel", "取消"),
+                          ("rejected", "桌宠拒绝")):
+            c = rest.count(st)
+            if c:
+                words.append("%d 步%s" % (c, label))
+        if not words:
+            return ""
+        return '<span class="tools-tail">（另有 %s）</span>' % "、".join(words)
+
     def _tool_steps_html(self, tools: list, msg_id: int = 0) -> str:
         """把工具调用渲染成步骤卡片（编号 + 中文名 + 动作目标 + 成败状态）。
 
@@ -4214,32 +4310,39 @@ class ChatWindow(QWidget):
         if not tools:
             return ""
         rows = []
+        states = []
         for i, t in enumerate(tools):
             name, args, result, tool_status = _unpack_tool(t)
             cn, target = _tool_label(name, args)
             # 成败用**信封状态**（有的话），不再从结果文本猜（Stage 3.5）
             status = _tool_status(result, tool_status)
+            states.append(status)
+            # 状态类名（.ok / .failed / .cancelled / .rejected）→ 颜色走 CSS，
+            # 两套主题同步；原来失败行和成功行长得一模一样（CSS 里的
+            # .tool-row.failed 一直没被渲染端用上）。
+            state = _tool_step_class(status)
             num = _CIRCLED_NUMS[i] if i < len(_CIRCLED_NUMS) else str(i + 1)
             if status == "cancel":
-                mark = '<span style="color:#9ca3af;">⊘ 取消</span>'
+                mark = '<span class="tool-mark tool-cancelled">⊘ 取消</span>'
             elif status == "fail":
-                mark = '<span style="color:#dc2626;">[失败]</span>'
+                mark = '<span class="tool-mark tool-failed">[失败]</span>'
             elif status == "rejected":
                 # 桌宠拒绝（companion REJECT/REFUSE）——不是「完成」
-                mark = '<span style="color:#a45b2e;">[桌宠拒绝]</span>'
+                mark = '<span class="tool-mark tool-rejected">[桌宠拒绝]</span>'
             else:
-                mark = '<span style="color:#16a34a;">[完成]</span>'
+                mark = '<span class="tool-mark tool-ok">[完成]</span>'
             target_html = (
-                f'&nbsp;<span style="color:#a1a1aa;">·</span>&nbsp;<b>{_html_escape(target)}</b>'
+                f'<span class="tool-target">· <b>{_html_escape(target)}</b></span>'
                 if target else ""
             )
             rows.append(
-                '<div class="tool-row">'
+                f'<div class="tool-row {state}">'
                 f'<span class="tool-num">{num}</span>'
                 f'<span class="tool-name">{_html_escape(cn)}</span>'
                 f'{target_html}'
-                f'<span class="tool-mark">{mark}</span>'
+                f'<span class="tool-mark-cell">{mark}</span>'
                 '</div>'
+                + self._tool_note_html(name, status, result)
             )
         n = len(tools)
         collapsed = self._tools_collapsed_by_msg.get(
@@ -4252,10 +4355,11 @@ class ChatWindow(QWidget):
             first_name, first_args, first_result, first_status = _unpack_tool(tools[0])
             first_cn, first_target = _tool_label(first_name, first_args)
             preview = (
-                '<div style="color:#9ca3af;font-size:9pt;margin:2px 0 0 0;">'
+                '<div class="tools-preview">'
                 '▸ ' + _html_escape(first_cn) +
                 (' · ' + _html_escape(first_target[:40]) if first_target else '') +
                 '  ' + (_unpack_status_mark(first_result, first_status)) +
+                self._tools_tail_summary(states) +
                 '</div>'
             )
             return (
@@ -4290,8 +4394,7 @@ class ChatWindow(QWidget):
             '<details>'
             '<summary class="thinking-head">'
             f'思考过程（{len(thoughts)} 步）</summary>'
-            '<pre style="margin:4px 0 2px 0;white-space:pre-wrap;font-family:'
-            'Consolas, Menlo, monospace;font-size:9pt;color:#374151;">'
+            '<pre class="thinking-body">'
             + _html_escape(joined) + '</pre>'
             '</details>'
             '</div>'
@@ -4306,22 +4409,19 @@ class ChatWindow(QWidget):
             cmd = _html_escape(e.get("cmd", ""))
             output = _html_escape(e.get("output", ""))
             ec = int(e.get("exit_code", 0))
-            ec_color = "#16a34a" if ec == 0 else "#dc2626"
+            # 颜色交给 CSS（.execs-exit.ok / .execs-exit），两套主题同步
+            ec_state = "ok" if ec == 0 else "failed"
             ec_icon = "[完成]" if ec == 0 else "[失败]"
             rows.append(
-                '<div style="margin:3px 0;background:#0f172a;border-radius:6px;'
-                'padding:6px 10px;font-family:Consolas,Menlo,monospace;font-size:9pt;'
-                'color:#e2e8f0;">'
-                f'<div style="color:#94a3b8;">$ {cmd}</div>'
-                f'<pre style="margin:3px 0 0 0;white-space:pre-wrap;color:#cbd5e1;'
-                f'overflow-x:auto;">{output}</pre>'
-                f'<div style="margin-top:3px;font-size:8pt;color:{ec_color};">'
+                '<div class="execs-row">'
+                f'<div class="execs-cmd-line">$ {cmd}</div>'
+                f'<pre class="execs-output">{output}</pre>'
+                f'<div class="execs-exit {ec_state}">'
                 f'{ec_icon} exit_code={ec}</div>'
                 '</div>'
             )
         head = (
-            '<div style="color:#0891b2;font-size:8pt;font-weight:bold;'
-            'margin:3px 0 2px;letter-spacing:0.5px;">执行命令 · '
+            '<div class="execs-head">执行命令 · '
             + str(len(execs)) + '</div>'
         )
         return '<div class="execs">' + head + "".join(rows) + '</div>'
@@ -4363,10 +4463,9 @@ class ChatWindow(QWidget):
         rows = []
         for e in edits:
             rows.append(
-                '<div style="margin:2px 0;background:#fef3c7;border:1px solid #fbbf24;'
-                'border-radius:4px;padding:4px 8px;font-size:9pt;color:#78350f;">'
+                '<div class="file-edit-row">'
                 f'<b>{_html_escape(e["path"])}</b>'
-                f'&nbsp;<span style="color:#92400e;">· {e["size"]} 字节</span>'
+                f'&nbsp;<span class="file-edit-size">· {e["size"]} 字节</span>'
                 '</div>'
             )
         head = (
@@ -4426,8 +4525,9 @@ class ChatWindow(QWidget):
 
         is_user = msg.role == "user"
         # 主人的消息标「主人」：中文应用，而且人设里桌宠就是这么称呼主人的
+        # 桌宠自己：显示**说话当时**的人设名（换人设后老消息不会被改成新人设）
         role_label = "主人" if is_user else _html_escape(
-            self.char_cfg.name or "桌宠")
+            getattr(msg, "speaker", "") or self.char_cfg.name or "桌宠")
 
         # 空 content + 无 tools → 灰色 placeholder 提示
         # 流式时跳过 placeholder,由 _typing_dots_html 负责显示 dots
@@ -4436,7 +4536,11 @@ class ChatWindow(QWidget):
         # 压缩摘要条目：role 仍是 "user"（它要进 LLM 的历史，role 不能改），
         # 但**显示上绝不能冒充主人说话** —— 它是系统生成的上下文摘要，
         # 标成「主人」会让主人以为刚才那句是自己说的。渲染成一条独立的居中说明。
-        if SUMMARY_MARKER in raw:
+        #
+        # 判定用**前缀**（app/brain/compaction.py::summary_entry_content 生成的正文
+        # 一定以标记开头）：原来用 in 匹配，主人自己写「【历史摘要】」四个字
+        # 也会被当成摘要条 —— 主人说的话被改标成「历史摘要」，等于替主人改口。
+        if raw.lstrip().startswith(SUMMARY_MARKER):
             body = _html_escape(raw).replace("\n", "<br/>")
             return (
                 '<div class="msg msg-summary">'
@@ -4461,7 +4565,7 @@ class ChatWindow(QWidget):
                 f'{label_html}'
                 '<div class="msg-body">'
                 '<span class="empty-msg-hint">'
-                '[此消息内容为空, 可能是早期生成失败]</span>'
+                '[此消息内容为空，可能是早期生成失败]</span>'
                 '</div>'
                 '</div>'
             )
@@ -4474,6 +4578,16 @@ class ChatWindow(QWidget):
 
         # HTML 转义 + markdown 渲染 (两边都做 markdown;user 消息内容一般很短, 走 markdown 没副作用)
         body_html = self._render_markdown(raw)
+
+        # 界面自己补的「已经帮主人搞定啦~」只在工具**真的成了**时才成立。
+        # 工具失败时这句是假的（主人以为成功了，其实没成）—— 显示层换成
+        # 诚实的说法；落库的原文不动（模型看到的历史保持原样）。
+        if (not is_user) and raw.strip() == _UI_TOOL_DONE_TEXT \
+                and self._tools_failed(getattr(msg, "tools", None)):
+            body_html = (
+                '<div class="msg-notice">%s</div>'
+                % _html_escape(_UI_TOOL_DONE_FAIL_TEXT)
+            )
 
         # 流式输出中:正文末尾追加「三点跳动」等待动画
         # 只要 streaming_meta 非空就显示 dots, 与 emotion 无关
@@ -4663,12 +4777,75 @@ class ChatWindow(QWidget):
             blocks.append(html)
             return f"\x00B{len(blocks) - 1}\x00"
 
+        def _inline_md(src: str) -> str:
+            """行内 markdown → HTML（行内代码 / 图片 / 链接 / 加粗 / 斜体）。
+
+            提成函数是因为**块级元素里的行内标记也要渲染**：
+            列表项里的加粗、引用里的行内代码，原来显示成原样标记
+            （块元素是在行内处理之前被抽走的，行内规则够不着它们）。
+            """
+            # 行内元素 —— 先做 code (避免被误判)
+            src = re.sub(r"\x60([^\x60\n]+)\x60", r"<code>\1</code>", src)
+
+            # v8 markdown 图片 ![alt](url) → <img src=url>
+            # 缩略图固定上限 (340px) + 点击放大看原图。KEY 用 sha1[:10] 稳定，
+            # 同一 URL 同一 key，重渲染不丢映射，避免 QUrl 对 data: 长 base64 截断
+            def _img(m: "re.Match[str]") -> str:
+                alt = m.group(1)
+                url = m.group(2)
+                if not re.match(r"^(https?|file|data):", url, re.IGNORECASE):
+                    return m.group(0)
+                # 上限 340 防大屏时图过大，下限 200 防小屏时图过窄
+                try:
+                    vp_w = self.chat_view.viewport().width()
+                except Exception:
+                    vp_w = 0
+                if vp_w and vp_w > 200:
+                    thumb_w = max(200, min(340, int(vp_w * 0.85)))
+                else:
+                    thumb_w = 340  # 没 layout / 测试环境 fallback
+                key = _img_open_key(url)
+                self._img_open_map[key] = url
+                return (
+                    f'<a href="img-open:{key}" title="点击放大" '
+                    f'style="text-decoration:none;display:inline-block;">'
+                    f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
+                    f'style="display:block;width:{thumb_w}px;height:auto;'
+                    f'max-width:100%;border-radius:8px;margin:2px 0;'
+                    f'cursor:zoom-in;"/>'
+                    f'</a>'
+                )
+            src = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _img, src)
+
+            # 链接 [text](url)  (允许 http/https/mailto/img-open; 后者由
+            #    _on_chat_anchor_clicked 路由到 _show_image_popup 弹原图 QDialog)
+            def _link(m: "re.Match[str]") -> str:
+                label = m.group(1)
+                url = m.group(2)
+                if re.match(r"^(https?|mailto|img-open):", url, re.IGNORECASE):
+                    return f'<a href="{url}">{label}</a>'
+                return m.group(0)
+            src = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _link, src)
+
+            # 加粗 (必须先于斜体,避免被斜体提前消耗)
+            src = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", src)
+            src = re.sub(r"__([^_\n]+)__", r"<strong>\1</strong>", src)
+
+            # 斜体
+            src = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", src)
+            src = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"<em>\1</em>", src)
+            return src
+
         # 1a. ```fenced code``` —— 同时保留原 char 内容, 不转义
         def _save_code(m: "re.Match[str]") -> str:
             lang = m.group(1) or ""
             body = m.group(2)
+            # 代码正文必须**转义**：它是代码，不是 HTML。
+            # 原来原文直接塞进去 → "if a < b and c > d:" 里的 "< b and c >"
+            # 被当成标签吞掉，代码显示成 "if a  d:"（内容凭空少一截）。
             return _stash(
-                f'<pre><code data-lang="{lang}">{body}</code></pre>'
+                f'<pre><code data-lang="{_html_escape(lang)}">'
+                f'{_html_escape(body)}</code></pre>'
             )
         text = re.sub(r'```(\w+)?\n(.*?)```', _save_code, text, flags=re.DOTALL)
 
@@ -4678,32 +4855,40 @@ class ChatWindow(QWidget):
 
         # 1c. 标题 (## ... / ### ... / #### ...)
         text = re.sub(r'(?m)^####\s+(.+?)\s*$',
-                      lambda m: _stash(f'<h4>{m.group(1)}</h4>'), text)
+                      lambda m: _stash(
+                          f'<h4>{_inline_md(_html_escape(m.group(1)))}</h4>'), text)
         text = re.sub(r'(?m)^###\s+(.+?)\s*$',
-                      lambda m: _stash(f'<h3>{m.group(1)}</h3>'), text)
+                      lambda m: _stash(
+                          f'<h3>{_inline_md(_html_escape(m.group(1)))}</h3>'), text)
         text = re.sub(r'(?m)^##\s+(.+?)\s*$',
-                      lambda m: _stash(f'<h2>{m.group(1)}</h2>'), text)
+                      lambda m: _stash(
+                          f'<h2>{_inline_md(_html_escape(m.group(1)))}</h2>'), text)
         text = re.sub(r'(?m)^#\s+(.+?)\s*$',
-                      lambda m: _stash(f'<h1>{m.group(1)}</h1>'), text)
+                      lambda m: _stash(
+                          f'<h1>{_inline_md(_html_escape(m.group(1)))}</h1>'), text)
 
         # 1d. 引用块 (> ...)
         def _save_blockquote(m: "re.Match[str]") -> str:
             inner = m.group(0)
             inner = re.sub(r'(?m)^>\s?', '', inner)
-            inner_html = inner.replace("\n", "<br/>")
+            # 引用块正文同样要转义（块元素是在转义**之前**抽出来的），
+            # 块里的行内标记也要渲染
+            inner_html = _inline_md(_html_escape(inner)).replace("\n", "<br/>")
             return _stash(f'<blockquote>{inner_html}</blockquote>')
         text = re.sub(r'(?:^>.*\n?)+', _save_blockquote, text, flags=re.MULTILINE)
 
         # 1e. 无序列表 (整段连续 - / * 行包一个 <ul>)
         def _save_ul(m: "re.Match[str]") -> str:
             items = re.findall(r'^[-*]\s+(.+?)\s*$', m.group(0), flags=re.MULTILINE)
-            return _stash('<ul>' + ''.join(f'<li>{it}</li>' for it in items) + '</ul>')
+            return _stash('<ul>' + ''.join(
+                f'<li>{_inline_md(_html_escape(it))}</li>' for it in items) + '</ul>')
         text = re.sub(r'(?:^[-*]\s+.+\n?)+', _save_ul, text, flags=re.MULTILINE)
 
         # 1f. 有序列表 (整段连续 "1. ..." 行包一个 <ol>)
         def _save_ol(m: "re.Match[str]") -> str:
             items = re.findall(r'^\d+\.\s+(.+?)\s*$', m.group(0), flags=re.MULTILINE)
-            return _stash('<ol>' + ''.join(f'<li>{it}</li>' for it in items) + '</ol>')
+            return _stash('<ol>' + ''.join(
+                f'<li>{_inline_md(_html_escape(it))}</li>' for it in items) + '</ol>')
         text = re.sub(r'(?:^\d+\.\s+.+\n?)+', _save_ol, text, flags=re.MULTILINE)
 
         # 1g. 表格 (简化 GFM: | col | col | / |---|...|)
@@ -4723,14 +4908,21 @@ class ChatWindow(QWidget):
             for ln in lines[2:]:
                 cells = [c.strip() for c in ln.strip().strip('|').split('|')]
                 body_rows.append(
-                    '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
+                    '<tr>' + ''.join(
+                        f'<td>{_inline_md(_html_escape(c))}</td>'
+                        for c in cells) + '</tr>'
                 )
             head = (
-                '<tr>' + ''.join(f'<th>{c}</th>' for c in header_cells) + '</tr>'
+                '<tr>' + ''.join(
+                    f'<th>{_inline_md(_html_escape(c))}</th>'
+                    for c in header_cells) + '</tr>'
             )
             return _stash('<table>' + head + ''.join(body_rows) + '</table>')
+        # 表格行末的换行是**可选**的：原来要求每行都以 \n 结尾，
+        # 消息正好以表格结尾时（最后一行后面没有换行），整张表只剩表头，
+        # 数据行变成一串 "|" 原文漏在下面 —— 表格数据凭空少一截。
         text = re.sub(
-            r'(?:^[ \t]*\|.*\n){2,}',
+            r'(?:^[ \t]*\|.*\n?){2,}',
             _save_table, text, flags=re.MULTILINE,
         )
 
@@ -4739,60 +4931,8 @@ class ChatWindow(QWidget):
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
 
-        # 3. 行内元素 —— 先做 code (避免被误判)
-        text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
-
-        # 3b. v8 markdown 图片 ![alt](url) → <img src=url>
-        # v9 升级: 放行 http(s):// / file:// / data: 三种 scheme。
-        # data: 是 _inline_local_images_to_data_url 的产物, 渲染稳定;
-        # file:// 是降级路径 (file 太大 / 失败), QTextBrowser 不一定 load。
-        #
-        # 缩略图固定上限 (340px) + 点击放大看原图。HTML attr width=N Qt 100% 支持
-        # KEY 用 sha1[:10] 稳定,同一 URL 同一 key,重渲染不丢映射,避免 QUrl 对 data: 长 base64 截断
-        def _img(m: "re.Match[str]") -> str:
-            alt = m.group(1)
-            url = m.group(2)
-            if not re.match(r'^(https?|file|data):', url, re.IGNORECASE):
-                return m.group(0)
-            # 上限 340 防大屏时图过大,下限 200 防小屏时图过窄
-            try:
-                vp_w = self.chat_view.viewport().width()
-            except Exception:
-                vp_w = 0
-            if vp_w and vp_w > 200:
-                thumb_w = max(200, min(340, int(vp_w * 0.85)))
-            else:
-                thumb_w = 340  # 没 layout / 测试环境 fallback
-            key = _img_open_key(url)
-            self._img_open_map[key] = url
-            return (
-                f'<a href="img-open:{key}" title="点击放大" '
-                f'style="text-decoration:none;display:inline-block;">'
-                f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
-                f'style="display:block;width:{thumb_w}px;height:auto;'
-                f'max-width:100%;border-radius:8px;margin:2px 0;'
-                f'cursor:zoom-in;"/>'
-                f'</a>'
-            )
-        text = re.sub(r'!\[([^\]]*)\]\(([^)\s]+)\)', _img, text)
-
-        # 4. 链接 [text](url)  (允许 http/https/mailto/img-open; 后者由
-        #    _on_chat_anchor_clicked 路由到 _show_image_popup 弹原图 QDialog)
-        def _link(m: "re.Match[str]") -> str:
-            label = m.group(1)
-            url = m.group(2)
-            if re.match(r'^(https?|mailto|img-open):', url, re.IGNORECASE):
-                return f'<a href="{url}">{label}</a>'
-            return m.group(0)
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _link, text)
-
-        # 5. 加粗 (必须先于斜体,避免被斜体提前消耗)
-        text = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', text)
-        text = re.sub(r'__([^_\n]+)__', r'<strong>\1</strong>', text)
-
-        # 6. 斜体
-        text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<em>\1</em>', text)
-        text = re.sub(r'(?<!_)_([^_\n]+)_(?!_)', r'<em>\1</em>', text)
+        # 3. 行内元素（行内代码 / 图片 / 链接 / 加粗 / 斜体）
+        text = _inline_md(text)
 
         # 7. 还原所有占位 (代码块 + 其他块元素)
         for i, blk in enumerate(blocks):

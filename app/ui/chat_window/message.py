@@ -21,6 +21,10 @@ class Message:
     execs: list[dict] = field(default_factory=list)  # 命令执行：{cmd, output, exit_code}
     # per-message skill：主人写 /skills/<name> 时关联到当条 user message
     skill: Optional[str] = None
+    # 说话人（桌宠人设名）—— **只给界面用**。
+    # 换人设后老消息仍显示当时的名字，不会被改成新人设；
+    # 空串 = 用当前人设名兜底（老记录没有这个字段）。
+    speaker: str = ""
 
 
 __all__ = ["Message"]

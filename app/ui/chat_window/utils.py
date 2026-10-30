@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Tuple
 
 # 工具结果的成败判定**不在本模块自维护词表**（Stage 3.5）：
@@ -77,6 +78,21 @@ _TOOL_UI_META = {
 }
 
 _CIRCLED_NUMS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
+
+#: 语音类工具（桌宠自己决定要不要发语音 / 唱歌）。
+#: 语音是「听得见的动作」，界面上必须留下痕迹：叫什么、成了没成、
+#: 念了多久、音频落在哪 —— 全部来自工具自己的结果文本。
+_VOICE_TOOLS = ("mcp_voice_speak", "mcp_voice_sing", "mcp_voice_status")
+
+#: 工具步骤状态 → 行 / 标记的 CSS 类名。
+#: 颜色**不在这里写死**：统一交给 CHAT_MD_CSS（亮 / 暗两套主题同步），
+#: 否则暗色主题下这几种标记会跟背景糊在一起。
+_TOOL_STEP_CLASS = {
+    "ok": "ok",
+    "fail": "failed",
+    "cancel": "cancelled",
+    "rejected": "rejected",
+}
 
 # 工具层的失败前缀契约 —— UI 侧只是**转发**这份表，不自己抄一份
 # （app/ui/chat_window/__init__.py 还在导入这个名字）。
@@ -179,17 +195,80 @@ def _tool_status(result: str, status: str = None) -> str:
     return _tool_result_state(r)
 
 
+def _tool_step_class(status: str) -> str:
+    """工具状态 → 步骤行 / 标记的 CSS 类名（ok / failed / cancelled / rejected）。
+
+    颜色不在这儿写死 —— 统一交给 CHAT_MD_CSS 的两套主题，
+    否则暗色主题下这几种标记会跟背景糊在一起。
+    """
+    return _TOOL_STEP_CLASS.get(status, "ok")
+
+
+def _tool_fail_reason(result: str, limit: int = 60) -> str:
+    """失败 / 取消 / 拒绝的**原因**（第一行，去掉失败前缀，截断）。
+
+    工具卡片原来只写一个「[失败]」，失败原因一个字都看不到 ——
+    主人不知道是权限不够还是程序崩了。这里把工具自己给的原文
+    提出来（只取第一行，截断到 limit 字），原样显示，不做改写。
+    """
+    text = (result or "").strip()
+    if not text:
+        return ""
+    for prefix in ("失败：", "失败:", "错误：", "错误:"):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    line = text.splitlines()[0].strip() if text else ""
+    if not line:
+        return ""
+    if len(line) > limit:
+        line = line[:limit] + "…"
+    return line
+
+
+#: 语音结果文本里的「（24.1 KB，3.4 秒）」和「音频在 <路径>」
+_VOICE_SIZE_RE = re.compile(r"([\d.]+)\s*KB")
+_VOICE_DUR_RE = re.compile(r"([\d.]+)\s*秒")
+_VOICE_FILE_RE = re.compile(r"音频在\s*([^。）)]+)")
+
+
+def _voice_result_note(name: str, result: str) -> str:
+    """语音工具的结果摘要：时长 / 体积 / 音频文件（都来自工具自己的文本）。
+
+    语音是「听得见」的动作，界面上必须留痕：不然主人只看到一句
+    「念一段话 ✓」，既不知道念了多久，也不知道音频落在哪。
+    解析不出来就返回空串 —— 宁可少说，不能编。
+    """
+    if name not in _VOICE_TOOLS:
+        return ""
+    text = (result or "").strip()
+    if not text:
+        return ""
+    parts = []
+    dur = _VOICE_DUR_RE.search(text)
+    if dur:
+        parts.append("%s 秒" % dur.group(1))
+    size = _VOICE_SIZE_RE.search(text)
+    if size:
+        parts.append("%s KB" % size.group(1))
+    f = _VOICE_FILE_RE.search(text)
+    if f:
+        parts.append(f.group(1))
+    return " · ".join(parts)
+
+
 def _unpack_status_mark(result: str, status: str = None) -> str:
     """返回工具结果对应的彩色 mark html,用于折叠态预览行."""
     status = _tool_status(result, status)
+    cls = "tool-mark tool-%s" % _tool_step_class(status)
     if status == "cancel":
-        return '<span style="color:#9ca3af;">⊘ 取消</span>'
+        return '<span class="%s">⊘ 取消</span>' % cls
     if status == "rejected":
         # 桌宠拒绝（companion REJECT/REFUSE）可视化
-        return '<span style="color:#a45b2e; font-weight:600;">桌宠拒绝</span>'
+        return '<span class="%s">桌宠拒绝</span>' % cls
     if status == "fail":
-        return '<span style="color:#dc2626;">✕ 失败</span>'
-    return '<span style="color:#16a34a;">✓</span>'
+        return '<span class="%s">✕ 失败</span>' % cls
+    return '<span class="%s">✓</span>' % cls
 
 
 def _html_escape(text: str) -> str:
@@ -218,6 +297,8 @@ def _format_time_short(ts: float) -> str:
 __all__ = [
     "_DANGEROUS_LABELS", "_CONFIRM_TIMEOUT_S",
     "_TOOL_UI_META", "_CIRCLED_NUMS",
+    "_VOICE_TOOLS", "_TOOL_STEP_CLASS",
     "_unpack_tool", "_tool_label", "_tool_status", "_unpack_status_mark",
+    "_tool_step_class", "_tool_fail_reason", "_voice_result_note",
     "_html_escape", "_format_time_short", "_img_open_key",
 ]

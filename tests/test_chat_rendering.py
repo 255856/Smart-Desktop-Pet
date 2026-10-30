@@ -203,7 +203,13 @@ def test_render_markdown_xss_protection():
 
 
 def test_render_markdown_code_block_preserves_special_chars():
-    """代码块 ``` 内 < > & 不应被转义 (常见代码含 < >)。"""
+    """代码块 ``` 内的 < > & 必须**原样显示**（常见代码含 < >）。
+
+    HTML 里当然要转义（否则 "< b and c >" 会被当成标签吞掉，
+    代码显示成 "if x  b:"），但**渲染出来的文字**必须跟源码一字不差。
+    """
+    from PyQt5.QtGui import QTextDocument
+
     char_cfg = CharacterConfig(name="测试")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
@@ -211,10 +217,15 @@ def test_render_markdown_code_block_preserves_special_chars():
     md = "```python\nif x < y and a > b:\n    return a & b\n```"
     html = cw._render_markdown(md)
     assert "<pre><code data-lang=\"python\">" in html
-    # 代码块内应保留 < > & 字面
-    assert "if x < y and a > b:" in html
-    assert "return a & b" in html
-    print("[OK] Markdown code block preserves < > & inside")
+    # HTML 里是转义后的（&lt; &gt; &amp;）—— 不能是裸标签
+    assert "<b>" not in html
+    doc = QTextDocument()
+    doc.setHtml(html)
+    shown = doc.toPlainText()
+    # 渲染出来主人看到的必须是原样的代码
+    assert "if x < y and a > b:" in shown, shown
+    assert "return a & b" in shown, shown
+    print("[OK] Markdown code block renders < > & verbatim")
 
 
 def test_msg_html_markdown_e2e():
@@ -395,7 +406,12 @@ def test_ai_coding_blocks_rendered():
     assert "文件编辑" in html
     assert "/tmp/test.py" in html
     assert "<details" in html
-    assert "background:#0f172a" in html
+    # 命令块的样式搬进 CHAT_MD_CSS 了（不再在渲染端写死内联色），
+    # 断言类名 + 样式表里真的有对应规则
+    assert "execs-row" in html
+    from app.ui import ui_style as _us
+    assert "div.execs .execs-row" in _us.CHAT_MD_CSS
+    assert "div.execs .execs-row" in _us.CHAT_MD_CSS_DARK
     print("[OK] AI coding blocks (思考/命令/文件/工具) rendered")
 
 

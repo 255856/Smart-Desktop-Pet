@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import string
 
 from app.core.qt_compat import Qt, QMenu
 
@@ -418,138 +419,268 @@ CHAT_BUBBLE_CSS = (
     "div.msg-summary .summary-body{border-left:3px dashed #c9c9de;"
     "background:#f6f6fb;padding:6px 10px;border-radius:0 4px 4px 0;"
     "color:#6b7280;font-size:9pt;line-height:1.5;}"
-)
-
-
-# MiniMax Code 风格的聊天窗样式（线性流 + 完整 markdown 渲染）
-# 每条消息是 div.msg 块，msg-label + msg-body 垂直堆叠。
-# 类名必须保留（tests/test_chat_rendering.py 有断言）
-CHAT_MD_CSS = (
-    # 基础排版: 跟 MiniMax Code 类似的中性灰底
-    "body{margin:0;padding:8px 14px;background:#fffcf8;"
-    "font-family:'Microsoft YaHei UI','Microsoft YaHei',"
-    "'PingFang SC','SF Pro Text','Segoe UI',sans-serif;"
-    "font-size:11pt;line-height:1.65;color:#4a3d6e;}"
-    # 消息主块: 上下 padding, 底部 1px 分隔线 (MiniMax Code 风格)
-    ".msg{padding:14px 4px 12px 4px;border-bottom:1px solid #ebe3d6;}"
-    ".msg:last-child{border-bottom:none;}"
-    # 角色微调: user 有非常浅的暖灰底背景, assistant 暖白 (跟新 BG 呼应)
-    ".msg-user{background:#faf6f2;}"
-    # v38: assistant 消息左边 3px 心情色带 (signature 元素, 跟 chat-window._msg_mood_to_border 联动)
-    # chat_window 内联 style 覆盖 border-left-color, 默认樱粉 (心情 HIGH)
-    ".msg-assistant{background:#fffcf8;border-left:3px solid #E89AAE;padding-left:10px;}"
-    ".msg-assistant:first-child{padding-top:14px;}"
-    # user label 右对齐，assistant label 左对齐（IM 风格）
-    ".msg-user .msg-label{text-align:right;color:#8a7f8c;}"
-    ".msg-user .msg-body{text-align:right;}"
-    ".msg-assistant .msg-label{text-align:left;}"
-    ".msg-assistant .msg-body{text-align:left;}"
-    # 角色标签 (You / 桌宠) + 时间 (主色改樱粉, 不再是紫罗兰)
-    ".msg-label{font-size:9pt;font-weight:600;color:#D17F95;"
-    "letter-spacing:0.5px;margin-bottom:5px;}"
-    ".msg-user .msg-label{color:#8a7f8c;}"
-    ".msg-label .ts{font-weight:400;color:#a89eaa;margin-left:8px;"
-    "font-size:8.5pt;letter-spacing:0;}"
-    # user 块右对齐（margin-left:auto 挤到右边，body 文本走 text-align:right）
-    ".msg-user .msg-label, .msg-user .msg-body{display:block;"
-    "margin-left:auto;width:fit-content;max-width:75%;}"
-    # assistant 块左对齐（label + body 同列同侧，左侧身份块）
-    ".msg-assistant .msg-label{display:block;margin-right:auto;"
-    "width:fit-content;max-width:90%;text-align:left;}"
-    ".msg-assistant .msg-body{display:block;margin-right:auto;"
-    "width:fit-content;max-width:90%;text-align:left;}"
-    # 消息正文容器
-    ".msg-body{font-size:11pt;line-height:1.7;color:#1f2937;}"
-    ".msg-body p{margin:7px 0;}"
-    # markdown 元素
-    ".msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4"
-    "{font-weight:600;line-height:1.3;margin:14px 0 6px 0;color:#111827;}"
-    ".msg-body h1{font-size:18pt;border-bottom:1px solid #e5e7eb;"
-    "padding-bottom:6px;}"
-    ".msg-body h2{font-size:14pt;color:#3730a3;}"
-    ".msg-body h3{font-size:12.5pt;color:#4338ca;}"
-    ".msg-body h4{font-size:11.5pt;color:#4f46e5;}"
-    # 列表 (MiniMax Code 缩进风格)
-    ".msg-body ul,.msg-body ol{padding-left:24px;margin:6px 0;}"
-    ".msg-body li{margin:3px 0;line-height:1.6;}"
-    ".msg-body li>p{margin:2px 0;}"
-    # 行内代码 (MiniMax Code 风格: 浅紫底色)
-    ".msg-body code{background:#eef2ff;padding:1px 6px;border-radius:4px;"
-    "font-family:Consolas,Monaco,'Courier New',monospace;"
-    "font-size:0.9em;color:#4f46e5;}"
-    # 代码块 (深色终端风格)
-    ".msg-body pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;"
-    "border-radius:8px;font-family:Consolas,Monaco,'Courier New',monospace;"
-    "font-size:9.5pt;line-height:1.5;overflow:auto;margin:8px 0;"
-    "border:1px solid #1e293b;}"
-    ".msg-body pre code{background:transparent;color:inherit;"
-    "padding:0;font-size:inherit;}"
-    # 引用块
-    ".msg-body blockquote{border-left:3px solid #c7d2fe;"
-    "background:#f5f7ff;padding:6px 14px;margin:8px 0;color:#475569;"
-    "border-radius:0 4px 4px 0;}"
-    ".msg-body blockquote p{margin:4px 0;}"
-    # 表格 (兼容 GFM)
-    ".msg-body table{border-collapse:collapse;margin:8px 0;}"
-    ".msg-body th,.msg-body td{border:1px solid #e5e7eb;"
-    "padding:6px 12px;text-align:left;}"
-    ".msg-body th{background:#f8fafc;font-weight:600;color:#1f2937;}"
-    ".msg-body tr:nth-child(even) td{background:#fafbfc;}"
-    # 分隔线
-    ".msg-body hr{border:none;border-top:1px solid #e5e7eb;margin:12px 0;}"
-    # 链接
-    ".msg-body a{color:#4f46e5;text-decoration:none;}"
-    ".msg-body a:hover{text-decoration:underline;}"
-    # 加粗 / 斜体
-    ".msg-body strong{font-weight:600;color:#111827;}"
-    ".msg-body em{font-style:italic;color:#374151;}"
-    # 工具调用 (已执行操作) 卡片 - 仍类似 Claude Code 的紧凑小卡片
-    "div.tools{font-size:9.5pt;color:#1f2937;background-color:#f1f5f9;"
-    "border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;"
-    "margin:6px 0 10px 0;}"
-    "div.tools .tool-row{display:block;margin:2px 0;}"
-    "div.tools .tool-row .tool-name{color:#0f172a;font-weight:600;}"
-    "div.tools .tool-row .tool-target{color:#475569;}"
-    "div.tools .tool-row.failed .tool-name{color:#b91c1c;}"
+    # 工具步骤的状态 / 附注（跟 CHAT_MD_CSS 一一对应，两套样式不许漂移）
+    "div.tools .tool-row .tool-num{color:#a0a0b4;margin-right:6px;}"
+    "div.tools .tool-row .tool-target{color:#6b7280;margin:0 4px;}"
+    "div.tools .tool-row .tool-mark-cell{margin-left:8px;}"
     "div.tools .tool-row.ok .tool-name{color:#15803d;}"
-    # 思考过程卡片
-    "div.thinking{font-size:9.5pt;color:#475569;background-color:#f8fafc;"
-    "border-left:3px solid #94a3b8;padding:8px 12px;margin:4px 0 8px 0;"
-    "border-radius:0 4px 4px 0;}"
-    "div.thinking .thinking-head{color:#64748b;font-weight:600;"
-    "margin-bottom:2px;}"
-    # 命令执行块 (终端黑色风格)
-    "div.execs{background:#0f172a;color:#e2e8f0;padding:10px 14px;"
-    "border-radius:6px;font-family:Consolas,Monaco,'Courier New',monospace;"
-    "font-size:9.5pt;line-height:1.5;margin:6px 0;border:1px solid #1e293b;}"
-    "div.execs .execs-head{color:#94a3b8;font-size:8.5pt;margin-bottom:4px;}"
-    "div.execs .execs-cmd{color:#a5f3fc;}"
-    "div.execs .execs-out{color:#cbd5e1;white-space:pre-wrap;}"
-    # 文件编辑块 (黄色提示风格)
-    "div.file-edits{font-size:9.5pt;color:#78350f;background-color:#fef3c7;"
-    "border-left:3px solid #f59e0b;padding:8px 12px;margin:6px 0;"
-    "border-radius:0 4px 4px 0;}"
-    "div.file-edits .file-edits-head{color:#b45309;font-weight:600;"
-    "margin-bottom:2px;}"
-    # 系统消息: 居中浅灰条
-    "span.system-msg{display:inline-block;background:#f1f5f9;"
-    "color:#64748b;padding:4px 12px;border-radius:12px;font-size:9pt;"
-    "margin:6px 0;}"
-    # 压缩摘要条目（Stage 4.3）：**不是**主人说的话，用虚线边 + 淡底区分
-    "div.msg-summary{margin:8px 0;}"
-    "div.msg-summary .msg-label .who{color:#7c8aa0;"
-    "font-weight:600;font-size:8.5pt;}"
-    "div.msg-summary .msg-label .ts{color:#94a3b8;font-size:8pt;}"
-    "div.msg-summary .summary-body{border-left:3px dashed #cbd5e1;"
-    "background:#f8fafc;padding:6px 10px;border-radius:0 4px 4px 0;"
-    "color:#64748b;font-size:9pt;line-height:1.5;}"
-    # 旧的"气泡"结构 (历史消息可能仍渲染): 保持视觉一致
-    "td.bubble{line-height:1.55;font-size:10pt;}"
-    # 三点跳动等待动画
-    ".typing-dot{display:inline-block;width:6px;height:6px;"
-    "border-radius:50%;margin:0 2px;background:#cbd5e1;vertical-align:middle;}"
-    ".typing-dot.active{background:#6366f1;}"
+    "div.tools .tool-row.failed .tool-name{color:#b91c1c;}"
+    "div.tools .tool-row.cancelled .tool-name{color:#9ca3af;}"
+    "div.tools .tool-row.rejected .tool-name{color:#a45b2e;}"
+    "div.tools .tool-mark.tool-ok{color:#16a34a;}"
+    "div.tools .tool-mark.tool-failed{color:#dc2626;font-weight:600;}"
+    "div.tools .tool-mark.tool-cancelled{color:#9ca3af;}"
+    "div.tools .tool-mark.tool-rejected{color:#a45b2e;font-weight:600;}"
+    "div.tools .tool-reason{color:#dc2626;font-size:8.5pt;margin:1px 0 3px 20px;}"
+    "div.tools .tool-note{color:#6b7280;font-size:8.5pt;margin:1px 0 3px 20px;}"
+    "div.tools .tools-preview{color:#9ca3af;font-size:9pt;margin:2px 0 0 0;}"
+    "div.tools .tools-tail{color:#dc2626;}"
+    "div.msg-notice{color:#6b7280;font-size:10pt;font-style:italic;"
+    "border-left:3px solid #a45b2e;padding:2px 10px;margin:4px 0;}"
 )
+
+
+# ---------------------------------------------------------------------------
+# 聊天正文样式（MiniMax Code 风格的线性流 + 完整 markdown 渲染）
+#
+# **一份规则表 + 两套配色**（亮 / 暗）：
+#   · _CHAT_MD_TEMPLATE —— 亮暗两套主题共用同一份规则（string.Template），
+#     「加了一条规则却只加到一套主题上」在结构上就不可能发生；
+#   · _CHAT_MD_LIGHT / _CHAT_MD_DARK —— 每套主题一份颜色 token。
+#
+# 类名必须保留（tests/test_chat_rendering.py 有断言）
+# ---------------------------------------------------------------------------
+_CHAT_MD_TEMPLATE = string.Template(
+    """body{margin:0;padding:8px 14px;background:$bg_page;font-family:'Microsoft YaHei UI','Microsoft YaHei','PingFang SC','SF Pro Text','Segoe UI',sans-serif;font-size:11pt;line-height:1.65;color:$text_body;}
+.msg{padding:14px 4px 12px 4px;border-bottom:1px solid $border_line;}
+.msg:last-child{border-bottom:none;}
+.msg-user{background:$bg_user;}
+.msg-assistant{background:$bg_page;border-left:3px solid $accent;padding-left:10px;}
+.msg-assistant:first-child{padding-top:14px;}
+.msg-user .msg-label{text-align:right;color:$text_sub;}
+.msg-user .msg-body{text-align:right;}
+.msg-assistant .msg-label{text-align:left;}
+.msg-assistant .msg-body{text-align:left;}
+.msg-label{font-size:9pt;font-weight:600;color:$text_label;letter-spacing:0.5px;margin-bottom:5px;}
+.msg-user .msg-label{color:$text_sub;}
+.msg-label .ts{font-weight:400;color:$text_muted;margin-left:8px;font-size:8.5pt;letter-spacing:0;}
+.msg-user .msg-label, .msg-user .msg-body{display:block;margin-left:auto;width:fit-content;max-width:75%;}
+.msg-assistant .msg-label{display:block;margin-right:auto;width:fit-content;max-width:90%;text-align:left;}
+.msg-assistant .msg-body{display:block;margin-right:auto;width:fit-content;max-width:90%;text-align:left;}
+.msg-body{font-size:11pt;line-height:1.7;color:$text_msg;}
+.msg-body p{margin:7px 0;}
+.msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4{font-weight:600;line-height:1.3;margin:14px 0 6px 0;color:$text_strong;}
+.msg-body h1{font-size:18pt;border-bottom:1px solid $border_soft;padding-bottom:6px;}
+.msg-body h2{font-size:14pt;color:$text_h2;}
+.msg-body h3{font-size:12.5pt;color:$text_h3;}
+.msg-body h4{font-size:11.5pt;color:$text_accent;}
+.msg-body ul,.msg-body ol{padding-left:24px;margin:6px 0;}
+.msg-body li{margin:3px 0;line-height:1.6;}
+.msg-body li>p{margin:2px 0;}
+.msg-body code{background:$bg_code_inline;padding:1px 6px;border-radius:4px;font-family:Consolas,Monaco,'Courier New',monospace;font-size:0.9em;color:$text_accent;}
+
+.msg-body pre{background:$bg_terminal;color:$fg_terminal;padding:12px 14px;border-radius:8px;font-family:Consolas,Monaco,'Courier New',monospace;font-size:9.5pt;line-height:1.5;white-space:pre-wrap;overflow:auto;margin:8px 0;border:1px solid $border_terminal;}
+.msg-body pre code{background:transparent;color:inherit;padding:0;font-size:inherit;}
+.msg-body blockquote{border-left:3px solid $border_quote;background:$bg_quote;padding:6px 14px;margin:8px 0;color:$text_quiet;border-radius:0 4px 4px 0;}
+.msg-body blockquote p{margin:4px 0;}
+.msg-body table{border-collapse:collapse;margin:8px 0;}
+.msg-body th,.msg-body td{border:1px solid $border_soft;padding:6px 12px;text-align:left;}
+.msg-body th{background:$bg_soft;font-weight:600;color:$text_th;}
+.msg-body tr:nth-child(even) td{background:$bg_row_alt;}
+.msg-body hr{border:none;border-top:1px solid $border_soft;margin:12px 0;}
+.msg-body a{color:$text_accent;text-decoration:none;}
+.msg-body a:hover{text-decoration:underline;}
+.msg-body strong{font-weight:600;color:$text_strong;}
+.msg-body em{font-style:italic;color:$text_italic;}
+div.tools{font-size:9.5pt;color:$text_msg;background-color:$bg_panel;border:1px solid $border_panel;border-radius:6px;padding:8px 12px;margin:6px 0 10px 0;}
+div.tools .tool-row{display:block;margin:2px 0;}
+div.tools .tool-row .tool-num{color:$text_muted;margin-right:6px;}
+div.tools .tool-row .tool-name{color:$text_tool_name;font-weight:600;}
+div.tools .tool-row .tool-target{color:$text_quiet;margin:0 4px;}
+div.tools .tool-row .tool-mark-cell{margin-left:8px;}
+div.tools .tool-row.ok .tool-name{color:$text_row_ok;}
+div.tools .tool-row.failed .tool-name{color:$text_row_fail;}
+div.tools .tool-row.cancelled .tool-name{color:$text_mark_cancel;}
+div.tools .tool-row.rejected .tool-name{color:$text_mark_rejected;}
+div.tools .tool-mark.tool-ok{color:$text_mark_ok;}
+div.tools .tool-mark.tool-failed{color:$text_mark_fail;font-weight:600;}
+div.tools .tool-mark.tool-cancelled{color:$text_mark_cancel;}
+div.tools .tool-mark.tool-rejected{color:$text_mark_rejected;font-weight:600;}
+div.tools .tool-reason{color:$text_mark_fail;font-size:8.5pt;margin:1px 0 3px 20px;}
+div.tools .tool-note{color:$text_sub;font-size:8.5pt;margin:1px 0 3px 20px;}
+div.tools .tools-preview{color:$text_preview;font-size:9pt;margin:2px 0 0 0;}
+div.tools .tools-tail{color:$text_mark_fail;}
+
+div.thinking{font-size:9.5pt;color:$text_quiet;background-color:$bg_soft;border-left:3px solid $text_terminal_head;padding:8px 12px;margin:4px 0 8px 0;border-radius:0 4px 4px 0;}
+div.thinking .thinking-head{color:$text_think_head;font-weight:600;margin-bottom:2px;}
+div.thinking .thinking-body{margin:4px 0 2px 0;white-space:pre-wrap;font-family:Consolas,Menlo,monospace;font-size:9pt;color:$text_think_pre;}
+div.execs{background:$bg_terminal;color:$fg_terminal;padding:10px 14px;border-radius:6px;font-family:Consolas,Monaco,'Courier New',monospace;font-size:9.5pt;line-height:1.5;margin:6px 0;border:1px solid $border_terminal;}
+div.execs .execs-head{color:$text_exec_head;font-size:8.5pt;margin-bottom:4px;}
+div.execs .execs-cmd{color:$text_terminal_cmd;}
+div.execs .execs-out{color:$text_terminal_out;white-space:pre-wrap;}
+div.execs .execs-row{margin:3px 0;background:$bg_terminal;border-radius:6px;padding:6px 10px;font-family:Consolas,Menlo,monospace;font-size:9pt;color:$fg_terminal;}
+div.execs .execs-cmd-line{color:$text_terminal_head;}
+div.execs .execs-output{margin:3px 0 0 0;white-space:pre-wrap;color:$text_terminal_out;}
+div.execs .execs-exit{margin-top:3px;font-size:8pt;color:$text_exec_fail;}
+div.execs .execs-exit.ok{color:$text_exec_ok;}
+div.file-edits{font-size:9.5pt;color:$text_file_edit;background-color:$bg_file_edit;border-left:3px solid $border_file_edit_block;padding:8px 12px;margin:6px 0;border-radius:0 4px 4px 0;}
+div.file-edits .file-edits-head{color:$text_file_edit_head;font-weight:600;margin-bottom:2px;}
+div.file-edits .file-edit-row{background:$bg_file_edit;border:1px solid $border_file_edit_row;border-radius:4px;padding:4px 8px;margin:2px 0;font-size:9pt;color:$text_file_edit;}
+div.file-edits .file-edit-size{color:$text_file_edit_size;}
+span.system-msg{display:inline-block;background:$bg_panel;color:$text_system;padding:4px 12px;border-radius:12px;font-size:9pt;margin:6px 0;}
+div.msg-summary{margin:8px 0;}
+div.msg-summary .msg-label .who{color:$text_summary_who;font-weight:600;font-size:8.5pt;}
+div.msg-summary .msg-label .ts{color:$text_summary_ts;font-size:8pt;}
+div.msg-summary .summary-body{border-left:3px dashed $border_summary;background:$bg_soft;padding:6px 10px;border-radius:0 4px 4px 0;color:$text_summary_body;font-size:9pt;line-height:1.5;}
+div.msg-notice{color:$text_sub;font-size:10pt;font-style:italic;border-left:3px solid $text_mark_rejected;padding:2px 10px;margin:4px 0;}
+div.plan-card{margin:8px 0 14px 0;padding:10px 12px;background:$bg_plan;border:1px solid $border_plan;border-radius:8px;}
+div.plan-card .plan-card-head{color:$text_plan_head;font-weight:600;margin-bottom:6px;}
+div.plan-card .plan-card-body{white-space:pre-wrap;color:$text_plan_body;line-height:1.55;}
+td.bubble{line-height:1.55;font-size:10pt;}
+.typing-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 2px;background:$text_dot;vertical-align:middle;}
+.typing-dot.active{background:$text_dot_active;}"""
+)
+
+#: 亮色主题配色（默认）
+_CHAT_MD_LIGHT = {
+    "bg_page": "#fffcf8",
+    "bg_user": "#faf6f2",
+    "bg_panel": "#f1f5f9",
+    "bg_soft": "#f8fafc",
+    "bg_quote": "#f5f7ff",
+    "bg_code_inline": "#eef2ff",
+    "bg_row_alt": "#fafbfc",
+    "bg_file_edit": "#fef3c7",
+    "bg_plan": "#fbf7ff",
+    "bg_terminal": "#0f172a",
+    "border_line": "#ebe3d6",
+    "border_soft": "#e5e7eb",
+    "border_panel": "#e2e8f0",
+    "border_terminal": "#1e293b",
+    "border_quote": "#c7d2fe",
+    "border_summary": "#cbd5e1",
+    "border_file_edit_block": "#f59e0b",
+    "border_file_edit_row": "#fbbf24",
+    "border_plan": "#d9c9f5",
+    "accent": "#E89AAE",
+    "text_body": "#4a3d6e",
+    "text_msg": "#1f2937",
+    "text_strong": "#111827",
+    "text_italic": "#374151",
+    "text_sub": "#8a7f8c",
+    "text_muted": "#a89eaa",
+    "text_label": "#D17F95",
+    "text_accent": "#4f46e5",
+    "text_h2": "#3730a3",
+    "text_h3": "#4338ca",
+    "text_quiet": "#475569",
+    "text_tool_name": "#0f172a",
+    "text_th": "#1f2937",
+    "text_think_head": "#64748b",
+    "text_think_pre": "#374151",
+    "text_terminal_head": "#94a3b8",
+    "text_terminal_cmd": "#a5f3fc",
+    "text_terminal_out": "#cbd5e1",
+    "text_exec_head": "#0891b2",
+    "text_exec_ok": "#16a34a",
+    "text_exec_fail": "#dc2626",
+    "fg_terminal": "#e2e8f0",
+    "text_file_edit": "#78350f",
+    "text_file_edit_head": "#b45309",
+    "text_file_edit_size": "#92400e",
+    "text_system": "#64748b",
+    "text_summary_who": "#7c8aa0",
+    "text_summary_ts": "#94a3b8",
+    "text_summary_body": "#64748b",
+    "text_dot": "#cbd5e1",
+    "text_dot_active": "#6366f1",
+    "text_preview": "#9ca3af",
+    "text_mark_ok": "#16a34a",
+    "text_mark_fail": "#dc2626",
+    "text_mark_cancel": "#9ca3af",
+    "text_mark_rejected": "#a45b2e",
+    "text_row_ok": "#15803d",
+    "text_row_fail": "#b91c1c",
+    "text_plan_head": "#7c5cf0",
+    "text_plan_body": "#2c2c38",
+}
+
+#: 暗色主题配色（与亮色**同一份规则表**，只换颜色）
+_CHAT_MD_DARK = {
+    "bg_page": "#1b1720",
+    "bg_user": "#241f2b",
+    "bg_panel": "#2b2536",
+    "bg_soft": "#2a2433",
+    "bg_quote": "#262238",
+    "bg_code_inline": "#2f2b48",
+    "bg_row_alt": "#262130",
+    "bg_file_edit": "#3a2f18",
+    "bg_plan": "#262036",
+    "bg_terminal": "#0b1220",
+    "border_line": "#3a3346",
+    "border_soft": "#3b3547",
+    "border_panel": "#423a52",
+    "border_terminal": "#1f2a3d",
+    "border_quote": "#4b4683",
+    "border_summary": "#4a4a5e",
+    "border_file_edit_block": "#b45309",
+    "border_file_edit_row": "#b45309",
+    "border_plan": "#4a3f66",
+    "accent": "#f0a8bd",
+    "text_body": "#e8e4f2",
+    "text_msg": "#e6e2f0",
+    "text_strong": "#f6f3fc",
+    "text_italic": "#d7d1e6",
+    "text_sub": "#b6acc8",
+    "text_muted": "#8f86a3",
+    "text_label": "#f0a8bd",
+    "text_accent": "#a5b4fc",
+    "text_h2": "#c4b5fd",
+    "text_h3": "#b7a6fb",
+    "text_quiet": "#c3bcd6",
+    "text_tool_name": "#f1eef8",
+    "text_th": "#ece8f6",
+    "text_think_head": "#a49bba",
+    "text_think_pre": "#d7d1e6",
+    "text_terminal_head": "#94a3b8",
+    "text_terminal_cmd": "#7dd3fc",
+    "text_terminal_out": "#cbd5e1",
+    "text_exec_head": "#7dd3fc",
+    "text_exec_ok": "#4ade80",
+    "text_exec_fail": "#f87171",
+    "fg_terminal": "#e2e8f0",
+    "text_file_edit": "#fcd34d",
+    "text_file_edit_head": "#fbbf24",
+    "text_file_edit_size": "#d9a441",
+    "text_system": "#a9a1bb",
+    "text_summary_who": "#9fb0c4",
+    "text_summary_ts": "#8d97a8",
+    "text_summary_body": "#a6aec0",
+    "text_dot": "#4a4358",
+    "text_dot_active": "#f0a8bd",
+    "text_preview": "#9a92ab",
+    "text_mark_ok": "#4ade80",
+    "text_mark_fail": "#f87171",
+    "text_mark_cancel": "#9ca3af",
+    "text_mark_rejected": "#e0a06a",
+    "text_row_ok": "#4ade80",
+    "text_row_fail": "#f87171",
+    "text_plan_head": "#c4b5fd",
+    "text_plan_body": "#e2ddf0",
+}
+
+#: 聊天正文样式表（亮色，默认）
+CHAT_MD_CSS = _CHAT_MD_TEMPLATE.safe_substitute(**_CHAT_MD_LIGHT)
+
+#: 聊天正文样式表（暗色）—— 与亮色共用同一份规则表
+CHAT_MD_CSS_DARK = _CHAT_MD_TEMPLATE.safe_substitute(**_CHAT_MD_DARK)
+
+
+def chat_md_css(theme: str = "light") -> str:
+    """按主题取聊天正文样式表（"light" / "dark"）。"""
+    return CHAT_MD_CSS_DARK if str(theme).lower() == "dark" else CHAT_MD_CSS
+
+
 
 
 # v37: 工具解锁窗
