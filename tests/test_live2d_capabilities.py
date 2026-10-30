@@ -278,6 +278,10 @@ class _FakeRenderer:
     def list_expressions(self):
         return []
 
+    def scene_is_overridden(self, sid):
+        # live2d_config.scene_configs() 会问渲染器「这个场景被主人改过没有」。
+        return False
+
 
 def _appearance(caps, rtype="live2d"):
     """跑一遍控制服务的「外观」handler，返回它报出来的内容。"""
@@ -287,6 +291,14 @@ def _appearance(caps, rtype="live2d"):
     class _Ctrl(UIController):
         def __init__(self):  # noqa: D107 - 只借方法，不跑 Qt 初始化
             self.pet = type("_P", (), {"renderer": _FakeRenderer(caps, rtype)})()
+            # _control_appearance 现在还会调 _live2d_models()，
+            # 它读 self.cfg.pet.live2d.model_dir —— 补一个最小的 cfg，
+            # 免得夹具因为「少一个属性」而不是因为功能行为失败。
+            self.cfg = type("_C", (), {
+                "pet": type("_P2", (), {
+                    "live2d": type("_L", (), {"model_dir": ""})(),
+                })(),
+            })()
 
     return _Ctrl()._control_appearance()
 
