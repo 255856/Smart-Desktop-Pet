@@ -387,8 +387,14 @@ class TestAutoReadSwitch:
 
 @needs_rvc
 class TestRealRvcSing:
-    """A2：mcp_voice_sing 真的用本机 RVC 出一段 wav。"""
+    """A2：mcp_voice_sing 真的用本机 RVC 出一段 wav。
 
+    注意：RVC 的唱歌脚本内部要调本机 TTS 服务（:9880）做音色转换，
+    所以这些用例**同时**要求 RVC 资产和 TTS 服务都在 —— 少一样就 skip，
+    不是 fail（本机没开那个服务不是代码坏了）。
+    """
+
+    @needs_tts
     def test_sing_produces_wav_and_does_not_download(self, tmp_path, monkeypatch):
         cfg = dict(_local_cfg())
         cfg["output_dir"] = str(tmp_path)
