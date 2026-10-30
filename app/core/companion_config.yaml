@@ -292,3 +292,38 @@ tool_allowlist:
   prefixes:                       # MCP 外部工具按命名空间前缀放行
     - mcp_aw_                      # ActivityWatch (aw server)
     - mcp_fs_                      # 文件系统沙箱 (fs server)
+
+# 输入侧预算（Stage 4.4）—— 输入 token 的天花板 + 超预算的可见告警
+#
+# 为什么要有这段：
+#   config.yaml 的 max_tokens 只管**输出**；输入侧原来既没有上限，也没有
+#   任何可见信号。而 data/traces.db 的 17 条 error 事件里有 7 条是 HTTP 429
+#   （token plan 用量上限 / tpm·rpm 超限）—— 已经被限流过，却看不见。
+#
+# 「一轮」怎么算：
+#   同一会话里、间隔不超过 turn_idle_seconds 的一串请求算一轮
+#   （一个回合里模型可能被调用多次：调工具 -> 工具结果 -> 再调模型）。
+#
+# 超了 input_tokens_per_turn 会做两件事：
+#   1) 在 data/token-usage.jsonl 的那一行挂上告警字段（事后可查）；
+#   2) 走桌宠气泡 / Windows 系统通知告诉主人（app/core/owner_notice.py）。
+#
+# ⚠️ 本段只放预算。API key 在 config.yaml，这里永远不读它。
+cost_budget:
+  input_tokens_per_turn: 32000      # 一轮允许的输入 token 上限（0 = 不限）
+  turn_idle_seconds: 300            # 多久没有请求算「新一轮」（秒）
+  warn: true                        # 超预算时告警（写台账 + 通知主人）
+  notice_min_interval_seconds: 300  # 同一会话两次告警之间的最短间隔（防刷屏）
+
+# 上下文压缩（Stage 4.3）—— 摘要并遗忘（不再是「只丢最旧」）
+# 参数口径对齐 qq-bridge 挂载的 dsh-compaction-basic
+# （docs/comparison-with-qq-bridge.md 第 4.6.4 节）：
+#   thresholdRatio = 0.8   上下文用量达到预算的 80% 触发压缩
+#   retainRatio    = 0.16  压缩后保留最近 16% 的消息**原文**
+#   keep_recent    = 8     最新 8 条永远原文保留，不参与摘要
+context_compaction:
+  threshold_ratio: 0.8      # 触发压缩的用量占比（相对字符预算）
+  retain_ratio: 0.16        # 压缩后保留最近消息原文的比例
+  keep_recent: 8            # 最新 N 条永远原文保留（不参与摘要）
+  summary_timeout_s: 20     # 摘要请求超时（秒）—— 超时按失败处理（退回丢最旧）
+  summary_max_chars: 600    # 摘要正文最长多少字（防止摘要把预算又吃回去）

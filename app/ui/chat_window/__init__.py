@@ -1,6 +1,8 @@
 """聊天窗口：消息渲染、工具卡片、命令补全、Agent/Stream Worker、拖放上传。"""
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import re
 import threading
@@ -57,19 +59,30 @@ def _convert_loaded_tools(stored_tools):
 from app.core.qt_compat import (
     QApplication, QFileDialog, QFont, QFrame, QHBoxLayout, QKeyEvent,
     QLabel, QMenu, QMessageBox, QPixmap, QPlainTextEdit, QPushButton,
+    QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
     Qt, QTextBrowser, QTextCursor, QToolButton,
     QVBoxLayout, QWidget, Signal, QTimer, QColor, QRect,
     QGraphicsDropShadowEffect, QPainter, QPainterPath, QLinearGradient,
     QBuffer, QByteArray, pyqtSlot,
     QDragEnterEvent, QDragMoveEvent, QDropEvent, QMimeData, QUrl,
-    QScrollArea, QSplitter, QStatusBar,
+    QScrollArea, QSplitter, QStatusBar, QThread,
 )
 
 from app.voice.character import Emotion, guess_emotion, parse_reply
-from app.core.config import CharacterConfig, LLMConfig
+from app.core.config import (CharacterConfig, LLMConfig, list_characters,
+                             switch_character as _switch_character)
 from app.core.api_keys import is_placeholder_key
 from app.brain.llm_client import ChatMessage, LLMClient
 from app.brain.agent import AgentLoop, DANGEROUS_TOOLS
+# Stage 4.3：上下文压缩（摘要并遗忘）—— 阈值 / 保留比例 / 摘要请求
+from app.brain.compaction import (
+    SUMMARY_PERSONA,
+    CompactionSettings,
+    apply_compaction,
+    history_chars,
+    load_compaction_settings,
+    plan_compaction,
+)
 # LangChainAgent 本体**不**在这里 import：它会连带拉起 langchain.agents /
 # langchain_openai（实测 1.84 s + 1.00 s），而 lightweight 后端根本用不到。
 # 需要时在 _kickoff_llm 里延迟 import（见该函数）。
@@ -134,6 +147,104 @@ from .command_completer import _CommandCompleter  # noqa: F401
 
 # _TitleBarDrag / _AvatarHoverHook — 拆到 chat_window.chrome
 from .chrome import _TitleBarDrag, _AvatarHoverHook  # noqa: F401
+
+
+#: 正在跑的摘要 worker（模块级引用）。
+#:
+#: 为什么要有它：窗口在摘要跑完之前被关掉时，QThread 对象会被销毁 ——
+#: Qt 会报 "QThread: Destroyed while thread is still running"（退出时可能直接 abort）。
+#: 模块级列表把 worker 钉住，等它自己跑完。
+_LIVE_WORKERS: list = []
+
+
+class _CompactionWorker(QThread):
+    """后台摘要 worker：把最旧的一段历史摘要成几句话。
+
+    摘要要走 LLM（可能慢、可能失败、可能超时）——**绝不能在 GUI 线程里等**：
+    它跑在独立线程里，失败只发 failed 信号，
+    异常**绝不**抛进聊天路径（红线见 app/brain/compaction.py 的模块文档）。
+
+    done 信号带摘要正文（空字符串 = 失败 / 不可用），
+    调用方据此退回「丢最旧」（今天的行为）。
+    """
+
+    done = Signal(str)      # 摘要正文（空 = 不可用）
+    failed = Signal(str)    # 失败原因（只进日志，不给主人看）
+
+    def __init__(self, summariser: Callable, payload) -> None:
+        super().__init__()
+        self._summariser = summariser
+        self._payload = payload
+
+    def run(self) -> None:
+        try:
+            text = asyncio.run(self._call())
+        except Exception as e:  # noqa: BLE001 - 摘要失败不许炸聊天路径
+            self.failed.emit(str(e))
+            return
+        self.done.emit(text or "")
+
+    async def _call(self) -> str:
+        """调摘要器（同步 / 异步都认）。"""
+        out = self._summariser(self._payload)
+        if inspect.isawaitable(out):
+            out = await out
+        return str(out or "")
+
+
+class _CharacterSwitchDialog(QDialog):
+    """角色切换对话框：列出 characters/*.yaml 里的角色，选一个换人。
+
+    坏文件（缺 character: 段 / 缺 name / 缺 persona）也列出来，但不可选，
+    并在行内标出坏在哪 —— 主人能一眼看出哪个文件没写好。
+    """
+
+    def __init__(self, entries, current_path: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("切换角色")
+        self.setMinimumWidth(380)
+        self._entries = list(entries or [])
+        lay = QVBoxLayout(self)
+        tip = QLabel("人设来自 characters/*.yaml。切换后立即生效，聊天记录保留。")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        self.list = QListWidget()
+        for e in self._entries:
+            if not e.ok:
+                item = QListWidgetItem("%s（坏了：%s）" % (e.file_name, e.error))
+                item.setToolTip(e.error)
+                try:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                except Exception:  # noqa: BLE001
+                    pass
+            elif e.path == current_path:
+                item = QListWidgetItem("%s（%s）（当前）" % (e.display_name, e.file_name))
+            else:
+                item = QListWidgetItem("%s（%s）" % (e.display_name, e.file_name))
+            self.list.addItem(item)
+        lay.addWidget(self.list)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        # 默认选中当前角色（没有就选第一个可用的）
+        for i, e in enumerate(self._entries):
+            if e.ok and e.path == current_path:
+                self.list.setCurrentRow(i)
+                break
+        if self.list.currentRow() < 0:
+            for i, e in enumerate(self._entries):
+                if e.ok:
+                    self.list.setCurrentRow(i)
+                    break
+
+    def selected_entry(self):
+        """当前选中的角色条目（CharacterEntry）；没选中 → None。"""
+        row = self.list.currentRow()
+        if row < 0 or row >= len(self._entries):
+            return None
+        return self._entries[row]
 
 
 class ChatWindow(QWidget):
@@ -342,6 +453,15 @@ class ChatWindow(QWidget):
         self._bot_avatar_path: str = (
             chat_cfg.bot_avatar_path if chat_cfg is not None else ""
         ) or ""
+        # Stage 4.3：上下文压缩（摘要并遗忘）。阈值 / 保留比例 / 摘要超时走
+        # app/core/companion_config.yaml 的 context_compaction 段。
+        self._compaction_settings: CompactionSettings = load_compaction_settings()
+        # 正在跑的后台摘要（worker / plan / inflight 三个状态一起管）
+        self._compaction_worker: Optional[_CompactionWorker] = None
+        self._compaction_plan = None
+        self._compaction_inflight = False
+        # 摘要器注入点（测试用；生产走 _summarise_history → 真 LLM）
+        self._compaction_summariser: Optional[Callable] = None
         self._build_ui()
         self._register_avatar_resources()
         self._append_system_welcome()
@@ -542,6 +662,123 @@ class ChatWindow(QWidget):
         # 富文本头像缓存（只影响之后的新消息）
         self._register_avatar_resources()
 
+    # -- 角色切换 ---------------------------------------------------------
+    def _character_root(self) -> Path:
+        """角色文件所在的项目根（找得到 characters/ 目录的那个）。"""
+        cands: list[Path] = []
+        if self._cwd:
+            cands.append(Path(self._cwd))
+        try:
+            cands.append(Path(self._cfg_path).resolve().parent)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cands.append(Path(__file__).resolve().parents[3])
+        except Exception:  # noqa: BLE001
+            pass
+        for p in cands:
+            try:
+                if (p / "characters").is_dir():
+                    return p.resolve()
+            except Exception:  # noqa: BLE001
+                continue
+        return cands[0] if cands else Path.cwd()
+
+    def _open_character_switcher(self) -> None:
+        """打开角色切换对话框（列表来自 characters/*.yaml）。"""
+        root = self._character_root()
+        entries = list_characters(root)
+        if not entries:
+            QMessageBox.warning(
+                self, "切换角色",
+                "没找到角色文件（%s 目录下没有 *.yaml）" % (root / "characters"))
+            return
+        dlg = _CharacterSwitchDialog(entries, self.char_cfg.character_file, self)
+        if dlg.exec_() != QDialog.DialogCode.Accepted:
+            return
+        entry = dlg.selected_entry()
+        if entry is None:
+            return
+        ok, msg = self.switch_character(entry.path)
+        if ok:
+            # 聊天区留一句提示（历史不清）
+            self._append_system_msg(msg)
+        else:
+            QMessageBox.warning(self, "切换角色失败", msg)
+
+    def switch_character(self, rel_path: str) -> tuple[bool, str]:
+        """运行时切换角色：改配置 + 重拼 system prompt + 刷新界面。
+
+        聊天历史**不动** —— 人设和历史是两回事。
+        返回 (是否成功, 提示信息)；失败时保持当前角色不变。
+        """
+        ok, msg = _switch_character(self.char_cfg, self._character_root(), rel_path)
+        if not ok:
+            return False, msg
+        self._rebuild_system_prompt()
+        self._refresh_character_ui()
+        # 落盘的聊天记录跟着新角色走（内存里的历史不动 —— 人设和历史是两回事）
+        store = getattr(self, "chat_store", None)
+        if store is not None:
+            try:
+                store.character_name = self.char_cfg.name
+            except Exception as e:  # noqa: BLE001
+                log.warning("同步聊天记录的角色标记失败: %s", e)
+        return True, msg
+
+    def _rebuild_system_prompt(self) -> str:
+        """按新人设重拼 system prompt（两个后端都要看到新人设）。
+
+        - 有活着的 agent（上一轮那个）：直接 set_persona，下一轮就按新人设说话；
+        - 没有：按新人设拼一条出来（跟真正发出去的那条同一套共享层）。
+        """
+        persona = self.char_cfg.persona
+        worker = getattr(self, "_worker", None)
+        agent = getattr(worker, "agent", None) if worker is not None else None
+        # 正在生成时**不碰**活着的 agent：那一轮已经发出去了，改它只会让
+        # 同一轮里的后续请求用错人设。下一轮本来就是新建 client/agent，
+        # 自然就是新人设。
+        busy = bool(getattr(self, "_generating", False))
+        if agent is not None and not busy and hasattr(agent, "set_persona"):
+            try:
+                return str(agent.set_persona(persona) or "")
+            except Exception as e:  # noqa: BLE001
+                log.warning("重拼 system prompt 失败: %s", e)
+        try:
+            from app.brain.agent import apply_persona_to_client
+            return apply_persona_to_client(None, persona)
+        except Exception as e:  # noqa: BLE001
+            log.warning("拼 system prompt 失败: %s", e)
+            return ""
+
+    def _refresh_character_ui(self) -> None:
+        """角色换人后刷新界面：标题 / 窗口标题 / 头像。
+
+        聊天历史**不动**（人设和历史是两回事）。
+        """
+        name = self.char_cfg.name
+        title = getattr(self, "title_label", None)
+        if title is not None:
+            try:
+                title.setText("和 %s 的对话" % name)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.setWindowTitle("和 %s 聊天" % name)
+        except Exception:  # noqa: BLE001
+            pass
+        # 头像：走现成的 set_avatar（重新生成圆形头像 → 换成新角色的首字）
+        try:
+            self.set_avatar(self._avatar_path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("刷新角色头像失败: %s", e)
+        subtitle = getattr(self, "subtitle_label", None)
+        if subtitle is not None:
+            try:
+                subtitle.setText(self._status_text())
+            except Exception:  # noqa: BLE001
+                pass
+
     # 头像自定义入口
     def pick_bot_avatar(self, parent=None) -> bool:
         """弹文件选择对话框让用户给桌宠选头像;选完复制到 data/avatars/bot.png。"""
@@ -610,7 +847,7 @@ class ChatWindow(QWidget):
 
         结构（从上到下）：
             ┌──────────────────────────────────────────────┐
-            │ 头像  鲸鱼娘                                  │
+            │ 头像  小汐                                    │
             │       模型 · 工具数 · 记忆数   [清屏] [Demo]  │   ← 标题
             ├──────────────────────────────────────────────┤
             │ ┌──────────────────────────────────────────┐ │   ← 能力展示面板
@@ -673,6 +910,7 @@ class ChatWindow(QWidget):
         dz.setSpacing(1)
         title = ElidedLabel(f"和 {self.char_cfg.name} 的对话")
         title.setObjectName("titlebar_title")
+        self.title_label = title    # 换角色时要改标题文字
         dz.addWidget(title)
         self.subtitle_label = ElidedLabel(self._status_text())
         self.subtitle_label.setObjectName("titlebar_subtitle")
@@ -701,6 +939,13 @@ class ChatWindow(QWidget):
         self.btn_unlock.setToolTip("查看工具解锁进度（每升 1 级解锁新工具）")
         self.btn_unlock.clicked.connect(self._open_tool_unlock)
         hl.addWidget(self.btn_unlock)
+
+        # 角色切换入口 —— 列出 characters/*.yaml 里的角色，换人不用改文件
+        self.btn_character = QPushButton("角色")
+        self.btn_character.setObjectName("ghost_btn")
+        self.btn_character.setToolTip("切换角色（人设来自 characters/*.yaml，切换后立即生效）")
+        self.btn_character.clicked.connect(self._open_character_switcher)
+        hl.addWidget(self.btn_character)
 
         # 控制台按钮 —— 打开浏览器控制台（设置都在里面）
         self.btn_settings = QPushButton("控制台")
@@ -734,6 +979,7 @@ class ChatWindow(QWidget):
 
         # 标题栏文字按钮锁定最小宽度 —— 空间紧张时让标题区省略,而不是把按钮文字裁掉
         for _tb in (self.btn_clear, self.btn_memory, self.btn_unlock,
+                    self.btn_character,
                 ):
             _tb.setMinimumWidth(_tb.sizeHint().width())
 
@@ -1640,13 +1886,62 @@ class ChatWindow(QWidget):
         # 直接插入到 chat_view(不动 history / chat_store)
         self.chat_view.append(html)
 
-    def _trim_history(self) -> None:
-        """裁剪送给 LLM 的上下文：条数上限 + 字符预算，两条约束取更严的。
+    # ------------------------------------------------------------------
+    # Stage 4.3：上下文压缩 —— 摘要并遗忘（不再只是「丢最旧」）
+    #
+    # 规则（参数口径对齐 qq-bridge 的 dsh-compaction-basic）：
+    #   1. 用量 < 预算 × 80% → **一个字都不动**（历史逐字节不变）
+    #   2. 用量 >= 80% → 把**最旧**的一段摘要成一条，最近 16% 的消息原文保留
+    #      （**最新 8 条永远原文保留**，不参与摘要）
+    #   3. 摘要起不来 / 失败 / 超时 / 空结果 → 退回今天的行为（丢最旧的）
+    #
+    # 两条硬约束：
+    #   - 摘要**只发生在对话历史里**，system prompt 一个字节都不动
+    #     （MiniMax 的前缀缓存按「最长公共前缀」判定，
+    #      见 tests/test_prompt_cache_stability.py）
+    #   - 摘要在**后台线程**里跑，聊天永远不阻塞；失败也**不抛异常**
+    # ------------------------------------------------------------------
 
-        只按条数裁是不够的：单条用户输入上限 2000 字符，50 条最坏能堆到
-        10 万字符 —— 每一轮都要把这坨重新发一遍，成本和首字延迟随对话
-        线性增长，而多轮场景里模型实际只需要最近几轮。字符预算按「从最早的
-        开始丢，累加到超预算就停」计算，保证留下的是最新上下文。
+    def _trim_history(self) -> None:
+        """裁剪送给 LLM 的上下文（Stage 4.3：先摘要，再丢最旧的）。
+
+        低于阈值时**什么都不做**（历史逐字节不变）；超阈值时把最旧的一段
+        交给后台摘要器，回来后换成「一条摘要 + 最近的原文」。
+
+        摘要器起不来（没配 key / 已经在跑）或摘要失败 → 退回
+        _drop_oldest_history()，也就是今天的行为。
+        """
+        if not self.history:
+            return
+        if self._compaction_inflight:
+            # 摘要正在后台跑：这一轮先不动历史，等摘要回来整体换
+            # （动了会让摘要对应的消息对不上号）
+            return
+
+        budget = self._CTX_CHAR_BUDGET
+        settings = self._compaction_settings
+        if not budget or budget <= 0:
+            # 没有字符预算 → 只按条数上限裁（今天的行为）
+            self._drop_oldest_history()
+            return
+        used = history_chars(self.history)
+        if used < settings.threshold_ratio * budget:
+            return          # 低于阈值：历史逐字节不变
+
+        plan = plan_compaction(self.history, settings, budget=budget)
+        if plan is not None and self._start_compaction(plan):
+            return
+        # 没东西可摘要（消息太少）或摘要起不来 → 退回丢最旧
+        self._drop_oldest_history()
+
+    def _drop_oldest_history(self, protect_tail: int = 0) -> None:
+        """今天的做法：超限就丢最旧的（Stage 4.3 之前的唯一裁剪方式）。
+
+        这是**摘要失败时的兜底**：条数上限 + 字符预算，从最旧的开始丢，
+        行为跟压缩前完全一样。
+
+        protect_tail > 0 时，最新的 protect_tail 条**永远保留** ——
+        压缩之后最新 8 条必须逐字节不变（它们比字符预算更硬）。
         """
         before = len(self.history)
         if before > self._MAX_HISTORY:
@@ -1655,9 +1950,15 @@ class ChatWindow(QWidget):
         # 字符预算：从新到旧累加，超出就截断
         budget = self._CTX_CHAR_BUDGET
         if budget and budget > 0:
+            # 最新的 protect_tail 条单独拎出来（它们永远保留），
+            # 字符预算只作用在更旧的那部分上
+            n = len(self.history)
+            tail_len = max(0, min(int(protect_tail or 0), n))
+            head = self.history[:n - tail_len]
+            tail = self.history[n - tail_len:]
             kept: list[Message] = []
             used = 0
-            for m in reversed(self.history):
+            for m in reversed(head):
                 cost = len(getattr(m, "content", "") or "")
                 if kept and used + cost > budget:
                     break
@@ -1668,12 +1969,159 @@ class ChatWindow(QWidget):
             # 开头的孤立助手回复对模型是噪声，去掉
             while kept and kept[0].role == "assistant":
                 kept.pop(0)
-            self.history = kept
+            self.history = kept + tail
 
         after = len(self.history)
         if after != before:
             log.debug("上下文裁剪：%d → %d 条（上限 %d / 预算 %d 字符）",
                       before, after, self._MAX_HISTORY, self._CTX_CHAR_BUDGET)
+
+    def _start_compaction(self, plan) -> bool:
+        """起后台摘要。返回 False = 起不来（调用方退回「丢最旧」）。"""
+        if self._compaction_inflight:
+            return False
+        if is_placeholder_key(getattr(self.llm_cfg, "api_key", "") or ""):
+            log.info("上下文压缩：没配 API Key，跳过摘要（退回丢最旧）")
+            return False
+        worker = _CompactionWorker(self._summarise_history, plan.to_summarise)
+        worker.done.connect(self._on_compaction_done)
+        worker.failed.connect(self._on_compaction_failed)
+        self._compaction_plan = plan
+        self._compaction_inflight = True
+        self._compaction_worker = worker
+        # 钉住 worker：窗口先关掉时 QThread 不能被销毁（见 _LIVE_WORKERS）
+        _LIVE_WORKERS[:] = [w for w in _LIVE_WORKERS if w.isRunning()]
+        _LIVE_WORKERS.append(worker)
+        worker.start()
+        log.info("上下文压缩：%d 条历史（%d 字符 / 预算 %d）超阈值，"
+                 "摘要最旧的 %d 条，保留最近 %d 条原文",
+                 len(plan.to_summarise) + len(plan.keep), plan.used_chars,
+                 plan.budget, len(plan.to_summarise), len(plan.keep))
+        return True
+
+    async def _summarise_history(self, messages: list) -> str:
+        """摘要请求（后台线程里跑）。**永不抛异常** —— 失败返回空串。
+
+        失败 = 空串 = 调用方退回「丢最旧」，这一轮照样能聊。
+        """
+        hook = self._compaction_summariser
+        if hook is not None:
+            # 注入点（测试 / 以后想换摘要模型时走这里）
+            try:
+                out = hook(messages)
+                if inspect.isawaitable(out):
+                    out = await out
+                return str(out or "")
+            except Exception as e:  # noqa: BLE001 - 摘要失败不许炸聊天路径
+                log.warning("上下文压缩：摘要失败（%s）", e)
+                return ""
+        from app.brain.compaction import summarise_history
+        client = None
+        try:
+            client = LLMClient(self.llm_cfg, SUMMARY_PERSONA,
+                               request_timeout_s=self._chat_timeout_s)
+            return await summarise_history(client, messages,
+                                           self._compaction_settings)
+        except Exception as e:  # noqa: BLE001 - 摘要失败不许炸聊天路径
+            log.warning("上下文压缩：摘要请求失败（%s）", e)
+            return ""
+        finally:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @pyqtSlot(str)
+    def _on_compaction_done(self, text: str) -> None:
+        """摘要回来了：摘要条目放到最旧的位置，替换掉被摘要的那一段。"""
+        plan = self._compaction_plan
+        self._compaction_plan = None
+        self._compaction_inflight = False
+        worker = self._compaction_worker
+        self._compaction_worker = None
+        self._release_compaction_worker(worker)
+        text = (text or "").strip()
+        if not text or plan is None:
+            log.warning("上下文压缩：摘要不可用，退回「丢最旧」")
+            self._drop_oldest_history()
+            return
+        try:
+            before = len(self.history)
+            self.history = apply_compaction(
+                self.history, plan, text, self._make_summary_entry)
+        except Exception:  # noqa: BLE001 - 摘要失败不许炸聊天路径
+            log.exception("上下文压缩：应用摘要失败，退回「丢最旧」")
+            self._drop_oldest_history()
+            return
+        log.info("上下文压缩：%d 条 → %d 条（1 条摘要 + %d 条原文）",
+                 before, len(self.history), len(self.history) - 1)
+        self._enforce_budget_after_compaction()
+
+    @pyqtSlot(str)
+    def _on_compaction_failed(self, err: str) -> None:
+        """摘要彻底失败（异常）→ 退回「丢最旧」，这一轮照样能聊。"""
+        log.warning("上下文压缩：摘要失败（%s），退回「丢最旧」", err)
+        self._compaction_plan = None
+        self._compaction_inflight = False
+        worker = self._compaction_worker
+        self._compaction_worker = None
+        self._release_compaction_worker(worker)
+        self._drop_oldest_history()
+
+    def _release_compaction_worker(self, worker) -> None:
+        """摘要把 worker 收尾（从模块级列表里摘掉 + 丢给 Qt 回收）。"""
+        if worker is None:
+            return
+        try:
+            _LIVE_WORKERS[:] = [w for w in _LIVE_WORKERS if w is not worker]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            worker.deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt 的命名
+        """关窗前等一下后台摘要线程（别让 QThread 在运行时被销毁）。"""
+        worker = getattr(self, "_compaction_worker", None)
+        if worker is not None:
+            try:
+                worker.wait(2000)
+            except Exception:  # noqa: BLE001
+                pass
+        super().closeEvent(event)
+
+    def _make_summary_entry(self, content: str) -> Message:
+        """摘要条目 —— 作为历史里最老的一条，让对话读起来连续。"""
+        return Message(role="user", content=content)
+
+    def _enforce_budget_after_compaction(self) -> None:
+        """压缩完再兜一次字符预算（最新 8 条永远保留）。"""
+        budget = self._CTX_CHAR_BUDGET
+        if not budget or budget <= 0:
+            return
+        if history_chars(self.history) <= budget:
+            return
+        self._drop_oldest_history(
+            protect_tail=self._compaction_settings.keep_recent)
+
+    def wait_compaction(self, timeout_ms: int = 5000) -> bool:
+        """等后台摘要跑完（测试用；生产代码不需要）。
+
+        返回 True = 这一轮摘要已经落地（成功、或失败兜底都算）。
+        """
+        deadline = time.time() + max(0.0, float(timeout_ms) / 1000.0)
+        app = _safe_qapp()
+        while time.time() < deadline:
+            worker = self._compaction_worker
+            if worker is not None:
+                worker.wait(50)
+            if app is not None:
+                app.processEvents()
+            if not self._compaction_inflight:
+                return True
+        return not self._compaction_inflight
 
     def _on_stop(self) -> None:
         """停止当前正在进行的流式生成。
