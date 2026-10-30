@@ -93,11 +93,18 @@ class TestVoiceToolContract:
         assert t["inputSchema"]["required"] == ["text"]
         assert "emotion" in t["inputSchema"]["properties"]
 
-    def test_sing_schema_requires_lyrics(self):
+    def test_sing_schema_has_two_modes(self):
+        """song（翻唱某首歌）和 lyrics（按旋律唱）**二选一**。
+
+        不能把 lyrics 设成必填 —— 那样主人说「唱《月亮代表我的心》」时，
+        模型照样得编一段词塞进去（主人的原话：她「直接念自己编的词」）。
+        """
         t = [x for x in vs.TOOLS if x["name"] == "sing"][0]
-        assert t["inputSchema"]["required"] == ["lyrics"]
         props = t["inputSchema"]["properties"]
+        assert {"song", "lyrics"} <= set(props)
         assert {"speed", "seed", "base"} <= set(props)
+        required = t["inputSchema"].get("required") or []
+        assert "lyrics" not in required
 
     def test_sing_description_forbids_bracket_labels(self):
         """语音条前面不许加方括号标签（主人嫌那玩意儿出戏）。"""
