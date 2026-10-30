@@ -20,6 +20,7 @@ _UI_TOOL_DONE_TEXT = "好的，已经帮主人搞定啦~"
 #: 认不出来就不加语气词 —— 宁可平一点，也不能替人设乱加口癖
 #: （原来写死「喵~」，大肥鱼是条鲸鱼，对着主人喵喵叫是把人设说错了）。
 _PERSONA_TONES = (
+    # 小汐的口癖是「喵~」，必须排第一（默认人设；它的 persona 里有「喵」）
     ("喵", "喵~"),
     ("哼", "哼~"),
     ("呜", "呜~"),
@@ -151,6 +152,9 @@ from .utils import (  # noqa: F401
     _unpack_tool, _tool_label, _tool_display, _tool_status,
     _unpack_status_mark, _tool_step_class, _tool_fail_reason,
     _voice_result_note, resolve_voice_artifact, _VOICE_KIND,
+    split_reply_sentences, reply_pacing_settings, compute_reply_gap_ms,
+    voice_waveform_bars, voice_bar_count, voice_play_icon_data_url,
+    _voice_play_key,
 )
 
 
@@ -432,6 +436,21 @@ class ChatWindow(QWidget):
         self._tools_collapsed_default: bool = True  # 新消息默认折叠
         # chat 图片缩略图 → 点击放大,img-open:KEY 锚点用 dict 查真 URL
         self._img_open_map: dict = {}
+        # 语音条 → 点击播放：锚点用**页内锚点**（#vp-KEY），KEY → 音频路径。
+        # 不用自定义 scheme —— QTextBrowser 点自定义 scheme 的链接会把它当成
+        # 「新文档地址」重新加载，整份聊天区会被清空（空白），
+        # 详见 _on_chat_anchor_clicked 的说明。
+        self._voice_play_map: dict = {}
+        # 音频路径 → 时长（秒）：播完撤「正在播放」高亮时用
+        self._voice_dur_map: dict = {}
+        # 正在播放的语音条 KEY（空串 = 没在放）；播放中的高亮走样式表，
+        # **不动文档**（点了播放，聊天内容一个字都不能变）。
+        self._voice_playing_key: str = ""
+        # 播放按钮原来的字符格式（放完原样换回去）
+        self._voice_saved_fmt = None
+        self._voice_play_timer = QTimer(self)
+        self._voice_play_timer.setSingleShot(True)
+        self._voice_play_timer.timeout.connect(self._on_voice_play_finished)
         # 用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频）
@@ -632,6 +651,29 @@ class ChatWindow(QWidget):
         self._finalize_watchdog = QTimer(self)
         self._finalize_watchdog.setSingleShot(True)
         self._finalize_watchdog.timeout.connect(self._on_finalize_watchdog)
+        # ---- 逐句投递（qq-bridge 那种「一句话一条消息」）----
+        # 本轮是否走逐句投递（配置在 companion_config.yaml 的 reply_pacing 段）
+        self._reply_pacing_on: bool = False
+        # 等着发出去的句子（模型说得比间隔快时会排队）
+        self._reply_queue: list = []
+        # 已经发出去的句子（重扫时靠它去重）
+        self._reply_sent: list = []
+        # 累积文本里已经消费到的位置（尾巴从这儿开始重新扫）
+        self._reply_sent_pos: int = 0
+        # 还没成句的尾巴（占位气泡里显示的就是它）
+        self._reply_tail: str = ""
+        # 上一条发出去的时刻（算「距上一句多久了」）
+        self._reply_last_sent_ts: float = 0.0
+        # 本轮模型已经说完（_on_done 来过）
+        self._reply_final: bool = False
+        # 主人叫停了 —— 剩下的句子不发了
+        self._reply_stopped: bool = False
+        # 已经显示过的工具条数（工具块只显示一次，别在每个气泡里重复）
+        self._reply_tools_shown: int = 0
+        # 逐句投递的节拍器：到点发下一句
+        self._reply_pacer = QTimer(self)
+        self._reply_pacer.setSingleShot(True)
+        self._reply_pacer.timeout.connect(self._on_reply_pacer_tick)
         # trace 的 token 事件攒批：原来每个 token 写一行 sqlite（6.5 ms/token，
         # 含 commit 的 fsync），流式时纯白占 GUI 线程。改成攒起来定时批量写。
         self._trace_text_buf: list[str] = []
@@ -1605,13 +1647,16 @@ class ChatWindow(QWidget):
         这里从人设文本里认它自己的口癖（喵 / 哼 / 呜 / 嗷 / 诶），
         认不出来就不加语气词 —— 宁可平一点，也不能替人设乱加口癖。
         """
-        self._render_message(Message(
+        # 存一份：开场白只渲染进了 DOM、**不在 history 里**，
+        # 全量重建（点「已执行操作」）时要把它一起重画，否则会凭空消失。
+        self._welcome_msg = Message(
             role="assistant",
             content=f"{self._persona_tone()}主人你好呀！我是 "
                     f"{self.char_cfg.name}，有什么我能帮你的吗？",
             emotion=Emotion.HAPPY,
             speaker=self.char_cfg.name,
-        ))
+        )
+        self._render_message(self._welcome_msg)
 
     def _persona_tone(self) -> str:
         """人设自己的口癖（开场白用）。认不出来返回空串。"""
@@ -2290,6 +2335,15 @@ class ChatWindow(QWidget):
         if self._worker is not None:
             self._worker.request_stop()
             self.stop_btn.setVisible(False)
+        # 逐句投递：主人叫停 → 剩下的句子直接作废（队列清空）
+        if getattr(self, "_reply_pacing_on", False):
+            self._reply_stopped = True
+            self._reply_queue = []
+            try:
+                self._reply_pacer.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._flush_pacing_tail()
 
     # ------------------------------------------------------------------
     # 上传 / 拖放 / 多模态生成按钮
@@ -3153,6 +3207,8 @@ class ChatWindow(QWidget):
         self._current_bot_msg = Message(role="assistant", content="",
                                          speaker=self.char_cfg.name)
         self._streaming_raw = ""   # 流式原始累积（最终规范前），供逐帧清洗显示
+        # 逐句投递的状态：新一轮从头来（队列 / 已发句子 / 尾巴都清掉）
+        self._reply_pacing_reset()
         # 流式清洗的节流状态：sanitize_text 是 O(累积长度)，每 token 都整段重算
         # 会让总开销变成 O(n²)（实测 2088 字回复累计 199 ms GUI 占用，
         # 4176 字 785 ms）。改成按「累积增长量」节流：同一个函数、同一个输入，
@@ -3332,6 +3388,43 @@ class ChatWindow(QWidget):
             scheme = url.scheme() if hasattr(url, "scheme") else ""
         except Exception:  # noqa: BLE001
             scheme = ""
+        try:
+            fragment = url.fragment() if hasattr(url, "fragment") else ""
+        except Exception:  # noqa: BLE001
+            fragment = ""
+
+        # ---- 页内锚点（#vp-KEY / #img-KEY）：内部动作一律走这种形式 ----
+        #
+        # **为什么不用自定义 scheme**（owner 报「点播放后聊天窗空白」的根因）：
+        # QTextBrowser 默认 openLinks=True，点链接时 Qt 走 QTextBrowser::openLink
+        # → 对「能当文档地址」的链接调 setSource()，**整份文档被换掉** →
+        # 聊天区直接清空（实测 document().characterCount() 74 → 1，
+        # toPlainText() 变成空串；同时 sourceChanged 被 emit）。
+        # 覆写 doSetSource 拦不住这条路径：Qt 5.15 的 openLink 直接调 setSource，
+        # 压根不经过 doSetSource（实测 doSetSource 一次都没被调用）。
+        # 页内锚点（只有 #fragment）Qt 当成「跳到本文档里的某个锚点」，
+        # 不换文档 —— 实测点完 toPlainText() / toHtml() / 滚动位置全都不变。
+        if not scheme and fragment:
+            if fragment.startswith("vp-"):
+                self._play_voice_artifact(
+                    self._voice_play_map.get(fragment[3:], ""))
+                return
+            if fragment.startswith("img-"):
+                real = self._img_open_map.get(fragment[4:])
+                if real:
+                    self._show_image_popup(real)
+                return
+            if fragment.startswith("tools-"):
+                # 折叠/展开「已执行操作」：只改折叠状态 + 全量重建
+                try:
+                    mid = int(fragment[6:])
+                except (TypeError, ValueError):
+                    mid = 0
+                cur = self._tools_collapsed_by_msg.get(mid, self._tools_collapsed_default)
+                self._tools_collapsed_by_msg[mid] = not cur
+                self._rebuild_chat_view_from_history()
+                return
+
         # img-open:KEY 在前,不要被 cmd: 分支吞掉
         if scheme == "img-open":
             try:
@@ -3388,8 +3481,12 @@ class ChatWindow(QWidget):
     def _play_voice_artifact(self, path: str) -> None:
         """播放一条语音产物（后台放，不打扰聊天）。
 
-        点了就响：**不弹窗、不抢焦点、不动滚动条**。
+        点了就响：**不弹窗、不抢焦点、不动滚动条、不动聊天内容**。
         放不出来只在光标处冒一句提示 + 记日志，不打断主人的阅读。
+
+        「正在播放」的样子 = 播放按钮自己换个颜色（见 _apply_voice_playing_format）——
+        **只改那一个按钮的字符格式**，文档不重建、不重排，
+        聊天区的文字 / 消息条数 / 滚动位置在点播放前后一模一样。
         """
         try:
             p = Path(str(path or ""))
@@ -3406,6 +3503,66 @@ class ChatWindow(QWidget):
             log.warning("播放语音失败 %s：%s", p, e)
         if not ok:
             self._voice_play_hint("语音没放出来：本机没有可用的播放器")
+            return
+        # 正在播放：按钮高亮 + 定时撤掉
+        key = _voice_play_key(str(p))
+        self._voice_playing_key = key
+        self._apply_voice_playing_format(key, True)
+        dur = 0.0
+        try:
+            dur = float(self._voice_dur_map.get(str(p), 0.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            dur = 0.0
+        # 播完撤高亮（按元数据时长计时；读不到时长就按 3 秒算）
+        self._voice_play_timer.start(max(300, int((dur or 3.0) * 1000) + 200))
+
+    def _on_voice_play_finished(self) -> None:
+        """语音放完了：把「正在播放」的高亮撤掉（只动那一个按钮）。"""
+        key = getattr(self, "_voice_playing_key", "") or ""
+        self._voice_playing_key = ""
+        if key:
+            self._apply_voice_playing_format(key, False)
+
+    def _apply_voice_playing_format(self, key: str, playing: bool) -> None:
+        """给某条语音的播放按钮换状态（播放中 = 「正在响」的图标 + 高亮）。
+
+        只改**那一个按钮**的字符格式（图标 / 前景色 / 背景色）——
+        文档不重建、不重排：聊天区的文字、消息条数、滚动位置一个字都不变。
+        """
+        if not key:
+            return
+        try:
+            from PyQt5.QtGui import QBrush, QColor, QTextCharFormat
+            doc = self.chat_view.document()
+            href = "#vp-%s" % key
+            cursor = self.chat_view.textCursor()
+            block = doc.begin()
+            while block.isValid():
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid() and frag.charFormat().anchorHref() == href:
+                        # 复制原格式（锚点 href 在格式里，不能整个换掉）
+                        fmt = QTextCharFormat(frag.charFormat())
+                        if playing:
+                            # 记下原样，放完原样换回去（别把按钮底色弄丢）
+                            self._voice_saved_fmt = fmt
+                            fmt.setBackground(QBrush(QColor("#e0e7ff")))
+                            fmt.setForeground(QBrush(QColor("#4338ca")))
+                        else:
+                            saved = getattr(self, "_voice_saved_fmt", None)
+                            if saved is not None:
+                                fmt = QTextCharFormat(saved)
+                            self._voice_saved_fmt = None
+                        cursor.setPosition(frag.position())
+                        cursor.setPosition(
+                            frag.position() + max(1, len(frag.text())),
+                            QTextCursor.MoveMode.KeepAnchor)
+                        cursor.setCharFormat(fmt)
+                    it += 1
+                block = block.next()
+        except Exception as e:  # noqa: BLE001
+            log.debug("语音条播放态没画上：%s", e)
 
     def _voice_play_hint(self, text: str) -> None:
         """播放失败时冒一句提示（不弹窗、不抢焦点、不动滚动）。"""
@@ -3886,7 +4043,13 @@ class ChatWindow(QWidget):
         #   但默认**不朗读**（voice.auto_read=false）时，这条链路根本不跑 →
         #   文字会一直等到最后**一次性蹦出来**（owner 报的「一下子全输出了」）。
         #   所以：TTS 不接管文字的时候，文字**立刻**流式出（更快，也更对）。
-        if changed and self._streaming_shows_live():
+        if getattr(self, "_reply_pacing_on", False):
+            # 逐句投递：成句的部分排队发出去；占位气泡只显示还没成句的尾巴
+            self._pacing_feed(sanitized)
+            self._current_bot_msg.content = self._reply_tail
+            if changed:
+                self._refresh_streaming_message()
+        elif changed and self._streaming_shows_live():
             self._refresh_streaming_message()
         # Trace：累计的原始文本。原先每个 token 写一行（一次 sqlite commit + fsync，
         # 实测 6.5 ms/token → 40 tok/s 时每秒白占 260 ms GUI 线程）。
@@ -3921,6 +4084,309 @@ class ChatWindow(QWidget):
         if not getattr(self.char_cfg, "tts_enabled", False) or self.tts is None:
             return True
         return not self._voice_auto_read_enabled()
+
+    # ------------------------------------------------------------------
+    # 逐句投递（qq-bridge 那种「一句话一条消息」）
+    #
+    # owner 原话：「回复还是一下子蹦出来…我需要按照 qq-bridge 一样一句话
+    # 一句话回复」。所以：模型每说完一句，就作为**一条独立气泡**发出去，
+    # 句与句之间隔一小会儿（默认 1~3 秒，配置在 companion_config.yaml）。
+    #
+    # 三条硬规矩：
+    #   1. **模型看到的历史不变** —— 落库 / 进 history 的还是**一整条**
+    #      assistant 消息（拆句只是「显示层」的事）；
+    #   2. **一个字都不能丢** —— 气泡拼回去 == 原回复（切分点上少了空白而已）；
+    #   3. **主人叫停就不发了** —— 剩下的句子直接作废。
+    # ------------------------------------------------------------------
+
+    def _reply_pacing_config(self) -> dict:
+        """逐句投递的设置（companion_config.yaml 的 reply_pacing 段）。"""
+        cfg = getattr(self, "_reply_pacing_cfg", None)
+        if cfg is None:
+            try:
+                cfg = reply_pacing_settings()
+            except Exception:  # noqa: BLE001 —— 配置读不到也别不说话
+                cfg = {}
+            if not cfg:
+                cfg = {
+                    "enabled": True, "min_gap_ms": 1000, "max_gap_ms": 3000,
+                    "long_gap_probability": 0.0, "long_gap_min_ms": 5000,
+                    "long_gap_max_ms": 10000, "max_chars_per_bubble": 200,
+                }
+            self._reply_pacing_cfg = cfg
+        return cfg
+
+    def _reply_pacing_enabled(self) -> bool:
+        """这一轮要不要逐句投递（默认要 —— owner 就是为这个提的需求）。"""
+        try:
+            return bool(self._reply_pacing_config().get("enabled", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _reply_pacing_reset(self) -> None:
+        """新一轮开始：把逐句投递的状态清干净。"""
+        # 只有「文字是实时往外蹦」的时候才逐句投递 ——
+        # TTS 开着且要朗读时，文字本来就跟着音频一句一句出（音画同步那条路），
+        # 那条路上再插一层间隔会把音画同步弄乱。
+        try:
+            live = bool(self._streaming_shows_live())
+        except Exception:  # noqa: BLE001
+            live = True
+        self._reply_pacing_on = self._reply_pacing_enabled() and live
+        self._reply_queue = []
+        self._reply_sent = []
+        self._reply_sent_pos = 0
+        self._reply_tail = ""
+        self._reply_last_sent_ts = 0.0
+        self._reply_final = False
+        self._reply_stopped = False
+        self._reply_tools_shown = 0
+        self._reply_base_text = ""
+        try:
+            self._reply_pacer.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _reply_pacing_limit(self) -> int:
+        """一个气泡最多多少字（超了按次要标点 / 长度拆）。"""
+        try:
+            return int(self._reply_pacing_config().get(
+                "max_chars_per_bubble", 200))
+        except Exception:  # noqa: BLE001
+            return 200
+
+    def _reply_sent_has(self, sentence: str) -> bool:
+        """这句是不是已经发过了 / 已经排队了（重扫时去重）。
+
+        队列里也要查 —— 排队但还没发出去的句子，在 _on_done 重新扫一遍
+        的时候不能又排一次（否则同一句话会出现两条气泡）。
+        """
+        key = "".join(str(sentence).split())
+        if not key:
+            return True
+        for done in list(self._reply_sent) + list(self._reply_queue):
+            if "".join(str(done).split()) == key:
+                return True
+        return False
+
+    def _pacing_feed(self, accumulated: str) -> None:
+        """把累积文本里**已经成句**的部分排进队列。
+
+        尾巴（还没成句的那半句）留在占位气泡里，等下一段文字到了再拼。
+        """
+        if not getattr(self, "_reply_pacing_on", False):
+            return
+        if getattr(self, "_reply_stopped", False):
+            return
+        if not accumulated:
+            return
+        if len(accumulated) < self._reply_sent_pos:
+            # 清洗后的文本跳变了（sanitize 会回头改字）→ 从头重扫
+            self._reply_sent_pos = 0
+        scan = accumulated[self._reply_sent_pos:]
+        try:
+            sentences, tail = split_reply_sentences(
+                scan, self._reply_pacing_limit())
+        except Exception:  # noqa: BLE001
+            return
+        self._reply_sent_pos = len(accumulated) - len(tail)
+        self._reply_tail = tail
+        fresh = [s for s in sentences if not self._reply_sent_has(s)]
+        if fresh:
+            self._pacing_enqueue(fresh)
+
+    def _pacing_enqueue(self, sentences: list) -> None:
+        """句子排进队列，并安排下一次发送。"""
+        if not sentences or getattr(self, "_reply_stopped", False):
+            return
+        self._reply_queue.extend(sentences)
+        if not self._reply_pacer.isActive():
+            self._reply_pacer.start(self._pacing_next_delay_ms())
+
+    def _pacing_next_delay_ms(self) -> int:
+        """下一句什么时候发（毫秒）。
+
+        · 第一句**立刻**发（一句的回复不许磨蹭）；
+        · 之后按配置随机 1~3 秒 —— **无条件**等这一下
+          （跟 qq-bridge 的 sendMessagesV2 一个路子：两条消息之间就是有间隔）。
+        """
+        if not self._reply_sent:
+            return 0
+        try:
+            gap = compute_reply_gap_ms(self._reply_pacing_config())
+        except Exception:  # noqa: BLE001
+            gap = 1000
+        return max(0, int(gap))
+
+    def _on_reply_pacer_tick(self) -> None:
+        """节拍器到点：发下一句。"""
+        if getattr(self, "_reply_stopped", False):
+            self._reply_queue = []
+            return
+        if self._reply_queue:
+            sentence = self._reply_queue.pop(0)
+            self._reply_sent.append(sentence)
+            self._reply_last_sent_ts = time.monotonic()
+            try:
+                self._render_reply_bubble(sentence)
+            except Exception:  # noqa: BLE001
+                log.exception("逐句投递渲染失败")
+        if self._reply_queue:
+            # 还有下一句 → 按间隔排下一次
+            self._reply_pacer.start(self._pacing_next_delay_ms())
+            return
+        # 队列空了：模型也说完了 → 收尾
+        if getattr(self, "_reply_final", False):
+            self._finish_reply_pacing()
+
+    def _reply_sentence_message(self, sentence: str) -> Message:
+        """一句回复对应的气泡消息。
+
+        工具块（已执行操作 / 语音条）**只显示一次**：谁在它之后发出来，
+        就挂在谁身上（别每个气泡都重复一份）。
+        """
+        tools = []
+        try:
+            all_tools = list(
+                getattr(self._current_bot_msg, "tools", None) or [])
+            shown = int(getattr(self, "_reply_tools_shown", 0))
+            if shown < len(all_tools):
+                tools = all_tools[shown:]
+                self._reply_tools_shown = len(all_tools)
+        except Exception:  # noqa: BLE001
+            tools = []
+        return Message(
+            role="assistant",
+            content=sentence,
+            emotion=getattr(self._current_bot_msg, "emotion", None),
+            speaker=self.char_cfg.name,
+            tools=tools,
+        )
+
+    def _reply_placeholder_html(self) -> str:
+        """占位气泡的 HTML：还没成句的尾巴 + 打字指示器。
+
+        工具块不在这里（工具块跟着真正发出去的那条气泡走）。
+        """
+        msg = Message(
+            role="assistant",
+            content=getattr(self, "_reply_tail", "") or "",
+            emotion=getattr(self._current_bot_msg, "emotion", None),
+            speaker=self.char_cfg.name,
+        )
+        return self._msg_html(msg, streaming_meta="typing…")
+
+    def _streaming_html(self, finished: bool) -> str:
+        """流式占位气泡该显示什么。"""
+        if finished:
+            return self._msg_html(self._current_bot_msg)
+        if getattr(self, "_reply_pacing_on", False):
+            return self._reply_placeholder_html()
+        return self._msg_html(self._current_bot_msg, streaming_meta="typing…")
+
+    def _render_reply_bubble(self, sentence: str) -> None:
+        """把一句回复作为**独立气泡**发出去（占位气泡让位给它）。"""
+        html = self._msg_html(self._reply_sentence_message(sentence))
+        anchor = getattr(self, "_streaming_anchor_pos", None)
+        cursor = self.chat_view.textCursor()
+        if anchor is None:
+            # 没有占位气泡（理论上不该发生）→ 退化成普通追加
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertHtml(html)
+            cursor.insertBlock()
+        else:
+            cursor.setPosition(anchor)
+            cursor.movePosition(QTextCursor.MoveOperation.End,
+                                 QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.insertHtml(html)
+            # 后面还有句子 → 重建占位气泡（打字指示器）；说完了就不重建
+            if self._reply_queue or not getattr(self, "_reply_final", False):
+                new_anchor = cursor.position()
+                cursor.insertHtml(self._reply_placeholder_html())
+                cursor.insertBlock()
+                self._streaming_anchor_pos = new_anchor
+            else:
+                self._streaming_anchor_pos = None
+        sb = self.chat_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _pacing_feed_final(self, text: str) -> None:
+        """收尾：把最后一段（可能没有句末标点）也排进队列。"""
+        try:
+            sentences, tail = split_reply_sentences(
+                text, self._reply_pacing_limit(), split_tail=True)
+        except Exception:  # noqa: BLE001
+            sentences, tail = [], ""
+        fresh = [s for s in sentences if not self._reply_sent_has(s)]
+        if tail and not self._reply_sent_has(tail):
+            fresh.append(tail)
+        if fresh:
+            self._pacing_enqueue(fresh)
+        self._reply_tail = ""
+
+    def _flush_reply_extras(self) -> None:
+        """收尾时把「多出来的两块」补上。
+
+        ① 正文尾部追加的多模态产物链接（图片 / 视频）；
+        ② 最后一句之后才跑完的工具（工具块挂在下一条气泡上，
+           没有下一条了就自己成一条）。
+        """
+        base = getattr(self, "_reply_base_text", "") or ""
+        content = getattr(self._current_bot_msg, "content", "") or ""
+        extra = ""
+        if base and content.startswith(base):
+            extra = content[len(base):].strip()
+        if extra:
+            try:
+                self._render_message(Message(
+                    role="assistant", content=extra,
+                    emotion=getattr(self._current_bot_msg, "emotion", None),
+                    speaker=self.char_cfg.name))
+            except Exception:  # noqa: BLE001
+                log.exception("多模态产物补气泡失败")
+        try:
+            all_tools = list(
+                getattr(self._current_bot_msg, "tools", None) or [])
+            shown = int(getattr(self, "_reply_tools_shown", 0))
+            if shown < len(all_tools):
+                rest = all_tools[shown:]
+                self._reply_tools_shown = len(all_tools)
+                self._render_message(Message(
+                    role="assistant", content="",
+                    emotion=getattr(self._current_bot_msg, "emotion", None),
+                    speaker=self.char_cfg.name, tools=rest))
+        except Exception:  # noqa: BLE001
+            log.exception("工具块补气泡失败")
+
+    def _flush_pacing_tail(self) -> None:
+        """叫停 / 收尾：把占位气泡里剩下的尾巴收成一条（没有尾巴就删掉占位）。"""
+        anchor = getattr(self, "_streaming_anchor_pos", None)
+        if anchor is None:
+            return
+        tail = (getattr(self, "_reply_tail", "") or "").strip()
+        try:
+            cursor = self.chat_view.textCursor()
+            cursor.setPosition(anchor)
+            cursor.movePosition(QTextCursor.MoveOperation.End,
+                                 QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            if tail:
+                cursor.insertHtml(
+                    self._msg_html(self._reply_sentence_message(tail)))
+                cursor.insertBlock()
+        except Exception:  # noqa: BLE001
+            log.exception("逐句投递收尾（尾巴）失败")
+        self._streaming_anchor_pos = None
+        self._reply_tail = ""
+
+    def _finish_reply_pacing(self) -> None:
+        """逐句投递送完了 → 正式收尾（写历史 / 落库 / 通知桌宠）。"""
+        try:
+            self._flush_reply_extras()
+        except Exception:  # noqa: BLE001
+            log.exception("逐句投递收尾失败")
+        self._finalize_reply()
 
     def _flush_trace_text(self) -> None:
         """把攒下的 token 批量写成一条 trace 事件（一次 commit 顶 N 次）。"""
@@ -4097,6 +4563,12 @@ class ChatWindow(QWidget):
         parsed = self._finalize_parsed
         if parsed is None:
             return
+        if (getattr(self, "_reply_pacing_on", False)
+                and not getattr(self, "_reply_stopped", False)
+                and (self._reply_queue
+                     or not getattr(self, "_reply_final", False))):
+            # 逐句投递还没送完 → 等队列排空（_on_reply_pacer_tick 会再叫一次）
+            return
         self._finalize_pending = False
         self._finalize_parsed = None
         self._finalize_watchdog.stop()
@@ -4118,8 +4590,13 @@ class ChatWindow(QWidget):
             emotion=parsed.emotion.value if parsed.emotion else "",
             tools=tools_list,
         )
-        self._refresh_streaming_message(finished=True,
-                                         emotion=parsed.emotion.value if parsed.emotion else "")
+        if getattr(self, "_reply_pacing_on", False):
+            # 逐句投递：正文已经一句一条发出去了，别再把整段塞回占位气泡
+            self._streaming_anchor_pos = None
+        else:
+            self._refresh_streaming_message(
+                finished=True,
+                emotion=parsed.emotion.value if parsed.emotion else "")
 
         self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
 
@@ -4189,6 +4666,8 @@ class ChatWindow(QWidget):
         # 2. **等所有 prepare worker 完成**（主线程短时阻塞；GPT-SoVITS 通常 3-5 秒）
         self._current_bot_msg.content = parsed.text
         self._current_bot_msg.emotion = parsed.emotion
+        # 逐句投递用：正文原样（后面追加的多模态链接不算正文）
+        self._reply_base_text = parsed.text
         # LLM 通过 generate_image/video/audio 工具生成产物时,从 msg.tools 倒着扫
         # 把 multimodal URL 重新拼到 content 末尾(扛住上面 content=parsed.text 的覆盖)
         self._reinject_multimodal_from_tools(self._current_bot_msg)
@@ -4196,6 +4675,12 @@ class ChatWindow(QWidget):
         # 收尾（写 history / 渲染 / 通知桌宠）。若还有 prepare 没回来，
         # 这里不阻塞主线程，改由 _finalize_reply 延后执行。
         self._finalize_parsed = parsed
+        if (getattr(self, "_reply_pacing_on", False)
+                and not getattr(self, "_reply_stopped", False)):
+            # 逐句投递：最后一段（可能没有句末标点）也排进队列；
+            # 正式收尾等队列排空（_finish_reply_pacing → _finalize_reply）
+            self._reply_final = True
+            self._pacing_feed_final(parsed.text)
         self._wait_all_sentence_workers(timeout_s=120.0)
 
     def _on_failed(self, err: str) -> None:
@@ -4428,8 +4913,12 @@ class ChatWindow(QWidget):
         n = len(tools)
         collapsed = self._tools_collapsed_by_msg.get(
             msg_id, self._tools_collapsed_default)
-        # URL 编码 msg_id 用 fragment (#N), 走 cmd:toggle_tools#123
-        url = f"cmd:toggle_tools#{msg_id}"
+        # URL 编码 msg_id 用 fragment (#N)。
+        # 用**页内锚点**（#tools-N）而不是自定义 scheme（cmd:toggle_tools#N）：
+        # QTextBrowser 默认 openLinks=True，点自定义 scheme 的链接会让 Qt 调 setSource()
+        # **把整份文档换掉** → 聊天区先清空再重建（owner 看到的就是「点一下就空白」）。
+        # 页内锚点 Qt 只当成「跳到本文档的某个锚点」，不换文档 → 没有闪烁。
+        url = f"#tools-{msg_id}"
         if collapsed:
             # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
             # 不出现"点击展开"字样,只靠箭头指示
@@ -4487,37 +4976,51 @@ class ChatWindow(QWidget):
         return "".join(rows)
 
     def _voice_bubble_html(self, art: dict) -> str:
-        """一条语音条（voice bubble）的 HTML。
+        """一条语音条（voice bubble）的 HTML —— **QQ 语音消息**那样子。
 
-        音频文件不在了就说没有 —— **不给点了没反应的死按钮**。
+        一个播放按钮 + 一排波形 + 时长，就这一行。
+
+        **没有文件名**，也没有「11.8 秒 + 文件名」那一坨
+        （owner 原话：「不要显示『11.8 秒 sing_20261030-200825.wav』这种东西」）。
+
+        波形怎么来的（**不说假话**）：
+          · 文件还在、而且是能读的 wav → 按采样算的**真包络**（每段的 RMS）；
+          · 读不出来（文件没了 / 不是 wav）→ 由「路径 + 时长」算的
+            **装饰性图案**，只是「像波形」，不代表音频里的真实起伏。
+
+        播放入口用**页内锚点**（#vp-KEY），不用自定义 scheme：
+        QTextBrowser 点自定义 scheme 的链接会把它当成「新文档地址」重载，
+        整份聊天区会被清空（空白）—— 详见 _on_chat_anchor_clicked。
         """
         dur = float(art.get("duration") or 0.0)
         dur_txt = ("%.1f 秒" % dur) if dur > 0 else "时长未知"
-        file_name = _html_escape(str(art.get("file_name") or ""))
-        spoken = str(art.get("text") or "")
-        spoken_html = (
-            '<span class="voice-text">%s</span>' % _html_escape(spoken)
-            if spoken else ""
+        path = str(art.get("path") or "")
+        bars = voice_waveform_bars(path, dur, buckets=voice_bar_count(dur))
+        wave_html = "".join(
+            '<i class="voice-bar" style="height:%dpx"></i>'
+            % max(2, int(round(h * 0.16)))
+            for h in bars
         )
         if art.get("exists"):
-            try:
-                from urllib.parse import quote as _quote
-                href = "voice-play:" + _quote(str(art.get("path") or ""), safe="")
-            except Exception:  # noqa: BLE001
-                href = "voice-play:"
-            play = '<a href="%s" class="voice-play">播放</a>' % href
-            cls = "voice-bubble"
+            key = _voice_play_key(path)
+            self._voice_play_map[key] = path
+            self._voice_dur_map[path] = dur
+            play = (
+                '<a href="#vp-%s" class="voice-btn" title="播放这条语音">'
+                '<img class="voice-ico" src="%s" alt=""/>'
+                '</a>' % (key, voice_play_icon_data_url())
+            )
+            cls = "voice-bubble vkey-%s" % key
         else:
             play = '<span class="voice-missing">音频文件已不在</span>'
             cls = "voice-bubble voice-missing"
         return (
             '<div class="%s">'
             '%s'
+            '<span class="voice-wave">%s</span>'
             '<span class="voice-dur">%s</span>'
-            '<span class="voice-file">%s</span>'
-            '%s'
             '</div>'
-        ) % (cls, play, dur_txt, file_name, spoken_html)
+        ) % (cls, play, wave_html, dur_txt)
 
     def _thoughts_html(self, thoughts: list) -> str:
         """思考块：折叠展示（默认收起，主人点开看推理过程）。
@@ -5104,7 +5607,7 @@ class ChatWindow(QWidget):
         PR-fix-line-breaks: cursor.insertHtml() 不会自动创建新 <p>，必须 insertBlock()
         强制开始新段落，否则消息会全部挤在同一个 <p> 里。
         """
-        html = self._msg_html(msg, streaming_meta="typing…")
+        html = self._streaming_html(False)
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         # 记录 anchor（插入前的位置），后续 refresh 从 anchor 到末尾删除旧内容
@@ -5161,11 +5664,18 @@ class ChatWindow(QWidget):
         # 2. 「是否还在流式」要在清 anchor **之前**记（清了就取不到了）
         streaming = (self._current_bot_msg is not None
                      and getattr(self, "_streaming_anchor_pos", None) is not None)
-        # 3. 清空 + 重渲染历史
+        # 3. 清空 + 重渲染
         #    **必须先清 anchor**：旧的 anchor 是上一次占位的位置，留着会让随后的
         #    _refresh_streaming_message 从错误的位置删到末尾，把内容擦白。
+        #
+        #    **开场白要一起重画**：它只渲染进了 DOM、**不在 self.history 里**
+        #    （_append_system_welcome 直接调 _render_message，没有 append 到 history），
+        #    只按 history 重建的话它会凭空消失 —— owner 看到的就是「点一下，开场白没了」。
         self.chat_view.clear()
         self._streaming_anchor_pos = None
+        welcome = getattr(self, "_welcome_msg", None)
+        if welcome is not None:
+            self._render_message(welcome)
         for msg in list(self.history or []):
             self._render_message(msg)
         # 4. 重建 streaming 占位 (如果还在 streaming)
@@ -5188,12 +5698,7 @@ class ChatWindow(QWidget):
                       _msg_html 看到 truthy 就追加 dots → 已完成的消息尾巴还有 ..)
         """
         _ = emotion  # emotion 不再当 streaming_meta 用,避免跟"是否还在打字"耦合
-        if finished:
-            # 流式结束: 不传 streaming_meta → 跳过 dots / placeholder 分支
-            html = self._msg_html(self._current_bot_msg)
-        else:
-            # 流式打字机期间一律显示三点跳动（typing 动画）
-            html = self._msg_html(self._current_bot_msg, streaming_meta="typing…")
+        html = self._streaming_html(finished)
 
         cursor = self.chat_view.textCursor()
         anchor = getattr(self, "_streaming_anchor_pos", None)

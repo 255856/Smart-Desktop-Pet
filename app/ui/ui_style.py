@@ -439,12 +439,17 @@ CHAT_BUBBLE_CSS = (
     "div.tools .tools-tail{color:#dc2626;}"
     # 语音条（voice bubble）：语音是「一条消息」，独立于工具块
     "div.voice-bubble{font-size:9.5pt;color:#1f2937;background-color:#f5f3ef;"
-    "border:1px solid #e4ded3;border-radius:8px;padding:6px 10px;margin:2px 0 8px 0;}"
-    "div.voice-bubble .voice-play{color:#4f46e5;text-decoration:none;font-weight:600;}"
-    "div.voice-bubble .voice-dur{color:#475569;margin-left:8px;}"
-    "div.voice-bubble .voice-file{color:#a0a0b4;font-size:8pt;margin-left:8px;}"
-    "div.voice-bubble .voice-text{color:#475569;font-size:9pt;margin-left:8px;}"
-    "div.voice-bubble .voice-missing{color:#dc2626;font-size:9pt;margin-left:8px;}"
+    "border:1px solid #e4ded3;border-radius:12px;padding:5px 10px;margin:2px 0 8px 0;}"
+    "div.voice-bubble .voice-btn{display:inline-block;width:20px;height:20px;"
+    "line-height:18px;text-align:center;text-decoration:none;"
+    "background-color:#ffffff;border:1px solid #e4ded3;border-radius:10px;"
+    "vertical-align:middle;}"
+    "div.voice-bubble .voice-ico{width:12px;height:12px;vertical-align:middle;}"
+    "div.voice-bubble .voice-wave{display:inline-block;vertical-align:middle;margin:0 8px;}"
+    "div.voice-bubble .voice-wave .voice-bar{display:inline-block;width:2px;"
+    "margin:0 1px;background-color:#b9b3c9;border-radius:1px;vertical-align:bottom;}"
+    "div.voice-bubble .voice-dur{color:#475569;font-size:9pt;vertical-align:middle;}"
+    "div.voice-bubble .voice-missing{color:#dc2626;font-size:9pt;}"
     "div.msg-notice{color:#6b7280;font-size:10pt;font-style:italic;"
     "border-left:3px solid #a45b2e;padding:2px 10px;margin:4px 0;}"
 )
@@ -522,12 +527,13 @@ div.tools .tool-reason{color:$text_mark_fail;font-size:8pt;margin:1px 0 2px 18px
 div.tools .tool-note{color:$text_muted;font-size:8pt;margin:1px 0 2px 18px;}
 div.tools .tools-preview{color:$text_muted;font-size:8.5pt;margin:1px 0 0 0;}
 div.tools .tools-tail{color:$text_mark_fail;}
-div.voice-bubble{font-size:9.5pt;color:$text_msg;background-color:$bg_voice;border:1px solid $border_voice;border-radius:8px;padding:6px 10px;margin:4px 0 8px 0;}
-div.voice-bubble .voice-play{color:$text_accent;text-decoration:none;font-weight:600;}
-div.voice-bubble .voice-dur{color:$text_quiet;margin-left:8px;}
-div.voice-bubble .voice-file{color:$text_muted;font-size:8pt;margin-left:8px;font-family:Consolas,Menlo,monospace;}
-div.voice-bubble .voice-text{color:$text_quiet;font-size:9pt;margin-left:8px;}
-div.voice-bubble .voice-missing{color:$text_mark_fail;font-size:9pt;margin-left:8px;}
+div.voice-bubble{font-size:9.5pt;color:$text_msg;background-color:$bg_voice;border:1px solid $border_voice;border-radius:12px;padding:5px 10px;margin:4px 0 8px 0;}
+div.voice-bubble .voice-btn{display:inline-block;width:20px;height:20px;line-height:18px;text-align:center;text-decoration:none;background-color:$voice_btn_bg;border:1px solid $border_voice;border-radius:10px;vertical-align:middle;}
+div.voice-bubble .voice-ico{width:12px;height:12px;vertical-align:middle;}
+div.voice-bubble .voice-wave{display:inline-block;vertical-align:middle;margin:0 8px;}
+div.voice-bubble .voice-wave .voice-bar{display:inline-block;width:2px;margin:0 1px;background-color:$voice_bar;border-radius:1px;vertical-align:bottom;}
+div.voice-bubble .voice-dur{color:$text_quiet;font-size:9pt;vertical-align:middle;}
+div.voice-bubble .voice-missing{color:$text_mark_fail;font-size:9pt;}
 
 div.thinking{font-size:9.5pt;color:$text_quiet;background-color:$bg_soft;border-left:3px solid $text_terminal_head;padding:8px 12px;margin:4px 0 8px 0;border-radius:0 4px 4px 0;}
 div.thinking .thinking-head{color:$text_think_head;font-weight:600;margin-bottom:2px;}
@@ -571,6 +577,8 @@ _CHAT_MD_LIGHT = {
     "bg_file_edit": "#fef3c7",
     "bg_plan": "#fbf7ff",
     "bg_voice": "#f5f3ef",
+    "voice_btn_bg": "#ffffff",
+    "voice_bar": "#b9b3c9",
     "bg_terminal": "#0f172a",
     "border_line": "#ebe3d6",
     "border_soft": "#e5e7eb",
@@ -637,6 +645,8 @@ _CHAT_MD_DARK = {
     "bg_file_edit": "#3a2f18",
     "bg_plan": "#262036",
     "bg_voice": "#2a2533",
+    "voice_btn_bg": "#332c42",
+    "voice_bar": "#5a5a78",
     "bg_terminal": "#0b1220",
     "border_line": "#3a3346",
     "border_soft": "#3b3547",

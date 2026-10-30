@@ -174,7 +174,10 @@ def test_voice_tool_step_shows_name_status_duration_and_file():
 
 
 def test_voice_sing_tool_step_shows_produced_file():
-    """唱歌：产物文件名要能看到（在语音条上，工具块里不刷路径）。"""
+    """唱歌：语音条上是 QQ 那样的语音条 —— 有时长，**没有文件名**。
+
+    owner 原话：「不要显示『11.8 秒 sing_20261030-200825.wav』这种东西」。
+    """
     cw = _cw()
     msg = Message(role="assistant", content="唱一段", tools=[
         ("mcp_voice_sing", '{"lyrics":"啦啦啦"}',
@@ -186,8 +189,11 @@ def test_voice_sing_tool_step_shows_produced_file():
     assert '<span class="tool-name">mcp_voice_sing</span>' in html
     assert "5.0 秒" in html
     bubble = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
-    assert "sing_20260101-120000.wav" in bubble, "音频文件没显示"
-    assert "5.0 秒" in bubble, "语音条上没显示时长"
+    assert "sing_20260101-120000.wav" not in bubble, (
+        "语音条上不该再显示文件名（owner 要求）")
+    import re as _re
+    assert _re.search(r"\d+(\.\d+)? 秒", bubble), "语音条上没显示时长"
+    assert "voice-wave" in bubble, "语音条上没画波形"
 
 
 def test_voice_tool_failure_follows_envelope_status():
@@ -471,9 +477,13 @@ def _patch_voice_out(monkeypatch, tmp_path):
     return _u
 
 
-def test_voice_bubble_shows_duration_file_name_and_play_link(tmp_path, monkeypatch):
-    """A1：语音工具 → 一条语音条：时长 + 文件名 + 播放入口。"""
-    from urllib.parse import quote
+def test_voice_bubble_is_qq_style_no_file_name(tmp_path, monkeypatch):
+    """A1：语音条 = QQ 语音条：播放按钮 + 波形 + 时长，**没有文件名**。
+
+    owner 原话：「我要的播放标识指的是像QQ一样的语音条，不要显示
+    『11.8 秒 sing_20261030-200825.wav』这种东西」。
+    """
+    import re as _re
     wav = _voice_artifact(tmp_path)
     _patch_voice_out(monkeypatch, tmp_path)
     cw = _cw()
@@ -484,17 +494,81 @@ def test_voice_bubble_shows_duration_file_name_and_play_link(tmp_path, monkeypat
     ])
     html = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
     assert "voice-bubble" in html, html
+    # QQ 语音条的三件套：播放按钮 + 波形 + 时长
+    assert "voice-btn" in html, "语音条上没有播放按钮"
+    assert "voice-wave" in html, "语音条上没有波形"
+    assert "voice-bar" in html, "语音条上没有波形竖条"
     assert "3.4 秒" in html, "语音条上没有时长"
-    assert wav.name in html, "语音条上没有文件名"
-    assert "voice-play:" in html, "语音条上没有播放入口"
+    # **没有文件名**、没有「秒 + 文件名」那一坨
+    assert wav.name not in html, "语音条上还在显示文件名"
+    assert "voice-file" not in html, "语音条上还有文件名那一块"
     assert "播放" in html, "播放入口没有中文文案"
-    assert "今天也要好好吃饭哦" in html, "语音条上没有念的内容"
-    # 播放入口指向的就是那一个 wav
-    assert quote(str(wav), safe="") in html, html
+    # 播放入口是**页内锚点**：点它不会把整个聊天区清空（空白）
+    assert "#vp-" in html, "播放入口不是页内锚点"
+    assert "voice-play:" not in html, "播放入口还在用自定义 scheme"
     # 整条消息里也有（语音条真的进了聊天窗，不只是孤立组件）
     full = cw._msg_html(msg)
     assert "voice-bubble" in full, full
-    assert quote(str(wav), safe="") in full, full
+    assert wav.name not in full, "整条消息里还漏着文件名"
+
+
+def test_voice_bubble_play_click_keeps_chat_unchanged(tmp_path, monkeypatch):
+    """A2：点播放 —— 声音响了，**聊天内容一个字都不许变**。
+
+    owner 报过「点击播放后聊天窗又会空白跟之前展开操作一样」。
+    这里锁住：点播放前后文本、消息条数、滚动位置全都不变。
+    """
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtCore import Qt
+    wav = _voice_artifact(tmp_path)
+    _patch_voice_out(monkeypatch, tmp_path)
+    played = []
+    from app.voice import voice as _voice
+    monkeypatch.setattr(_voice, "play_audio_file",
+                        lambda p, **kw: played.append(str(p)) or True)
+    cw = _cw()
+    cw.resize(900, 600)
+    cw.show()
+    cw.chat_view.clear()
+    cw.history = []
+    msg = Message(role="assistant", content="念给你听~", tools=[
+        ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
+         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
+         "已经放给主人听了。", "ok"),
+    ])
+    cw._render_message(msg)
+    cw.history.append(msg)
+    app.processEvents()
+
+    before_text = cw.chat_view.toPlainText()
+    before_blocks = cw.chat_view.document().blockCount()
+    before_chars = cw.chat_view.document().characterCount()
+    before_history = len(cw.history)
+
+    # 找到「播放」那个锚点，真的点一下
+    point = None
+    viewport = cw.chat_view.viewport()
+    for y in range(0, viewport.height(), 2):
+        for x in range(0, viewport.width(), 2):
+            if str(cw.chat_view.anchorAt(QPoint(x, y))).startswith("#vp-"):
+                point = QPoint(x, y)
+                break
+        if point is not None:
+            break
+    assert point is not None, "语音条上没找到播放锚点"
+    QTest.mouseClick(viewport, Qt.LeftButton, Qt.NoModifier, point)
+    app.processEvents()
+
+    assert played == [str(wav)], played
+    after_text = cw.chat_view.toPlainText()
+    assert after_text == before_text, (
+        "点播放之后聊天内容变了：\n前=%r\n后=%r" % (before_text, after_text))
+    assert cw.chat_view.document().blockCount() == before_blocks, (
+        "点播放之后消息条数变了")
+    assert cw.chat_view.document().characterCount() == before_chars, (
+        "点播放之后文档长度变了")
+    assert len(cw.history) == before_history, "点播放之后历史被动过"
 
 
 def test_voice_bubble_is_honest_when_file_is_gone(tmp_path, monkeypatch):

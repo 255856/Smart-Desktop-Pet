@@ -358,8 +358,11 @@ def test_tool_calls_display():
     msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
     assert "my_custom_thing" in cw._msg_html(msg3)
     # 折叠态用 anchor link 触发 toggle; head 只显示「已执行操作 · N ▾」,
-    # 不再出现"点击展开/点击收起"字样, 但 cmd:toggle_tools 仍保留
-    assert 'href="cmd:toggle_tools' in html
+    # 不再出现"点击展开/点击收起"字样。
+    # 链接用**页内锚点**（#tools-N）而不是自定义 scheme（cmd:toggle_tools#N）：
+    # 自定义 scheme 会让 QTextBrowser 调 setSource() 把整份文档换掉 → 聊天区清空
+    # （owner 报「点开已执行操作后就会空白」）。
+    assert 'href="#tools-' in html
     assert "▾" in html  # 折叠态箭头
     assert "点击展开" not in html, (
         f"「点击展开」字样不应出现 (用户实测要求去掉), 实际: {html}"
@@ -1006,7 +1009,9 @@ def test_tool_steps_no_click_text():
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert "点击展开" not in html, f"「点击展开」字样不应出现: {html}"
     assert "点击收起" not in html, f"「点击收起」字样不应出现: {html}"
-    assert 'href="cmd:toggle_tools' in html, \
+    # toggle 的 href 用**页内锚点**（#tools-N）：自定义 scheme 会让 QTextBrowser
+    # 调 setSource() 把整份文档换掉 → 聊天区清空（owner 实测「点一下就空白」）。
+    assert 'href="#tools-' in html, \
         "toggle 功能保留, href 必须在"
     assert "▾" in html, "折叠态应显示下箭头"
 

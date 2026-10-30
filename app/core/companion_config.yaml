@@ -357,7 +357,7 @@ voice:
   mcp_enabled: true            # 是否注册内置 voice MCP server
   output_dir: data/voice_out  # 语音产物目录（wav 落这儿）
   tts_url: 'http://127.0.0.1:9880'      # 本机 GPT-SoVITS api_v2
-  voice_dir: 'voice/大飞鱼'              # 参考音频 + 情绪参考库所在目录
+  voice_dir: 'voice/大肥鱼'              # 参考音频 + 情绪参考库所在目录
   default_emotion: neutral     # 不指定情绪时用哪个
   rvc:
     python: 'E:\AI\RVC\venv\Scripts\python.exe'
@@ -367,3 +367,41 @@ voice:
     sing_speed: 0.92            # 念白语速（放慢更像唱）
     sing_base: 329.63           # 旋律基准音高 Hz
     timeout_s: 300              # RVC 推理墙钟上限（秒）
+
+    # —— 翻唱（mcp_voice_sing 传 song 时的链路：找歌 → 下载 → 分离 → 音转音 → 混伴奏）——
+    fetch_script: 'E:\SnowLuma\rvc_fetch.py'   # 下载 + 人声分离（现成脚本，不重写）
+    separate_model: bs_roformer_anvuew_sdr_12.45.ckpt  # 人声分离模型（**本机已有，不下载**）
+    voice_lib: 'data/voice_out/voice_lib'         # 翻唱用的本地语音库（下载+分离产物落这儿）
+    ffmpeg: 'C:\Program Files\ffmpeg\bin\ffmpeg.exe'   # 混伴奏用
+    f0_method: rmvpe            # 音转音的 F0 提取方式
+    protect: 0.33               # 音转音的清浊保真
+    index_rate: 0.75            # 检索索引占比（本机没索引时自动退化成 0）
+    mix_volume: 0.75            # 原伴奏混回去时的音量倍数
+    cover_max_seconds: 120      # 翻唱最多取多长（秒）。0 = 不限。
+                                  # 整首太长会顶穿 MCP 调用超时（voice server 是 240 秒；
+                                  # 本机实测 180 秒要 259 秒，120 秒约 150 秒），
+                                  # 截一段时工具会**如实告诉主人**截了。
+    convert_chunk_s: 30          # 音转音分块长度（秒）。整段一次喂进 RVC 显存吃太狠，
+                                  # 分块跑（一次模型加载）本机快 10 倍以上。
+    fetch_timeout_s: 1800       # 下载 + 人声分离的墙钟上限（秒）
+    convert_timeout_s: 900      # 音转音的墙钟上限（秒）
+
+# 回复逐句投递 —— 「一句话一条消息」（跟 qq-bridge 一个路子）
+#
+# 桌宠的回复不再「一下子全蹦出来」，而是模型每说完一句就作为**一条独立
+# 气泡**发出去，句与句之间隔一小会儿。
+#
+#   enabled                —— 总开关；关了就是老样子（一整条回复）
+#   min_gap_ms/max_gap_ms  —— 句与句之间的常规间隔（qq-bridge 的 burstInterval*）
+#   long_gap_*             —— 偶尔来一个长停顿（qq-bridge 的 longGapProbability）
+#   max_chars_per_bubble   —— 一条气泡最多多少字（超了按标点/长度拆，不丢字）
+#
+# ⚠️ 拆句只是**显示层**的事：模型看到的历史仍然是一整条 assistant 消息。
+reply_pacing:
+  enabled: true
+  min_gap_ms: 1000
+  max_gap_ms: 3000
+  long_gap_probability: 0.15
+  long_gap_min_ms: 5000
+  long_gap_max_ms: 10000
+  max_chars_per_bubble: 200
