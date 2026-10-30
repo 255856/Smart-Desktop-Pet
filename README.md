@@ -89,6 +89,24 @@ python main.py
 6. **右键模型 → 「设置」** 配置 LLM / Tavily Key 启用真模型；设置面板 → 「控制 Tab → 主动关心」段可开 AW SQLite 落盘
 7. **记忆 sidecar 在后台起来了**：桌宠自己拉起 `memory_sidecar`（:8788），**不阻塞桌宠启动**；它没就绪也不影响聊天，只是这一轮没有长期记忆
 8. **记忆模型没下载**？语义召回（向量 + 精排）用不了，只剩 BM25 关键词腿；想开就跑一次 `python scripts/prefetch_models.py`（≈1.1 GB / 有 CUDA ≈2.2 GB），详见下一节
+9. **桌宠不再逐句朗读了**。声音改成**它自己决定**要不要用：合适的时候会发一条短语音，或者哼唱两句。想恢复原来的逐句朗读，把 `app/core/companion_config.yaml` 里的 `voice.auto_read` 改成 `true`（也可以在 `data/companion_config.yaml` 里覆盖）—— **改完即时生效，不用重启**。
+
+### 语音：变成 MCP 能力，由桌宠自己决定要不要说
+
+三个 MCP 工具（按本项目的 `mcp_<server>_<tool>` 命名规范）：
+
+| 工具 | 干什么 |
+|---|---|
+| `mcp_voice_speak` | 念一小段话（可选情绪） |
+| `mcp_voice_sing` | 按旋律唱几句歌词（旋律是现编的调） |
+| `mcp_voice_status` | 报本机语音服务在不在、有哪些音色可用 |
+
+**全部复用你本机已有的东西**：念用本机 GPT-SoVITS 服务（`:9880`），唱用本机 RVC 音色权重。
+**绝不下载任何模型权重** —— 本机没有的音色，`mcp_voice_status` 会写明「音色不在本地」，
+工具也会**如实失败**，不会偷偷去下一个。
+
+**措辞铁律**（写在工具描述里，模型看得见）：语音条**前面不加方括号标签**；自编的调**不冒充原创歌曲**；
+工具失败了**不许假装已经发出**。语音是打断 —— 绝大多数回合用文字就好。
 
 ### 长期记忆：sidecar 进程 + 模型（第一次要下 ≈1.1 GB / 有 CUDA ≈2.2 GB）
 
@@ -430,6 +448,29 @@ See [ActivityWatch integration](docs/activitywatch-integration.md)
 6. **Right-click the model → "Settings"** to configure LLM / Tavily keys; Settings → "Control Tab → Proactive Care" enables AW SQLite persistence
 7. **The memory sidecar comes up in the background**: the pet starts `memory_sidecar` (:8788) without blocking its own startup; if it isn't ready yet the pet still chats — that turn simply has no long-term memory
 8. **Models not downloaded?** Semantic recall (vector + rerank) is unavailable and only the BM25 keyword leg remains; run `python scripts/prefetch_models.py` once to enable it (≈1.1 GB, ≈2.2 GB with CUDA) — see the section below
+9. **The pet no longer reads every reply aloud.** Voice is now something it *chooses*: it may send a
+   short voice message, or sing a line, when that fits. If you want the old behaviour back, set
+   `voice.auto_read: true` in `app/core/companion_config.yaml` (or in `data/companion_config.yaml`
+   to override it) — it takes effect immediately, no restart.
+
+### Voice as an MCP capability (the pet decides when to speak)
+
+Three MCP tools, following the project's `mcp_<server>_<tool>` convention:
+
+| tool | what it does |
+|---|---|
+| `mcp_voice_speak` | say a short line out loud (optional emotion) |
+| `mcp_voice_sing` | sing a few lines to a melody it makes up |
+| `mcp_voice_status` | report which local voices/services are actually available |
+
+**Everything runs on what you already have**: speech goes through your local GPT-SoVITS service
+(`:9880`), singing goes through your local RVC voice model. **No model weight is ever downloaded** —
+if a voice is not on this machine, `mcp_voice_status` says 「音色不在本地」 and the tool fails
+honestly instead of fetching something.
+
+**Wording rules the model has to follow** (they are in the tool descriptions): no `[voice]`-style
+label in front of a voice message, never claim a self-written melody is an original song, and never
+claim a voice was sent when it failed. Voice is an interruption — most turns should stay text.
 
 ### Long-term memory models (≈1.1 GB on first run, ≈2.2 GB with CUDA)
 
