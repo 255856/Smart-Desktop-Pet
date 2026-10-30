@@ -977,6 +977,20 @@ class LangChainAgent:
     # 应用方式：主程序调 set_companion_state(state)，内部所有 task 调用都
     # 走同一个 agent 实例，set 一次永久生效（除非外部显式调用 set_companion_state(None) 解除）。
 
+    def set_persona(self, persona: str) -> str:
+        """运行时换人设：更新 self.persona + 让已编译的 agent 失效。
+
+        standard 后端的 system prompt 是**烘进编译后的图**里的
+        （create_agent(system_prompt=...)），所以换人设必须让 agent 失效，
+        下一轮 _ensure_agent() 会按新人设重建。checkpointer 不动 ⇒
+        聊天历史（LangGraph checkpoint）不丢。
+
+        返回按新人设拼好的 system prompt。
+        """
+        self.persona = persona or ""
+        self._agent = None      # 强制下一轮重建（system prompt 变了）
+        return self.assemble_system_prompt()
+
     def assemble_system_prompt(self, persona: str | None = None) -> str:
         """standard 后端的 system prompt 组装路径（唯一入口，Stage 1.1）。
 

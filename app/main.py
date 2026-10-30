@@ -1050,7 +1050,7 @@ def _main_inner() -> int:
     banner = _Banner(enabled=not args.no_banner)
     # 先读 config 拿角色名（横幅要用）
     _ensure_config(_resolve_root())
-    char_name = "鲸鱼娘"
+    char_name = "小汐"
     try:
         cfg = load_config(cfg_path)
         char_name = cfg.character.name or char_name

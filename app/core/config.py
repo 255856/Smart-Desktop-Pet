@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Literal, Optional
 
@@ -42,7 +43,10 @@ class VoiceProfile(BaseModel):
 
 
 class CharacterConfig(BaseModel):
-    name: str = "鲸鱼娘"
+    # 兜底默认角色 = characters/xiaoxi.yaml（小汐）。
+    # 这里以前写的是一个早就废弃的旧角色名（项目早换成小汐了），是个没人
+    # 清理的残留 —— 现在跟 characters/xiaoxi.yaml 对齐。
+    name: str = "小汐"
     persona: str = ""
     # 角色文件路径 (相对项目根, e.g. "characters/xiaoxi.yaml")
     character_file: str = "characters/xiaoxi.yaml"
@@ -274,6 +278,218 @@ def _load_character_yaml(project_root: Path, rel_path: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# 角色（characters/*.yaml）：枚举 + 运行时切换 + 持久化
+# --------------------------------------------------------------------------
+#
+# 为什么持久化**不写** config.yaml
+# ----------------------------
+# config.yaml 里有 llm.api_key。任何「整份 YAML 读出来再写回去」都会把 key
+# 重新序列化一遍（格式被打乱 / key 泄露到备份或日志 / 别的段被抹掉）。
+# 所以角色选择单独落在 data/character_selection.yaml —— 一个只存角色路径的小文件。
+# load_config() 优先读它，读不到 / 读坏了就回退 config.yaml 的 character_file。
+
+#: 角色文件目录（相对项目根）
+CHARACTER_DIR = "characters"
+
+#: 角色选择持久化文件（相对项目根）。**不是** config.yaml。
+CHARACTER_SELECTION_FILE = "data/character_selection.yaml"
+
+
+@dataclass
+class CharacterEntry:
+    """characters/*.yaml 里的一份角色定义。
+
+    ok=False 时 name / persona 为空，error 说明坏在哪（给 UI 提示用）。
+    """
+
+    path: str            # 相对项目根的路径，如 "characters/xiaoxi.yaml"
+    name: str = ""
+    persona: str = ""
+    ok: bool = False
+    error: str = ""
+
+    @property
+    def file_name(self) -> str:
+        return Path(self.path).name
+
+    @property
+    def display_name(self) -> str:
+        """给 UI 看的名字：坏文件退化成文件名。"""
+        return self.name or self.file_name
+
+
+def _project_root(root: str | Path) -> Path:
+    """项目根目录：传文件取它的父目录，传目录就用目录本身。"""
+    p = Path(root)
+    if p.is_file():
+        p = p.parent
+    try:
+        return p.resolve()
+    except Exception:  # noqa: BLE001
+        return p
+
+
+def _rel_to_root(root: Path, path: Path) -> str:
+    """尽量写成相对项目根的形式（写进配置文件用）。"""
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except Exception:  # noqa: BLE001
+        return path.as_posix()
+
+
+def load_character_entry(project_root: str | Path, rel_path: str) -> CharacterEntry:
+    """读一个角色文件 → CharacterEntry。
+
+    读不到 / 没有 character: 段 / 缺 name 或 persona → ok=False + error。
+    **不抛异常**：坏角色文件不能让桌宠启动不了。
+    """
+    root = _project_root(project_root)
+    raw_rel = str(rel_path or "").strip()
+    entry = CharacterEntry(path=raw_rel)
+    if not raw_rel:
+        entry.error = "角色文件路径为空"
+        return entry
+    p = Path(raw_rel)
+    if not p.is_absolute():
+        p = root / p
+    entry.path = _rel_to_root(root, p)
+    if not p.is_file():
+        entry.error = "角色文件不存在：%s" % entry.path
+        return entry
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:  # noqa: BLE001
+        entry.error = "角色文件解析失败：%s" % e
+        return entry
+    if not isinstance(raw, dict):
+        entry.error = "角色文件格式不对（顶层不是字典）"
+        return entry
+    block = raw.get("character")
+    if not isinstance(block, dict):
+        entry.error = "缺少 character: 段"
+        return entry
+    name = block.get("name")
+    persona = block.get("persona")
+    missing = [k for k, v in (("name", name), ("persona", persona))
+               if not (isinstance(v, str) and v.strip())]
+    if missing:
+        entry.error = "character: 段缺少 %s" % " / ".join(missing)
+        return entry
+    entry.name = str(name).strip()
+    entry.persona = str(persona)
+    entry.ok = True
+    return entry
+
+
+def list_characters(project_root: str | Path = ".") -> list[CharacterEntry]:
+    """列出 characters/*.yaml 里的所有角色（按文件名排序）。
+
+    坏文件也列出来（ok=False + error）—— UI 要能告诉主人「这个文件坏了」。
+    """
+    root = _project_root(project_root)
+    d = root / CHARACTER_DIR
+    if not d.is_dir():
+        return []
+    out: list[CharacterEntry] = []
+    for f in sorted(d.glob("*.yaml")):
+        out.append(load_character_entry(root, f.relative_to(root).as_posix()))
+    return out
+
+
+def load_character_selection(project_root: str | Path) -> str:
+    """读持久化的角色选择（相对项目根的路径）；没有 / 读不了 → 空串。"""
+    root = _project_root(project_root)
+    p = root / CHARACTER_SELECTION_FILE
+    if not p.is_file():
+        return ""
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("读角色选择文件失败 %s: %s", p, e)
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    v = raw.get("character_file")
+    return str(v).strip() if isinstance(v, str) else ""
+
+
+def save_character_selection(project_root: str | Path, rel_path: str) -> Path:
+    """把选中的角色写进 data/character_selection.yaml（原子写）。
+
+    **绝不碰 config.yaml**（里面有 API key）。
+    """
+    root = _project_root(project_root)
+    p = root / CHARACTER_SELECTION_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(
+        yaml.safe_dump({"character_file": str(rel_path)},
+                       allow_unicode=True, sort_keys=False),
+        encoding="utf-8")
+    tmp.replace(p)
+    return p
+
+
+#: 角色切换监听器（BrainController 注册）：换人设后同步主动发言等子系统。
+_character_switch_hooks: list = []
+
+
+def register_character_switch_hook(hook) -> None:
+    """注册「角色已切换」回调 hook(name, persona)。"""
+    if hook is not None and hook not in _character_switch_hooks:
+        _character_switch_hooks.append(hook)
+
+
+def unregister_character_switch_hook(hook) -> None:
+    """注销角色切换回调。"""
+    try:
+        _character_switch_hooks.remove(hook)
+    except ValueError:
+        pass
+
+
+def notify_character_switch(name: str, persona: str) -> None:
+    """通知所有监听器：角色换了（单个回调出错不影响别人）。"""
+    for hook in list(_character_switch_hooks):
+        try:
+            hook(name, persona)
+        except Exception as e:  # noqa: BLE001
+            log.warning("角色切换回调失败: %s", e)
+
+
+def switch_character(cfg: "Config | CharacterConfig", project_root: str | Path,
+                     rel_path: str,
+                     persist: bool = True) -> tuple[bool, str]:
+    """运行时切换角色。
+
+    成功：改 cfg.character 的 name / persona / character_file，落盘持久化，
+          并通知监听器（主动发言等人设同步）。
+    失败：**cfg 一个字都不动**（保持当前角色），返回 (False, 原因)。
+    """
+    entry = load_character_entry(project_root, rel_path)
+    if not entry.ok:
+        return False, "切换失败：%s" % entry.error
+    ch = getattr(cfg, "character", None)
+    if ch is None:
+        # 直接传 CharacterConfig 也行（聊天窗口手里只有 character 段）
+        ch = cfg
+    if not hasattr(ch, "persona"):
+        return False, "切换失败：配置对象里没有 character 段"
+    ch.name = entry.name
+    ch.persona = entry.persona
+    ch.character_file = entry.path
+    msg = "已切换到「%s」" % entry.name
+    if persist:
+        try:
+            save_character_selection(project_root, entry.path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("角色选择落盘失败: %s", e)
+            msg += "（但没能保存，下次启动会回到原来的角色：%s）" % e
+    notify_character_switch(entry.name, entry.persona)
+    return True, msg
+
+
 def load_config(path: str | Path = "config.yaml") -> Config:
     """读取 YAML 配置（.env 由 BaseSettings 自动加载，环境变量优先级最高）。
 
@@ -282,6 +498,11 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     读 config.yaml 后, 再读 cfg.character.character_file 指向的 yaml,
     用里面的 name / persona 覆盖 cfg.character。character_file 缺失 / 解析
     失败时静默 fallback (保留 config.yaml / 默认值), 不阻断启动。
+
+    **运行时选过的角色优先**: data/character_selection.yaml 里存着主人
+    在 UI 里选的角色, 它比 config.yaml 的 character_file 更靠前
+    (config.yaml 从头到尾不写 —— 里面有 API key)。选的那个坏了就回退
+    config.yaml 的 character_file, 不阻断启动。
     """
     p = Path(path).resolve()
     raw: dict[str, Any] = {}
@@ -296,6 +517,16 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     # 从 character_file 读人设, override name / persona
     project_root = p.parent
     char_file = merged["character"].get("character_file") or cfg.character.character_file
+    # 运行时选过的角色优先于 config.yaml 的 character_file
+    saved = load_character_selection(project_root)
+    if saved:
+        saved_entry = load_character_entry(project_root, saved)
+        if saved_entry.ok:
+            char_file = saved
+            merged["character"]["character_file"] = saved
+        else:
+            log.warning("持久化的角色 %s 不可用（%s），回退 config.yaml 的 %s",
+                        saved, saved_entry.error, char_file)
     char_yaml = _load_character_yaml(project_root, char_file)
     if char_yaml:
         merged["character"].update(char_yaml)
@@ -355,4 +586,10 @@ __all__ = [
     "AppConfig", "SpriteConfig", "ASRConfig", "BrainConfig",
     "AgentConfig", "LangChainConfig", "MCPConfig", "ChatConfig",
     "ActivityWatchConfig",
+    # 角色枚举 / 切换 / 持久化
+    "CharacterEntry", "CHARACTER_DIR", "CHARACTER_SELECTION_FILE",
+    "list_characters", "load_character_entry", "switch_character",
+    "load_character_selection", "save_character_selection",
+    "register_character_switch_hook", "unregister_character_switch_hook",
+    "notify_character_switch",
 ]

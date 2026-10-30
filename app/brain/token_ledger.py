@@ -27,13 +27,30 @@
 
 行格式（每行一个 JSON 对象）
 ---------------------------
-{"v":1,"kind":"request","session_id":"char:鲸鱼娘:main","request_index":7,
+{"v":1,"kind":"request","session_id":"char:小汐:main","request_index":7,
  "backend":"lightweight","retry":0,"ts":1750000000.123,"model":"deepseek-chat",
  "prompt_tokens":120,"completion_tokens":7,"total_tokens":127,
  "cache_hit_tokens":100,"cache_miss_tokens":20,"cache_write_tokens":0}
 
 压实后被丢掉的样本会折进一条 "kind":"aggregate" 的行（多一个 "n" 字段表示
 它代表了几条请求），聚合行和保留下来的样本行互不重叠，汇总时不会重复计数。
+
+输入侧预算告警（Stage 4.4）
+---------------------------
+`config.yaml` 的 `max_tokens` 只管输出；输入侧原来**没有任何上限**。
+而 `data/traces.db` 里 17 条 error 事件有 7 条是 HTTP 429（token plan 用量上限 /
+tpm·rpm 超限）—— 已经被限流过，却没有任何可见信号。
+
+所以这里加一条**输入侧预算**：
+  - 预算配置在 `app/core/companion_config.yaml` 的 `cost_budget` 段
+    （**不读 config.yaml**：那里有 API key）；
+  - 一轮（同一会话 + 空闲间隔内的一串请求）累计输入超过预算时，
+    **在请求行上挂告警字段**（不是新增行类型 —— 现有读法不受影响），
+    同时走 `app/core/owner_notice.py` 那条通道告诉主人；
+  - 告警说的是「预算超了」，**不是**「失败了」。
+
+金额仍然**不在这里算**：台账只存 token 桶，金额由 `app/brain/model_prices.py`
+在**读取时**算（`TokenLedger.cost_summary()`）。
 """
 from __future__ import annotations
 
@@ -65,6 +82,16 @@ _META_FIELDS: tuple[str, ...] = (
     "v", "kind", "session_id", "request_index", "backend", "retry", "ts", "model",
 )
 _ROW_FIELDS: tuple[str, ...] = _META_FIELDS + BUCKET_FIELDS
+
+#: 超预算告警字段（Stage 4.4）—— **附加**在请求行上，不新增行类型：
+#: 现有读法（面板的 _ledger_rows、压实、折叠）都只认自己那几个字段，
+#: 多出来的字段一律忽略，所以台账的行的形状对读者保持不变。
+WARNING_FIELDS: tuple[str, ...] = (
+    "input_budget_tokens",     # 预算上限（token）
+    "turn_input_tokens",       # 本轮累计输入（token）
+    "input_budget_exceeded",   # True = 超了
+    "warning",                 # 给主人看的一句话
+)
 
 DEFAULT_SESSION = "desktop"
 DEFAULT_MAX_LINES = 20000
@@ -153,6 +180,54 @@ def current_session() -> str:
         return DEFAULT_SESSION
 
 
+# ---------------------------------------------------------------------------
+# 输入侧预算的配置（Stage 4.4）
+# ---------------------------------------------------------------------------
+
+#: 预算配置的进程内缓存 TTL（秒）。
+#: 为什么必须缓存：`record()` 在每次 LLM 请求后都会跑，读两次 yaml 太贵，
+#: 不能把 IO 放在热路径上。改完 yaml 调 `reload_budget()` 立刻生效。
+_BUDGET_TTL_SECONDS = 60.0
+_BUDGET_CACHE: dict = {"at": 0.0, "value": None}
+
+
+def _current_budget():
+    """当前生效的输入预算（带 TTL 缓存；读不到返回 None）。"""
+    try:
+        now = time.monotonic()
+        value = _BUDGET_CACHE.get("value")
+        if value is not None and \
+                (now - _safe_float(_BUDGET_CACHE.get("at"))) < _BUDGET_TTL_SECONDS:
+            return value
+        from app.brain.model_prices import load_cost_budget
+        value = load_cost_budget()
+        _BUDGET_CACHE["value"] = value
+        _BUDGET_CACHE["at"] = now
+        return value
+    except Exception:  # noqa: BLE001
+        log.debug("token ledger: 读预算配置失败（忽略）", exc_info=True)
+        return None
+
+
+def reload_budget() -> None:
+    """丢掉预算配置的缓存（改完 yaml 立刻生效；测试也用这个）。"""
+    with _LEDGER_LOCK:
+        _BUDGET_CACHE["value"] = None
+        _BUDGET_CACHE["at"] = 0.0
+
+
+def _in_window(row: dict, since=None, until=None) -> bool:
+    """行的时间戳落在 [since, until] 里吗（两个都可省）。"""
+    ts = _safe_float(row.get("ts"))
+    if ts > 1e11:      # 毫秒时间戳
+        ts = ts / 1000.0
+    if since is not None and ts < _safe_float(since):
+        return False
+    if until is not None and ts > _safe_float(until):
+        return False
+    return True
+
+
 def _row_key(row: dict) -> tuple:
     """台账主键：(session_id, request_index, backend, retry)。"""
     return (
@@ -229,6 +304,9 @@ class TokenLedger:
         self._lock = threading.RLock()
         self._lines = 0
         self._counted = False
+        # 回合状态（Stage 4.4）：session_id -> {"input_tokens", "last_ts", "accounted"}
+        # 只用来判断「这一轮累计输入有没有超预算」，不参与记账。
+        self._turn_state: dict = {}
 
     # ------------------------------------------------------------------
     # 写
@@ -243,7 +321,14 @@ class TokenLedger:
                                   usage, model, ts)
             if row is None:
                 return False
+            # 输入侧预算（Stage 4.4）：超了就在这行挂告警字段 ——
+            # 告警是**附加**在请求行上的，不新增行类型，现有读法不受影响。
+            warning = self._check_input_budget(row)
+            if warning:
+                row.update(warning)
             self._append(row)
+            if warning:
+                self._notify_budget_exceeded(row, warning)
             return True
         except Exception:  # noqa: BLE001
             log.debug("token ledger: record 失败（忽略）", exc_info=True)
@@ -441,7 +526,7 @@ class TokenLedger:
 
     @staticmethod
     def _sanitize_row(row: dict) -> dict:
-        out = {k: row.get(k) for k in _ROW_FIELDS if k in row}
+        out = {k: row.get(k) for k in _ROW_FIELDS + WARNING_FIELDS if k in row}
         out.setdefault("v", ROW_VERSION)
         out.setdefault("kind", "request")
         out["session_id"] = str(row.get("session_id") or "")
@@ -503,6 +588,122 @@ class TokenLedger:
             return out
         except Exception:  # noqa: BLE001
             return _empty_summary()
+
+    # ------------------------------------------------------------------
+    # 输入侧预算（Stage 4.4）
+    # ------------------------------------------------------------------
+    def _check_input_budget(self, row: dict) -> Optional[dict]:
+        """判断这一行所属的那一轮是不是超了输入预算。
+
+        超了就返回告警字段（数字 + 给主人看的一句话），没超返回 None。
+
+        「一轮」怎么算：台账没有 turn 坐标（主键是
+        (session_id, request_index, backend, retry)），所以用「同会话 + 空闲间隔」
+        近似 —— 同一回合里的多次模型调用只隔几秒，主人下一条消息隔得久得多。
+        间隔值走 companion_config.yaml 的 cost_budget.turn_idle_seconds。
+        """
+        try:
+            budget = _current_budget()
+            if budget is None or not budget.enabled:
+                return None
+            from app.brain.model_prices import input_tokens_of, normalize_usage
+            input_tokens = input_tokens_of(normalize_usage(row))
+            if input_tokens <= 0:
+                return None
+            sid = str(row.get("session_id") or "")
+            ts = _safe_float(row.get("ts"))
+            state = self._turn_state.setdefault(
+                sid, {"input_tokens": 0, "last_ts": 0.0, "accounted": {}})
+            idle = max(1, int(budget.turn_idle_seconds or 0))
+            last_ts = _safe_float(state.get("last_ts"))
+            if last_ts and (ts - last_ts) > idle:
+                # 隔太久 = 新的一轮，累计清零
+                state["input_tokens"] = 0
+                state["accounted"] = {}
+            key = _row_key(row)
+            accounted = state.setdefault("accounted", {})
+            previous = _safe_int(accounted.get(key))
+            accounted[key] = input_tokens
+            if len(accounted) > 4096:
+                accounted.clear()
+            total = max(0, _safe_int(state.get("input_tokens")) +
+                        input_tokens - previous)
+            state["input_tokens"] = total
+            state["last_ts"] = ts
+            if total <= budget.input_tokens_per_turn:
+                return None
+            over = total - budget.input_tokens_per_turn
+            return {
+                "input_budget_tokens": int(budget.input_tokens_per_turn),
+                "turn_input_tokens": int(total),
+                "input_budget_exceeded": True,
+                "warning": (
+                    f"输入 token 超出本轮预算：{total} > {budget.input_tokens_per_turn}"
+                    f"（超 {over}）。这一轮塞进去的上下文太大，更容易撞上 provider 的"
+                    f"限流；本轮照常完成，只是花费偏高。"
+                ),
+            }
+        except Exception:  # noqa: BLE001 - 预算检查不许影响记账
+            log.debug("token ledger: 输入预算检查失败（忽略）", exc_info=True)
+            return None
+
+    def _notify_budget_exceeded(self, row: dict, warning: dict) -> None:
+        """把预算告警送到主人看得见的通道（桌宠气泡 / Windows 系统通知）。"""
+        try:
+            from app.core import owner_notice
+            budget = _current_budget()
+            interval = float(budget.notice_min_interval_seconds) if budget else 0.0
+            session_id = str(row.get("session_id") or "")
+            total = int(warning.get("turn_input_tokens") or 0)
+            limit = int(warning.get("input_budget_tokens") or 0)
+            owner_notice.notify_owner_budget_exceeded(
+                f"cost_budget:{session_id}",
+                "花费告警：输入超预算",
+                f"这一轮输入 {total} token，超过预算 {limit} token。"
+                f"上下文太大更容易被限流，花费偏高。",
+                min_interval_seconds=interval,
+            )
+        except Exception:  # noqa: BLE001 - 提醒失败不许影响任何东西
+            log.debug("token ledger: 预算告警通知失败（忽略）", exc_info=True)
+
+    def warnings(self) -> list[dict]:
+        """台账里的超预算告警行（读取时挑出来；按时间升序）。"""
+        try:
+            rows = [r for r in self._read_rows()
+                    if r.get("input_budget_exceeded") is True]
+            rows.sort(key=lambda r: _safe_float(r.get("ts")))
+            return [self._sanitize_row(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def cost_summary(self, *, table=None, now=None, idle_seconds=None,
+                     since=None, until=None) -> dict:
+        """读取时算钱（Stage 4.1）。
+
+        台账只存 token 桶，金额在这里算 —— **价目表变了不用重写历史**。
+        形状对齐 qq-bridge 的 token-ledger.js::summary()：
+        cost / attributedCost vs unattributedCost / byTier.peak|off /
+        cacheHitRate / avgCostPerTurn / avgCostPerStep / estimated。
+        """
+        try:
+            from app.brain import model_prices
+            rows = self._read_rows()
+            if since is not None or until is not None:
+                rows = [r for r in rows if _in_window(r, since, until)]
+            if idle_seconds is None:
+                budget = _current_budget()
+                idle_seconds = (budget.turn_idle_seconds if budget
+                                else model_prices.DEFAULT_TURN_IDLE_SECONDS)
+            return model_prices.summary(
+                rows, table=table, now=now,
+                idle_seconds=idle_seconds or model_prices.DEFAULT_TURN_IDLE_SECONDS)
+        except Exception:  # noqa: BLE001
+            log.debug("token ledger: cost_summary 失败（降级）", exc_info=True)
+            try:
+                from app.brain import model_prices
+                return model_prices.summary([])
+            except Exception:  # noqa: BLE001
+                return {}
 
     def turns(self, session_id: str) -> list[dict]:
         """某个 session 的逐请求明细（按时间排序）。"""
@@ -593,9 +794,23 @@ def record_usage(usage: dict, backend: str = "", model: str = "",
         return False
 
 
+def cost_summary(path: Optional[str | Path] = None, **kwargs) -> dict:
+    """读取时算钱（模块级入口：给面板 / 脚本用）。
+
+    形状对齐 qq-bridge 的 token-ledger.js::summary()，细节见
+    `TokenLedger.cost_summary()`。
+    """
+    try:
+        return get_ledger(path).cost_summary(**kwargs)
+    except Exception:  # noqa: BLE001
+        log.debug("token ledger: cost_summary 失败（忽略）", exc_info=True)
+        return {}
+
+
 __all__ = [
     "TokenLedger",
     "BUCKET_FIELDS",
+    "WARNING_FIELDS",
     "DEFAULT_MAX_LINES",
     "LEDGER_PATH_ENV",
     "default_ledger_path",
@@ -604,4 +819,6 @@ __all__ = [
     "record_usage",
     "current_session",
     "set_session",
+    "cost_summary",
+    "reload_budget",
 ]

@@ -13,6 +13,7 @@ from app.brain.llm_client import (COT_ONLY_RETRY_HINT as _COT_ONLY_RETRY_HINT,
                                   COT_ONLY_RETRY_MARK as _COT_ONLY_RETRY_MARK,
                                   COT_ONLY_RETRY_MAX_TOKENS as _COT_ONLY_RETRY_MAX_TOKENS,
                                   LLMClient, MAX_COT_ONLY_RETRIES as _MAX_COT_ONLY_RETRIES,
+                                  _build_full_system_prompt,
                                   count_request_actions, detect_action_intent,
                                   is_low_cjk_reply)
 from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
@@ -590,6 +591,30 @@ class _ToolPayloadBudget:
         self.truncated = True
 
 
+def apply_persona_to_client(client, persona: str) -> str:
+    """把新人设装到 client 上并重拼 system prompt（运行时换角色用）。
+
+    跟 LLMClient.__init__ 里做的事**完全一致**（同一个拼装函数
+    _build_full_system_prompt）—— 所以换完人设后发出去的 system 字符串
+    跟「用新人设新建一个 client」逐字节相同，模型立刻换人设，不用重启。
+
+    client 为 None（没有活着的 client）→ 只返回按新人设拼好的字符串。
+    """
+    base = persona or ""
+    if client is None:
+        return _build_full_system_prompt(base)
+    try:
+        client.base_system_prompt = base
+    except Exception as e:  # noqa: BLE001
+        log.warning("写 client.base_system_prompt 失败: %s", e)
+    try:
+        client.system_prompt = _build_full_system_prompt(base)
+    except Exception as e:  # noqa: BLE001
+        log.warning("重拼 system prompt 失败: %s", e)
+        client.system_prompt = base
+    return getattr(client, "system_prompt", base)
+
+
 class AgentLoop:
     def __init__(self, client: LLMClient, registry: ToolRegistry,
                  max_turns: int = MAX_TURNS,
@@ -651,16 +676,30 @@ class AgentLoop:
             dynamic=build_dynamic_block(),
         )
 
-    def _apply_system_prompt(self) -> None:
-        """把 ReAct 后端最终 system 字符串装到 client 上（共享层拼的）。"""
+    def _apply_system_prompt(self) -> str:
+        """把 ReAct 后端最终 system 字符串装到 client 上（共享层拼的）。
+
+        返回装上去的那条 system 字符串（换人设时拿它做对比 / 展示）。
+        """
         client = self.client
         if client is None:
-            return
+            return ""
         base = getattr(client, "base_system_prompt", None)
         if base is None:
             # 不是 LLMClient（老路径 / 测试用的假 client）：保持原样，不碰
-            return
-        client.system_prompt = self.assemble_system_prompt(base)
+            return ""
+        prompt = self.assemble_system_prompt(base)
+        client.system_prompt = prompt
+        return prompt
+
+    def set_persona(self, persona: str) -> str:
+        """运行时换人设：改 base_system_prompt 并重拼 system prompt。
+
+        换完下一轮（甚至正在跑的下一轮）就按新人设说话 —— 不必重启。
+        返回重拼后的 system 字符串。
+        """
+        apply_persona_to_client(self.client, persona)
+        return self._apply_system_prompt()
 
     def _select_tools(self, intent: Optional[str],
                       all_tools: Optional[list[dict]]) -> Optional[list[dict]]:

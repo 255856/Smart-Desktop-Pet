@@ -106,7 +106,7 @@ def test_dialog_changed_signal():
 
 def test_chat_window_uses_client():
     m = _store()
-    char_cfg = CharacterConfig(name="鲸鱼娘")
+    char_cfg = CharacterConfig(name="小汐")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites",
                     asr_enabled=False, memory_store=m)
@@ -124,7 +124,7 @@ def test_chat_window_uses_client():
 
 
 def test_chat_window_without_memory_store():
-    char_cfg = CharacterConfig(name="鲸鱼娘")
+    char_cfg = CharacterConfig(name="小汐")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites",
                     asr_enabled=False, memory_store=None)

@@ -48,7 +48,7 @@ def test_format_time_short():
 
 def test_msg_html_user_alignment():
     """用户消息：msg-user div + 浅灰底 + 'You' label。"""
-    char_cfg = CharacterConfig(name="鲸鱼娘")
+    char_cfg = CharacterConfig(name="小汐")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
@@ -68,7 +68,7 @@ def test_msg_html_user_alignment():
 
 def test_msg_html_bot_alignment():
     """桌宠消息：msg-assistant div + 紫 '桌宠' label。"""
-    char_cfg = CharacterConfig(name="鲸鱼娘")
+    char_cfg = CharacterConfig(name="小汐")
     llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
     cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
 
@@ -77,7 +77,7 @@ def test_msg_html_bot_alignment():
     assert "msg msg-assistant" in html
     assert "msg-body" in html
     assert "msg-label" in html
-    assert "鲸鱼娘" in html
+    assert "小汐" in html
     assert "avatar-col bot" not in html
     assert "bubble bot" not in html
     print("[OK] Bot message uses new linear-flow structure")

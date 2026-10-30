@@ -640,6 +640,13 @@ class BrainController(QObject):
             self.proactive.start()
         else:
             self.proactive = None
+        # 运行时换角色：主动发言拿的是**启动时**的人设快照，这里注册一个
+        # 回调，配置层换完角色就同步过来（不用重启）。
+        try:
+            from app.core.config import register_character_switch_hook
+            register_character_switch_hook(self._on_character_switched)
+        except Exception as e:  # noqa: BLE001
+            log.warning("注册角色切换回调失败：%s", e)
 
     # ---- 记忆 sidecar（独立进程）的状态 / 收尾 ---------------------------------
     def sidecar_status(self) -> dict:
@@ -813,6 +820,33 @@ class BrainController(QObject):
     def _on_proactive_remark(self, text: str) -> None:
         """转发主动发言信号。"""
         self.remark_ready.emit(text)
+
+    # -- 运行时换角色 -------------------------------------------------------
+    def _on_character_switched(self, name: str, persona: str) -> None:
+        """角色换了：把新人设同步给主动发言子系统（ProactiveBrain）。
+
+        ProactiveBrain 构造时拿的是启动时的 persona / char_name 快照，
+        这里换掉 → 之后主动搭话也按新人设来。
+        """
+        if not self._alive():
+            return
+        proactive = getattr(self, "proactive", None)
+        if proactive is None:
+            return
+        try:
+            proactive.persona = persona
+            proactive.char_name = name
+            log.info("角色已切换 → 主动发言人设同步为 %s", name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("同步主动发言人设失败：%s", e)
+
+    def switch_character(self, rel_path: str) -> tuple[bool, str]:
+        """运行时切换角色（UI 调它）：改配置 + 同步主动发言的人设。
+
+        返回 (是否成功, 提示信息)。失败时配置保持原样，不崩。
+        """
+        from app.core.config import switch_character as _switch
+        return _switch(self.cfg, self.root, rel_path)
 
     def create_agent(self, client: LLMClient, confirm_tool=None) -> AgentLoop:
         """创建 AgentLoop 实例。"""

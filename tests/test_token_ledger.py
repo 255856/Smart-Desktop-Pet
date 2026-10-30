@@ -259,3 +259,53 @@ def test_record_usage_writes_to_default_ledger(tmp_path, monkeypatch):
     summary = token_ledger.get_ledger().summary()
     assert summary["requests"] == 1
     assert summary["cache_hit_tokens"] == 90
+
+# --------------------------------------------------------------------------
+# Stage 4.1 / 4.4：读取时算钱 + 输入侧预算
+# --------------------------------------------------------------------------
+
+def test_cost_summary_computes_money_at_read_time(tmp_path):
+    """金额是**读取时**算的：台账里只有 token 桶。"""
+    from app.brain import model_prices as mp
+
+    path = tmp_path / "token-usage.jsonl"
+    led = TokenLedger(path)
+    led.record("s1", 1, "standard", 0, _usage(prompt=1000, completion=100),
+               model="MiniMax-M3")
+    before_bytes = path.read_bytes()
+    summary = led.cost_summary()
+    assert summary["totals"]["cost"] > 0
+    assert summary["totals"]["steps"] == 1
+    assert summary["totals"]["estimated"] is False   # MiniMax-M3 有官方价
+    # 改价目表 -> 金额变；台账不用重写
+    table = mp.resolve_price_table({"models": {"minimax-m3": {
+        "off": {"cacheMiss": 4.20, "cacheWrite": 4.20}}}})
+    after = led.cost_summary(table=table)
+    assert after["totals"]["cost"] > summary["totals"]["cost"]
+    assert path.read_bytes() == before_bytes
+
+
+def test_budget_warning_does_not_change_the_row_shape(tmp_path, monkeypatch):
+    """超预算只是**附加**告警字段：原有字段一个不少，也不新增行。"""
+    from app.brain import model_prices as mp
+    from app.brain import token_ledger as tl
+
+    budget = mp.CostBudget(input_tokens_per_turn=500, turn_idle_seconds=300,
+                            warn=True, notice_min_interval_seconds=0)
+    monkeypatch.setattr(tl, "_current_budget", lambda: budget)
+    path = tmp_path / "token-usage.jsonl"
+    led = TokenLedger(path)
+    led.record("s1", 1, "standard", 0,
+               _usage(prompt=600, hit=0, miss=600), model="MiniMax-M3")
+    rows = _rows(path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "request"
+    for key in ("v", "kind", "session_id", "request_index", "backend", "retry",
+                "ts", "model", "prompt_tokens", "completion_tokens",
+                "total_tokens", "cache_hit_tokens", "cache_miss_tokens",
+                "cache_write_tokens"):
+        assert key in row, key
+    assert row["input_budget_exceeded"] is True
+    assert led.warnings()
+
