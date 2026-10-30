@@ -1227,6 +1227,19 @@ class MemoryStore:
 
         threading.Thread(target=work, name="memory-sidecar-sync", daemon=True).start()
 
+    def sync_index_async(self) -> bool:
+        """**公开**入口：后台补向量索引（写卡 / 预热后调用）。
+
+        为什么要有公开入口：模型预热被推后到「第一次真的需要语义检索」，
+        但**写卡**也是一种需要 —— 卡片进了 cards.json（真值）却没进向量索引，
+        主人看到的就是「这条没进向量库」。sidecar 的写路径调它，
+        索引在后台补齐，写本身还是 ~2ms（不等模型）。
+
+        返回 True = 已经起了后台线程（补齐是异步的）。
+        """
+        self._sync_in_background()
+        return True
+
     # -- 挂起队列（写卡记账，检索 / 预热时补索引） ------------------------
     def _mark_pending(self, ids, op):
         with self._pending_lock:

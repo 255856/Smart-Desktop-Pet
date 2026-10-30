@@ -217,14 +217,32 @@ _RISK_NAMES = {
 }
 
 
+#: **记忆类工具永远放行**（记事实 / 回忆）。
+#:
+#: 为什么：状态闸门本来是给「危险动作」设的（心情差 → 别乱动主人的东西）。
+#: 但**记事不是危险动作** —— 主人刚说过一件耐久的事，桌宠当时心情不好就被
+#: CONFIRM 拦下 → **没存下来** → 主人后面问它就「忘了」。
+#: 实测（data/companion_log.txt）：remember_fact 的决策分布是 ALLOW×3 / **CONFIRM×1**，
+#: 那一次 CONFIRM 就是「主人说的话丢了」。
+#:
+#: 所以：recall_memory / remember_fact **不走状态闸门**。
+#: forget_memory（删记忆）**仍然走** —— 删是不可逆的，值得拦一下。
+MEMORY_TOOLS_ALWAYS_ALLOW = frozenset({"remember_fact", "recall_memory"})
+
+
 def lookup_decision(pet_state: PetState, tool_name: str) -> str:
     """决策函数：算 state + risk，按 priority 顺序遍历 RULES_TABLE 匹配，
     返回 Decision.{ALLOW, CONFIRM, REJECT, REFUSE}。
+
+    **记忆类工具（remember_fact / recall_memory）直接 ALLOW** ——
+    见 MEMORY_TOOLS_ALWAYS_ALLOW 的注释（记事不是危险动作）。
 
     命中规则 → 返回 rule.decision。
     未命中 → 按 risk 走默认：
       SAFE/LOW/MEDIUM → ALLOW，HIGH → CONFIRM，IRREVERSIBLE → REJECT。
     """
+    if tool_name in MEMORY_TOOLS_ALWAYS_ALLOW:
+        return Decision.ALLOW
     state = quantize_state(pet_state)
     sat = state["satiety"]
     mood = state["mood"]

@@ -470,6 +470,18 @@ def _format_verify_hint(executed_tools: list, force_final: bool = False) -> str:
     return f"[系统·结果核对] 本轮工具执行结果：\n{tool_list}\n{decision}"
 
 
+#: **无论本轮意图是什么都在**的工具。
+#:
+#: 记忆三件套：Stage 2.3 的【记忆规则】是**每轮都在**的行为规则 ——
+#: 主人随口说出的耐久事实（"我今天给你换了新模型"）可能出现在**任何**一轮里，
+#: 不该因为本轮被判定成 query / web_search / open_app 就把 remember_fact
+#: 从工具列表里删掉：列表里没有 = 模型**调不到**（standard 后端 LangChain 的
+#: ToolNode 只认下发过的工具，ReAct 后端 registry.execute 也会直接拒）。
+#: 那正是「模型好像不会主动进行记忆」的一个真实成因。
+_ALWAYS_TOOL_NAMES: tuple[str, ...] = (
+    "remember_fact", "recall_memory", "forget_memory",
+)
+
 # 意图 → 本轮下发的工具白名单
 # 全量下发 52 个工具时模型容易选错；按意图裁到 8~15 个收窄选择空间
 # 识别不出意图时照旧全量下发，不牺牲任何能力
@@ -714,7 +726,8 @@ class AgentLoop:
         wanted = _INTENT_TOOL_NAMES.get(intent or "")
         if not wanted:
             return all_tools
-        allow = set(wanted)
+        # 记忆三件套永远留着（见 _ALWAYS_TOOL_NAMES 的注释）
+        allow = set(wanted) | set(_ALWAYS_TOOL_NAMES)
         picked = [t for t in all_tools
                   if (t.get("function") or {}).get("name") in allow]
         return picked or all_tools

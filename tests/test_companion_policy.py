@@ -208,3 +208,31 @@ def test_no_rules_actually_duplicate_same_specific():
             )
         seen[key] = r
     print(f"[OK] companion_policy: {len(RULES_TABLE)} 条规则互不重复")
+
+
+def test_memory_tools_are_not_gated_by_the_pets_mood():
+    """心情差 + 好感低时，**记事不许被拦**。
+
+    背景：状态闸门本来是给危险动作设的（心情差 → 别乱动主人的东西）。
+    但记事不是危险动作 —— 主人刚说过的事因为桌宠当时心情不好就没存下来，
+    主人后面问它就「忘了」（实测 companion_log 里 remember_fact 有 CONFIRM 的记录）。
+    """
+    from app.brain.companion_policy import lookup_decision
+    from app.engine.state import PetState
+
+    st = PetState()
+    st.feeling = 5.0        # 心情差
+    st.likability = 0.0     # 好感低
+    st.level = 1
+    st.store_strength_food = 90.0
+    q = st.quantize()
+    assert q['mood'] == 'LOW' and q['favor'] == 'LOW', q
+
+    # 记事 / 回忆：永远放行
+    assert lookup_decision(st, 'remember_fact') == 'ALLOW'
+    assert lookup_decision(st, 'recall_memory') == 'ALLOW'
+
+    # 删记忆 / 删提醒：仍然走状态闸门（不可逆，值得拦一下）
+    assert lookup_decision(st, 'forget_memory') != 'ALLOW'
+    assert lookup_decision(st, 'delete_reminder') != 'ALLOW'
+    print("[OK] 记忆类工具豁免状态闸门，其他工具照常受闸")

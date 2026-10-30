@@ -100,6 +100,8 @@ MEMORY_RULE_BLOCK = (
     "② **你自己的承诺、立场、你想变成的样子**（我答应他送礼物、"
     "我不想再只会附和了）"
     "——②必须记，只记主人的事等于把自己的成长丢在会过期的短期记忆里；\n"
+    "③ 主人跟你**共同经历 / 共同拥有**的事（给你换模型、起昵称、约好的事）也算；\n"
+    "记完**如实**告诉主人结果：没调成工具就不许说「记下了」；\n"
     "事实变了用 remember_fact(supersedes=旧id) 改写旧说法"
     "（旧条会自动标记为过时，不会新旧两条并存），"
     "别新记一条造成互相矛盾；\n"
@@ -241,6 +243,10 @@ class MemorySidecarSupervisor:
         self.failures = 0            # 连续失败次数（成功一次清零）
         self.log_path: Path | None = None
         self._notified: set = set()
+        #: 「端口上已经有一个健康的 sidecar → 直接复用」这条**只说一次**。
+        #: 以前每次心跳都打一遍 INFO（看门狗 5 秒一次 + 面板轮询），
+        #: 主人的控制台被同一条消息刷了几千行 —— 那不是信息，是噪声。
+        self._reuse_logged = False
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
         self._atexit_registered = False
@@ -382,8 +388,14 @@ class MemorySidecarSupervisor:
             self.running = True
             self.degraded = False
             self.last_error = ""
-            log.info("记忆 sidecar 已在 %s 运行，直接复用（不再起第二个）",
-                     sidecar_base_url(self.port))
+            if self._reuse_logged:
+                # 已经在跑了 —— 第二次以后降到 debug（别刷主人的控制台）
+                log.debug("记忆 sidecar 已在 %s 运行，直接复用（不再起第二个）",
+                          sidecar_base_url(self.port))
+            else:
+                self._reuse_logged = True
+                log.info("记忆 sidecar 已在 %s 运行，直接复用（不再起第二个）",
+                         sidecar_base_url(self.port))
             return True
         if self.failures >= self.max_restarts:
             self._degrade_if_exhausted()

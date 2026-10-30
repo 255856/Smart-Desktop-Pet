@@ -49,11 +49,16 @@ def _endpoints():
     }
 
 
-def make_handler(store, on_search=None):
+def make_handler(store, on_search=None, on_write=None):
     """把 store 绑到处理器上（每个 server 一份，不用模块级全局）。
 
     on_search: “第一次 /search”的回调（可选）。用来把**模型预热**推到
     “第一次真的需要语义检索”的时候（见 MemorySidecarServer._on_search）。
+
+    on_write: “写完卡”的回调（可选）。写卡也把**模型预热**叫醒 + 后台补
+    向量索引 —— 不然卡片只进了 cards.json（真值），向量索引一直空着，
+    主人看到的就是「这条没进向量库”（见 MemorySidecarServer._on_write）。
+    回调必须是**非阻塞**的：写路径要的是毫秒级，不等模型。
     """
 
     class MemoryHandler(BaseHTTPRequestHandler):
@@ -148,15 +153,18 @@ def make_handler(store, on_search=None):
                 if path == "/upsert":
                     n = store.upsert(payload.get("cards") or [])
                     self._json({"ok": True, "upserted": n})
+                    self._notify_write()
                 elif path == "/delete":
                     ids = payload.get("ids") or []
                     if isinstance(ids, str):
                         ids = [i.strip() for i in ids.split(",") if i.strip()]
                     self._json({"ok": True, "deleted": store.delete(ids)})
+                    self._notify_write()
                 elif path == "/supersede":
                     old_id = payload.get("oldId") or payload.get("old_id") or ""
                     n = store.supersede(old_id, payload.get("card") or {})
                     self._json({"ok": True, "upserted": n})
+                    self._notify_write()
                 elif path == "/rebuild":
                     self._json({"ok": True, "rebuilt": store.rebuild_index()})
                 elif path == "/sleep/apply":
@@ -250,6 +258,16 @@ def make_handler(store, on_search=None):
                 return
             self._json(result)
 
+        # -- 写完卡：把推后的预热叫醒 + 后台补向量索引 --------------------
+        def _notify_write(self):
+            """写卡之后叫一下 on_write（不阻塞、不抛）。"""
+            if on_write is None:
+                return
+            try:
+                on_write()
+            except Exception:  # noqa: BLE001 - 补索引失败不许影响写入
+                pass
+
         # -- /search：绝不 500 ------------------------------------------
         def _handle_search(self, payload):
             store = self.store_
@@ -320,7 +338,9 @@ class MemorySidecarServer:
         self._httpd = None
         self._thread = None
         self._warmup_thread = None
-        #: 预热是否还没起过（推后预热：等第一次检索再热）
+        #: 补向量索引的后台线程（写卡时起）
+        self._sync_thread = None
+        #: 预热是否还没起过（推后预热：等第一次检索**或第一次写卡**再热）
         self._warmup_pending = bool(warmup)
         self._stop_lock = threading.Lock()
 
@@ -328,7 +348,8 @@ class MemorySidecarServer:
     def _make_httpd(self):
         httpd = ThreadingHTTPServer((self.host, self.requested_port),
                                    make_handler(self.store,
-                                               on_search=self._on_search))
+                                               on_search=self._on_search,
+                                               on_write=self._on_write))
         httpd.daemon_threads = True  # 关服务时不陪长连接耗着
         httpd.sidecar_port = int(httpd.server_address[1])
         httpd.started_at = time.time()
@@ -423,6 +444,32 @@ class MemorySidecarServer:
         self._warmup_pending = False
         self._start_warmup()
 
+    def _on_write(self):
+        """写完卡 → 把推后的模型预热叫醒 + 后台补向量索引。
+
+        为什么**写卡**也要触发预热：预热被推后到「第一次真的需要语义检索」，
+        但写卡同样需要 —— 卡片进了 cards.json（真值）却没进向量索引时，
+        主人看到的就是「这条没进向量库」，而且没人检索的话索引会一直空着。
+
+        写路径**不等**模型：这里只起后台线程，写本身还是 ~2ms。
+        预热还没起过 → 起预热（预热线程末尾会 sync_index + ensure_vector_index，
+        刚写的那张卡自然进索引）；预热已经跑过 → 直接后台补索引。
+        """
+        if self._warmup_pending:
+            self._warmup_pending = False
+            self._start_warmup()
+            return
+        self._start_sync()
+
+    def _start_sync(self):
+        """后台补向量索引（不等它）。"""
+        if self._sync_thread is not None and self._sync_thread.is_alive():
+            return
+        try:
+            self.store.sync_index_async()
+        except Exception:  # noqa: BLE001 - 补索引失败不许影响写入
+            pass
+
     def _start_warmup(self):
         if not self.warmup or self._warmup_thread is not None:
             return
@@ -437,6 +484,12 @@ class MemorySidecarServer:
             report = self.store.warmup()
         except Exception as e:
             report = {"error": "%s: %s" % (type(e).__name__, e)}
+        # 预热期间可能又写进来几张卡 → 再补一次索引（写卡路径也会调 _on_write，
+        # 但预热还没结束时那次会跟这一轮抢模型锁，这里补一刀保证不漏）
+        try:
+            self.store.sync_index()
+        except Exception:  # noqa: BLE001
+            pass
         print(
             "[memory_sidecar] 预热完成 耗时=%dms %s"
             % (int((time.time() - t0) * 1000), json.dumps(report, ensure_ascii=False)),
