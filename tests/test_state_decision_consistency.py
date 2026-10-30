@@ -87,11 +87,21 @@ def test_main_writes_results_file(tmp_path=None):
 
 
 def test_actual_diff_rate_above_30_percent_within_seed():
-    """验证论文 §4.4.1 实证: 默认 seed=42 时决策差异率至少达到主人预期。"""
+    """验证论文 §4.4.1 实证: 默认 seed=42 时状态耦合率至少达到主人预期。
+
+    「状态耦合率」= **本就应当随桌宠状态变化**的那批工具里，有多少确实会变。
+    记忆类工具（remember_fact / recall_memory）是**明确的例外** —— 记事不是危险动作，
+    不该被心情拦（主人报「模型不会主动记忆」的根因之一）—— 所以它们不计入分母。
+    全部工具的差异率另存在 decision_diff_rate_all_tools 里，供对照。
+    """
     summary = run_experiment()
     rate = summary["decision_diff_rate"]
-    # 论文规划: 决策差异率至少要 >= 30%. 我们在 50% 以上是强证据.
+    # 论文规划: 状态耦合率至少要 >= 30%. 我们在 50% 以上是强证据.
     assert rate >= 0.50, (
-        f"默认 seed 应产生强决策差异 (>50%). 实际: {rate:.2%}"
+        f"默认 seed 应产生强状态耦合 (>50%). 实际: {rate:.2%}"
     )
-    print(f"[OK] 默认 seed 决策差异率 = {rate:.2%} (>50%, 证据强)")
+    # 豁免的那两个工具必须**不**计入耦合率（否则论文的数字会虚高）
+    assert set(summary.get("memory_exempt_tools") or []) == {
+        "remember_fact", "recall_memory"}
+    print(f"[OK] 默认 seed 状态耦合率 = {rate:.2%} (>50%, 证据强); "
+          f"全部工具差异率 = {summary['decision_diff_rate_all_tools']:.2%}")

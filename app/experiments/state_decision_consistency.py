@@ -25,7 +25,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from app.brain.companion_policy import Decision, RULES_TABLE
+from app.brain.companion_policy import (
+    Decision,
+    MEMORY_TOOLS_ALWAYS_ALLOW,
+    RULES_TABLE,
+)
 from app.engine.state import PetState
 from app.engine.tools._risk import TOOL_RISK_LEVEL, risk_for_tool
 
@@ -85,8 +89,14 @@ def _expected_for_rules(sat_v: float, mood_v: float, lvl: int, tool_name: str) -
     """按 RULES_TABLE 顺序遍历, 模拟 lookup_decision 拿理论预期值。
 
     跟 companion_policy.lookup_decision 同一规则. 复现只为了实验脚本
-    不依赖 LangChain / 持久化层, 纯函数跑。
+    不依赖 LangChain / 持久化层, 纯函数跑.
+
+    **记忆类工具的豁免也要镜像**（见 companion_policy.MEMORY_TOOLS_ALWAYS_ALLOW）：
+    记事/回忆不是危险动作, 不该被桌宠心情拦 —— 真实实现放行, 这里也必须放行,
+    否则「真实实现 vs 规则表模拟」这个 sanity check 会平白多出一批假差异.
     """
+    if tool_name in MEMORY_TOOLS_ALWAYS_ALLOW:
+        return Decision.ALLOW
     sat = "HIGH" if sat_v > 67 else ("LOW" if sat_v < 33 else "MID")
     mood = "HIGH" if mood_v > 67 else ("LOW" if mood_v < 33 else "MID")
     lvl_band = "LOW" if lvl < 5 else ("HIGH" if lvl >= 15 else "MID")
@@ -111,6 +121,7 @@ def run_experiment(n: int = 100, seed: int = 42) -> dict[str, Any]:
 
     # 跟踪决策差异 (一个 scenario 在 27 状态下决策不全等 → 算"有差异")
     scenarios_with_diff = 0
+    gated_with_diff = 0
     scenarios_decisions_match_expected = 0
 
     for sc in scenarios:
@@ -133,6 +144,11 @@ def run_experiment(n: int = 100, seed: int = 42) -> dict[str, Any]:
 
         if len(set(decisions)) > 1:
             scenarios_with_diff += 1
+            if sc["tool_name"] not in MEMORY_TOOLS_ALWAYS_ALLOW:
+                # 记忆类工具是**明确的例外**（记事不该被心情拦），
+                # 不计入「状态耦合」的分母 —— 论文的 claim 说的是「耦合机制在起作用」,
+                # 而这批工具本来就不该耦合。
+                gated_with_diff += 1
 
         # 统计这个 scenario 的 27 档决策分布
         dist = Counter(decisions)
@@ -145,6 +161,11 @@ def run_experiment(n: int = 100, seed: int = 42) -> dict[str, Any]:
         })
 
     decision_diff_rate = scenarios_with_diff / len(scenarios)
+    # **状态耦合率**：只在「本就应当随状态变化」的那批工具上统计
+    # （排除记忆类豁免）。这是论文 §4.4.1 的 claim 所在。
+    gated_total = sum(1 for sc in scenarios
+                       if sc["tool_name"] not in MEMORY_TOOLS_ALWAYS_ALLOW)
+    gated_diff_rate = (gated_with_diff / gated_total) if gated_total else 0.0
     rule_hit_rate = scenarios_decisions_match_expected / (
         len(scenarios) * len(_STATE_GRID))
 
@@ -152,7 +173,10 @@ def run_experiment(n: int = 100, seed: int = 42) -> dict[str, Any]:
         "n_scenarios": len(scenarios),
         "n_states_per_scenario": len(_STATE_GRID),
         "scenarios_with_state_diff": scenarios_with_diff,
-        "decision_diff_rate": round(decision_diff_rate, 4),
+        "decision_diff_rate": round(gated_diff_rate, 4),
+        "decision_diff_rate_all_tools": round(decision_diff_rate, 4),
+        "gated_scenarios": gated_total,
+        "memory_exempt_tools": sorted(MEMORY_TOOLS_ALWAYS_ALLOW),
         "rule_hit_rate": round(rule_hit_rate, 4),
         "decision_diff_rate_target": 0.30,
         "rule_hit_rate_target": 0.85,
