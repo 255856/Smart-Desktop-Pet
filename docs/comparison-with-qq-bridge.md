@@ -1192,25 +1192,26 @@ A 已经有 `tests/` **86 个 `test_*.py` 测试文件**（实测）—— **A �
 | 分条 / 节奏 / 主体性 | ✅ 逐句投递（§reply_pacing§，间隔实测 146~389ms，**不超模型出句速度**） |
 | 软质量反馈（提示而非删除） | ✅ 删掉了 20+ 条改写模型散文的正则（「让提示词负责，代码不猜」） |
 | 记忆按 query 语义召回 top-K | ✅ 独立 sidecar（JSON 卡真值 + Chroma + BM25 + 精排）+ **按 kind 分档闸门**（近似陷阱避开率 1.000，recall 1.000） |
-| 记忆分类 + 记忆卫生 | ✅ 5 类（thought/topic/event/fact/impression）+ §supersede§ 改写 + 分档阈值 |
+| 记忆分类 + 记忆卫生 | ✅ 5 类（thought/topic/event/fact/impression）+ §supersede§ 改写 + 分档阈值；**再加分区**（身份 / 价值 / 程序性三块常量块 + 情感权重 arousal/valence + 检索路由：时间词→事件、事实词→事实、how-to→程序性，**只调顺序不硬过滤**） |
 | 工具**执行期白名单** | ✅ §tool_allowlist§（61 精确名 + 3 前缀桶）：存量放行 / 增量拒绝 |
 | 工具名**双向对账脚本** | ✅ §scripts/check_tool_docs.py§（8 处来源，阻断级差异） |
 | 消息节奏 / 分条发送 | ✅（同上） |
-| 黑话 / 口头禅学习回路 | ❌ **唯一的真缺口**（1:1 场景价值下降，可降级为「记住主人的口头禅」） |
+| 主动搭话的触发来源 | ✅ **多源轮换**（2026-11-05）：记忆 / 最近对话 / AW / **自主想法** / 自己的状态 / 规律 / 时间感 —— 每轮挑 1~2 个有素材的理由，最近两轮用过的降权（原来只有 AW，桌宠只会顺着 AW 说话） |
+| 黑话 / 口头禅学习回路 | ✅ **同款移植**（§app/engine/tools/_slang.py§：candidate/confirmed/rejected 三态 + 容量上限 + 排序 + 坏文件隔离 + **只有 confirmed 注入提示词**（常量块）） |
 | 时间感 / 消息时效 | ✅ §context_provider§（时段提示 / 规律 hint） |
 | token 账本 + 定价 + 控制台 | ✅ §model_prices.py§（读时算钱）+ 台账 + 控制台成本页（人民币口径、逐行传 model） |
 | 长期记忆引擎 | ✅（**纯 Python** sidecar，与 qq-bridge 同源思路但独立实现） |
 | 上下文压缩 / 工具结果裁剪 | ✅ §compaction.py§（0.8 / 0.16 / 最近 8 条原文）+ §fit_tool_payload§（50000/45000/2000） |
-| 结构化 tool result 协议 | 🔄 ReAct 已完成；**standard（LangChain）后端正在接**（它绕过 §execute()§） |
+| 结构化 tool result 协议 | ✅ 两后端都对齐（standard 走 §wrap_tool_fn§ + §ToolPhaseBudget§ middleware：单工具 60s / 整轮 120s） |
 | agent loop / 工具并行 | ✅ 自研 ReAct + LangChain 双后端（不换 DSH） |
 | MCP host / 命名空间工具面 | ✅ §app/mcp/§（aw / fs / voice 三台，10 个工具） |
 | 唤醒 / 潜水 / 等待状态机 | ⚪ 1:1 桌宠**不适用**（qq-bridge 的群聊模型） |
 
-**qq-bridge 有、我们没有、且值得考虑的**：
-1. **拍一拍**（poke）—— qq 群里的社交手势；桌宠场景可做成「戳一下桌宠」的互动。
-2. **100 个 GIF 表情包库** —— 我们有 Live2D 贴纸与随机贴纸设置，但**没有表情包库**。
-3. **ComfyUI 生视频** —— 我们的 §generate_video§ 还是 stub。
-4. **黑话 / 口头禅学习** —— 见上表那一行。
+**qq-bridge 有、我们没有、且值得考虑的**（2026-11-01 更新）：
+1. ~~**拍一拍**（poke）~~ → ✅ **已做**：双击模型 = 一次拍一拍（表情 + 台词 + 计数 + 长期记忆卡）；单击热区只是触摸反应。
+2. ~~**GIF 表情包库**~~ → ✅ **已做**：不下载素材，直接用现成的 §assets/sprites/Emotion_*§ 素材做目录（8 种情绪 × 4 = **32 张**，每张带动画帧），桌宠能把它当**一条消息**发进聊天（§app/engine/stickers.py§ + §send_sticker§）。
+3. **ComfyUI 生视频** —— 我们的 §generate_video§ 还是 stub（**明确不做**：要另起一个 GPU 服务，跟「桌宠不该那么重」冲突）。
+4. ~~**黑话 / 口头禅学习**~~ → ✅ **已做**（见上表）。
 
 ### 9.1 已在本轮复核并从"待补"中移除的项
 
