@@ -649,6 +649,7 @@ class BrainController(QObject):
                 is_sleeping=self._check_sleeping,
                 chat_cfg=cfg.chat,
                 aw_cfg=getattr(cfg, "activitywatch", None),
+                recent_turns_provider=self._recent_chat_turns,
             )
             self.proactive.remark_ready.connect(self._on_proactive_remark)
             self.proactive.emotion_hint.connect(self.emotion_hint)
@@ -891,6 +892,29 @@ class BrainController(QObject):
     def _on_proactive_remark(self, text: str) -> None:
         """转发主动发言信号。"""
         self.remark_ready.emit(text)
+
+    def _recent_chat_turns(self, limit: int = 4) -> list:
+        """最近几轮对话（给主动搭话用）—— 桌宠要能接着刚才的话冒泡。
+
+        取法：读 ChatStore（跟聊天窗口同一个库 data/chat_history.db）。
+        聊天窗口是独立组件，brain 这边没有它的引用 —— 走 DB 是最短路径。
+        读不到就当没有（不能因为取不到就不冒泡）。
+        """
+        try:
+            from app.engine.chat_store import SHARED_BUCKET, ChatStore
+            store = ChatStore(character_name=SHARED_BUCKET)
+            msgs = store.all()
+        except Exception:  # noqa: BLE001
+            log.debug("读最近对话失败（忽略）", exc_info=True)
+            return []
+        turns = []
+        for m in msgs[-max(1, int(limit)):]:
+            role = str(getattr(m, "role", "") or "")
+            content = str(getattr(m, "content", "") or "").strip()
+            if not content:
+                continue
+            turns.append((role, content))
+        return turns
 
     # -- 运行时换角色 -------------------------------------------------------
     def _on_character_switched(self, name: str, persona: str) -> None:

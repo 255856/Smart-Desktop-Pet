@@ -14,6 +14,7 @@ import random
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from app.core.qt_compat import QObject, QThread, Signal
@@ -46,6 +47,96 @@ _OCR_MAX_CHARS = 200     # 截前 200 字, 够 LLM 拿类别
 # v57: RoutineProfiler 数据目录 (在项目根 cwd/data 下, 默认)
 _ROUTINE_DATA_DIR = "data"
 _ROUTINE_REFRESH_THREAD_NAME = "proactive-rp-refresh"
+
+
+# --------------------------------------------------------------------------
+# 触发理由池 —— 「这一轮凭什么冒泡」
+# --------------------------------------------------------------------------
+# 为什么要有「理由」：素材一股脑丢给模型，模型永远挑**最容易**的那一样
+# （实测：有 AW 数据就必聊 AW，记忆和自主想法基本轮不到）。
+# 显式告诉模型「这一轮从哪个角度看」，它才会轮流用上各个来源。
+
+REASON_NAMES = {
+    "memory": "记忆",
+    "context": "最近对话",
+    "aw": "主人当下在做的事",
+    "idea": "自己的念头",
+    "state": "自己的状态",
+    "routine": "这个时段的规律",
+    "time": "时间感",
+}
+
+REASON_RULES = {
+    "memory": (
+        "从记忆里的一件事聊起：说一件我们之间发生过的事，或主人提过的一个习惯"
+        "（要具体，别把记忆卡片的原文念出来）"
+    ),
+    "context": (
+        "接着最近这段对话说：就主人刚说过的事追问半句，或接上他没说完的意思"
+        "（别重复他刚问的问题，也别假装知道没发生的事）"
+    ),
+    "aw": (
+        "结合主人当下在做的事挑切入口（比如「看了半天 VSCode，休息一下吧」）；"
+        "敏感标题只概括类别、不复读原文"
+    ),
+    "idea": (
+        "说一个**你自己冒出来的念头**：可以是一个小疑问、一个吐槽、一个突然想到的小发现"
+        "——不用等主人开口，桌宠本来就会自己嘀咕"
+    ),
+    "state": (
+        "说说桌宠自己现在的状态或心情（饿/困/想玩/心情好），让主人知道你在这儿"
+    ),
+    "routine": (
+        "提一句这个时段的历史规律（只当关心入口，不要纠正主人）"
+    ),
+    "time": (
+        "只按时间感说一句（早上好 / 这么晚了 / 周末啦），不用牵扯具体的事"
+    ),
+}
+
+#: 理由要哪些 context 字段才有素材（字段为空 → 这个理由这一轮不可用）
+REASON_NEEDS = {
+    "memory": ("memories", "shared_memories"),
+    "context": ("recent_dialogue",),
+    "aw": ("aw_context",),
+    "idea": (),
+    "state": ("pet_status",),
+    "routine": ("routine_hint",),
+    "time": ("time_hint",),
+}
+
+#: 理由权重：自主想法稍微高一点 —— 它是桌宠唯一不需要任何外部数据的来源
+REASON_WEIGHTS = {
+    "memory": 1.0, "context": 1.2, "aw": 1.0, "idea": 1.4,
+    "state": 0.8, "routine": 0.8, "time": 0.9,
+}
+
+#: 自主想法的种子（桌宠自己那些小念头）。主人可以在 data/proactive_ideas.json
+#: 里追加自己的想法（一个 JSON 字符串数组），会跟种子一起进池子。
+IDEA_SEEDS = [
+    "想问主人今天有没有好好吃饭",
+    "突然想知道主人最喜欢的一首歌是哪首",
+    "想问问主人上次说的那件事后来怎么样了",
+    "想吐槽一下主人又熬夜",
+    "想问主人今天有没有遇到什么好笑的事",
+    "突然有点好奇主人小时候最喜欢干什么",
+    "想提醒主人该起来走走了",
+    "想问主人是不是又忘记喝水了",
+    "突然想问主人自己的生日是哪天（我记着呢）",
+    "想说今天的云好像挺好看的",
+    "想问主人最近有没有在玩什么新游戏",
+    "想跟主人讲个特别没意思的冷知识",
+    "突然想问问主人桌子上的水杯还在不在",
+    "想问主人觉得自己今天状态怎么样",
+    "想说窗外好像有只鸟叫了半天",
+    "想问问主人今天有没有被谁气到",
+    "突然想给主人推荐一首歌（又没听过的）",
+    "想问主人写代码的时候脑子里在想什么",
+    "想问问主人是不是该起来走走了",
+    "想说主人今天已经很久没笑了",
+]
+
+IDEAS_FILE = "data/proactive_ideas.json"
 
 
 class _ChatOnceWorker(QThread):
@@ -141,6 +232,7 @@ class ProactiveBrain(QObject):
         aw_cfg=None,              # app.core.config.ActivityWatchConfig, 可选
         idle_skip_minutes: int = 30,           # v54: 主人空闲多久（分钟）跳过主动搭话
         meeting_auto_mute_minutes: int = 30,   # v54: 检测到会议自动静音 TTS 多长时间
+        recent_turns_provider=None,  # 可选：取最近几轮对话（桌宠要能接着聊）
     ):
         super().__init__()
         self.llm_cfg = llm_cfg
@@ -164,6 +256,10 @@ class ProactiveBrain(QObject):
         # v31~v57 时代按人设名分桶（_last_remarks_by_char），切人设就换桶，
         # 小汐说过的话大肥鱼看不见。主人拍板：一只桌宠一份记忆，不分人设。
         self._last_remarks: list[str] = []
+        # 最近对话的取法（外部注入）：聊天窗口是独立组件，这里拿不到它的引用
+        self.recent_turns_provider = recent_turns_provider
+        # 最近几轮用过的触发理由（别老盯着 AW）
+        self._recent_reasons: list[str] = []
         # v54: 闲置 / 会议感知阈值
         self.idle_skip_minutes = max(1, int(idle_skip_minutes))
         self.meeting_auto_mute_minutes = max(1, int(meeting_auto_mute_minutes))
@@ -372,6 +468,153 @@ class ProactiveBrain(QObject):
         self._timer.start(delay_ms)
         log.info("ProactiveBrain: 下一次主动发言在 %.1f 分钟后", delay_ms / 60000)
 
+    # ---- 触发理由：这一轮从哪冒泡 ----------------------------------------
+
+    def _available_reasons(self, context: dict) -> list:
+        """这一轮**有素材**的理由（没数据就别硬聊）。"""
+        out = []
+        for key, needs in REASON_NEEDS.items():
+            ok = True
+            for field in needs:
+                value = context.get(field)
+                if isinstance(value, (list, tuple)):
+                    ok = ok and bool([v for v in value
+                                     if str(v or "").strip()])
+                else:
+                    ok = ok and bool(str(value or "").strip())
+            if key == "aw":
+                # AW 没跑 / 没数据时它返回的是一句提示，不是素材
+                text = str(context.get("aw_context") or "")
+                if "未运行" in text or "无数据" in text:
+                    ok = False
+            if ok:
+                out.append(key)
+        return out
+
+    def _pick_reasons(self, context: dict) -> list:
+        """挑这一轮的角度（1~2 个）。
+
+        - 只挑有素材的理由；
+        - 最近两轮用过的理由权重压到 0.15 → 不会一直只聊 AW；
+        - 「自主想法」永远可用：它是桌宠不需要任何外部数据就能冒泡的来源。
+        """
+        avail = self._available_reasons(context)
+        if not avail:
+            return ["idea"]
+        pool = list(avail)
+        weights = []
+        recent = self._recent_reasons[-2:]
+        for key in pool:
+            w = float(REASON_WEIGHTS.get(key, 1.0))
+            if key in recent:
+                w *= 0.15
+            weights.append(w)
+        count = 2 if (len(pool) >= 2 and random.random() < 0.35) else 1
+        picked = []
+        for _ in range(min(count, len(pool))):
+            total = sum(weights)
+            if total <= 0:
+                break
+            target = random.random() * total
+            acc = 0.0
+            for i, key in enumerate(pool):
+                acc += weights[i]
+                if acc >= target:
+                    picked.append(key)
+                    pool.pop(i)
+                    weights.pop(i)
+                    break
+        if not picked:
+            picked = ["idea"]
+        self._recent_reasons.append(picked[0])
+        if len(self._recent_reasons) > 6:
+            self._recent_reasons = self._recent_reasons[-6:]
+        return picked
+
+    def _pick_ideas(self, n: int = 2) -> list:
+        """桌宠自己的念头：种子 + 主人自己加的（data/proactive_ideas.json）。"""
+        pool = list(IDEA_SEEDS)
+        try:
+            path = Path(IDEAS_FILE)
+            if path.exists():
+                extra = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(extra, list):
+                    pool += [str(x).strip() for x in extra
+                             if str(x).strip()]
+        except Exception:  # noqa: BLE001
+            log.debug("读自定义想法池失败，忽略", exc_info=True)
+        if not pool:
+            return []
+        return random.sample(pool, min(n, len(pool)))
+
+    def _recent_dialogue(self, limit: int = 4) -> list:
+        """最近几轮对话（主人 + 桌宠各一句），给「接着聊」用。
+
+        取法由外部注入（brain_controller 读 ChatStore）—— 聊天窗口是独立组件，
+        这里拿不到它的引用。取不到就当没有（不能因为拿不到就不冒泡）。
+        """
+        if self.recent_turns_provider is None:
+            return []
+        try:
+            turns = self.recent_turns_provider(limit) or []
+        except Exception:  # noqa: BLE001
+            log.debug("取最近对话失败，忽略", exc_info=True)
+            return []
+        out = []
+        for turn in turns:
+            try:
+                role, text = turn[0], turn[1]
+            except Exception:  # noqa: BLE001
+                continue
+            text = str(text or "").strip()
+            if not text:
+                continue
+            who = ("主人" if str(role).startswith("user")
+                   else (self.char_name or "桌宠"))
+            out.append("%s：%s" % (who, text[:120]))
+        return out
+
+
+    def _compose(self, context: dict) -> tuple:
+        """把这一轮的上下文拼成 (system, messages)。
+
+        单独拆出来是为了能离线测：不用真的调模型，就能检查
+        「这一轮选了哪个理由」「提示词里有没有那条引导」。
+        """
+        from app.brain.llm_client import ChatMessage
+        focus = list(context.get("focus") or [])
+        focus_rules = ""
+        for i, key in enumerate(focus):
+            rule = REASON_RULES.get(key)
+            if not rule:
+                continue
+            focus_rules += (
+                "\n%d. 这一轮从**%s**这个角度冒泡：%s"
+                % (6 + i, REASON_NAMES.get(key, key), rule)
+            )
+        fields_note = (
+            "\n%d. `recent_dialogue` 是主人刚跟你说过的话；`own_ideas` 是**你自己**的小念头"
+            "（不是主人的事）；`memories` / `shared_memories` 是长期记忆；"
+            "`aw_context` / `screen_excerpt` 是主人当下的活动。"
+            "只说你这一轮该说的那一部分，别一次把全说完。"
+            % (6 + len(focus))
+        )
+        system = (
+            self.persona
+            + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
+              "规则：\n"
+              "1. 只输出一句话（40 字以内），像自然地冒出来的一句话："
+              "可以是关心、闲聊、提起记忆里的事、或根据时间/状态作出的提醒；\n"
+              f"2. 时间段提示：{context.get('time_hint', '')}\n"
+              "3. 不要重复 recent_remarks 里说过的内容；\n"
+              "4. 如果此刻真的没什么好说的，只输出 [skip]；\n"
+              "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
+              "情绪由语气自然表达即可。"
+              + focus_rules
+              + fields_note
+        )
+        user = json.dumps(context, ensure_ascii=False)
+        return system, [ChatMessage(role="user", content=user)]
     def _fire(self) -> None:
         try:
             self._schedule()   # 先排下一轮，本轮失败也不影响节奏
@@ -448,15 +691,6 @@ class ProactiveBrain(QObject):
             aw_context = self._build_aw_context()
             context = dict(context_base)
             context["aw_context"] = aw_context
-            # 第 6 条规则只在 AW 实际有数据时挂上，避免 prompt 噪声
-            aw_rule = ""
-            if aw_context and "未运行" not in aw_context and "无数据" not in aw_context:
-                aw_rule = (
-                    "\n6. 若 `aw_context` 里有数据, 可以结合主人当下在做的事"
-                    "（写代码 / 刷视频 / 看文档 等）挑更贴切的切入口, "
-                    "比如「看了半天 VSCode, 休息一下吧」; "
-                    "对敏感标题（私人聊天/银行）只概括类别不复读标题。"
-                )
 
             # v55: 低频 OCR — 当窗口是编辑器 / 浏览器 / 文档类时截屏 OCR 拿屏幕文字
             focus_line = self._fetch_focus_line() or ""
@@ -468,50 +702,14 @@ class ProactiveBrain(QObject):
                 if excerpt:
                     context["screen_excerpt"] = excerpt
 
-            screen_rule = ""
-            if context.get("screen_excerpt"):
-                screen_rule = (
-                    "\n7. `screen_excerpt` 是当前窗口 OCR 文字摘要 (可能与本地代码差异), "
-                    "可以用来更具体地关心主人在看什么, 比如「在看这篇 XX 啊, 累不累」; "
-                    "只概括类别/主题, 不要复述完整内容。"
-                )
+            # 最近对话 + 自己的念头：桌宠要能接着聊，也要能自己冒泡
+            context["recent_dialogue"] = self._recent_dialogue(4)
+            context["own_ideas"] = self._pick_ideas(2)
 
-            # v56: 共同经历 — 自然引用「我们一起 XX」的故事, 比普通 fact 更贴切
-            shared_rule = ""
-            if context.get("shared_memories"):
-                shared_rule = (
-                    "\n8. `shared_memories` 是我们之间共同经历过的事 (关系叙事), "
-                    "如果跟当前话题相关, 可以自然引用一句 (比如「上次那盘棋你还记得吗」), "
-                    "但不要每轮都引用, 偶尔提一次就好; 没相关就别提。"
-                )
-
-            # v57: 规律 — 不强加「应该做什么」, 只在合适时提一句历史规律
-            routine_rule = ""
-            if context.get("routine_hint"):
-                routine_rule = (
-                    "\n9. `routine_hint` 是主人这个时段的历史规律 (比如通常在写代码), "
-                    "可以拿来当关心入口 (「这个时间又在写啊」), 不要硬套 — "
-                    "跟现在做的不一致时不要纠正主人。"
-                )
-            system = (
-                self.persona
-                + "\n\n【主动互动模式】现在没有用户消息，由你主动发起一次互动。"
-                  "规则：\n"
-                  "1. 只输出一句话（40 字以内），像自然地冒出来的一句话："
-                  "可以是关心、闲聊、提起记忆里的事、或根据时间/状态作出的提醒；\n"
-                  f"2. 时间段提示：{context['time_hint']}\n"
-                  "3. 不要重复 recent_remarks 里说过的内容；\n"
-                  "4. 如果此刻真的没什么好说的，只输出 [skip]；\n"
-                  "5. 不要在结尾追加 [emotion] 标签或「~ happy」等情绪字样，"
-                  "情绪由语气自然表达即可。"
-                  + aw_rule
-                  + screen_rule
-                  + shared_rule
-                  + routine_rule
-            )
-            from app.brain.llm_client import ChatMessage
-            user = json.dumps(context, ensure_ascii=False)
-            return system, [ChatMessage(role="user", content=user)]
+            # 这一轮从哪冒泡 —— 显式指定，模型才不会永远只聊 AW
+            focus = self._pick_reasons(context)
+            context["focus"] = focus
+            return self._compose(context)
 
         # 每次新建 worker（独立 httpx 客户端，绑定本次子 loop）—— 见 _ChatOnceWorker 注释
         worker = _ChatOnceWorker(
