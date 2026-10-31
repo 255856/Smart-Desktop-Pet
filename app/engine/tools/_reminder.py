@@ -25,7 +25,7 @@ def _arm_backup(item, when_desc: str) -> str:
             return ""
         name = win_alarm.arm(item.fire_at, item.text, key=item.id)
         if name:
-            return f"。已加系统级兜底：即使桌宠关掉，到点 Windows 也会响"
+            return f"。已加系统级兜底：即使我关掉，到点 Windows 也会响"
         # 剩太近等注册不上——提醒本身仍然有效，不算失败，只是没有兜底
         return f"。注：{when_desc} 离现在太近，没能加系统级兜底（需要至少 2 分钟）"
     except Exception:  # noqa: BLE001
@@ -70,7 +70,7 @@ def register(reg: ToolRegistry, *, reminders) -> None:
             ok = getattr(reminders, "last_save_ok", True)
             if not ok:
                 return (f"错误：提醒已排入内存但**没能保存到磁盘**"
-                        f"（{at_time} 触发），桌宠重启后会丢失。")
+                        f"（{at_time} 触发），重启后会丢失。")
             return f"已设置提醒「{item.text}」，将在 {at_time} 触发（id={item.id}）" + \
                 _arm_backup(item, f"将在 {at_time} 触发")
         # 原来 `elif delay_minutes and delay_minutes > 0` 让 0 / 负数走到
@@ -86,7 +86,7 @@ def register(reg: ToolRegistry, *, reminders) -> None:
         item = reminders.add(int(mins * 60), text.strip())
         if not getattr(reminders, "last_save_ok", True):
             return (f"错误：提醒已排入内存但**没能保存到磁盘**"
-                    f"（{mins:g} 分钟后触发），桌宠重启后会丢失。")
+                    f"（{mins:g} 分钟后触发），重启后会丢失。")
         return (f"已设置提醒「{item.text}」，{mins:g} 分钟后触发"
                 f"（id={item.id}）"
                 + _arm_backup(item, f"{mins:g} 分钟后触发"))

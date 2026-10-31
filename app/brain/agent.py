@@ -535,7 +535,7 @@ _INTENT_BLOCKED_TOOLS: dict[str, dict[str, str]] = {
     "add_reminder": {
         "countdown": ("错误：本轮不提供 countdown。主人要的是「闹钟/提醒」，"
                       "请改用 add_reminder —— 它会存进 reminders.json，"
-                      "桌宠重启后还在，也能取消。countdown 只活在内存里，一关就没。"),
+                      "重启后还在，也能取消。countdown 只活在内存里，一关就没。"),
         "list_countdowns": "错误：本轮不提供倒计时相关工具，请改用 list_reminders。",
         "cancel_countdown": "错误：本轮不提供倒计时相关工具，请改用 list_reminders / delete_reminder。",
     },

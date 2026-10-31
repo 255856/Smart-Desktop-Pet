@@ -316,7 +316,7 @@ def test_five_components_are_all_in_the_final_system_prompt():
     sp = _make_react(reg).assemble_system_prompt(persona=PERSONA_BLOB)
 
     # ① 中文输出约束
-    assert "你是用简体中文聊天的桌宠" in sp
+    assert "你是用简体中文说话的人" in sp
     # ② _STYLE_RULE 拆出来的两段（Stage 1.6）
     assert "【说话方式】" in sp
     assert "【任务执行协议】" in sp
@@ -331,7 +331,7 @@ def test_five_components_are_all_in_the_final_system_prompt():
         # Stage 1.8：skills/ 目录里的行为包**默认不注入**（要显式激活）
         assert "以下是主人激活的 Skills" not in sp
     # ⑤ 状态策略：**不在** system prompt（它在易变通道）
-    assert "桌宠状态策略" not in sp
+    assert "状态策略" not in sp
     # 防幻觉基线也在（共享层的稳定段）
     assert "【防幻觉基线】" in sp
 
@@ -361,7 +361,7 @@ def test_state_strategy_only_lives_in_the_volatile_channel():
 
     reg = _FakeRegistry()
     sp = _make_react(reg).assemble_system_prompt(persona=PERSONA_BLOB)
-    assert "桌宠状态策略" not in sp
+    assert "状态策略" not in sp
 
     ctx = build_turn_context(now=datetime.datetime(2026, 1, 2, 3, 4, 5), state=ps)
     assert "桌宠状态策略" in ctx, "状态策略必须进易变通道"

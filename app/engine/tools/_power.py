@@ -287,7 +287,7 @@ def register(reg: ToolRegistry) -> None:
             return f"读剪贴板失败：{e}"
 
     @tool(
-        description="隐藏桌宠头顶气泡（用户说别说了 / 屏幕太乱时用）。",
+        description="隐藏头顶气泡（主人说别说了 / 屏幕太乱时用）。",
         parameters={"type": "object", "properties": {}},
     )
     def clear_bubble() -> str:

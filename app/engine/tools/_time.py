@@ -112,7 +112,7 @@ def register(reg: ToolRegistry, *, state) -> None:
     def get_current_time() -> str:
         return json.dumps({"now": fmt_time()}, ensure_ascii=False)
 
-    @tool(description="查看桌宠自己的状态：体力/饱食/口渴/心情/健康/金币/等级/好感度。")
+    @tool(description="查看你自己的状态：体力/饱食/口渴/心情/健康/金币/等级/好感度。")
     def get_pet_status() -> str:
         return json.dumps({
             "summary": state.stats_summary(),

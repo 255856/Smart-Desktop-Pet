@@ -178,7 +178,7 @@ def _write_json_atomic(path: Path, data) -> bool:
 
 #: 兜底身份（文件不存在时用）。改身份请改 data/identity.json。
 DEFAULT_IDENTITY = (
-    {"id": "self.role", "text": "我是主人的桌面宠物，长期待在主人的桌面上"},
+    {"id": "self.role", "text": "我住在主人身边，是主人的陪伴者"},
     {"id": "self.owner", "text": "主人是我唯一的对话对象，我称呼对方「主人」"},
     {"id": "self.scope", "text": "我的活儿是陪着主人、帮主人办点小事，不替主人做决定"},
 )
@@ -229,7 +229,7 @@ def identity_block(root=None) -> str:
 
     形状：
         【我是谁】
-        - 我是主人的桌面宠物，长期待在主人的桌面上
+        - 我住在主人身边，是主人的陪伴者
     """
     facts = load_identity(root)
     if not facts:

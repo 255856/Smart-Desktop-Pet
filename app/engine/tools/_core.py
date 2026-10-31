@@ -533,7 +533,7 @@ def reload_tool_allowlist() -> Optional[AllowlistPolicy]:
 #: 解锁层级 → 能力分组。同一层解锁的工具属于同一类能力。
 TOOL_GROUPS: dict[int, dict[str, str]] = {
     1: {"name": "基础能力",
-        "desc": "时间 / 天气 / 计算 / 桌宠状态 / 读文件 / 打开应用与网页"},
+        "desc": "时间 / 天气 / 计算 / 自身状态 / 读文件 / 打开应用与网页"},
     2: {"name": "联网检索", "desc": "联网搜索、抓网页正文"},
     3: {"name": "系统控制", "desc": "音量 / 亮度 / 剪贴板 / 提醒查询"},
     4: {"name": "文件与提醒编辑", "desc": "改文件、设 / 删提醒"},

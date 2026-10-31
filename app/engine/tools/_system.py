@@ -395,7 +395,7 @@ def system_info() -> str:
 
 
 @tool(
-    description="截取当前屏幕截图（返回 base64 编码的 PNG）。用于让桌宠看到用户屏幕内容。",
+    description="截取当前屏幕截图（返回 base64 编码的 PNG）。用于让你看到屏幕内容。",
     parameters={"type": "object", "properties": {}},
 )
 def take_screenshot_tool() -> str:

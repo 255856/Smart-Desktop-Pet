@@ -48,7 +48,7 @@ def register(
     hooks = hooks or {}
 
     @tool(
-        description="用桌宠自己的金币买食物吃（食物名必须完全匹配 foods.json）。",
+        description="用自己的金币买食物吃（食物名必须完全匹配 foods.json）。",
         parameters={
             "type": "object",
             "properties": {"food_name": {"type": "string"}},
@@ -87,11 +87,11 @@ def register(
                     f"可选：{', '.join(ANIMATIONS)}")
         if not _fire_hook(hooks, "animation", name):
             return (f"错误：动画「{name}」没能投递给界面（UI 通道不可用），"
-                    f"桌宠实际没有做出这个动作。")
+                    f"实际没有做出这个动作。")
         return f"已触发「{name}」动画"
 
     @tool(
-        description="切换桌宠情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise",
+        description="切换情绪表情。可选：happy, sad, angry, shy, think, pride, fear, doubt, surprise",
         parameters={
             "type": "object",
             "properties": {"emotion": {"type": "string", "description": "情绪名称"}},
@@ -110,7 +110,7 @@ def register(
         return f"已切换到「{name}」情绪"
 
     @tool(
-        description="在桌宠头顶气泡里冒一句话（不用等主人打开聊天窗）。适合补充说明、打招呼。",
+        description="在头顶气泡里冒一句话（不用等主人打开聊天窗）。适合补充说明、打招呼。",
         parameters={
             "type": "object",
             "properties": {"text": {"type": "string"}},
