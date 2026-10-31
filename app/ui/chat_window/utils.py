@@ -429,6 +429,11 @@ def _resolve_voice_meta(name: str, args: str, result: str,
     text = (result or "").strip()
     if not text:
         return {}
+    # 两段式：结果里带**任务号** = 合成**还没好** → 现在没有产物。
+    # 直接返回，别去扫产物目录（那是一次无谓的全目录扫描，
+    # 而且流式重渲时每字都要扫一遍）。
+    if voice_job_id(text):
+        return {}
     dur_m = _VOICE_DUR_RE.search(text)
     size_m = _VOICE_SIZE_RE.search(text)
     dur = float(dur_m.group(1)) if dur_m else 0.0
@@ -517,6 +522,42 @@ def _img_open_key(url: str) -> str:
     """给图片 src 算稳定 KEY（SHA1 前 10 位）。"""
     import hashlib
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+
+
+#: 合成任务状态文件的后缀（生产端见 app/mcp/voice_server.py::VOICE_JOB_SUFFIX）。
+_VOICE_JOB_SUFFIX = ".voicejob.json"
+
+#: 工具结果文本里的任务号（「任务号：sing_20260101-120000_1a2b」）。
+_VOICE_JOB_RE = re.compile(r"任务号[:：]\s*([A-Za-z0-9_\-]+)")
+
+
+def voice_job_id(result: str) -> str:
+    """从语音工具的结果文本里取出**合成任务号**（没有就返回空串）。
+
+    语音工具是「先回复、后合成」的：它**立刻**返回一句「已经受理」，
+    真正的合成在后台跑。界面靠这个任务号盯住**那一次**合成 ——
+    只盯 pending 的任务，不扫整个产物目录。
+    """
+    m = _VOICE_JOB_RE.search(result or "")
+    return m.group(1) if m else ""
+
+
+def voice_job_path(job_id: str) -> Path:
+    """合成任务状态文件的绝对路径（跟生产端同一个约定）。"""
+    out_dir, _suffix = _voice_meta_settings()
+    return out_dir / (str(job_id) + _VOICE_JOB_SUFFIX)
+
+
+def read_voice_job(job_id: str) -> dict:
+    """读一个合成任务的状态（读不到 / 不是 json 就返回空 dict）。"""
+    try:
+        path = voice_job_path(job_id)
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _voice_play_key(path: str) -> str:
@@ -972,4 +1013,5 @@ __all__ = [
     "split_reply_sentences", "voice_waveform_bars", "voice_bar_count",
     "voice_play_icon_data_url", "VOICE_PLAY_ICON_SVG",
     "_voice_play_key",
+    "voice_job_id", "voice_job_path", "read_voice_job", "_VOICE_JOB_SUFFIX",
 ]

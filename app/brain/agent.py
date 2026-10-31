@@ -221,6 +221,12 @@ def _tool_ack_sentence(name: str, args: str, result) -> str:
         return "好的主人，系统信息来啦~"
     if name == "list_installed_apps":
         return "好的，主人电脑上的应用都在这啦~"
+    # 语音是「两段式」的：工具**立刻**返回，音频还在后台合成。
+    # 所以这里只能说「我这就去」，**不能说已经好了**（那是骗主人）。
+    if name == "mcp_voice_sing":
+        return "好的，我去唱一下，等我一会儿~"
+    if name == "mcp_voice_speak":
+        return "好的，我这就念给主人听~"
     if name == "send_notification":
         return "好的，已经帮主人弹通知啦~"
     return "好的，已经帮主人搞定啦~"

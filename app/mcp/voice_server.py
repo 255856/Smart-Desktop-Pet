@@ -18,6 +18,23 @@ r"""语音 MCP server：桌宠**自己决定**要不要发语音 / 唱歌。
    翻唱，导致直接念自己编的词」）——唱《XXX》必须去找**真的那首歌**，
    找不到就**如实说找不到**，绝不允许把自己编的词当成那首歌唱给主人。
 
+两段式：先回复，音频后到（主人定的）
+------------------------------------
+主人原话：「桌宠唱歌合成语音前应该先回复的」。所以：
+
+  · **工具立刻返回**（远小于一秒）：合成在**后台线程**里跑；
+  · **绝不自动播放**：产物只落盘，**点语音条才放**（自动播会被主人当成打扰）；
+  · 模型看到的结果文本必须写清楚「**现在还没好**」，
+    让它先回一句「我去唱一下，等我一会儿」，**不许**说「唱完了」；
+  · 合成好了 / 失败了，聊天窗自己会冒出来（看 .voicejob.json 任务文件），
+    主人什么都不用做。
+
+任务文件（生产端写、界面端读）
+------------------------------
+  · <任务号>.voicejob.json —— 状态 pending / done / failed，
+    done 时带 path / duration / size，failed 时带 error；
+  · <任务号>.wav —— 最终产物；旁边还有 <任务号>.wav.voice.json（界面画语音条用）。
+
 参考实现：E:\study\qq-bridge-main\qq-bridge-main\src\mcp-local-media.js
 （local_speak / local_sing / local_media_status）。那边是「发到 QQ 会话」，
 这边是「在本机放给主人听 + 落盘」，其余契约（措辞规则、失败语义、
@@ -32,10 +49,13 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import uuid
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -80,7 +100,11 @@ TOOLS = [
             "规矩：①语音条**前面不要加方括号标签**（例如「[语音]」「[朗读]」），"
             "主人嫌那玩意儿像在读任务卡；要说话就另外发一条普通文字消息；"
             "②语音是打断，不是每轮都要用，大部分回合用文字就好；"
-            "③失败就如实告诉主人哪一步失败，**不要假装已经发出**。"
+            "③失败就如实告诉主人哪一步失败，**不要假装已经发出**；"
+            "④**两段式**：工具是**后台合成**的 —— 它**立刻**返回，音频过一会儿才做好。"
+            "所以调完工具**马上**回主人一句（比如「念给你听啦~」），"
+            "**不要说「念完了」**（那时还没念完）；"
+            "合成好了聊天窗会自己冒出语音条，主人**点一下**才放（不会自动出声）。"
         ),
         "inputSchema": {
             "type": "object",
@@ -119,8 +143,14 @@ TOOLS = [
             "③找歌 / 下载 / 人声分离 / 音转音哪一步失败，就说**是哪一步**失败，不要含糊；"
             "④语音条前面**不要加方括号标签**，要说话就另外发一条普通文字消息；"
             "⑤语音是打断，不是每轮都要用，大部分回合用文字就好；"
-            "⑥失败就如实说失败（哪一步没成），**不要假装唱过了**。\n"
-            "耗时：整首翻唱要跑几分钟（下载 + 人声分离 + 音转音），耐心等一会儿；"
+            "⑥失败就如实说失败（哪一步没成），**不要假装唱过了**；"
+            "⑦**两段式**：工具是**后台合成**的 —— 它**立刻**返回（不会卡住你几十分钟），"
+            "音频要过一会儿才做好。所以调完工具**马上**回主人一句"
+            "（比如「我去唱一下，等我一会儿~」），"
+            "**不要说「唱完了」**（那时还没唱完）；"
+            "合成好了聊天窗会自己冒出语音条，主人**点一下**才放（不会自动出声）；"
+            "没合成出来也会如实说失败。\n"
+            "耗时：整首翻唱要跑几分钟（下载 + 人声分离 + 音转音）；"
             "想快点就用 start/end 只唱一段（比如副歌）。"
         ),
         "inputSchema": {
@@ -243,6 +273,62 @@ def _human_kb(size: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 跑子进程：超时时把**整棵进程树**杀掉
+# ---------------------------------------------------------------------------
+#
+# 为什么不能直接用 subprocess.run(timeout=…)：
+#   它超时只 kill **直接子进程**。RVC / rvc_fetch 会再拉起自己的子进程
+#   （ffmpeg、python 子模块），那些孙进程会活下来占着几个 GB 内存不放 ——
+#   本机就出过「一个卡死的合成吃了 4.2 GB 内存，桌宠整个卡住」。
+#   所以这里自己开进程组，超时时连孙进程一起杀。
+
+
+def _kill_tree(proc) -> None:
+    """杀掉一个子进程**和它派生的孙进程**（失败不抛 —— 收尾不该再出错）。"""
+    if proc is None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=60)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception as e:  # noqa: BLE001
+        log.warning("杀进程树失败：%s", e)
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_proc(cmd, *, cwd=None, env=None, timeout: float = 300.0) -> tuple:
+    """跑一个子进程并收它的输出。返回 (返回码, stdout, stderr)。
+
+    超时时：整棵进程树被杀掉，返回码 = -1，stderr 里写明「超时」。
+    """
+    kwargs = dict(cwd=cwd, env=env, stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                  errors="replace")
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen([str(c) for c in cmd], **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=15)
+        except Exception:  # noqa: BLE001
+            out, err = "", ""
+        return -1, out or "", (err or "") + (
+            "\n[超时] 超过 %d 秒还没结束，已把整棵进程树都杀掉。" % int(timeout))
+    return proc.returncode, out or "", err or ""
+
+
+# ---------------------------------------------------------------------------
 # 语音产物的**结构化旁路文件**（给界面用，不给模型看）
 # ---------------------------------------------------------------------------
 #
@@ -273,8 +359,8 @@ def write_voice_meta(wav_path: Path, kind: str, duration: float,
                      size: int, text: str = "") -> Optional[Path]:
     """给语音产物写一份结构化旁路文件（.voice.json）。
 
-    写失败**不影响语音本身**：语音已经合成、已经放给主人听了，
-    旁路文件只是给界面补一份准确信息，写不动就当没有（界面会退化成
+    写失败**不影响语音本身**：音频已经合成了，旁路文件只是给界面补一份
+    准确信息（路径 / 时长 / 体积），写不动就当没有（界面会退化成
     普通工具行，不会编造路径）。
     """
     try:
@@ -294,6 +380,171 @@ def write_voice_meta(wav_path: Path, kind: str, duration: float,
         log.warning("写语音旁路文件失败 %s：%s", wav_path, e)
         return None
 
+# ---------------------------------------------------------------------------
+# 合成任务（job）：工具**立刻**返回，合成在后台跑
+# ---------------------------------------------------------------------------
+#
+# 为什么要有任务文件：
+#   合成要跑几分钟，工具调用**不能**等（主人原话：「桌宠唱歌合成语音前
+#   应该先回复的」——干等三分钟主人就走了）。所以：
+#     · 工具立刻返回一句「已经受理」；
+#     · 后台线程真的去合成；
+#     · 合成好了 / 失败了 → 写回任务文件；
+#     · 聊天窗**只盯还在 pending 的那几个任务**（不是每轮扫一遍产物目录），
+#       一看到终态就把语音条 / 失败提示发到聊天里。
+#
+# 任务文件跟语音产物放同一个目录（voice.output_dir）：
+#   名字 = <任务号> + VOICE_JOB_SUFFIX，任务号就是产物文件名的前缀
+#   （<任务号>.wav）—— 两边对得上，不会认错。
+
+#: 合成任务状态文件的后缀。
+VOICE_JOB_SUFFIX = ".voicejob.json"
+
+#: 合成任务的三种状态。
+JOB_PENDING = "pending"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+
+#: 本机一次只跑一个语音合成（RVC 一次要吃好几个 GB 内存）。
+_VOICE_JOB_LOCK = threading.Lock()
+
+
+def _job_id(prefix: str) -> str:
+    """合成任务号：<前缀>_<时间戳>_<4位随机>（同一秒里两次调用也不撞）。"""
+    return "%s_%s_%s" % (prefix, _stamp(), uuid.uuid4().hex[:4])
+
+
+def voice_job_path(job_id: str, cfg: Optional[dict] = None) -> Path:
+    """合成任务状态文件的绝对路径（界面端按同一个约定找它）。"""
+    return voice_out_dir(cfg) / (str(job_id) + VOICE_JOB_SUFFIX)
+
+
+def _write_job(out_dir: Path, job_id: str, payload: dict) -> Optional[Path]:
+    """写任务状态文件。
+
+    先写临时文件再**原子替换** —— 界面读到的永远是完整 json（不会读到半个）。
+    """
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / (job_id + VOICE_JOB_SUFFIX)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        return path
+    except Exception as e:  # noqa: BLE001
+        log.warning("写合成任务文件失败 %s：%s", job_id, e)
+        return None
+
+
+def read_voice_job(job_id: str, cfg: Optional[dict] = None) -> dict:
+    """读一个合成任务的状态（读不到就返回空 dict）。"""
+    try:
+        path = voice_job_path(job_id, cfg)
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        log.debug("读合成任务文件失败 %s：%s", job_id, e)
+        return {}
+
+
+def wait_voice_job(job_id: str, cfg: Optional[dict] = None,
+                   timeout: float = 60.0) -> dict:
+    """等一个合成任务跑到终态，返回任务 payload（测试 / 脚本用）。"""
+    deadline = time.time() + max(0.0, float(timeout))
+    payload: dict = {}
+    while True:
+        payload = read_voice_job(job_id, cfg)
+        if str(payload.get("state") or "") in (JOB_DONE, JOB_FAILED):
+            return payload
+        if time.time() >= deadline:
+            return payload
+        time.sleep(0.05)
+
+
+def _start_job(cfg: dict, kind: str, tool: str, worker, *,
+               job_id: str = "", text: str = "", note: str = "") -> str:
+    """登记一个后台合成任务并**立刻**返回任务号。
+
+    worker：无参可调用对象 → 返回 (成功?, 信息 dict)。
+        成功时信息里给 path / duration / size；失败时给 error。
+    job_id：不给就自己生成（给了就用它 —— 产物文件名要跟它对齐）。
+    """
+    out_dir = _out_dir(cfg)
+    job_id = job_id or _job_id(kind)
+    # 本机一次只跑一个语音合成：RVC 一次要吃好几个 GB 内存，
+    # 两个一起跑会把机器压垮（出过 4.2 GB 的卡死进程）。
+    if not _VOICE_JOB_LOCK.acquire(blocking=False):
+        payload = {
+            "id": job_id, "state": JOB_FAILED, "kind": kind, "tool": tool,
+            "text": str(text or ""), "note": str(note or ""),
+            "created": time.time(), "updated": time.time(),
+            "error": "已经有一个语音合成在跑（本机一次只跑一个），等它跑完再试。",
+            "path": "", "duration": 0.0, "size": 0,
+        }
+        _write_job(out_dir, job_id, payload)
+        return job_id
+    payload = {
+        "id": job_id,
+        "state": JOB_PENDING,
+        "kind": kind,
+        "tool": tool,
+        "text": str(text or ""),
+        "note": str(note or ""),
+        "created": time.time(),
+        "updated": time.time(),
+        "error": "",
+        "path": "",
+        "duration": 0.0,
+        "size": 0,
+    }
+    _write_job(out_dir, job_id, payload)
+
+    def _run() -> None:
+        try:
+            ok, info = worker()
+        except Exception as e:  # noqa: BLE001
+            ok, info = False, {"error": "内部出错：%s" % (str(e) or type(e).__name__)}
+        finally:
+            try:
+                _VOICE_JOB_LOCK.release()
+            except Exception:  # noqa: BLE001
+                pass
+        info = dict(info or {})
+        payload.update(info)
+        payload["updated"] = time.time()
+        if ok:
+            payload["state"] = JOB_DONE
+        else:
+            payload["state"] = JOB_FAILED
+            payload["error"] = str(info.get("error") or "不知道是哪一步失败了")
+        _write_job(out_dir, job_id, payload)
+
+    threading.Thread(target=_run, daemon=True,
+                     name="voice-job-%s" % job_id).start()
+    return job_id
+
+
+def _accepted(job_id: str, head: str, *, hint: str = "", extra: str = "") -> dict:
+    """工具的「已受理」结果：立刻返回，并把**两段式**说清楚。
+
+    head  —— 在做什么（给主人看的人话）
+    hint  —— 让模型先回什么（如「我去唱一下，等我一会儿」）
+    extra —— 补充说明（音色 / 会不会是清唱版 …）
+    """
+    lines = [
+        head,
+        "**现在还没好** —— 请**立刻**回复主人一句%s，**不要说已经做好了**。"
+        % (("（%s）" % hint) if hint else ""),
+        "合成好了聊天窗会自己冒出语音条，主人**点一下**才放（不会自动出声）；"
+        "没合成出来也会如实说失败。",
+    ]
+    if extra:
+        lines.append(extra)
+    lines.append("任务号：%s" % job_id)
+    return _ok(" ".join(lines))
+
 
 # ---------------------------------------------------------------------------
 # 本机资产盘点（绝不下载）
@@ -311,6 +562,90 @@ def _rvc_weight_path(cfg: dict) -> Path:
         return Path(model)
     root = _abs(rvc.get("root") or "")
     return root / "assets" / "weights" / model
+
+def _rvc_python(cfg: dict) -> Path:
+    r"""RVC 解释器 —— **只认配置里那一个**。
+
+    绝**不**回退到 PATH 上的 python：本机出过一次「用 E:\Python\python.exe
+    跑 RVC」—— 那个解释器装不下 RVC 的依赖，进程起来就卡在等 CPU，
+    白占 4.2 GB 内存，桌宠整个被拖死。
+    """
+    raw = str(_rvc_cfg(cfg).get("python") or "").strip()
+    if not raw:
+        return Path("")
+    return _abs(raw)
+
+
+#: 解释器自检结果的缓存（按解释器路径）—— 自检要起一次 python，不能每次都跑。
+_RVC_PYTHON_CHECK: dict = {}
+
+
+def _rvc_env(cfg: dict) -> dict:
+    r"""跑 RVC 用的环境变量。
+
+    **PATH 最前面放 RVC venv 的 Scripts 目录** —— 这一步不能省：
+    infer.cli 内部会**再 spawn 一个 "python"**（本机现场抓到过：
+    它抓到的是 PATH 第 3 位的 E:\Python\python.exe，不是配置里那个 venv）。
+    那个解释器装不下 RVC 的依赖 → 孙子进程卡死 → 父亲 infer.cli 等它 →
+    我们 spawn 的 infer.cli 不退 → **voice server 的主循环被占死**，
+    后面所有工具调用全排队挂死（主人每条消息都要等 5 分钟）。
+
+    把 venv 放到 PATH 最前面，内部 spawn 抓到的就是**对的那个**解释器。
+    """
+    env = dict(os.environ)
+    py = _rvc_python(cfg)
+    if py.parent.is_dir():
+        env["PATH"] = str(py.parent) + os.pathsep + env.get("PATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _check_rvc_python(cfg: dict, timeout: float = 60.0) -> tuple:
+    """确认 RVC 解释器**真的能跑 RVC**。返回 (好?, 说明)。
+
+    查三件事：
+      1. 配置里那个解释器在不在（不在就直接失败，不回退到别的 python）；
+      2. 能不能启动（跑一句 python -c 打印自己的位置）；
+      3. 装不装得上 RVC 的依赖（import torch）—— 装不上就别让它去跑，
+         免得进程卡在等 CPU 上白占内存。
+    """
+    py = _rvc_python(cfg)
+    if not py.is_file():
+        return False, ("RVC 解释器不在本机：%s（不会回退到 PATH 上的 python，"
+                       "也不会下载或安装任何东西）" % py)
+    key = str(py)
+    cached = _RVC_PYTHON_CHECK.get(key)
+    if cached is not None:
+        return cached
+    try:
+        code, out, err = _run_proc(
+            [str(py), "-c", "import sys;print(sys.executable)"], timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        result = (False, "RVC 解释器跑不起来：%s（%s）"
+                  % (py, str(e) or type(e).__name__))
+        _RVC_PYTHON_CHECK[key] = result
+        return result
+    if code != 0:
+        detail = (err or "").strip().splitlines()
+        result = (False, "RVC 解释器跑不起来：%s（返回码 %s，%s）"
+                  % (py, code, detail[-1][:200] if detail else "没有输出"))
+        _RVC_PYTHON_CHECK[key] = result
+        return result
+    try:
+        code2, _out2, err2 = _run_proc(
+            [str(py), "-c", "import torch"], timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        code2, err2 = -1, str(e)
+    if code2 != 0:
+        detail = (err2 or "").strip().splitlines()
+        result = (False, "RVC 解释器装不了 RVC 的依赖：%s（import torch 失败：%s）"
+                  % (py, detail[-1][:200] if detail else "没有输出"))
+        _RVC_PYTHON_CHECK[key] = result
+        return result
+    result = (True, "就绪（%s）" % py)
+    _RVC_PYTHON_CHECK[key] = result
+    return result
 
 
 def _local_rvc_models(cfg: dict) -> list[str]:
@@ -415,8 +750,46 @@ def _resolve_ref(cfg: dict, emotion: Optional[str]):
     return None, "", name, note
 
 
+def _speak_worker(cfg: dict, url: str, payload: dict, out: Path,
+                  text: str) -> tuple:
+    """后台合成一段语音。返回 (成功?, 信息)。
+
+    失败时信息里带 error —— 聊天窗会把它如实显示成「合成失败：…」。
+    """
+    try:
+        req = urllib.request.Request(
+            url.rstrip("/") + "/tts",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            audio = resp.read()
+    except Exception as e:  # noqa: BLE001
+        return False, {"error": "合成失败：TTS 服务 %s 没响应（%s）。"
+                               "本机没装好这个服务时**不会**去下载模型。"
+                               % (url, str(e) or type(e).__name__)}
+    if not audio or len(audio) < 100:
+        return False, {"error": "合成失败：TTS 服务返回了 %d 字节，不是音频。"
+                               % len(audio or b"")}
+    try:
+        out.write_bytes(audio)
+    except OSError as e:
+        return False, {"error": "写文件失败：%s（%s）" % (out, e)}
+    size, dur = _wav_info(out)
+    if size <= 0:
+        return False, {"error": "写文件失败：%s 是空的。" % out}
+    # 结构化旁路文件：给界面做语音条用（模型看不到它）
+    write_voice_meta(out, "speak", dur, size, text)
+    return True, {"path": str(out), "duration": dur, "size": size, "text": text}
+
+
 def handle_speak(args: dict) -> dict:
-    """voice_speak：用本机 GPT-SoVITS 念一段话。"""
+    """voice_speak：用本机 GPT-SoVITS 念一段话。
+
+    **立刻返回**（合成在后台跑）—— 主人要的是「桌宠先回话，音频后到」。
+    本机资产检查（有没有参考音频）是**当场**做的：缺了就直接说失败。
+    合成好了**不会自动播放**（主人点语音条才放）。
+    """
     text = str(args.get("text") or "").strip()
     if not text:
         return _fail("要念的话不能为空。")
@@ -446,52 +819,18 @@ def handle_speak(args: dict) -> dict:
         "text_split_method": "cut5",
         "speed_factor": speed,
     }
-    try:
-        req = urllib.request.Request(
-            url.rstrip("/") + "/tts",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            audio = resp.read()
-    except Exception as e:  # noqa: BLE001
-        return _fail("合成失败：TTS 服务 %s 没响应（%s）。"
-                     "本机没装好这个服务时**不会**去下载模型。" % (url, str(e) or type(e).__name__))
-    if not audio or len(audio) < 100:
-        return _fail("合成失败：TTS 服务返回了 %d 字节，不是音频。" % len(audio or b""))
-
-    out = _out_dir(cfg) / ("speak_%s.wav" % _stamp())
-    try:
-        out.write_bytes(audio)
-    except OSError as e:
-        return _fail("写文件失败：%s（%s）" % (out, e))
-    size, dur = _wav_info(out)
-    if size <= 0:
-        return _fail("写文件失败：%s 是空的。" % out)
-
-    # 结构化旁路文件：给界面做语音条用（模型看不到它）
-    write_voice_meta(out, "speak", dur, size, text)
-    played = _play(out)
-    lines = ["念完了：%s（%s，%.1f 秒）。" % (text, _human_kb(size), dur)]
+    job_id = _job_id("speak")
+    out = _out_dir(cfg) / ("%s.wav" % job_id)
+    _start_job(cfg, "speak", "mcp_voice_speak",
+               lambda: _speak_worker(cfg, url, payload, out, text),
+               job_id=job_id, text=text, note=note)
+    extra = ""
     if emo_name:
-        lines.append("音色：%s。" % EMOTION_LABELS.get(emo_name, emo_name))
+        extra = "音色：%s。" % EMOTION_LABELS.get(emo_name, emo_name)
     if note:
-        lines.append("（%s）" % note)
-    if played:
-        lines.append("已经放给主人听了。")
-    else:
-        lines.append("（本机没放出来，音频在 %s）" % out)
-    return _ok(" ".join(lines))
-
-
-def _play(path: Path) -> bool:
-    """把音频放给主人听。失败不抛（调用方如实写进结果）。"""
-    try:
-        from app.voice.voice import play_audio_file
-        return bool(play_audio_file(path))
-    except Exception as e:  # noqa: BLE001
-        log.warning("播放失败 %s：%s", path, e)
-        return False
+        extra = (extra + "（%s）" % note).strip()
+    return _accepted(job_id, "已经受理：正在合成这段语音（要几秒钟）。",
+                     hint="「念给你听啦~」", extra=extra)
 
 
 # ---------------------------------------------------------------------------
@@ -800,10 +1139,18 @@ def _separate_model(cfg: dict) -> tuple:
     return None, None
 
 
+def _voice_lib_path(cfg: dict) -> Path:
+    """翻唱用的本地语音库目录（**只算路径，不建目录**）。
+
+    盘点状态用这个 —— 面板是只读的，不该顺手在磁盘上建目录。
+    """
+    lib = str(_rvc_cfg(cfg).get("voice_lib") or "")
+    return _abs(lib) if lib else (_out_dir(cfg) / "voice_lib")
+
+
 def _voice_lib_dir(cfg: dict) -> Path:
     """翻唱用的本地语音库目录（rvc_fetch.py 往这儿放下载+分离好的音频）。"""
-    lib = str(_rvc_cfg(cfg).get("voice_lib") or "")
-    d = _abs(lib) if lib else (_out_dir(cfg) / "voice_lib")
+    d = _voice_lib_path(cfg)
     try:
         d.mkdir(parents=True, exist_ok=True)
     except OSError as e:  # noqa: BLE001
@@ -840,7 +1187,7 @@ def _run_fetch(cfg: dict, url: str, lib_dir: Path, start: float = 0.0,
     返回 {"ok": bool, "payload": {...}, "stage": 阶段, "error": 原因}。
     """
     rvc = _rvc_cfg(cfg)
-    py_path = _abs(rvc.get("python") or "")
+    py_path = _rvc_python(cfg)
     script = _fetch_script_path(cfg)
     rvc_root = _abs(rvc.get("root") or "")
     cmd = [str(py_path), str(script), "--url", url, "--lib-dir", str(lib_dir)]
@@ -850,26 +1197,23 @@ def _run_fetch(cfg: dict, url: str, lib_dir: Path, start: float = 0.0,
         cmd += ["--end", str(end)]
     if sep_model is not None:
         cmd += ["--separate", "--model", sep_model.name]
-    env = dict(os.environ)
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
+    env = _rvc_env(cfg)
     if sep_model_dir is not None:
         # 告诉 pymss 模型在哪儿 —— 免得它以为自己没模型就去下载
         env["PYMSS_MODEL_DIR"] = str(sep_model_dir)
     timeout = float(rvc.get("fetch_timeout_s") or 1800)
     try:
-        proc = subprocess.run(
+        code, out, err = _run_proc(
             cmd, cwd=str(rvc_root) if rvc_root.is_dir() else None,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "payload": {}, "stage": "下载+分离",
-                "error": "超过 %d 秒还没结束，已放弃" % int(timeout)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "payload": {}, "stage": "下载+分离",
                 "error": "跑不动下载脚本（%s）" % (str(e) or type(e).__name__)}
-    out = proc.stdout or ""
-    blob = out + "\n" + (proc.stderr or "")
+    if code == -1:
+        return {"ok": False, "payload": {}, "stage": "下载+分离",
+                "error": "超过 %d 秒还没结束，已放弃（整棵进程树都杀掉了）"
+                         % int(timeout)}
+    blob = out + "\n" + (err or "")
     payload = None
     for line in reversed([x.strip() for x in out.splitlines() if x.strip()]):
         if line.startswith("{"):
@@ -902,9 +1246,7 @@ def _run_rvc(cfg: dict, src: Path, out: Path, pitch: int = 0) -> tuple:
     weight = _rvc_weight_path(cfg)
     index_rate = _num(rvc.get("index_rate"), 0.75)
     timeout = float(rvc.get("convert_timeout_s") or 900)
-    env = dict(os.environ)
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
+    env = _rvc_env(cfg)
 
     def _run(rate: float):
         cmd = [str(py_path), "-m", "infer.cli",
@@ -917,31 +1259,31 @@ def _run_rvc(cfg: dict, src: Path, out: Path, pitch: int = 0) -> tuple:
                "--overwrite"]
         if pitch:
             cmd += ["--pitch", str(pitch)]
-        return subprocess.run(
+        return _run_proc(
             cmd, cwd=str(rvc_root) if rvc_root.is_dir() else None,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=env)
 
     try:
-        proc = _run(index_rate)
-    except subprocess.TimeoutExpired:
-        return False, "RVC 推理超过 %d 秒还没结束，已放弃" % int(timeout)
+        code, sout, serr = _run(index_rate)
     except Exception as e:  # noqa: BLE001
         return False, "跑不动 RVC 脚本（%s）" % (str(e) or type(e).__name__)
-    blob = (proc.stderr or "") + "\n" + (proc.stdout or "")
-    if proc.returncode != 0 or not (out.is_file() or out.is_dir()):
+    if code == -1:
+        return False, ("RVC 推理超过 %d 秒还没结束，已放弃（整棵进程树都杀掉了）"
+                       % int(timeout))
+    blob = (serr or "") + "\n" + (sout or "")
+    if code != 0 or not (out.is_file() or out.is_dir()):
         # 索引缺失只是「检索增强」没了 —— 退化成无索引再跑一次
         if index_rate > 0 and ("index" in blob.lower() or "索引" in blob):
             try:
-                proc = _run(0)
-                blob = (proc.stderr or "") + "\n" + (proc.stdout or "")
+                code, sout, serr = _run(0)
+                blob = (serr or "") + "\n" + (sout or "")
             except Exception as e:  # noqa: BLE001
                 return False, ("无索引重跑也失败（%s）"
                                % (str(e) or type(e).__name__))
         else:
             tail = [x for x in blob.splitlines() if x.strip()]
             detail = tail[-1][:300] if tail else "（没有输出）"
-            return False, "RVC 返回码 %s，最后一行：%s" % (proc.returncode, detail)
+            return False, "RVC 返回码 %s，最后一行：%s" % (code, detail)
     if out.is_file() and out.stat().st_size <= 0:
         tail = [x for x in blob.splitlines() if x.strip()]
         detail = tail[-1][:300] if tail else "（没有输出）"
@@ -1035,22 +1377,137 @@ def _mix_with_instrumental(cfg: dict, vocal: Path, instrumental: Path,
     return True, ""
 
 
+def _cover_worker(cfg: dict, args: dict, song: str, artist: str,
+                   url: str, job_id: str) -> tuple:
+    """后台跑整条翻唱链路。返回 (成功?, 信息)。
+
+    找歌 → 下载 →（可选）分离人声 → RVC 音转音 →（可选）混伴奏 → 落盘。
+    哪一步失败就**说哪一步**（信息里的 error）。
+    """
+    t0 = time.time()
+    rvc = _rvc_cfg(cfg)
+    ok, why = _check_rvc_python(cfg)
+    if not ok:
+        return False, {"error": why}
+
+    # ① 找音源：先项目自己的搜索后端，再退到免 key 的公开音源
+    if url:
+        source = "调用方给的音频直链"
+    else:
+        url, source, notes = _find_audio_url(song, artist)
+        if not url:
+            return False, {"error": (
+                "没找到《%s》%s的音频直链%s。**不会**用自己编的词冒充这首歌唱 —— "
+                "换个说法（加上歌手名）再试一次，或者直接把音频直链给我（url 参数）。"
+                % (song, ("（%s）" % artist) if artist else "",
+                   ("（%s）" % notes) if notes else ""))}
+
+    # ② 下载 +（可选）分离人声
+    lib_dir = _voice_lib_dir(cfg)
+    start = _num(args.get("start"), 0.0)
+    end = _num(args.get("end"), 0.0)
+    trimmed = ""
+    max_s = _num(rvc.get("cover_max_seconds"), 180.0)
+    if end <= 0 and max_s > 0:
+        # 整首太长会跑太久 —— 截一段，并且**如实告诉主人**截了。
+        end = start + max_s
+        trimmed = "（整首太长，这次只取了前 %d 秒）" % int(max_s)
+    sep_model, sep_model_dir = _separate_model(cfg)
+    separated = sep_model is not None
+    sep_name = str(rvc.get("separate_model") or "bs_roformer_anvuew_sdr_12.45.ckpt")
+    fetched = _run_fetch(cfg, url, lib_dir, start, end,
+                         sep_model if separated else None,
+                         sep_model_dir if separated else None)
+    if not fetched["ok"]:
+        return False, {"error": "%s失败：%s" % (fetched["stage"], fetched["error"])}
+    payload = fetched["payload"]
+    vocal = lib_dir / str(payload.get("name") or "")
+    if not vocal.is_file():
+        return False, {"error": "下载成功，但语音库里没有这个文件：%s" % vocal}
+    instrumental = None
+    if payload.get("instrumental"):
+        cand = lib_dir / str(payload["instrumental"])
+        if cand.is_file():
+            instrumental = cand
+    # 歌本来没那么长 → 不用提「截了一段」
+    if trimmed:
+        _vdur = _wav_info(vocal)[1]
+        if _vdur and _vdur < max_s - 1.0:
+            trimmed = ""
+
+    # ③ 音转音（换成「大肥鱼」的嗓子）
+    out_dir = _out_dir(cfg)
+    conv_out = out_dir / ("%s_vocal.wav" % job_id)
+    try:
+        pitch = int(args.get("pitch") or 0)
+    except (TypeError, ValueError):
+        pitch = 0
+    ok, err = _run_convert(cfg, vocal, conv_out, pitch)
+    if not ok:
+        return False, {"error": "音转音失败：%s" % err}
+
+    # ④ 混伴奏（mix=auto/on/off）
+    mix_mode = str(args.get("mix") or "auto").strip().lower()
+    mix_volume = max(0.0, min(2.0, _num(args.get("mix_volume"),
+                                          _num(rvc.get("mix_volume"), 0.75))))
+    final = conv_out
+    mixed = False
+    notes_out = []
+    if mix_mode == "off":
+        notes_out.append("这次是清唱版（原伴奏被静音）。")
+    elif instrumental is not None:
+        mix_out = out_dir / ("%s.wav" % job_id)
+        ok, err = _mix_with_instrumental(cfg, conv_out, instrumental,
+                                         mix_out, mix_volume)
+        if ok:
+            final = mix_out
+            mixed = True
+        else:
+            notes_out.append("混伴奏失败（%s），这次给的是清唱版。" % err)
+    elif mix_mode == "on":
+        return False, {"error": "要求带伴奏，但这段素材没有伴奏轨"
+                                "（没分离出伴奏），只能给清唱版。"}
+    else:
+        notes_out.append("这段素材没有伴奏轨，这次给的是清唱版。")
+    if not separated:
+        notes_out.append("本机没有 %s 人声分离模型，这次是整段音频直接换调，"
+                         "伴奏也跟着变了调。" % sep_name)
+    if trimmed:
+        notes_out.append(trimmed)
+
+    size, dur = _wav_info(final)
+    if size <= 0:
+        return False, {"error": "音转音没有产出音频文件。"}
+    write_voice_meta(final, "sing", dur, size,
+                     "%s%s" % (song, (" - " + artist) if artist else ""))
+    kind = "大肥鱼的嗓子 + 原曲伴奏" if mixed else "只有大肥鱼的人声"
+    note = " ".join(notes_out + ["这次是%s。" % kind,
+                                 "音源：%s。这是对原曲的**翻唱**，不是原唱。"
+                                 % source,
+                                 "全程花了 %.1f 秒。" % (time.time() - t0)])
+    return True, {"path": str(final), "duration": dur, "size": size,
+                  "text": "%s%s" % (song, (" - " + artist) if artist else ""),
+                  "note": note, "kind_text": kind}
+
+
 def handle_cover(args: dict) -> dict:
     """voice_sing(song=...)：翻唱一首歌。
 
-    找歌 → 下载 →（可选）分离人声 → RVC 音转音 →（可选）混伴奏 → 播放。
+    **立刻返回** —— 整条链路（找歌 → 下载 → 分离 → 音转音 → 混伴奏）
+    在后台线程里跑，主人不用等（等三分钟主人就走了）。
+    本机资产检查是**当场**做的：缺了就直接说失败，不进后台。
+    合成好了**不会自动播放**（点语音条才放）。
     """
     song = str(args.get("song") or "").strip()
     artist = str(args.get("artist") or "").strip()
     url = str(args.get("url") or "").strip()
     if not song and not url:
         return _fail("要翻唱就得给歌名（song），或者给一个音频直链（url）。")
-    t0 = time.time()
     cfg = _cfg()
     rvc = _rvc_cfg(cfg)
 
     # ① 本机资产盘点 —— 缺了就如实说，**绝不下载**
-    py_path = _abs(rvc.get("python") or "")
+    py_path = _rvc_python(cfg)
     rvc_root = _abs(rvc.get("root") or "")
     weight = _rvc_weight_path(cfg)
     fetch_script = _fetch_script_path(cfg)
@@ -1063,123 +1520,88 @@ def handle_cover(args: dict) -> dict:
     if not fetch_script.is_file():
         return _fail("下载脚本不在本机：%s（本工具不会下载任何东西）。" % fetch_script)
 
-    sep_model, sep_model_dir = _separate_model(cfg)
-    separated = sep_model is not None
-    sep_name = str(rvc.get("separate_model") or "bs_roformer_anvuew_sdr_12.45.ckpt")
+    job_id = _job_id("cover")
+    _start_job(cfg, "sing", "mcp_voice_sing",
+               lambda: _cover_worker(cfg, args, song, artist, url, job_id),
+               job_id=job_id, text=song)
+    head = ("已经受理：开始翻唱《%s》%s。"
+            % (song or "这首歌", ("（%s）" % artist) if artist else ""))
+    return _accepted(job_id, head, hint="「我去唱一下，等我一会儿~」")
 
-    # ② 找音源：先项目自己的搜索后端，再退到免 key 的公开音源
-    if url:
-        source = "调用方给的音频直链"
-    else:
-        url, source, notes = _find_audio_url(song, artist)
-        if not url:
-            return _fail(
-                "没找到《%s》%s的音频直链%s。**不会**用自己编的词冒充这首歌唱 —— "
-                "换个说法（加上歌手名）再试一次，或者直接把音频直链给我（url 参数）。"
-                % (song, ("（%s）" % artist) if artist else "",
-                   ("（%s）" % notes) if notes else ""))
-
-    # ③ 下载 +（可选）分离人声
-    lib_dir = _voice_lib_dir(cfg)
-    start = _num(args.get("start"), 0.0)
-    end = _num(args.get("end"), 0.0)
-    trimmed = ""
-    max_s = _num(rvc.get("cover_max_seconds"), 180.0)
-    if end <= 0 and max_s > 0:
-        # 整首太长会顶穿 MCP 调用超时（voice server 注册的是 240 秒）——
-        # 截一段，并且**如实告诉主人**截了。
-        end = start + max_s
-        trimmed = "（整首太长，这次只取了前 %d 秒）" % int(max_s)
-    fetched = _run_fetch(cfg, url, lib_dir, start, end,
-                         sep_model if separated else None,
-                         sep_model_dir if separated else None)
-    if not fetched["ok"]:
-        return _fail("%s失败：%s" % (fetched["stage"], fetched["error"]))
-    payload = fetched["payload"]
-    vocal = lib_dir / str(payload.get("name") or "")
-    if not vocal.is_file():
-        return _fail("下载成功，但语音库里没有这个文件：%s" % vocal)
-    instrumental = None
-    if payload.get("instrumental"):
-        cand = lib_dir / str(payload["instrumental"])
-        if cand.is_file():
-            instrumental = cand
-    # 歌本来没那么长 → 不用提「截了一段」
-    if trimmed:
-        _vdur = _wav_info(vocal)[1]
-        if _vdur and _vdur < max_s - 1.0:
-            trimmed = ""
-
-    # ④ 音转音（换成「大肥鱼」的嗓子）
-    out_dir = _out_dir(cfg)
-    stem = "cover_%s_%s" % (_safe_stem(song or "song"), _stamp())
-    conv_out = out_dir / (stem + "_vocal.wav")
-    try:
-        pitch = int(args.get("pitch") or 0)
-    except (TypeError, ValueError):
-        pitch = 0
-    ok, err = _run_convert(cfg, vocal, conv_out, pitch)
-    if not ok:
-        return _fail("音转音失败：%s" % err)
-
-    # ⑤ 混伴奏（mix=auto/on/off）
-    mix_mode = str(args.get("mix") or "auto").strip().lower()
-    mix_volume = max(0.0, min(2.0, _num(args.get("mix_volume"),
-                                          _num(rvc.get("mix_volume"), 0.75))))
-    final = conv_out
-    mixed = False
-    notes_out = []
-    if mix_mode == "off":
-        notes_out.append("这次是清唱版（原伴奏被静音）。")
-    elif instrumental is not None:
-        mix_out = out_dir / (stem + ".wav")
-        ok, err = _mix_with_instrumental(cfg, conv_out, instrumental,
-                                         mix_out, mix_volume)
-        if ok:
-            final = mix_out
-            mixed = True
-        else:
-            notes_out.append("混伴奏失败（%s），这次给的是清唱版。" % err)
-    elif mix_mode == "on":
-        return _fail("要求带伴奏，但这段素材没有伴奏轨（没分离出伴奏），只能给清唱版。")
-    else:
-        notes_out.append("这段素材没有伴奏轨，这次给的是清唱版。")
-    if not separated:
-        notes_out.append("本机没有 %s 人声分离模型，这次是整段音频直接换调，"
-                         "伴奏也跟着变了调。" % sep_name)
-
-    size, dur = _wav_info(final)
-    if size <= 0:
-        return _fail("音转音没有产出音频文件。")
-    write_voice_meta(final, "sing", dur, size,
-                     "%s%s" % (song, (" - " + artist) if artist else ""))
-    played = _play(final)
-    elapsed = time.time() - t0
-    kind = "大肥鱼的嗓子 + 原曲伴奏" if mixed else "只有大肥鱼的人声"
-    lines = [
-        "翻唱完了：%s（%s，%.1f 秒，%s）。" % (song, kind, dur, _human_kb(size)),
-        "音源：%s。这是对原曲的**翻唱**，不是原唱。" % source,
-        "音频在 %s。" % final,
-        "全程花了 %.1f 秒。" % elapsed,
-    ]
-    lines.extend(notes_out)
-    if trimmed:
-        lines.append(trimmed)
-    if played:
-        lines.append("已经放给主人听了。")
-    else:
-        lines.append("（本机没放出来，音频在 %s）" % final)
-    return _ok(" ".join(lines))
 
 # ---------------------------------------------------------------------------
 # voice_sing：走本机 RVC（复用 E:\SnowLuma\rvc_sing.py）
 # ---------------------------------------------------------------------------
 
+def _sing_worker(cfg: dict, lyrics: str, out: Path, speed: float,
+                 seed: int, base: float) -> tuple:
+    """后台跑一次 RVC 唱歌。返回 (成功?, 信息)。"""
+    rvc = _rvc_cfg(cfg)
+    ok, why = _check_rvc_python(cfg)
+    if not ok:
+        return False, {"error": why}
+    py_path = _rvc_python(cfg)
+    script_path = _abs(rvc.get("sing_script") or "")
+    rvc_root = _abs(rvc.get("root") or "")
+    cmd = [str(py_path), str(script_path),
+           "--text", lyrics,
+           "--out", str(out),
+           "--model", str(rvc.get("model") or "da_fei_yu.pth")]
+    cmd += ["--speed", str(speed)]
+    cmd += ["--seed", str(seed)]
+    cmd += ["--base", str(base)]
+    # 参考音频用**项目配置里那个音色目录**（rvc_sing.py 里写死的那条路径
+    # 在本机不存在 —— 目录名是「大肥鱼」，脚本里写的是「飞鱼」，
+    # TTS 那边会直接 400）。这里显式传本机真实存在的那份。
+    ref_wav = _abs(cfg.get("voice_dir") or "voice/大飞鱼") / "dfy_ref.wav"
+    if ref_wav.is_file():
+        cmd += ["--ref-audio", str(ref_wav)]
+        lab = ref_wav.with_suffix(".lab")
+        if lab.is_file():
+            try:
+                prompt = lab.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                prompt = ""
+            if prompt:
+                cmd += ["--ref-text", prompt]
+
+    timeout = float(rvc.get("timeout_s") or 180)
+    try:
+        code, sout, serr = _run_proc(
+            cmd, cwd=str(rvc_root) if rvc_root.is_dir() else None,
+            timeout=timeout, env=_rvc_env(cfg))
+    except Exception as e:  # noqa: BLE001
+        return False, {"error": "唱歌失败：跑不动 RVC 脚本（%s）。"
+                                % (str(e) or type(e).__name__)}
+    blob = (serr or "") + "\n" + (sout or "")
+    if code == -1:
+        return False, {"error": "唱歌失败：RVC 推理超过 %d 秒还没结束，已放弃"
+                                "（整棵进程树都杀掉了）。" % int(timeout)}
+    if not out.is_file() or out.stat().st_size <= 0:
+        tail = [x for x in blob.strip().splitlines() if x.strip()]
+        detail = tail[-1][:300] if tail else "（没有输出）"
+        return False, {"error": "唱歌失败：没有产出音频。RVC 返回码 %s，最后一行：%s"
+                                % (code, detail)}
+    if code != 0:
+        tail = [x for x in blob.strip().splitlines() if x.strip()]
+        detail = tail[-1][:300] if tail else "（没有输出）"
+        return False, {"error": "唱歌失败：RVC 返回码 %s，最后一行：%s"
+                                % (code, detail)}
+
+    size, dur = _wav_info(out)
+    # 结构化旁路文件：给界面做语音条用（模型看不到它）
+    write_voice_meta(out, "sing", dur, size, lyrics)
+    return True, {"path": str(out), "duration": dur, "size": size, "text": lyrics,
+                  "note": "旋律是按这段词现编的调（seed=%d，基准 %.0f Hz）。"
+                          % (seed, base)}
+
+
 def handle_sing(args: dict) -> dict:
     """voice_sing：用本机 RVC 唱歌。
 
-    给了 song / url → **翻唱**（找歌 → 下载 → 分离人声 → 音转音 → 播放）；
-    只给 lyrics → 按旋律唱一段词（旋律是现编的调）。
+    给了 song / url → **翻唱**；只给 lyrics → 按旋律唱一段词（旋律是现编的调）。
+    **立刻返回** —— RVC 推理在后台线程里跑。
+    合成好了**不会自动播放**（点语音条才放）。
     """
     if str(args.get("song") or "").strip() or str(args.get("url") or "").strip():
         return handle_cover(args)
@@ -1189,9 +1611,8 @@ def handle_sing(args: dict) -> dict:
     cfg = _cfg()
     rvc = _rvc_cfg(cfg)
 
-    py_path = _abs(rvc.get("python") or "")
+    py_path = _rvc_python(cfg)
     script_path = _abs(rvc.get("sing_script") or "")
-    rvc_root = _abs(rvc.get("root") or "")
     weight = _rvc_weight_path(cfg)
 
     # 逐项检查本机资产 —— 缺了就如实说「音色不在本地」，**绝不下载**
@@ -1221,131 +1642,155 @@ def handle_sing(args: dict) -> dict:
     except (TypeError, ValueError):
         base = 329.63
 
-    out = _out_dir(cfg) / ("sing_%s.wav" % _stamp())
-    cmd = [str(py_path), str(script_path),
-           "--text", lyrics,
-           "--out", str(out),
-           "--model", str(rvc.get("model") or "da_fei_yu.pth")]
-    cmd += ["--speed", str(speed)]
-    cmd += ["--seed", str(seed)]
-    cmd += ["--base", str(base)]
-    # 参考音频用**项目配置里那个音色目录**（rvc_sing.py 里写死的那条路径
-    # 在本机不存在 —— 目录名是「大肥鱼」，脚本里写的是「飞鱼」，
-    # TTS 那边会直接 400）。这里显式传本机真实存在的那份。
-    ref_wav = _abs(cfg.get("voice_dir") or "voice/大飞鱼") / "dfy_ref.wav"
-    if ref_wav.is_file():
-        cmd += ["--ref-audio", str(ref_wav)]
-        lab = ref_wav.with_suffix(".lab")
-        if lab.is_file():
-            try:
-                prompt = lab.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                prompt = ""
-            if prompt:
-                cmd += ["--ref-text", prompt]
-
-    timeout = float(rvc.get("timeout_s") or 300)
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(rvc_root) if rvc_root.is_dir() else None,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return _fail("唱歌失败：RVC 推理超过 %d 秒还没结束，已放弃。" % int(timeout))
-    except Exception as e:  # noqa: BLE001
-        return _fail("唱歌失败：跑不动 RVC 脚本（%s）。" % (str(e) or type(e).__name__))
-
-    if not out.is_file() or out.stat().st_size <= 0:
-        tail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip().splitlines()
-        detail = tail[-1][:300] if tail else "（没有输出）"
-        return _fail("唱歌失败：没有产出音频。RVC 返回码 %s，最后一行：%s" % (proc.returncode, detail))
-    if proc.returncode != 0:
-        tail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip().splitlines()
-        detail = tail[-1][:300] if tail else "（没有输出）"
-        return _fail("唱歌失败：RVC 返回码 %s，最后一行：%s" % (proc.returncode, detail))
-
-    size, dur = _wav_info(out)
-    # 结构化旁路文件：给界面做语音条用（模型看不到它）
-    write_voice_meta(out, "sing", dur, size, lyrics)
-    played = _play(out)
-    lines = ["唱完了（%s，%.1f 秒）。" % (_human_kb(size), dur),
-             "旋律是按这段词现编的调（seed=%d，基准 %.0f Hz）。" % (seed, base),
-             "音频在 %s。" % out]
-    if played:
-        lines.append("已经放给主人听了。")
-    else:
-        lines.append("（本机没放出来，音频在 %s）" % out)
-    return _ok(" ".join(lines))
+    job_id = _job_id("sing")
+    out = _out_dir(cfg) / ("%s.wav" % job_id)
+    _start_job(cfg, "sing", "mcp_voice_sing",
+               lambda: _sing_worker(cfg, lyrics, out, speed, seed, base),
+               job_id=job_id, text=lyrics)
+    return _accepted(job_id, "已经受理：开始按旋律唱这段词（要跑一会儿 RVC）。",
+                     hint="「我去唱一下，等我一会儿~」")
 
 
 # ---------------------------------------------------------------------------
 # voice_status：只读盘点
 # ---------------------------------------------------------------------------
 
-def handle_status(args=None) -> dict:
-    """voice_status：报本机语音服务 / 音色盘点。"""
-    cfg = _cfg()
+def voice_status_payload(cfg: Optional[dict] = None,
+                         timeout: float = 4.0) -> dict:
+    """本机语音资产盘点（**结构化**）—— mcp_voice_status 与控制台共用这一份。
+
+    界面（控制台）要的是结构化字段，模型要的是人话；
+    两边都从这一个函数出，别各写一份（写两份一定会走歪）。
+    """
+    cfg = _cfg() if cfg is None else cfg
     url = str(cfg.get("tts_url") or "http://127.0.0.1:9880")
-    lines = ["本机语音服务状态："]
-
-    tts_up, tts_detail = _probe_tts(url)
-    lines.append("- TTS 合成服务（%s）：%s" % (url, tts_detail))
-
     rvc = _rvc_cfg(cfg)
-    py_path = _abs(rvc.get("python") or "")
+    py_path = _rvc_python(cfg)
     script_path = _abs(rvc.get("sing_script") or "")
     weight = _rvc_weight_path(cfg)
-    lines.append("- RVC 解释器（%s）：%s" % (py_path, "就绪" if py_path.is_file() else "不在本机"))
-    lines.append("- RVC 唱歌脚本（%s）：%s" % (script_path, "就绪" if script_path.is_file() else "不在本机"))
-    if weight.is_file():
-        try:
-            lines.append("- 本机音色权重：%s（%s）"
-                         % (weight.name, _human_kb(weight.stat().st_size)))
-        except OSError:
-            lines.append("- 本机音色权重：%s" % weight.name)
-    else:
-        lines.append("- 本机音色权重：音色不在本地（%s），**不会自动下载**。" % weight)
-
-    models = _local_rvc_models(cfg)
-    if models:
-        lines.append("- 本机可用音色（共 %d 个）：%s"
-                     % (len(models), "、".join(m.split("（")[0] for m in models)))
-    else:
-        lines.append("- 本机可用音色：音色不在本地（%s 下没有 .pth）"
-                     % (_abs(rvc.get("root") or "") / "assets" / "weights"))
-
-    emotions = _local_emotions(cfg)
-    if emotions:
-        lines.append("- 情绪参考（%s）：%s"
-                     % (_emotion_dir(cfg),
-                        "、".join(EMOTION_LABELS.get(n, n) for n, _w, _p in emotions)))
-    else:
-        lines.append("- 情绪参考：不在本地（%s）" % _emotion_dir(cfg))
-
-    # 翻唱链路的本机资产（找歌 → 下载 → 分离 → 音转音 → 混伴奏）
     fetch_script = _fetch_script_path(cfg)
     sep_model, _sep_dir = _separate_model(cfg)
-    lines.append("- 翻唱下载脚本（%s）：%s"
-                 % (fetch_script, "就绪" if fetch_script.is_file() else "不在本机"))
-    if sep_model is not None:
+
+    tts_up, tts_detail = _probe_tts(url, timeout=timeout)
+
+    # 本机音色权重（RVC 目录下的 .pth）—— 只列目录，绝不下载
+    models = []
+    wdir = _abs(rvc.get("root") or "") / "assets" / "weights"
+    if wdir.is_dir():
+        for mp in sorted(wdir.glob("*.pth")):
+            try:
+                msize = mp.stat().st_size
+            except OSError:
+                msize = 0
+            models.append({"name": mp.name, "path": str(mp), "size": msize,
+                           "size_kb": _human_kb(msize)})
+
+    # 本机情绪参考库
+    emotions = []
+    for ename, wav, prompt in _local_emotions(cfg):
         try:
-            lines.append("- 人声分离模型（%s）：就绪（%s）"
-                         % (sep_model.name, _human_kb(sep_model.stat().st_size)))
+            esize = wav.stat().st_size
         except OSError:
-            lines.append("- 人声分离模型（%s）：就绪" % sep_model.name)
+            esize = 0
+        emotions.append({"name": ename, "label": EMOTION_LABELS.get(ename, ename),
+                         "path": str(wav), "size": esize, "prompt": prompt})
+
+    try:
+        wsize = weight.stat().st_size if weight.is_file() else 0
+    except OSError:
+        wsize = 0
+    try:
+        ssize = sep_model.stat().st_size if sep_model is not None else 0
+    except OSError:
+        ssize = 0
+
+    return {
+        "tts": {"url": url, "up": bool(tts_up), "detail": tts_detail},
+        "rvc": {
+            "root": str(_abs(rvc.get("root") or "")),
+            "python": str(py_path),
+            "python_ok": py_path.is_file(),
+            "sing_script": str(script_path),
+            "sing_script_ok": script_path.is_file(),
+            "weight": str(weight),
+            "weight_ok": weight.is_file(),
+            "weight_size": wsize,
+            "fetch_script": str(fetch_script),
+            "fetch_script_ok": fetch_script.is_file(),
+            "separate_model": str(sep_model) if sep_model is not None else "",
+            "separate_model_ok": sep_model is not None,
+            "separate_model_size": ssize,
+            "separate_model_name": str(rvc.get("separate_model")
+                                       or "bs_roformer_anvuew_sdr_12.45.ckpt"),
+            "voice_lib": str(_voice_lib_path(cfg)),
+        },
+        "models": models,
+        "model_count": len(models),
+        "weights_dir": str(wdir),
+        "emotions": emotions,
+        "emotion_count": len(emotions),
+        "emotion_dir": str(_emotion_dir(cfg)),
+        "voice_dir": str(_abs(cfg.get("voice_dir") or "voice/大肥鱼")),
+        "out_dir": str(_out_dir(cfg)),
+        "search_backend": ("Tavily（已配置 key）" if _tavily_key()
+                           else "Tavily 没配 key，DuckDuckGo 没装 ddgs 时只能靠公开音源"),
+    }
+
+
+def handle_status(args=None) -> dict:
+    """voice_status：报本机语音服务 / 音色盘点。
+
+    文本**从结构化盘点里渲染**（voice_status_payload）——
+    控制台的「语音」Tab 用的是同一份数据，不会跟这里说两套。
+    """
+    data = voice_status_payload()
+    tts = data["tts"]
+    rvc = data["rvc"]
+    lines = ["本机语音服务状态："]
+
+    lines.append("- TTS 合成服务（%s）：%s" % (tts["url"], tts["detail"]))
+    lines.append("- RVC 解释器（%s）：%s"
+                 % (rvc["python"], "就绪" if rvc["python_ok"] else "不在本机"))
+    lines.append("- RVC 唱歌脚本（%s）：%s"
+                 % (rvc["sing_script"], "就绪" if rvc["sing_script_ok"] else "不在本机"))
+    if rvc["weight_ok"]:
+        lines.append("- 本机音色权重：%s（%s）"
+                     % (Path(rvc["weight"]).name, _human_kb(rvc["weight_size"])))
+    else:
+        lines.append("- 本机音色权重：音色不在本地（%s），**不会自动下载**。"
+                     % rvc["weight"])
+
+    if data["models"]:
+        lines.append("- 本机可用音色（共 %d 个）：%s"
+                     % (data["model_count"],
+                        "、".join(m["name"] for m in data["models"])))
+    else:
+        lines.append("- 本机可用音色：音色不在本地（%s 下没有 .pth）"
+                     % data["weights_dir"])
+
+    if data["emotions"]:
+        lines.append("- 情绪参考（%s）：%s"
+                     % (data["emotion_dir"],
+                        "、".join(e["label"] for e in data["emotions"])))
+    else:
+        lines.append("- 情绪参考：不在本地（%s）" % data["emotion_dir"])
+
+    # 翻唱链路的本机资产（找歌 → 下载 → 分离 → 音转音 → 混伴奏）
+    lines.append("- 翻唱下载脚本（%s）：%s"
+                 % (rvc["fetch_script"],
+                    "就绪" if rvc["fetch_script_ok"] else "不在本机"))
+    if rvc["separate_model_ok"]:
+        lines.append("- 人声分离模型（%s）：就绪（%s）"
+                     % (Path(rvc["separate_model"]).name,
+                        _human_kb(rvc["separate_model_size"])))
     else:
         lines.append("- 人声分离模型：不在本地（%s），**不会自动下载**；"
                      "没有它就分不开人声和伴奏（翻唱会退化成整段换调）。"
-                     % (rvc.get("separate_model") or "bs_roformer_anvuew_sdr_12.45.ckpt"))
-    lines.append("- 翻唱语音库：%s" % _voice_lib_dir(cfg))
-    lines.append("- 搜索后端：%s" % ("Tavily（已配置 key）"
-                                     if _tavily_key() else "Tavily 没配 key，"
-                                                          "DuckDuckGo 没装 ddgs 时只能靠公开音源"))
+                     % rvc["separate_model_name"])
+    lines.append("- 翻唱语音库：%s" % rvc["voice_lib"])
+    lines.append("- 搜索后端：%s" % data["search_backend"])
 
-    lines.append("- 语音产物目录：%s" % _out_dir(cfg))
+    lines.append("- 语音产物目录：%s" % data["out_dir"])
     lines.append("不可用的服务对应的工具会失败，其余工具不受影响。"
                  "本工具只读探测，**不会下载任何模型**。")
     return _ok("\n".join(lines))

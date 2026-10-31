@@ -155,6 +155,7 @@ from .utils import (  # noqa: F401
     split_reply_sentences, reply_pacing_settings, compute_reply_gap_ms,
     voice_waveform_bars, voice_bar_count, voice_play_icon_data_url,
     _voice_play_key,
+    voice_job_id, read_voice_job,
 )
 
 
@@ -451,6 +452,16 @@ class ChatWindow(QWidget):
         self._voice_play_timer = QTimer(self)
         self._voice_play_timer.setSingleShot(True)
         self._voice_play_timer.timeout.connect(self._on_voice_play_finished)
+        # 语音合成任务（先回复、后合成）：任务号 → 任务信息。
+        # **只盯还在 pending 的那几个** —— 没有任务在跑时定时器是停着的，
+        # 不会每轮聊天都去扫一遍产物目录。
+        self._voice_pending_jobs: dict = {}
+        # 合成好了 / 失败了之后补进聊天窗的消息（不进 LLM 历史，
+        # 但重建聊天区时要一起画出来）。
+        self._voice_arrived: list = []
+        self._voice_job_timer = QTimer(self)
+        self._voice_job_timer.setInterval(self._voice_job_poll_ms())
+        self._voice_job_timer.timeout.connect(self._check_voice_jobs)
         # 用户改头像后,要把 chat 段写回 config.yaml
         self._cfg_path: str = cfg_path
         # TTS 引擎引用（用于在 _on_done 时同步 prepare 音频）
@@ -466,6 +477,16 @@ class ChatWindow(QWidget):
         # 现在固定用共享 id（同时也是 token 台账的 session_id）。
         # 手工传 session_id 时仍以传入值为准。
         self._session_id = session_id or (SHARED_SESSION_ID if char_cfg else None)
+        # **台账 session**（成本记账）：永远是共享的那一个 —— 一个桌宠一个钱包。
+        # 它与 checkpoint 线程 id 是**两件事**（换人设时只换后者）。
+        self._ledger_session = SHARED_SESSION_ID
+        # **模型上下文起点**（self.history 的下标）：换人设时移到末尾 ——
+        # 旧历史仍然显示在聊天区（可查），但**不再进模型上下文**
+        # （owner 决定：换人设 = 开新会话；否则旧人设的对话会把模型带偏 ——
+        #  实测历史 239 条里有 41 条「小汐」、18 条「喵」→ 模型继续演旧人设）。
+        self._ctx_start = 0
+        # 换人设次数 → checkpoint 线程 id 的后缀（每次换人设开一条新线程）
+        self._char_switch_seq = 0
         # 磁盘上还留着的旧 per-character 线程 → 改名并到共享线程。
         # 只迁一次（改之前先备份 db），没传 langchain_cfg 的调用方不碰盘。
         if (langchain_cfg is not None
@@ -889,12 +910,26 @@ class ChatWindow(QWidget):
     def switch_character(self, rel_path: str) -> tuple[bool, str]:
         """运行时切换角色：改配置 + 重拼 system prompt + 刷新界面。
 
-        聊天历史**不动** —— 人设和历史是两回事。
+        **换人设 = 开新会话**（owner 决定）：
+        - 旧历史**仍然显示**在聊天区（可查），但**不再进模型上下文**；
+        - checkpoint 换一条新线程（§_ctx_start§ / §_session_id§）；
+        - **长期记忆（sidecar）仍然共享** —— 一只桌宠一份记忆，这条不变。
+
+        为什么：实测共享历史 239 条里有 41 条「小汐」、18 条「喵」，
+        模型跟着旧人设演（大肥鱼也在说「喵」）。
+
         返回 (是否成功, 提示信息)；失败时保持当前角色不变。
         """
         ok, msg = _switch_character(self.char_cfg, self._character_root(), rel_path)
         if not ok:
             return False, msg
+        # 模型上下文从此刻重新开始（旧消息留在聊天区，但不再进上下文）
+        self._ctx_start = len(self.history)
+        # checkpoint 换一条新线程（台账 session 不变 —— 一个钱包）
+        self._char_switch_seq = int(getattr(self, "_char_switch_seq", 0)) + 1
+        self._session_id = "%s#%d" % (SHARED_SESSION_ID, self._char_switch_seq)
+        log.info("换人设 → 新会话：上下文从第 %d 条开始，checkpoint 线程 %s",
+                 self._ctx_start, self._session_id)
         self._rebuild_system_prompt()
         self._refresh_character_ui()
         # v58: 聊天历史是共享的 —— 切人设不换历史库的身份（同一个共享桶）
@@ -3195,7 +3230,7 @@ class ChatWindow(QWidget):
                 from app.brain.token_ledger import (
                     set_session as _set_ledger_session,
                 )
-                _set_ledger_session(self._session_id or "")
+                _set_ledger_session(self._ledger_session or "")
             except Exception:  # noqa: BLE001
                 pass
             client = LLMClient(
@@ -3333,7 +3368,9 @@ class ChatWindow(QWidget):
         """
         import re
         # 先在 self.history 上找幻觉索引（保留 tools）
-        history = [m for m in self.history if m.role in ("user", "assistant")]
+        # 只取**本次人设段落**（换人设之前的旧历史不进模型上下文，但仍在聊天区可见）
+        history = [m for m in self.history[self._ctx_start:]
+                   if m.role in ("user", "assistant")]
 
         hallucination_indices: list[int] = []
         for i, m in enumerate(history):
@@ -3575,6 +3612,110 @@ class ChatWindow(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    # ------------------------------------------------------------------
+    # 语音合成：先回复，后合成
+    # ------------------------------------------------------------------
+    #
+    # 语音工具是**两段式**的：它立刻返回一句「已经受理」，真的合成在后台跑。
+    # 这里盯住**还在 pending 的那几个任务**：
+    #   · 合成好了 → 往聊天里补一条带语音条的消息（主人点一下才放）；
+    #   · 合成失败 → 往聊天里补一条「合成失败：…」（不装没发生）。
+    # 没有 pending 任务时定时器是**停着的** —— 不扫产物目录，不费电。
+
+    @staticmethod
+    def _voice_job_poll_ms() -> int:
+        """盯合成任务的轮询间隔（毫秒）。"""
+        try:
+            from app.voice.voice import load_voice_settings
+            cfg = load_voice_settings() or {}
+            ms = int(cfg.get("job_poll_interval_ms") or 1000)
+        except Exception:  # noqa: BLE001
+            ms = 1000
+        return max(200, min(5000, ms))
+
+    @staticmethod
+    def _voice_job_timeout_s() -> float:
+        """等一次合成最多等多久（秒）。
+
+        超过就把这次任务**如实说成超时**并放弃盯它 ——
+        不然语音 server 要是中途挂了，任务永远停在 pending，
+        这个表就永远转下去。
+        """
+        try:
+            from app.voice.voice import load_voice_settings
+            cfg = load_voice_settings() or {}
+            sec = float(cfg.get("job_timeout_s") or 3600)
+        except Exception:  # noqa: BLE001
+            sec = 3600.0
+        return max(60.0, sec)
+
+    def _track_voice_job(self, name: str, args: str, result: str) -> None:
+        """语音工具的结果里带任务号 → 登记成「在跑的合成」。"""
+        if name not in _VOICE_KIND:
+            return
+        job_id = voice_job_id(result)
+        if not job_id:
+            return
+        self._voice_pending_jobs[job_id] = {
+            "job_id": job_id,
+            "tool": name,
+            "args": args or "{}",
+            "result": result or "",
+            "since": time.time(),
+        }
+        if not self._voice_job_timer.isActive():
+            self._voice_job_timer.start()
+
+    def _check_voice_jobs(self) -> None:
+        """看一眼还在跑的合成：跑完了就把结果发进聊天。"""
+        if not self._voice_pending_jobs:
+            self._voice_job_timer.stop()
+            return
+        for job_id in list(self._voice_pending_jobs.keys()):
+            job = read_voice_job(job_id)
+            state = str(job.get("state") or "")
+            if not job or state == "pending":
+                # 语音 server 要是中途挂了，任务会永远停在 pending ——
+                # 到点就如实说超时，别让这个表永远转下去。
+                since = float(self._voice_pending_jobs.get(job_id, {}).get("since")
+                              or 0.0)
+                if since and (time.time() - since) > self._voice_job_timeout_s():
+                    self._voice_pending_jobs.pop(job_id, None)
+                    self._voice_job_failed({"error": "合成超时了，没有结果。"})
+                continue
+            self._voice_pending_jobs.pop(job_id, None)
+            if state == "done":
+                self._voice_job_arrived(job)
+            else:
+                self._voice_job_failed(job)
+        if not self._voice_pending_jobs:
+            self._voice_job_timer.stop()
+
+    def _voice_job_arrived(self, job: dict) -> None:
+        """合成好了 → 往聊天里补一条带语音条的消息（自动出现，不用主人点）。"""
+        path = str(job.get("path") or "")
+        dur = float(job.get("duration") or 0.0)
+        size = int(job.get("size") or 0)
+        tool = str(job.get("tool") or "mcp_voice_sing")
+        args = str(job.get("args") or "{}")
+        if not path or not Path(path).is_file():
+            self._voice_job_failed({"error": "合成完了但音频文件不在了：%s" % path})
+            return
+        # 结果文本按生产端的约定写（界面靠它解析路径 / 时长 / 体积）
+        text = ("语音合成好了（%.1f 秒，%.1f KB）。音频在 %s。"
+                % (dur, size / 1024.0, path))
+        msg = Message(role="assistant", content=str(job.get("note") or ""),
+                      tools=[(tool, args, text, "ok")])
+        self._voice_arrived.append(msg)
+        self._render_message(msg)
+
+    def _voice_job_failed(self, job: dict) -> None:
+        """合成失败 → 如实说出来（不装没发生，也不给一个坏掉的语音条）。"""
+        err = str(job.get("error") or "不知道是哪一步失败了")
+        msg = Message(role="system", content="合成失败：%s" % err)
+        self._voice_arrived.append(msg)
+        self._render_message(msg)
+
     def _show_image_popup(self, url: str) -> None:
         """点击 chat 缩略图弹原图 QDialog, Esc / 点 × 关闭。
 
@@ -3688,6 +3829,10 @@ class ChatWindow(QWidget):
         界面拿它渲染成败标记，不再从结果文本猜成败（文本没前缀的失败曾被显示成「完成」）。
         老后端不带 status → 空串 → 渲染端回退到文本判定。
         """
+        # 语音工具是「两段式」的：结果里带任务号 → 登记成「在跑的合成」，
+        # 合成好了 / 失败了再自己发进聊天（主人什么都不用做）。
+        # 这一步**不能**被「没有当前气泡」挡住 —— 语音条是界面自己的事。
+        self._track_voice_job(name, args or "", result or "")
         if self._current_bot_msg is None:
             return
         # run_script：把 [OK] path\n--- stdout ---\n…\n--- stderr ---\n… 的结构化结果
@@ -4647,7 +4792,12 @@ class ChatWindow(QWidget):
         if not parsed.text.strip():
             if self._current_bot_msg.tools:
                 # 工具执行了但模型没给文字 → 一句完成确认
-                parsed.text = "好的，已经帮主人搞定啦~"
+                if self._voice_pending_jobs:
+                    # 语音是「两段式」的：音频还在后台合成，
+                    # 这时候说「搞定啦」是骗主人
+                    parsed.text = "好的，我这就去弄，等我一会儿~"
+                else:
+                    parsed.text = "好的，已经帮主人搞定啦~"
                 if not parsed.tag_found:
                     parsed.emotion = Emotion.HAPPY
             else:
@@ -5677,6 +5827,9 @@ class ChatWindow(QWidget):
         if welcome is not None:
             self._render_message(welcome)
         for msg in list(self.history or []):
+            self._render_message(msg)
+        # 3.5 后到的语音条（合成好了 / 失败了才出现的那些）也要画出来
+        for msg in list(getattr(self, "_voice_arrived", []) or []):
             self._render_message(msg)
         # 4. 重建 streaming 占位 (如果还在 streaming)
         if streaming:

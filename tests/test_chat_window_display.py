@@ -155,13 +155,18 @@ def test_ok_tool_row_has_ok_class():
     assert "[完成]" in html
 
 
-def test_voice_tool_step_shows_name_status_duration_and_file():
-    """语音工具在界面上留痕 —— 英文工具名（主）+ 中文小提示 + 真实状态 + 时长 + 体积。"""
+def test_voice_tool_step_shows_name_status_duration_and_file(tmp_path,
+                                                                      monkeypatch):
+    """语音工具在界面上留痕 —— 英文工具名（主）+ 中文小提示 + 真实状态 + 时长 + 体积。
+
+    语音是**两段式**的：合成好了之后那条消息里的工具行才有时长 / 体积。
+    """
+    wav = _voice_artifact(tmp_path)
+    _patch_voice_out(monkeypatch, tmp_path)
     cw = _cw()
     msg = Message(role="assistant", content="念给你听~", tools=[
         ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
-         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
-         "已经放给主人听了。", "ok"),
+         "语音合成好了（3.4 秒，24.1 KB）。音频在 %s。" % wav, "ok"),
     ])
     cw._tools_collapsed_by_msg[id(msg)] = False
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
@@ -173,16 +178,18 @@ def test_voice_tool_step_shows_name_status_duration_and_file():
     assert "24.1 KB" in html, "语音体积没显示"
 
 
-def test_voice_sing_tool_step_shows_produced_file():
+def test_voice_sing_tool_step_shows_produced_file(tmp_path, monkeypatch):
     """唱歌：语音条上是 QQ 那样的语音条 —— 有时长，**没有文件名**。
 
     owner 原话：「不要显示『11.8 秒 sing_20261030-200825.wav』这种东西」。
     """
+    wav = _voice_artifact(tmp_path, name="sing_20260101-120000.wav", kind="sing",
+                          duration=5.0, size=12800)
+    _patch_voice_out(monkeypatch, tmp_path)
     cw = _cw()
     msg = Message(role="assistant", content="唱一段", tools=[
         ("mcp_voice_sing", '{"lyrics":"啦啦啦"}',
-         "唱完了（12.5 KB，5.0 秒）。 旋律是按这段词现编的调（seed=7，基准 330 Hz）。 "
-         "音频在 data\\voice_out\\sing_20260101-120000.wav。 已经放给主人听了。", "ok"),
+         "语音合成好了（5.0 秒，12.5 KB）。音频在 %s。" % wav, "ok"),
     ])
     cw._tools_collapsed_by_msg[id(msg)] = False
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
@@ -489,8 +496,7 @@ def test_voice_bubble_is_qq_style_no_file_name(tmp_path, monkeypatch):
     cw = _cw()
     msg = Message(role="assistant", content="念给你听~", tools=[
         ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
-         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
-         "已经放给主人听了。", "ok"),
+         "语音合成好了（3.4 秒，24.1 KB）。音频在 %s。" % wav, "ok"),
     ])
     html = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
     assert "voice-bubble" in html, html
@@ -534,8 +540,7 @@ def test_voice_bubble_play_click_keeps_chat_unchanged(tmp_path, monkeypatch):
     cw.history = []
     msg = Message(role="assistant", content="念给你听~", tools=[
         ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
-         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
-         "已经放给主人听了。", "ok"),
+         "语音合成好了（3.4 秒，24.1 KB）。音频在 %s。" % wav, "ok"),
     ])
     cw._render_message(msg)
     cw.history.append(msg)
@@ -573,13 +578,12 @@ def test_voice_bubble_play_click_keeps_chat_unchanged(tmp_path, monkeypatch):
 
 def test_voice_bubble_is_honest_when_file_is_gone(tmp_path, monkeypatch):
     """A2：音频文件没了就说没有 —— 不给点了没反应的死按钮。"""
-    _voice_artifact(tmp_path, make_wav=False)
+    wav = _voice_artifact(tmp_path, make_wav=False)
     _patch_voice_out(monkeypatch, tmp_path)
     cw = _cw()
     msg = Message(role="assistant", content="念给你听~", tools=[
         ("mcp_voice_speak", '{"text":"今天也要好好吃饭哦"}',
-         "念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
-         "已经放给主人听了。", "ok"),
+         "语音合成好了（3.4 秒，24.1 KB）。音频在 %s。" % wav, "ok"),
     ])
     html = cw._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
     assert "voice-bubble" in html, html
@@ -655,7 +659,11 @@ def test_tool_block_is_quiet_but_failure_still_stands_out():
 
 
 def test_voice_tool_result_text_unchanged_meta_goes_out_of_band(tmp_path, monkeypatch):
-    """A3：模型看到的结果文本原样不变；结构化信息走旁路文件，不进文本。"""
+    """A3：模型看到的结果文本原样不变；结构化信息走旁路文件，不进文本。
+
+    语音是**两段式**的：工具**立刻**返回「已经受理」（里面没有机器标记），
+    合成好了之后结构化信息（路径 / 时长 / 体积）在旁路文件里。
+    """
     from app.mcp import voice_server
     out_dir = tmp_path / "voice_out"
     monkeypatch.setattr(voice_server, "_cfg", lambda: {
@@ -664,7 +672,6 @@ def test_voice_tool_result_text_unchanged_meta_goes_out_of_band(tmp_path, monkey
     monkeypatch.setattr(voice_server, "_resolve_ref",
                         lambda cfg, emo: (Path("ref.wav"), "", "neutral", ""))
     monkeypatch.setattr(voice_server, "_wav_info", lambda p: (24647, 3.4))
-    monkeypatch.setattr(voice_server, "_play", lambda p: True)
 
     class _Resp:
         def read(self):
@@ -681,12 +688,17 @@ def test_voice_tool_result_text_unchanged_meta_goes_out_of_band(tmp_path, monkey
 
     res = voice_server.handle_speak({"text": "今天也要好好吃饭哦"})
     text = res["content"][0]["text"]
-    assert text == ("念完了：今天也要好好吃饭哦（24.1 KB，3.4 秒）。 音色：中性。 "
-                    "已经放给主人听了。"), text
     # 模型看到的那段文本里没有机器标记
     for bad in ("{", "}", ".voice.json", "<", ">"):
         assert bad not in text, f"模型看到的结果文本里有机器标记：{bad}"
-    # 结构化信息在旁路文件里（不在文本里）
+    # 两段式：现在还没好（模型不能说「念完了」）
+    assert "现在还没好" in text, text
+    assert "念完" not in text, text
+    # 合成好了 → 结构化信息在旁路文件里（不在文本里）
+    job = voice_server.wait_voice_job(
+        re.search(r"任务号[:：]\s*([A-Za-z0-9_\-]+)", text).group(1),
+        voice_server._cfg(), timeout=30)
+    assert job.get("state") == "done", job
     metas = list(out_dir.glob("*" + voice_server.VOICE_META_SUFFIX))
     assert metas, "旁路文件没写"
     data = json.loads(metas[0].read_text(encoding="utf-8"))
@@ -703,4 +715,104 @@ def test_voice_tool_result_text_unchanged_meta_goes_out_of_band(tmp_path, monkey
     assert ".voice.json" not in html
     assert "{" not in html and "}" not in html
     assert msg.tools[0][2] == text, "界面改了结果文本（模型看到的不一样）"
+
+
+# ---------------------------------------------------------------------------
+# 两段式：语音条**后到**（主人什么都不用做）
+# ---------------------------------------------------------------------------
+
+def _write_job(out_dir, job_id, payload):
+    """写一个合成任务状态文件（界面端读的就是它）。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / (job_id + ".voicejob.json")
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_voice_job_arrives_later_as_new_message(tmp_path, monkeypatch):
+    """合成好了 → 聊天里**自己**多出一条带语音条的消息（不用主人点任何东西）。"""
+    from app.ui.chat_window import utils as _u
+    out_dir = tmp_path / "voice_out"
+    _patch_voice_out(monkeypatch, tmp_path)
+    wav = _voice_artifact(tmp_path, name="sing_20260101-120000.wav", kind="sing",
+                          duration=5.0, size=12800)
+    job_id = "sing_20260101-120000"
+    _write_job(out_dir, job_id, {
+        "id": job_id, "state": "done", "kind": "sing", "tool": "mcp_voice_sing",
+        "text": "啦啦啦", "note": "", "error": "",
+        "path": str(wav), "duration": 5.0, "size": 12800,
+        "created": time.time(), "updated": time.time(),
+    })
+    cw = _cw()
+    cw.chat_view.clear()
+    # 先登记一个「在跑的合成」
+    cw._track_voice_job("mcp_voice_sing", '{"lyrics":"啦啦啦"}',
+                         "已经受理：开始按旋律唱这段词。 任务号：%s" % job_id)
+    assert job_id in cw._voice_pending_jobs
+    cw._check_voice_jobs()
+    # 任务跑完了 → 聊天里多了一条带语音条的消息
+    assert not cw._voice_pending_jobs, "跑完了还没从待办里去掉"
+    assert cw._voice_arrived, "后到的语音消息没记下来"
+    arrived = cw._voice_arrived[0]
+    bubble = cw._voice_bubbles_html(arrived.tools, msg_ts=arrived.ts)
+    assert "voice-bubble" in bubble, bubble
+    assert "5.0 秒" in bubble, bubble
+    # 聊天区里真的多了一条（语音条 + 时长）
+    text = cw.chat_view.toPlainText()
+    assert "5.0 秒" in text, text
+    assert arrived.role == "assistant"
+
+
+def test_voice_job_failure_is_reported_honestly(tmp_path, monkeypatch):
+    """合成失败 → 聊天里**如实说**失败（不装没发生，也不给坏掉的语音条）。"""
+    out_dir = tmp_path / "voice_out"
+    _patch_voice_out(monkeypatch, tmp_path)
+    job_id = "sing_20260101-120001"
+    _write_job(out_dir, job_id, {
+        "id": job_id, "state": "failed", "kind": "sing", "tool": "mcp_voice_sing",
+        "text": "", "note": "", "error": "音转音失败：显存不够",
+        "path": "", "duration": 0.0, "size": 0,
+        "created": time.time(), "updated": time.time(),
+    })
+    cw = _cw()
+    cw.chat_view.clear()
+    cw._track_voice_job("mcp_voice_sing", '{"lyrics":"啦啦啦"}',
+                         "已经受理：开始按旋律唱这段词。 任务号：%s" % job_id)
+    cw._check_voice_jobs()
+    text = cw.chat_view.toPlainText()
+    assert "合成失败" in text, text
+    assert "显存不够" in text, text
+    assert cw._voice_arrived, "失败消息没记下来"
+    assert cw._voice_arrived[0].role == "system"
+    # 失败了**不给**语音条（不给一个坏掉的按钮）
+    assert not cw._voice_arrived[0].tools
+    assert cw._voice_bubbles_html(cw._voice_arrived[0].tools) == ""
+
+
+def test_voice_watch_only_polls_pending_jobs(tmp_path, monkeypatch):
+    """没有任务在跑时**不轮询**（不扫产物目录）；有任务才开表。"""
+    from app.ui.chat_window import utils as _u
+    out_dir = tmp_path / "voice_out"
+    _patch_voice_out(monkeypatch, tmp_path)
+    cw = _cw()
+    assert not cw._voice_job_timer.isActive(), "没有任务却一直在轮询"
+    # 没有任务号 → 不登记
+    cw._track_voice_job("mcp_voice_sing", "{}", "已经受理：开始唱。")
+    assert not cw._voice_pending_jobs
+    assert not cw._voice_job_timer.isActive()
+    # 不是语音工具 → 不登记
+    cw._track_voice_job("web_search", "{}", "任务号：abc")
+    assert not cw._voice_pending_jobs
+    # 有任务号 → 登记并开表
+    cw._track_voice_job("mcp_voice_sing", "{}", "任务号：sing_1")
+    assert cw._voice_pending_jobs
+    assert cw._voice_job_timer.isActive()
+    # 任务跑完 → 表停掉
+    _write_job(out_dir, "sing_1", {
+        "id": "sing_1", "state": "done", "kind": "sing", "tool": "mcp_voice_sing",
+        "text": "", "note": "", "error": "", "path": "", "duration": 0.0,
+        "size": 0, "created": time.time(), "updated": time.time(),
+    })
+    cw._check_voice_jobs()
+    assert not cw._voice_job_timer.isActive(), "任务跑完了还在轮询"
 

@@ -194,12 +194,17 @@ def test_single_sentence_reply_arrives_immediately(tmp_path):
     assert marks[0][0] < 0.3, "一句话的回复等了 %r 秒才到" % marks[0][0]
 
 
-def test_default_gap_config_is_qq_bridge_like():
-    """默认间隔在 qq-bridge 的那个量级（1~3 秒），偶尔来一个长停顿。"""
+def test_default_gap_config_never_lags_the_model():
+    """默认间隔**不得超过模型的出句速度**（实测约 1 秒/句）。
+
+    为什么不是 qq-bridge 的 1~3 秒：qq-bridge 的间隔是**发多条 QQ 消息**的网络节奏；
+    桌宠是本地窗口，多等 1~3 秒纯粹是白等 —— 实测整轮 15.1 秒，而模型自己只要 1.6 秒。
+    """
     cfg = reply_pacing_settings()
     assert cfg["enabled"] is True
-    assert cfg["min_gap_ms"] == 1000, cfg
-    assert cfg["max_gap_ms"] == 3000, cfg
+    # 间隔必须小于「模型出一句」的典型时间（~1 秒），否则队列会堆积
+    assert cfg["max_gap_ms"] <= 1000, cfg
+    assert 0 <= cfg["min_gap_ms"] <= cfg["max_gap_ms"], cfg
     assert 0.0 <= cfg["long_gap_probability"] <= 1.0, cfg
     assert cfg["long_gap_min_ms"] >= cfg["max_gap_ms"], cfg
     # 算出来的间隔都落在配置的范围里
@@ -281,3 +286,34 @@ def test_stop_stops_remaining_sentences(tmp_path):
     text = cw.chat_view.toPlainText()
     for sentence in queued:
         assert sentence not in text, "叫停之后还在发：%r" % sentence
+
+
+def test_switching_persona_starts_a_new_context():
+    """换人设 = **开新会话**：旧历史留在聊天区（可查），但不再进模型上下文。
+
+    背景：共享记忆之后，历史里全是旧人设的对话（实测 239 条里有 41 条「小汐」、
+    18 条「喵」）→ 模型跟着旧人设演。owner 决定：换人设就开新会话。
+    """
+    from app.ui.chat_window import ChatWindow
+    from app.ui.chat_window.message import Message
+
+    char_cfg = CharacterConfig(name="小汐")
+    llm_cfg = type("L", (), {"model": "test", "api_key": "test"})()
+    cw = ChatWindow(llm_cfg, char_cfg, "assets/sprites")
+
+    cw.history = [Message(role="user", content="旧人设的对话"),
+                  Message(role="assistant", content="喵~")]
+    cw._ctx_start = 0
+    before = cw._build_clean_messages_for_llm()
+    assert len(before) == 2, before
+
+    # 模拟一次换人设（不落盘：只动上下文边界与线程 id）
+    cw._ctx_start = len(cw.history)
+    cw._char_switch_seq = 1
+    cw._session_id = "char:pet:main#1"
+
+    after = cw._build_clean_messages_for_llm()
+    assert after == [], after
+    # 旧历史**仍在**（可查）
+    assert len(cw.history) == 2
+    print("[OK] 换人设 = 开新会话（旧历史可查，不进模型上下文）")

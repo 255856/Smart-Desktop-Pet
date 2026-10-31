@@ -62,6 +62,7 @@ TAB_ENDPOINTS = {
     "工具": ["/api/tools", "/api/reconciliation"],
     "配置": ["/api/config"],
     "状态": ["/api/state"],
+    "语音": ["/api/voice"],
     "健康与维护": ["/api/health", "/api/maintenance/status"],
 }
 
@@ -92,6 +93,12 @@ EXPECTED_KEYS = {
                    ("unlock_progress",)),
     "/api/health": (("rate_limited",), ("crashes",), ("ledger",), ("files",)),
     "/api/overview": (("stats",), ("tokens",), ("memory",), ("tools",), ("cards",)),
+    "/api/voice": (("ok",), ("tts", "url"), ("tts", "up"), ("tts", "detail"),
+                   ("rvc", "python"), ("rvc", "python_ok"), ("rvc", "sing_script"),
+                   ("rvc", "sing_script_ok"), ("rvc", "weight"), ("rvc", "weight_ok"),
+                   ("rvc", "fetch_script"), ("rvc", "fetch_script_ok"),
+                   ("models",), ("model_count",), ("emotions",), ("emotion_count",),
+                   ("emotion_dir",), ("out_dir",), ("search_backend",)),
     "/api/maintenance/status": (("maintenance_required",), ("operations",),
                                 ("last_results",)),
 }
@@ -786,6 +793,62 @@ class TestToolsTab:
 
 
 # --------------------------------------------------------------------------
+# 语音 Tab：本机音色 / 情绪参考 / 服务状态（不可达时要降级，不能 500）
+# --------------------------------------------------------------------------
+class TestVoiceEndpoint:
+    def test_voice_endpoint_lists_local_assets(self, panel):
+        data = _get_json(panel["app"], "/api/voice")
+        assert data["ok"] is True, data.get("error")
+        tts = data["tts"]
+        assert tts["url"].startswith("http")
+        assert isinstance(tts["up"], bool)
+        # 音色模型：每个都有名字和大小
+        for m in data["models"]:
+            assert m["name"].endswith(".pth"), m
+            assert m["size"] >= 0
+            assert m["size_kb"]
+        # 情绪参考：名字 + 中文标签
+        for e in data["emotions"]:
+            assert e["name"]
+            assert e["label"]
+        # RVC 解释器 / 唱歌脚本 / 翻唱脚本 在不在
+        rvc = data["rvc"]
+        assert isinstance(rvc["python_ok"], bool)
+        assert isinstance(rvc["sing_script_ok"], bool)
+        assert isinstance(rvc["fetch_script_ok"], bool)
+        assert isinstance(rvc["weight_ok"], bool)
+
+    def test_voice_endpoint_reuses_the_tool_status(self, panel):
+        """控制台的数据来自**工具那一份**盘点（不是另写一套）。
+
+        主人原话：「大肥鱼有自己的音色文件啊，你好像没有同步到控制台里面」。
+        """
+        from app.mcp import voice_server
+        data = _get_json(panel["app"], "/api/voice")
+        tool_text = voice_server.handle_status()["content"][0]["text"]
+        assert "本机语音服务状态" in tool_text
+        for m in data["models"]:
+            assert m["name"] in tool_text, m["name"]
+        for e in data["emotions"]:
+            assert e["label"] in tool_text, e["label"]
+
+    def test_voice_endpoint_degrades_when_unreachable(self, panel, monkeypatch):
+        """语音服务不可达 → 200 + ok=false + 说明（**绝不 500**）。"""
+        from app.mcp import voice_server
+
+        def _boom(*a, **k):
+            raise RuntimeError("语音服务没起来")
+
+        monkeypatch.setattr(voice_server, "voice_status_payload", _boom)
+        r = _request(panel["app"], "GET", "/api/voice")
+        assert r.status_code == 200, r.status_code
+        data = r.json()
+        assert data["ok"] is False
+        assert "语音服务没响应" in data["error"]
+        assert data["models"] == [] and data["emotions"] == []
+
+
+# --------------------------------------------------------------------------
 # A7 · data/ 一个字节都没动
 # --------------------------------------------------------------------------
 class TestDataDirUntouched:
@@ -808,16 +871,16 @@ class TestDataDirUntouched:
 # 前端：9 个 Tab
 # --------------------------------------------------------------------------
 class TestFrontendTabs:
-    def test_page_has_nine_tabs(self, panel):
+    def test_page_has_ten_tabs(self, panel):
         html = _request(panel["app"], "GET", "/").text
         tabs = re.findall(r'data-tab="([^"]+)"', html)
-        assert tabs == ["runs", "cost", "memory", "decision", "tools",
+        assert tabs == ["runs", "cost", "memory", "decision", "tools", "voice",
                         "settings", "config", "state", "health"], tabs
 
     def test_page_has_tab_labels(self, panel):
         html = _request(panel["app"], "GET", "/").text
-        for label in ("运行", "成本", "记忆", "决策", "工具", "设置", "配置",
-                      "状态", "健康与维护"):
+        for label in ("运行", "成本", "记忆", "决策", "工具", "语音", "设置",
+                      "配置", "状态", "健康与维护"):
             assert label in html, label
 
     def test_page_has_no_external_dependencies(self, panel):

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import time
@@ -133,6 +134,29 @@ def test_uses_an_already_healthy_sidecar_instead_of_spawning(tmp_path):
     assert sup.external is True
     assert sup.status()["running"] is True
     assert sup.status()["degraded"] is False
+
+
+def test_reuse_notice_is_logged_once_not_on_every_heartbeat(tmp_path, caplog):
+    """「已在运行，直接复用」**只说一次**。
+
+    看门狗每 5 秒一次心跳，这条提示以前每次心跳都打一遍 INFO ——
+    主人的控制台被同一条消息刷了几千行（实测 logs/pet.log 里有 3200 行）。
+    现在：第一次 INFO，之后一律 debug。
+    """
+    port = Port(healthy=True)
+    spawn = Spawner()
+    sup = _supervisor(tmp_path, port, spawn)
+
+    with caplog.at_level(logging.DEBUG, logger="app.brain.brain_controller"):
+        for _ in range(5):
+            assert sup.tick() is True
+
+    reuse = [r for r in caplog.records if "直接复用" in r.getMessage()]
+    at_info = [r for r in reuse if r.levelno >= logging.INFO]
+    assert len(reuse) == 5, "每次心跳都应该留下一条记录（只是级别不同），实际 %d" % len(reuse)
+    assert len(at_info) == 1, (
+        "INFO 级别的复用提示只该出现一次，实际 %d 次" % len(at_info))
+    assert "已在" in at_info[0].getMessage()
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import types
@@ -75,6 +76,16 @@ needs_tts = pytest.mark.skipif(
 def _text(result: dict) -> str:
     """MCP result → 文本。"""
     return "\n".join(str(c.get("text", "")) for c in result.get("content", []))
+
+
+def _job_id(result_text: str) -> str:
+    """从工具结果文本里取**合成任务号**（「任务号：xxx」）。
+
+    语音工具是两段式的：它立刻返回一句「已经受理」，
+    真正的合成在后台跑，界面靠这个任务号盯住那次合成。
+    """
+    m = re.search(r"任务号[:：]\s*([A-Za-z0-9_\-]+)", result_text or "")
+    return m.group(1) if m else ""
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +190,9 @@ class TestHonestFailure:
         assert "音色不在本地" in text
         assert "已发送" not in text
 
-    def test_tts_down_says_so(self, tmp_path, monkeypatch):
-        """TTS 服务不在 → 如实说没响应，不假装念了。"""
+    def test_tts_down_is_reported_not_pretended(self, tmp_path, monkeypatch):
+        """TTS 服务不在 → 工具**先受理**（不谎报念完了），
+        **后台**如实说合成失败（不装没发生）。"""
         voice_dir = tmp_path / "v"
         voice_dir.mkdir()
         (voice_dir / "x_ref.wav").write_bytes(b"RIFF" + b"\0" * 200)
@@ -192,9 +204,15 @@ class TestHonestFailure:
         })
         res = vs.handle_speak({"text": "你好"})
         text = _text(res)
-        assert text.startswith("失败：")
-        assert "合成失败" in text
-        assert "已发送" not in text and "念完" not in text
+        # 工具本身是「受理」，不是失败、更不是「念完了」
+        assert not text.startswith("失败："), text
+        assert "现在还没好" in text
+        assert "念完" not in text
+        # 后台那次合成**如实说失败**
+        job = vs.wait_voice_job(_job_id(text), vs._cfg(), timeout=30)
+        assert job.get("state") == "failed", job
+        assert "合成失败" in str(job.get("error") or "")
+        assert "已发送" not in str(job.get("error") or "")
 
 
 class TestStatusHonesty:
@@ -224,6 +242,275 @@ class TestStatusHonesty:
         assert "音色不在本地" in text
         assert "不会自动下载" in text
 
+
+# ---------------------------------------------------------------------------
+# 1.5 两段式（先回复，后合成）+ 绝不自动播放 + 合成不许拖死 server
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    """假的 urlopen 返回值（够 voice server 读音频用）。"""
+    def __init__(self, data):
+        self._d = data
+
+    def read(self):
+        return self._d
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _stub_sing_cfg(tmp_path, monkeypatch) -> dict:
+    """一份「本机资产齐全」的假配置（不碰真 RVC）。"""
+    cfg = {
+        "output_dir": str(tmp_path),
+        "voice_dir": str(tmp_path / "v"),
+        "rvc": {
+            "python": str(tmp_path / "py.exe"),
+            "root": str(tmp_path / "rvc"),
+            "sing_script": str(tmp_path / "sing.py"),
+            "fetch_script": str(tmp_path / "fetch.py"),
+            "model": "da_fei_yu.pth",
+        },
+    }
+    (tmp_path / "py.exe").write_bytes(b"x")
+    (tmp_path / "sing.py").write_text("x", encoding="utf-8")
+    (tmp_path / "fetch.py").write_text("x", encoding="utf-8")
+    (tmp_path / "rvc" / "assets" / "weights").mkdir(parents=True)
+    (tmp_path / "rvc" / "assets" / "weights" / "da_fei_yu.pth").write_bytes(b"w")
+    monkeypatch.setattr(vs, "_cfg", lambda: cfg)
+    monkeypatch.setattr(vs, "_check_rvc_python",
+                        lambda c, timeout=60.0: (True, "就绪"))
+    return cfg
+
+
+class TestNoAutoPlay:
+    """ITEM 1：语音工具**只落盘**，绝不自动播放（点语音条才放）。"""
+
+    @staticmethod
+    def _no_play(monkeypatch) -> list:
+        """把播放器换成会记账的假货 —— 真被调用了就说明自动播放了。"""
+        played = []
+        import app.voice.voice as vmod
+        monkeypatch.setattr(vmod, "play_audio_file",
+                            lambda p, **kw: played.append(str(p)) or True)
+        return played
+
+    def test_speak_does_not_auto_play(self, tmp_path, monkeypatch):
+        played = self._no_play(monkeypatch)
+        voice_dir = tmp_path / "v"
+        voice_dir.mkdir()
+        (voice_dir / "x_ref.wav").write_bytes(b"RIFF" + b"\0" * 200)
+        monkeypatch.setattr(vs, "_cfg", lambda: {
+            "output_dir": str(tmp_path), "voice_dir": str(voice_dir),
+            "tts_url": "http://127.0.0.1:9880"})
+        monkeypatch.setattr(vs, "_resolve_ref",
+                            lambda cfg, emo: (voice_dir / "x_ref.wav", "",
+                                              "neutral", ""))
+        monkeypatch.setattr(vs.urllib.request, "urlopen",
+                            lambda *a, **k: _FakeResp(b"0" * 512))
+        res = vs.handle_speak({"text": "你好"})
+        job = vs.wait_voice_job(_job_id(_text(res)), vs._cfg(), timeout=30)
+        assert job.get("state") == "done", job
+        assert played == [], "语音工具自动播放了（应该只落盘，主人点语音条才放）"
+
+    def test_sing_does_not_auto_play(self, tmp_path, monkeypatch):
+        played = self._no_play(monkeypatch)
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _fake_proc(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return 0, "", ""
+
+        monkeypatch.setattr(vs, "_run_proc", _fake_proc)
+        res = vs.handle_sing({"lyrics": "测试", "seed": 3})
+        job = vs.wait_voice_job(_job_id(_text(res)), vs._cfg(), timeout=30)
+        assert job.get("state") == "done", job
+        assert played == [], "唱歌工具自动播放了（应该只落盘，主人点语音条才放）"
+
+    def test_cover_does_not_auto_play(self, tmp_path, monkeypatch):
+        played = self._no_play(monkeypatch)
+        _stub_sing_cfg(tmp_path, monkeypatch)
+        monkeypatch.setattr(vs, "_find_audio_url",
+                            lambda song, artist="": ("http://example.com/s.mp3",
+                                                     "测试音源", ""))
+
+        def _fake_fetch(cfg_, url, lib_dir, start=0.0, end=0.0,
+                        sep_model=None, sep_model_dir=None):
+            lib_dir.mkdir(parents=True, exist_ok=True)
+            (lib_dir / "song.wav").write_bytes(b"RIFF" + b"\0" * 400)
+            return {"ok": True, "payload": {"name": "song.wav"},
+                    "stage": "", "error": ""}
+
+        def _fake_convert(cfg_, src, out, pitch=0):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return True, ""
+
+        def _fake_mix(cfg_, vocal, instrumental_path, out, volume=0.75):
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return True, ""
+
+        monkeypatch.setattr(vs, "_run_fetch", _fake_fetch)
+        monkeypatch.setattr(vs, "_run_convert", _fake_convert)
+        monkeypatch.setattr(vs, "_mix_with_instrumental", _fake_mix)
+        res = vs.handle_cover({"song": "月亮代表我的心"})
+        job = vs.wait_voice_job(_job_id(_text(res)), vs._cfg(), timeout=30)
+        assert job.get("state") == "done", job
+        assert played == [], "翻唱工具自动播放了（应该只落盘，主人点语音条才放）"
+
+
+class TestTwoPhase:
+    """ITEM 2：桌宠**先回复**，音频后到。"""
+
+    def test_tool_returns_in_well_under_a_second(self, tmp_path, monkeypatch):
+        """工具调用**远小于一秒**就返回（不等合成）。"""
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _slow_proc(cmd, **kwargs):
+            time.sleep(2.0)
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return 0, "", ""
+
+        monkeypatch.setattr(vs, "_run_proc", _slow_proc)
+        t0 = time.time()
+        res = vs.handle_sing({"lyrics": "测试", "seed": 3})
+        dt = time.time() - t0
+        assert dt < 1.0, "工具等了 %.2f 秒才返回（主人要的是先回复）" % dt
+        assert not _text(res).startswith("失败：")
+        # 等后台那次跑完（不然下一个用例撞上「本机一次只跑一个」）
+        vs.wait_voice_job(_job_id(_text(res)), vs._cfg(), timeout=60)
+
+    def test_result_text_makes_two_phase_obvious_to_the_model(self,
+                                                               tmp_path, monkeypatch):
+        """结果文本要让**模型**知道现在是两段式（说「我去唱一下」而不是「唱完了」）。"""
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _fake_proc(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return 0, "", ""
+
+        monkeypatch.setattr(vs, "_run_proc", _fake_proc)
+        text = _text(vs.handle_sing({"lyrics": "测试", "seed": 3}))
+        assert "现在还没好" in text, text
+        assert "立刻" in text, text
+        assert "点一下" in text, text
+        assert "唱完" not in text and "唱好了" not in text, text
+        assert _job_id(text), "结果里没有任务号，界面没法盯这次合成"
+
+    def test_background_job_does_not_block_the_server(self, tmp_path, monkeypatch):
+        """合成在后台线程里跑 —— MCP 主循环不被占住（下一个请求还能服务）。"""
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _slow_proc(cmd, **kwargs):
+            time.sleep(2.0)
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return 0, "", ""
+
+        monkeypatch.setattr(vs, "_run_proc", _slow_proc)
+        monkeypatch.setattr(vs, "_probe_tts", lambda url, timeout=4.0: (True, "在线"))
+        t0 = time.time()
+        started = _text(vs.handle_sing({"lyrics": "测试", "seed": 3}))
+        t1 = time.time()
+        res = vs.handle_status()
+        t2 = time.time()
+        assert t1 - t0 < 1.0, "工具被合成挡住了"
+        assert t2 - t1 < 1.0, "主循环被后台合成占住了"
+        assert "本机语音服务状态" in _text(res)
+        # 等后台那次跑完（不然下一个用例撞上「本机一次只跑一个」）
+        vs.wait_voice_job(_job_id(started), vs._cfg(), timeout=60)
+
+    def test_job_file_records_the_finished_audio(self, tmp_path, monkeypatch):
+        """任务文件：pending → done，带路径 / 时长 / 体积（界面靠它画语音条）。"""
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _fake_proc(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_bytes(b"RIFF" + b"\0" * 400)
+            return 0, "", ""
+
+        monkeypatch.setattr(vs, "_run_proc", _fake_proc)
+        text = _text(vs.handle_sing({"lyrics": "测试", "seed": 3}))
+        job_id = _job_id(text)
+        job = vs.wait_voice_job(job_id, vs._cfg(), timeout=30)
+        assert job.get("state") == "done", job
+        assert Path(str(job.get("path") or "")).is_file()
+        assert float(job.get("duration") or 0) >= 0
+        # 任务文件就放在产物目录里（界面按同一个约定找它）
+        job_file = tmp_path / (job_id + vs.VOICE_JOB_SUFFIX)
+        assert job_file.is_file()
+        # 界面能通过工具结果里的任务号找到它
+        from app.ui.chat_window.utils import voice_job_id, voice_job_path
+        assert voice_job_id(text) == job_id
+        assert voice_job_path(job_id).name == job_file.name
+
+    def test_failed_job_is_visible(self, tmp_path, monkeypatch):
+        """合成失败 → 任务文件里 failed + 原因（界面据此如实说失败）。"""
+        _stub_sing_cfg(tmp_path, monkeypatch)
+
+        def _boom(cmd, **kwargs):
+            return -1, "", "[超时] 超过 1 秒还没结束，已把整棵进程树都杀掉。"
+
+        monkeypatch.setattr(vs, "_run_proc", _boom)
+        text = _text(vs.handle_sing({"lyrics": "测试", "seed": 3}))
+        job = vs.wait_voice_job(_job_id(text), vs._cfg(), timeout=30)
+        assert job.get("state") == "failed", job
+        err = str(job.get("error") or "")
+        assert "已放弃" in err and "进程树" in err, err
+        assert not list(tmp_path.glob("*.wav")), "失败了却产出了音频"
+
+
+class TestRvcSafety:
+    """合成**不许**把整个 voice server 拖死（本机真出过 5 分钟超时）。"""
+
+    def test_rvc_timeout_smaller_than_mcp_call_timeout(self):
+        """RVC 单次推理超时必须**明显小于** MCP 调用超时（240 秒）。
+
+        以前 rvc.timeout_s=300 > 240：MCP 先放弃、子进程还在跑，
+        voice server 被一个调用占死 → 后面所有工具全排队挂死。
+        """
+        from app.core import companion_config as cc
+        raw = cc._read_yaml(cc._default_yaml_path()) or {}
+        rvc = (raw.get("voice") or {}).get("rvc") or {}
+        timeout_s = float(rvc.get("timeout_s") or 0)
+        assert 0 < timeout_s <= 180, "RVC 超时 %s 秒，太大" % timeout_s
+        assert timeout_s < 240, "RVC 超时必须小于 MCP 调用超时（240 秒）"
+
+    def test_rvc_python_never_falls_back_to_path(self, tmp_path):
+        """解释器只认配置里那个；配置错了就**立刻失败**，不回落 PATH 上的 python。"""
+        cfg = {"rvc": {"python": str(tmp_path / "没有这个解释器.exe")}}
+        py = vs._rvc_python(cfg)
+        assert py == tmp_path / "没有这个解释器.exe"
+        ok, why = vs._check_rvc_python(cfg)
+        assert ok is False
+        assert "不在本机" in why
+        assert "不会回退到 PATH" in why
+
+    def test_rvc_env_puts_venv_first_on_path(self, tmp_path):
+        r"""跑 RVC 时 PATH 最前面必须是 RVC venv 的 Scripts。
+
+        infer.cli 内部会**再 spawn 一个 python** —— 不前置的话它抓到的是
+        PATH 上的别的解释器（本机是 E:\Python\python.exe），那个解释器
+        跑不了 RVC → 孙子进程卡死 → 父亲不退 → voice server 被占死。
+        """
+        venv = tmp_path / "venv" / "Scripts"
+        venv.mkdir(parents=True)
+        cfg = {"rvc": {"python": str(venv / "python.exe")}}
+        env = vs._rvc_env(cfg)
+        assert env["PATH"].split(os.pathsep)[0] == str(venv)
+
+    def test_run_proc_kills_process_tree_on_timeout(self):
+        """超时一定走「杀整棵进程树」那条路（不然孙进程活下来占内存）。"""
+        code, out, err = vs._run_proc(
+            [sys.executable, "-c", "import time; time.sleep(30)"], timeout=2.0)
+        assert code == -1, (code, out, err)
+        assert "超时" in err
 
 # ---------------------------------------------------------------------------
 # 2. 真子进程：MCP 握手 + tools/list（只要 python，不碰模型）
@@ -298,6 +585,10 @@ class TestBrainRegistration:
         assert "mcp_voice_sing" in handbook
         assert "方括号标签" in handbook
         assert "原创歌曲" in handbook
+        # 两段式：先回复，音频后到（主人原话：「桌宠唱歌合成语音前应该先回复的」）
+        assert "两段式" in handbook
+        assert "我去唱一下" in handbook
+        assert "不要" in handbook and "唱完了" in handbook
 
     def test_handbook_has_no_voice_section_without_tools(self):
         from app.brain.prompt_layer import build_tool_handbook
@@ -400,7 +691,9 @@ class TestRealRvcSing:
         cfg["output_dir"] = str(tmp_path)
         monkeypatch.setattr(vs, "_cfg", lambda: cfg)
         played = []
-        monkeypatch.setattr(vs, "_play", lambda p: played.append(str(p)) or True)
+        import app.voice.voice as vmod
+        monkeypatch.setattr(vmod, "play_audio_file",
+                            lambda p, **kw: played.append(str(p)) or True)
 
         weight = _rvc_weight()
         before = (weight.stat().st_mtime_ns, weight.stat().st_size)
@@ -408,7 +701,12 @@ class TestRealRvcSing:
         res = vs.handle_sing({"lyrics": "今天天气真好呀", "seed": 11})
         text = _text(res)
         assert res.get("isError") is not True, text
-        assert text.startswith("唱完")
+        # 两段式：工具**立刻**返回「已经受理」，不说「唱完了」
+        assert "现在还没好" in text, text
+        assert "唱完" not in text, text
+
+        job = vs.wait_voice_job(_job_id(text), cfg, timeout=600)
+        assert job.get("state") == "done", job
 
         wavs = sorted(tmp_path.glob("sing_*.wav"))
         assert wavs, "没有产出 wav：" + text
@@ -416,7 +714,8 @@ class TestRealRvcSing:
         size, dur = vs._wav_info(wav)
         assert size > 1000, "wav 太小：%d 字节" % size
         assert dur > 0.3, "wav 时长异常：%.2f 秒" % dur
-        assert played, "应该把音频放给主人听"
+        # 红线：合成好了**不自动播放**（点语音条才放）
+        assert not played, "语音工具自动播放了"
 
         # 红线：权重没被动过（没下载、没替换）
         after = (weight.stat().st_mtime_ns, weight.stat().st_size)
@@ -429,24 +728,25 @@ class TestRealRvcSing:
         monkeypatch.setattr(vs, "_cfg", lambda: cfg)
         seen = {}
 
-        class _FakeProc:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
         def _fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             out = Path(cmd[cmd.index("--out") + 1])
             out.write_bytes(b"RIFF" + b"\0" * 400)
-            return _FakeProc()
+            return 0, "", ""
 
-        monkeypatch.setattr(vs.subprocess, "run", _fake_run)
+        monkeypatch.setattr(vs, "_run_proc", _fake_run)
+        monkeypatch.setattr(vs, "_check_rvc_python",
+                            lambda c, timeout=60.0: (True, "就绪"))
         res = vs.handle_sing({"lyrics": "测试", "seed": 3})
         assert res.get("isError") is not True
+        job = vs.wait_voice_job(_job_id(_text(res)), cfg, timeout=30)
+        assert job.get("state") == "done", job
         assert "--model" in seen["cmd"]
         model = seen["cmd"][seen["cmd"].index("--model") + 1]
         assert model == cfg["rvc"]["model"]
         assert model.endswith(".pth")
+        # 解释器必须是**配置里那个**，不能回退到 PATH 上的 python
+        assert seen["cmd"][0] == str(vs._rvc_python(cfg))
 
 
 @needs_tts
@@ -458,19 +758,27 @@ class TestRealGptSovitsSpeak:
         cfg["output_dir"] = str(tmp_path)
         monkeypatch.setattr(vs, "_cfg", lambda: cfg)
         played = []
-        monkeypatch.setattr(vs, "_play", lambda p: played.append(str(p)) or True)
+        import app.voice.voice as vmod
+        monkeypatch.setattr(vmod, "play_audio_file",
+                            lambda p, **kw: played.append(str(p)) or True)
 
         res = vs.handle_speak({"text": "主人，今天也要好好吃饭哦。"})
         text = _text(res)
         assert res.get("isError") is not True, text
-        assert text.startswith("念完")
+        # 两段式：先受理，不说「念完了」
+        assert "现在还没好" in text, text
+        assert "念完" not in text, text
+
+        job = vs.wait_voice_job(_job_id(text), cfg, timeout=600)
+        assert job.get("state") == "done", job
 
         wavs = sorted(tmp_path.glob("speak_*.wav"))
         assert wavs, "没有产出 wav：" + text
         size, dur = vs._wav_info(wavs[0])
         assert size > 1000
         assert dur > 0.3
-        assert played
+        # 合成好了**不自动播放**
+        assert not played, "语音工具自动播放了"
 
 
 class TestPlaybackHook:

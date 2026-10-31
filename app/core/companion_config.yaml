@@ -359,6 +359,11 @@ voice:
   tts_url: 'http://127.0.0.1:9880'      # 本机 GPT-SoVITS api_v2
   voice_dir: 'voice/大肥鱼'              # 参考音频 + 情绪参考库所在目录
   default_emotion: neutral     # 不指定情绪时用哪个
+  # 语音合成是「先回复、后合成」的：工具立刻返回，音频在后台合成。
+  # 聊天窗盯着**还在跑的那几个任务**（不是每轮扫产物目录），
+  # 这个值是它多久看一次（毫秒）。
+  job_poll_interval_ms: 1000
+  job_timeout_s: 3600         # 等一次合成最多等多久（秒）；超了就如实说超时
   rvc:
     python: 'E:\AI\RVC\venv\Scripts\python.exe'
     root: 'E:\AI\RVC\Retrieval-based-Voice-Conversion-WebUI-main'
@@ -366,7 +371,12 @@ voice:
     model: da_fei_yu.pth        # 本机已有的音色权重（**不下载**）
     sing_speed: 0.92            # 念白语速（放慢更像唱）
     sing_base: 329.63           # 旋律基准音高 Hz
-    timeout_s: 300              # RVC 推理墙钟上限（秒）
+    # RVC 单次推理的墙钟上限（秒）。
+    # ⚠️ 必须**明显小于** MCP 调用超时（voice server 注册的是 240 秒）：
+    #    以前这里是 300 > 240，MCP 先放弃、子进程还在跑，
+    #    voice server 被一个调用卡死 → 后面所有工具全排队挂死。
+    #    现在 180 < 240；而且合成在后台跑，超时会把整棵进程树杀掉。
+    timeout_s: 180
 
     # —— 翻唱（mcp_voice_sing 传 song 时的链路：找歌 → 下载 → 分离 → 音转音 → 混伴奏）——
     fetch_script: 'E:\SnowLuma\rvc_fetch.py'   # 下载 + 人声分离（现成脚本，不重写）
@@ -378,9 +388,8 @@ voice:
     index_rate: 0.75            # 检索索引占比（本机没索引时自动退化成 0）
     mix_volume: 0.75            # 原伴奏混回去时的音量倍数
     cover_max_seconds: 120      # 翻唱最多取多长（秒）。0 = 不限。
-                                  # 整首太长会顶穿 MCP 调用超时（voice server 是 240 秒；
-                                  # 本机实测 180 秒要 259 秒，120 秒约 150 秒），
-                                  # 截一段时工具会**如实告诉主人**截了。
+                                  # 整首太长要跑很久（本机实测 180 秒要 259 秒，
+                                  # 120 秒约 150 秒），截一段时工具会**如实告诉主人**截了。
     convert_chunk_s: 30          # 音转音分块长度（秒）。整段一次喂进 RVC 显存吃太狠，
                                   # 分块跑（一次模型加载）本机快 10 倍以上。
     fetch_timeout_s: 1800       # 下载 + 人声分离的墙钟上限（秒）
@@ -399,9 +408,13 @@ voice:
 # ⚠️ 拆句只是**显示层**的事：模型看到的历史仍然是一整条 assistant 消息。
 reply_pacing:
   enabled: true
-  min_gap_ms: 1000
-  max_gap_ms: 3000
-  long_gap_probability: 0.15
+  # **间隔必须 ≤ 模型的出句速度**（实测约 1 秒/句）。
+  # 原来 1000~3000ms：模型先把整段说完，再按 1~3 秒/句把句子倒出来 → 队列堆积 →
+  # 最后一句比 qq-bridge 晚好几秒（实测整轮 15.1 秒，而模型自己只要 1.6 秒）。
+  # 现在 120~400ms：仍然一句一条气泡，但绝不比模型慢。
+  min_gap_ms: 120
+  max_gap_ms: 400
+  long_gap_probability: 0.0
   long_gap_min_ms: 5000
   long_gap_max_ms: 10000
   max_chars_per_bubble: 200

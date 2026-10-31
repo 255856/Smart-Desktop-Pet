@@ -428,6 +428,15 @@ class TestPersonaSwitchKeepsMemory:
         assert cw.char_cfg.name == "大肥鱼"
         assert "大肥鱼" in cw.windowTitle()
         assert cw.title_label.text() == "和 大肥鱼 的对话"
-        # 记忆没变
-        assert cw._session_id == before_sid == SHARED_SESSION_ID
+        # **长期记忆没变**（一只桌宠一份记忆）—— owner 拍板保留的那部分
         assert cw.chat_store.character_name == before_bucket == SHARED_BUCKET
+        # **但换人设 = 开新会话**（owner 后来拍板）：
+        #   - checkpoint 换一条新线程（旧的仍在盘上，可查）
+        #   - 模型上下文从此刻重新开始（旧消息留在聊天区，但不再进上下文）
+        #   原因：共享历史里全是旧人设的对话（实测 41 条「小汐」、18 条「喵」）
+        #   → 模型跟着旧人设演。
+        assert cw._session_id != before_sid
+        assert cw._session_id.startswith(SHARED_SESSION_ID)
+        assert cw._ctx_start == len(cw.history)
+        # **台账 session 不变** —— 一个桌宠一个钱包（成本不能按人设拆）
+        assert cw._ledger_session == SHARED_SESSION_ID

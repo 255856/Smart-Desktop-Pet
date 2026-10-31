@@ -662,6 +662,16 @@ class App:
         )
 
         banner.section("⑥ 智能中枢")
+        # 启动时清掉上一轮遗留的孤儿（RVC/语音推理进程）——
+        # 实测见过一个卡死的 infer.cli 占 4.2 GB 一直不退（它用的是 PATH 上另一个
+        # 解释器，跑不了 RVC 依赖 → 永远挂着）。这类进程不该活过桌宠那一轮。
+        try:
+            from app.core.orphan_cleanup import sweep_orphan_processes
+            swept = sweep_orphan_processes()
+            if swept:
+                banner.info("清理上一轮遗留的孤儿进程 %d 个" % len(swept))
+        except Exception as e:  # noqa: BLE001
+            log.debug("启动清理孤儿进程失败: %s", e)
         self.brain = BrainController(
             root, cfg, self.state_mgr.state, self.state_mgr.reminders,
         )
