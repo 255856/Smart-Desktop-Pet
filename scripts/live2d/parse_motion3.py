@@ -6,7 +6,7 @@ SDK 解析规则（来自 cubism4.min.js）：
     [首点(t0,v0), 类型1, ..., 类型2, ...]
   类型 0=线性(吃 2 个数: t1,v1) / 1=贝塞尔(吃 6 个数: c1(t,v),c2(t,v),end(t,v))
   → 线性段总长 3，贝塞尔段总长 7。
-用法: python scripts/parse_motion3.py <motion3.json> [...]
+用法: python scripts/live2d/parse_motion3.py <motion3.json> [...]
 """
 import json
 import sys

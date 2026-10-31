@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """验证：鼠标不动时模型是否真的静止（抓两帧比像素差）。
 
-用法: python scripts/probe_live2d_still.py --model-dir assets/live2d/DeepSeek/DeepSeek
+用法: python scripts/live2d/probe_live2d_still.py --model-dir assets/live2d/DeepSeek/DeepSeek
 """
 from __future__ import annotations
 

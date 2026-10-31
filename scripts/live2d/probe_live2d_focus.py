@@ -8,7 +8,7 @@ Q2  为什么 focus() 之后 ParamAngleX 还是 0？
     → 直接调 model.focus()，把异常、focusController 的 x/targetX 都读出来。
 
 用法：
-    python scripts/probe_live2d_focus.py --model-dir assets/live2d/DeepSeek/DeepSeek
+    python scripts/live2d/probe_live2d_focus.py --model-dir assets/live2d/DeepSeek/DeepSeek
 """
 from __future__ import annotations
 

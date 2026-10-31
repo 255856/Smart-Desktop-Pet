@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """调试：连续播放多个动作组，看哪个没生效。
 
-用法: python scripts/dbg_motion_seq.py 挥手 招手 指过来 竖手指
+用法: python scripts/live2d/dbg_motion_seq.py 挥手 招手 指过来 竖手指
 """
 import json
 import os

@@ -3,7 +3,7 @@
 """验证本轮改动：三轴转头 / 脚钉住不动 / 动作能播。
 
 用法：
-    python scripts/verify_live2d_actions.py --model-dir assets/live2d/DeepSeek/DeepSeek
+    python scripts/live2d/verify_live2d_actions.py --model-dir assets/live2d/DeepSeek/DeepSeek
 输出：data/measure/actions_verify/*.png + result.json
 """
 from __future__ import annotations

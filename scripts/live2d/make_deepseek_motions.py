@@ -11,7 +11,7 @@
     Meta.TotalSegmentCount = 各曲线段数之和
 
 用法：
-    python scripts/make_deepseek_motions.py
+    python scripts/live2d/make_deepseek_motions.py
 """
 from __future__ import annotations
 

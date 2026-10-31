@@ -61,6 +61,9 @@ agent_compare.txt
 *.tmp
 .tmp_*
 *.bak
+# 一次性调试脚本（根目录的 _tmp_*.py / _tmp_*.js 之类）
+_tmp_*
+_scratch_*
 .DS_Store
 Thumbs.db
 

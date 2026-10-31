@@ -10,8 +10,8 @@
   3. 差异集中在画面哪一块（判断动的是身体还是只有头发）。
 
 用法：
-    python scripts/probe_live2d_body.py --model-dir assets/live2d/DeepSeek/DeepSeek
-    python scripts/probe_live2d_body.py --model-dir <dir> --out data/measure/body_probe
+    python scripts/live2d/probe_live2d_body.py --model-dir assets/live2d/DeepSeek/DeepSeek
+    python scripts/live2d/probe_live2d_body.py --model-dir <dir> --out data/measure/body_probe
 """
 from __future__ import annotations
 
