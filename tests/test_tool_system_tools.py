@@ -115,7 +115,7 @@ SYSTEM_TOOL_SNAPSHOT: dict[str, tuple[str, dict, str]] = {
     ),
 }
 
-# 删死副本之前抓的完整内置工具名快照（61 个；MCP 的 7 个是运行时桥接的，不在内）
+# 删死副本之前抓的完整内置工具名快照（64 个；MCP 的 7 个是运行时桥接的，不在内）
 FULL_BUILTIN_TOOL_NAMES = (
     "Task", "add_reminder", "calculate", "cancel_countdown",
     "change_pet_emotion", "clear_bubble", "clipboard_copy", "convert_units",
@@ -127,12 +127,12 @@ FULL_BUILTIN_TOOL_NAMES = (
     "list_countdowns", "list_desktop_files", "list_installed_apps",
     "list_processes", "list_reminders", "lock_screen", "multi_edit",
     "ocr_image", "open_app", "open_file_explorer", "open_notepad",
-    "open_terminal", "open_website", "play_animation", "read_file",
-    "read_text_file", "recall_memory", "remember_fact", "run_script",
-    "say_to_user", "search_files", "send_notification", "set_bluetooth",
-    "set_brightness", "set_tts_mute_until", "set_volume", "set_wifi",
-    "system_info", "take_screenshot_tool", "understand_image", "unmute_tts",
-    "web_search",
+    "open_terminal", "open_website", "play_animation", "query_slang",
+    "read_file", "read_text_file", "recall_memory", "remember_fact",
+    "run_script", "say_to_user", "search_files", "send_notification",
+    "send_sticker", "set_bluetooth", "set_brightness", "set_tts_mute_until", "set_volume",
+    "set_wifi", "submit_slang", "system_info", "take_screenshot_tool",
+    "understand_image", "unmute_tts", "web_search",
 )
 
 

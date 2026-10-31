@@ -12,12 +12,13 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
 --------------
   1. persona        人设（+ 上游注入的会话上下文：SKILL / 长期记忆 / 可用工具列表）
   2. style_guide    characters/style-guide.md —— **逐字**追加，不改写、不重排
-  3. tool_handbook  工具手册（【工具解锁】等级提示）
-  4. dynamic        会话内稳定动态块（项目级指令文档 + skills）
-  5. 防幻觉基线 + 高风险工具 confirm 协议
-  6. 中文输出约束
-  7. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
-  8. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
+  3. slang          已收录黑话表（**只有 confirmed 词条**）—— 常量块
+  4. tool_handbook  工具手册（【工具解锁】等级提示）
+  5. dynamic        会话内稳定动态块（项目级指令文档 + skills）
+  6. 防幻觉基线 + 高风险工具 confirm 协议
+  7. 中文输出约束
+  8. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
+  9. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
 
 顺序变了会让 MiniMax 的前缀缓存整块失效，所以**不要随手调换**。
 
@@ -193,6 +194,30 @@ def risky_prompt_fragment() -> str:
 def anti_hallucination_suffix() -> str:
     """防幻觉基线 + 高风险工具 confirm 协议（稳定内容，两个后端必须一致）。"""
     return _ANTI_HALLUCINATION_HEAD + risky_prompt_fragment()
+
+
+# --------------------------------------------------------------------------
+# 黑话 / 口头禅表（已确认词条）
+# --------------------------------------------------------------------------
+# 为什么要进提示词
+# ----------------
+# 主人的黑话/口头禅是**他那边**的语境，模型不查表就不知道那词是什么意思，
+# 只能瞎解释。这里把**已确认（confirmed）**的词条做成一个紧凑块塞进
+# system prompt —— 跟 AI 味黑名单（characters/style-guide.md）一个位置：
+# 都是**行为层的稳定段**，不是每轮变的东西。
+#
+# ⚠️ 必须是**常量**：内容只随词库文件（data/slang.json）变，不随每轮变。
+# 每轮变的内容放 system prompt 会打掉前缀缓存（实测 98.9% → 1.5%）。
+# ⚠️ 候选（candidate）**不进**提示词 —— 没确认的词模型不许用。
+
+def slang_prompt_block() -> str:
+    """已确认黑话的紧凑块（**常量字符串**；词库坏了就当没有，绝不崩聊天）。"""
+    try:
+        from app.engine.tools._slang import confirmed_prompt_block
+        return confirmed_prompt_block()
+    except Exception as e:  # noqa: BLE001
+        log.debug("取已收录黑话失败，跳过：%s", e)
+        return ""
 
 
 # --------------------------------------------------------------------------
@@ -471,6 +496,25 @@ VOICE_TOOL_GUIDE = (
 )
 
 
+#: 表情包（send_sticker）用法：什么时候发、怎么发、两条措辞铁律。
+#:
+#: 刻意**不**写成"每轮都发" —— 表情包跟语音一样是打断，不是常态。
+STICKER_TOOL_GUIDE = (
+    "【表情包】send_sticker：把桌宠自己的表情当成**一条消息**发进聊天"
+    "（聊天窗里是一张独立的表情气泡，主人点一下能看大图）。"
+    "可选 sticker_id（指定哪一张）或 emotion（按情绪挑一张："
+    "happy 开心 / sad 难过 / anger 生气 / fear 害怕 / doubt 狐疑 / "
+    "pride 骄傲 / shy 害羞 / surprise 惊讶）；两个都不给就随手发一张。\n"
+    "适合发：主人明确说「发个表情」「发表情包」「来张图」的时候；"
+    "或者你只是想表达一下情绪（开心 / 生气 / 害羞），又不想写一大段话的时候。\n"
+    "不适合：解释问题、长回答、主人要照着看的内容 —— 那些用文字。\n"
+    "频率：一轮最多发一张，别连着发好几张（会刷屏）。\n"
+    "措辞铁律：①表情包**前面不要加方括号标签**（「[表情包]」那种）—— "
+    "它本身就是一条消息；要说话就另外发一条普通文字消息；"
+    "②工具失败了就说失败（哪一步失败说哪一步），**绝不假装已经发出表情包**。"
+)
+
+
 def _current_tool_level() -> int:
     """当前桌宠等级（读全局等级读取器；读不到按 Lv10 = 全部可见）。"""
     try:
@@ -520,6 +564,13 @@ def build_tool_handbook(*, registry=None, level=None) -> str:
         has_voice = False
     if has_voice:
         unlock_line += "\n\n" + VOICE_TOOL_GUIDE
+    # 表情包在册 → 手册里补一段「什么时候该发表情包」（跟语音一个路数）
+    try:
+        has_sticker = "send_sticker" in set(registry.names())
+    except Exception:  # noqa: BLE001
+        has_sticker = False
+    if has_sticker:
+        unlock_line += "\n\n" + STICKER_TOOL_GUIDE
     return unlock_line
 
 
@@ -559,6 +610,7 @@ def build_system_prompt(*, persona, style_guide, tool_handbook, dynamic,
     sections = [
         persona,
         style_guide,
+        slang_prompt_block(),
         tool_handbook,
         dynamic,
         anti_hallucination_suffix(),

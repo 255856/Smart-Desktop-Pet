@@ -6,9 +6,11 @@ from typing import Callable, Optional
 
 from ._core import Tool, ToolRegistry, is_safe_url
 from . import (
-    _time, _reminder, _memory, _pet, _system, _math, _file, _shortcuts, _search,
+    _time, _reminder, _memory, _pet, _sticker, _system, _math, _file,
+    _shortcuts, _search,
     _audio, _weather, _timer, _power, _filesearch, _webfetch, _ocr, _runner,
     _tts_mute, _subagent, _multimodal,
+    _slang,
     _unlock,
 )
 
@@ -43,7 +45,11 @@ def build_default_tools(
     _time.register(reg, state=state)
     _reminder.register(reg, reminders=reminders)
     _memory.register(reg, memory=memory)
+    # 黑话/口头禅学习回路: query_slang / submit_slang（词表, 独立 JSON）
+    _slang.register(reg)
     _pet.register(reg, state=state, items=items, hooks=hooks)
+    # 表情包：send_sticker（把已有的 Emotion_* 素材当消息发进聊天）
+    _sticker.register(reg)
     _system.register(reg, hooks=hooks)
     _math.register(reg)
     _file.register(reg)

@@ -76,6 +76,8 @@ TOOL_RISK_LEVEL: dict[str, int] = {
     "ocr_image":                 SAFE,
     "understand_image":          SAFE,
     "recall_memory":             SAFE,
+    "query_slang":               SAFE,   # 只读: 查已收录的黑话表
+    "send_sticker":              SAFE,   # 只读本地表情包素材 + 在聊天里发一条图
     # ---- LOW (1): UI 改动 / 桌面启动 / 内部状态小幅动 ----
     "clear_bubble":              LOW,
     "countdown":                 LOW,
@@ -98,6 +100,7 @@ TOOL_RISK_LEVEL: dict[str, int] = {
     "edit_file":                 MEDIUM,
     "multi_edit":                MEDIUM,
     "remember_fact":             MEDIUM,
+    "submit_slang":              MEDIUM, # 写本地词库文件 (data/slang.json)
     "forget_memory":             MEDIUM,
     "set_volume":                MEDIUM,
     "set_brightness":            MEDIUM,
