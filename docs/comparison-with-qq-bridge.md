@@ -1180,6 +1180,38 @@ A 已经有 `tests/` **86 个 `test_*.py` 测试文件**（实测）—— **A �
    没有读 `E:\dsh-runtime\` 的源码。已确认的是：**B 不用 DSH 的 `fact_register`**
    （全仓 grep 零命中），B 的长期记忆 100% 是自己的 sidecar。
 
+### 9.2 移植状态复核（2026-10-31，§5 那张表的逐行核对）
+
+§5 的「机制归属表」就是移植清单。**现在逐行核一遍**（✅ 已做 / 🔄 在做 / ⚪ 1:1 场景不适用 / ❌ 没做）：
+
+| 机制 | 现在的状态 |
+|---|---|
+| 对照式对话示例 + AI 味黑名单 | ✅ §characters/style-guide.md§（36 条黑名单 + 12 组对照示例）+ 逐条 golden 门禁 |
+| 仿真提示词 / 人格两层拆分 | ✅ §app/brain/prompt_layer.py§（persona / style_guide / tool_handbook / dynamic 四段） |
+| 角色卡热更新 | ✅ §characters/*.yaml§ + 运行时切换（§config.switch_character§，**不动 config.yaml**） |
+| 分条 / 节奏 / 主体性 | ✅ 逐句投递（§reply_pacing§，间隔实测 146~389ms，**不超模型出句速度**） |
+| 软质量反馈（提示而非删除） | ✅ 删掉了 20+ 条改写模型散文的正则（「让提示词负责，代码不猜」） |
+| 记忆按 query 语义召回 top-K | ✅ 独立 sidecar（JSON 卡真值 + Chroma + BM25 + 精排）+ **按 kind 分档闸门**（近似陷阱避开率 1.000，recall 1.000） |
+| 记忆分类 + 记忆卫生 | ✅ 5 类（thought/topic/event/fact/impression）+ §supersede§ 改写 + 分档阈值 |
+| 工具**执行期白名单** | ✅ §tool_allowlist§（61 精确名 + 3 前缀桶）：存量放行 / 增量拒绝 |
+| 工具名**双向对账脚本** | ✅ §scripts/check_tool_docs.py§（8 处来源，阻断级差异） |
+| 消息节奏 / 分条发送 | ✅（同上） |
+| 黑话 / 口头禅学习回路 | ❌ **唯一的真缺口**（1:1 场景价值下降，可降级为「记住主人的口头禅」） |
+| 时间感 / 消息时效 | ✅ §context_provider§（时段提示 / 规律 hint） |
+| token 账本 + 定价 + 控制台 | ✅ §model_prices.py§（读时算钱）+ 台账 + 控制台成本页（人民币口径、逐行传 model） |
+| 长期记忆引擎 | ✅（**纯 Python** sidecar，与 qq-bridge 同源思路但独立实现） |
+| 上下文压缩 / 工具结果裁剪 | ✅ §compaction.py§（0.8 / 0.16 / 最近 8 条原文）+ §fit_tool_payload§（50000/45000/2000） |
+| 结构化 tool result 协议 | 🔄 ReAct 已完成；**standard（LangChain）后端正在接**（它绕过 §execute()§） |
+| agent loop / 工具并行 | ✅ 自研 ReAct + LangChain 双后端（不换 DSH） |
+| MCP host / 命名空间工具面 | ✅ §app/mcp/§（aw / fs / voice 三台，10 个工具） |
+| 唤醒 / 潜水 / 等待状态机 | ⚪ 1:1 桌宠**不适用**（qq-bridge 的群聊模型） |
+
+**qq-bridge 有、我们没有、且值得考虑的**：
+1. **拍一拍**（poke）—— qq 群里的社交手势；桌宠场景可做成「戳一下桌宠」的互动。
+2. **100 个 GIF 表情包库** —— 我们有 Live2D 贴纸与随机贴纸设置，但**没有表情包库**。
+3. **ComfyUI 生视频** —— 我们的 §generate_video§ 还是 stub。
+4. **黑话 / 口头禅学习** —— 见上表那一行。
+
 ### 9.1 已在本轮复核并从"待补"中移除的项
 
 | 原待验证项 | 复核结果 |
