@@ -1,12 +1,14 @@
 """Tool / ToolRegistry 核心类型。"""
 from __future__ import annotations
 
+import contextvars
 import ipaddress
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
@@ -339,6 +341,109 @@ def fit_tool_payload(contents: list[str]) -> tuple[list[str], bool]:
         for i in range(head_end + 1, tail_start):
             out[i] = "…"
     return out, True
+
+
+# ---------------------------------------------------------------------------
+# 3.4 标准后端（LangChain）工具调用护栏
+# ---------------------------------------------------------------------------
+#
+# 标准后端的工具是**直接**交给 LangChain 的（StructuredTool.func = tool.fn），
+# LangChain 的 ToolNode 直接调它 → 回来的只是一段裸文本：
+#   · 工具抛异常 → LangChain 包成 "Error: ..." 之类，界面按前缀判不出失败 → 显示 ✓；
+#   · 超大结果 → 整段塞进上下文，没有统一裁剪；
+#   · 卡死的工具 → 整轮对话跟着卡住，没有单工具超时。
+#
+# 下面这个薄适配器把工具函数包一层，让每次调用都走上面那套 helper
+# （超时 / 失败前缀 / 统一裁剪），与 ReAct 路径（app/brain/agent.py +
+# ToolRegistry.execute）语义一致。工具本体、schema、注册表都不动。
+
+
+def _fmt_tool_seconds(x: float) -> str:
+    """秒数 → 人话（60.0 → "60s"，0.5 → "0.5s"）。"""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    return f"{int(v)}s" if v.is_integer() else f"{v:.1f}s"
+
+
+def ensure_failure_prefix(text: str) -> str:
+    """失败文案补「失败：」前缀。
+
+    界面（app/ui/chat_window/utils.py::_tool_status）判失败认的正是
+    _ERROR_PREFIXES（错误 / 失败 / 未安装）—— 标准后端没有信封 status，
+    只有这段文本，所以失败必须带前缀，否则界面会显示 ✓。
+    """
+    raw = text or ""
+    if not raw.strip():
+        return "失败：工具没有返回结果。"
+    if raw.lstrip().startswith(_ERROR_PREFIXES):
+        return raw
+    return "失败：" + raw
+
+
+def _call_tool_with_timeout(fn: Callable[..., Any], kwargs: dict,
+                            timeout: Optional[float]
+                            ) -> tuple[Any, Optional[BaseException], bool]:
+    """在守护线程里跑一次同步工具。
+
+    返回 (返回值, 异常, 是否超时)。超时后**不等**那个跑不动的线程
+    （线程没法杀），调用方立刻拿到「超时」继续往下走，线程在后台跑完即弃。
+    """
+    box: dict = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = fn(**kwargs)
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    # 复制当前 contextvars（LangChain 的回调 / 追踪上下文别丢）
+    ctx = contextvars.copy_context()
+    th = threading.Thread(target=ctx.run, args=(_runner,), daemon=True,
+                         name="tool-call")
+    th.start()
+    th.join(timeout if (timeout and timeout > 0) else None)
+    if th.is_alive():
+        return None, None, True
+    if "error" in box:
+        return None, box["error"], False
+    return box.get("value"), None, False
+
+
+def wrap_tool_fn(name: str, fn: Callable[..., Any],
+                 timeout: Optional[float] = None) -> Callable[..., str]:
+    """把同步工具函数包成「带结果契约」的调用（标准后端交给 LangChain 用）。
+
+    每次调用依次经过：
+      1. 单工具墙钟超时（TOOL_CALL_TIMEOUT_SECONDS）—— 超时按失败报，
+         不再让一个卡死的工具把整轮对话拖住；
+      2. 异常 → 失败文案（带「失败：」前缀）；
+      3. 失败统一加「失败：」前缀（界面按前缀判失败 → 显示 ✕ 而不是 ✓）；
+      4. 统一裁剪 trim_tool_result（50000 / 45000 / 2000，与 ReAct 同款）。
+
+    成功且不超预算时**原样返回工具的文本**（不改写、不加前缀）。
+    """
+    def _guarded(**kwargs) -> str:
+        limit = TOOL_CALL_TIMEOUT_SECONDS if timeout is None else timeout
+        value, error, timed_out = _call_tool_with_timeout(fn, kwargs, limit)
+        if timed_out:
+            log.warning("工具 %s 超时（%s）", name, _fmt_tool_seconds(limit))
+            return (f"失败：工具 {name} 超时（{_fmt_tool_seconds(limit)}），"
+                    "没有返回结果。")
+        if error is not None:
+            log.warning("工具 %s 执行失败: %r", name, error)
+            return f"失败：工具 {name} 执行出错：{error}"
+        text = value if isinstance(value, str) else str(value)
+        status, _code = classify_tool_result(name, text)
+        if status != "ok":
+            text = ensure_failure_prefix(text)
+        trimmed, _truncated = trim_tool_result(text)
+        return trimmed
+
+    _guarded.__name__ = f"guarded_{name}"
+    _guarded.__doc__ = f"工具 {name} 的受控调用（超时 / 失败前缀 / 统一裁剪）。"
+    return _guarded
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +864,7 @@ __all__ = [
     "AllowlistPolicy", "load_tool_allowlist", "reload_tool_allowlist",
     "classify_tool_result", "classify_legacy_result",
     "trim_tool_result", "fit_tool_payload",
+    "wrap_tool_fn", "ensure_failure_prefix",
     "tool_group_name", "TOOL_GROUPS", "MCP_GROUP", "OTHER_GROUP",
     "DEFAULT_ALLOWLIST_PREFIXES",
     "TOOL_RESULT_MAX_CHARS", "TOOL_RESULT_HEAD_CHARS", "TOOL_RESULT_TAIL_CHARS",

@@ -29,6 +29,7 @@ from app.brain.tool_schema import tool_to_args_schema
 from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
                                     build_tool_handbook, load_style_guide)
 from app.engine.tools import Tool, ToolRegistry
+from app.engine.tools._core import ensure_failure_prefix, wrap_tool_fn
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +110,15 @@ def _internal_tool_to_langchain(tool: Tool) -> StructuredTool:
     from_function 从 fn 签名反推：反推会把属性描述 / enum / min-max 全丢掉，
     还会把 run_script 的 args 改名成 v__args（撞 BaseTool.args），
     两种调用方式都失败。转换见 app/brain/tool_schema.py。
+
+    func 不是 tool.fn 本身，而是**受控调用**（app/engine/tools/_core.py::
+    wrap_tool_fn）：标准后端的工具由 LangChain 的 ToolNode 直接调，
+    不经过 ToolRegistry.execute，于是少了三样东西 —— 失败状态（界面会把
+    失败显示成 ✓）、统一裁剪、单工具超时。这里补上，与 ReAct 路径
+    （app/brain/agent.py）用同一套 helper，工具本体/schema/注册表不动。
     """
     return StructuredTool.from_function(
-        func=tool.fn,
+        func=wrap_tool_fn(tool.name, tool.fn),
         name=tool.name,
         description=tool.description,
         args_schema=tool_to_args_schema(tool),
@@ -1350,6 +1357,11 @@ class LangChainAgent:
                             continue
                     except (ValueError, TypeError):
                         pass  # 普通工具结果,走默认路径
+                    # LangChain 自己判失败（参数 schema 校验不过等）→ 内容是
+                    # "Error: ..."，界面按前缀判不出失败 → 会显示 ✓。
+                    # 补上「失败：」前缀（同一套前缀契约，同 ensure_failure_prefix）。
+                    if str(getattr(chunk, "status", "") or "") == "error":
+                        result = ensure_failure_prefix(result)
                     yield ("tool", name, "", result)
             yield ("done", "".join(final_text_parts))
             return
