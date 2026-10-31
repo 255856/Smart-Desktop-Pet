@@ -33,6 +33,12 @@ noise 闲聊噪声 / are_you_ai 问是不是 AI / bad_state_demand 状态差时�
 praise 夸奖 / complain 吐槽 / ask_recommendation 求推荐 / tell_joke 讲笑话 /
 long_question 长问题 / short_question 短问题 / follow_up 连续追问 /
 call_name 叫名字 / praise_cute 夸可爱 / lookup_material 查资料
+
+角色感知（persona-aware）
+------------------------
+门禁对着**当前加载的角色**跑：黄金集按角色分文件（小汐 = naturalness_cases.json，
+大肥鱼 = naturalness_cases_dfy.json），用哪个角色就查哪一份。
+当前角色**还没有黄金集**时，门禁**跳过并写明原因**（不是失败，也不是假装通过）。
 """
 from __future__ import annotations
 
@@ -57,6 +63,23 @@ from app.brain.llm_client import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: 录制脚本 —— 黄金集「角色 -> 文件名」的口径只有那一份，录制和门禁共用
+SCRIPT_PATH = ROOT / "scripts" / "record_naturalness.py"
+
+
+def _load_recorder():
+    """按文件路径加载 scripts/record_naturalness.py（scripts 不是 python 包）。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("record_naturalness", SCRIPT_PATH)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_RECORDER = _load_recorder()
 
 # --------------------------------------------------------------------------
 # 常量
@@ -106,26 +129,76 @@ _META_NARRATION_MARKERS = (
     "tool_call", "<invoke", "invoke name", "minimax[>",
 )
 
-#: 拼 prompt 用的人设片段（跟 characters/xiaoxi.yaml 的第一句一致）
-PERSONA_SNIPPET = "你是「小汐」，住在用户桌面上的女仆桌宠，称呼用户为主人。"
+
+# --------------------------------------------------------------------------
+# 角色感知（persona-aware）：门禁永远对着**当前加载的角色**跑
+# --------------------------------------------------------------------------
+
+class _Character:
+    """一个角色：名字 / 人设 / 角色文件（相对项目根）。"""
+
+    __slots__ = ("name", "persona", "character_file")
+
+    def __init__(self, name: str, persona: str, character_file: str):
+        self.name = name
+        self.persona = persona
+        self.character_file = character_file
+
+
+def _current_character() -> _Character:
+    """**当前加载的角色**（config.yaml + data/character_selection.yaml）。
+
+    load_config() 先看运行时选过的角色（data/character_selection.yaml），
+    再回退 config.yaml 的 character_file —— 这就是「真正在跑的那个角色」。
+    门禁要对着它评，不是对着某个写死的名字。
+
+    环境变量 NATURALNESS_CHARACTER 可以**手动**指定角色（验证用：
+    NATURALNESS_CHARACTER=characters/xiaoxi.yaml pytest tests/test_naturalness.py），
+    默认走运行时真正加载的那个。
+    """
+    from app.core.config import load_config, load_character_entry
+
+    cfg = load_config(str(ROOT / "config.yaml"))
+    override = os.environ.get("NATURALNESS_CHARACTER", "").strip()
+    if override:
+        entry = load_character_entry(ROOT, override)
+        assert entry.ok, (
+            f"NATURALNESS_CHARACTER 指定的角色不可用：{override}（{entry.error}）")
+        return _Character(entry.name, entry.persona, entry.path)
+    ch = cfg.character
+    return _Character(name=ch.name or "", persona=ch.persona or "",
+                      character_file=ch.character_file or "")
+
+
+def _persona_head(persona: str) -> str:
+    """人设的第一行（拼 prompt 用的人设片段）。"""
+    lines = (persona or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+_CHARACTER = _current_character()
+
+#: 拼 prompt 用的人设片段 = **当前角色**人设的第一行
+PERSONA_SNIPPET = _persona_head(_CHARACTER.persona) or "你是桌宠"
 
 
 # --------------------------------------------------------------------------
-# 评测集读取
+# 评测集读取（按角色选文件）
 # --------------------------------------------------------------------------
 
 def _fixture_path() -> Path:
-    """评测集路径；可用环境变量覆盖（临时副本验证用，不影响 CI）。"""
+    """**当前角色**的黄金集路径；可用环境变量覆盖（临时副本验证用）。"""
     override = os.environ.get("NATURALNESS_CASES", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent / "fixtures" / "naturalness_cases.json"
+    return _RECORDER.fixture_path_for(_CHARACTER.character_file)
 
 
-def _load_cases() -> list:
-    path = _fixture_path()
+def _load_cases(path) -> list:
+    """读一个黄金集文件；读不到返回空列表（由调用方决定跳过）。"""
+    path = Path(path)
     if not path.is_file():
-        raise AssertionError(f"找不到自然度评测集：{path}")
+        return []
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         data = data.get("cases") or []
@@ -134,8 +207,41 @@ def _load_cases() -> list:
     return data
 
 
-CASES = _load_cases()
+def _characters_with_golden_sets() -> list:
+    """所有**有黄金集**的角色 -> [(角色, 黄金集路径)]"""
+    from app.core.config import list_characters
+
+    out = []
+    for entry in list_characters(ROOT):
+        if not entry.ok:
+            continue
+        path = _RECORDER.fixture_path_for(entry.path)
+        if path.is_file():
+            out.append((entry, path))
+    return out
+
+
+_FIXTURE_PATH = _fixture_path()
+CASES = _load_cases(_FIXTURE_PATH)
 CASE_IDS = [str(c.get("id")) for c in CASES]
+
+#: 没有黄金集时的占位 —— 让用例**跑起来**并给出跳过原因
+#: （空参数集会被 pytest 静默跳过，看不出「为什么没跑」）
+_MISSING_CASE = {"id": "__no_golden_set__"}
+_PARAM_CASES = CASES if CASES else [_MISSING_CASE]
+_PARAM_IDS = [str(c.get("id")) for c in _PARAM_CASES]
+
+
+def _require_cases() -> list:
+    """当前角色没有黄金集 -> **跳过**（带原因），不是失败、也不是假装通过。"""
+    if not CASES:
+        pytest.skip(
+            f"角色「{_CHARACTER.name or '未知'}」"
+            f"（{_CHARACTER.character_file or '未知'}）还没有自然度黄金集"
+            f"（{_FIXTURE_PATH.name}）—— 门禁跳过。"
+            f"录制：python scripts/record_naturalness.py --record "
+            f"--character {_CHARACTER.character_file}")
+    return CASES
 
 
 # --------------------------------------------------------------------------
@@ -330,23 +436,98 @@ class TestCharacterization:
 
 
 # --------------------------------------------------------------------------
-# L2：golden 评测集
+# L2：golden 评测集（对着**当前加载的角色**）
 # --------------------------------------------------------------------------
+
+def _violations(case: dict) -> list:
+    """这一条 case 的违规项（空 = 达标）。
+
+    门禁和「每个角色的黄金集都绿」共用这一份口径 —— 两边不能各写一套，
+    否则「门禁说绿、汇总说红」这种事迟早发生。
+    """
+    golden = case.get("golden_reply")
+    if golden is None:
+        return []
+    raw = golden
+    cleaned = sanitize_text(raw)
+    if not cleaned:
+        # 剥光了 —— 跟门禁一样，这一轮没东西可评（跳过，不算违规）
+        return []
+    violations = []
+    # Stage 3：清洗管线不再删工具独白（那族正则连人话都吃），
+    # 所以「独白漏进最终回复」改由**评测口径**量，命中记 violation。
+    if _TOOL_MONOLOGUE_RE.search(cleaned):
+        violations.append(f"工具独白漏进了最终回复：{cleaned!r}")
+    ai_hits = _ai_flavor_hits(cleaned)
+    if ai_hits:
+        violations.append(f"AI 味词命中 {ai_hits}")
+    service = _service_hits(cleaned)
+    if service:
+        violations.append(f"客服腔句式 {service}")
+    # 只比**可见回复**（剥掉 <think> 思维链）—— 见 _visible_answer 的注释：
+    # 思维链里的过渡语不算数，否则会误报「过渡语被误删」。
+    lost = [t for t in _transition_hits(_visible_answer(raw))
+            if t not in _transition_hits(cleaned)]
+    if lost:
+        violations.append(f"过渡语被清洗管线误删 {lost}")
+    if cleaned.startswith(("?", "？")):
+        violations.append("回复以问号开场")
+    prompt = _assemble_prompt(case)
+    if HARD_CAP in prompt:
+        violations.append(f"system prompt 残留硬上限「{HARD_CAP}」")
+    return violations
+
 
 def test_fixture_has_twenty_cases():
     """评测集固定 20 条（多一条少一条都会让基线不可比）。"""
-    assert len(CASES) == 20, f"评测集应该是 20 条，实际 {len(CASES)} 条"
+    cases = _require_cases()
+    assert len(cases) == 20, f"评测集应该是 20 条，实际 {len(cases)} 条"
 
 
 def test_case_ids_are_unique():
     """case id 必须唯一。"""
-    ids = [c.get("id") for c in CASES]
+    ids = [c.get("id") for c in _require_cases()]
     assert len(set(ids)) == len(ids), f"case id 重复：{ids}"
 
 
-@pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+def test_gate_follows_the_current_character():
+    """门禁对着**当前加载的角色**：黄金集的人设片段里必须有这个角色的名字。
+
+    这是 persona-aware 的硬证据 —— 拿错角色的黄金集来评，等于没评。
+    """
+    cases = _require_cases()
+    head = (cases[0].get("system_prompt_fragments") or [""])[0]
+    assert _CHARACTER.name in head, (
+        f"黄金集 {_FIXTURE_PATH.name} 的人设片段里没有「{_CHARACTER.name}」"
+        f"—— 门禁对着别的角色在跑：{head[:40]!r}")
+
+
+def test_every_character_with_a_golden_set_is_green():
+    """每个**有黄金集**的角色，20 条 golden reply 都得零违规。
+
+    不管当前加载的是哪个角色，小汐 / 大肥鱼 两套黄金集都得是绿的 ——
+    这条是「门禁真的对着人设跑」的证据（门禁本身只看当前角色）。
+    """
+    sets = _characters_with_golden_sets()
+    assert sets, "一个角色的黄金集都没有 —— 门禁形同虚设"
+    problems = []
+    for entry, path in sets:
+        cases = _load_cases(path)
+        if len(cases) != 20:
+            problems.append(f"{entry.name}：{path.name} 只有 {len(cases)} 条（应该 20 条）")
+            continue
+        for case in cases:
+            bad = _violations(case)
+            if bad:
+                problems.append(f"{entry.name} / {case.get('id')}：{'；'.join(bad)}")
+    if problems:
+        pytest.xfail("有角色的黄金集没达标：" + " | ".join(problems))
+
+
+@pytest.mark.parametrize("case", _PARAM_CASES, ids=_PARAM_IDS)
 def test_case_shape_is_valid(case):
     """每条 case 字段要齐全（golden_reply 允许为 null = 还没录）。"""
+    _require_cases()
     missing = {"id", "input", "system_prompt_fragments", "golden_reply"} - set(case)
     assert not missing, f"缺字段：{sorted(missing)}"
     assert isinstance(case["id"], str) and case["id"].strip()
@@ -357,9 +538,10 @@ def test_case_shape_is_valid(case):
     assert case["golden_reply"] is None or isinstance(case["golden_reply"], str)
 
 
-@pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+@pytest.mark.parametrize("case", _PARAM_CASES, ids=_PARAM_IDS)
 def test_golden_reply_structure(case):
     """golden reply 过一遍清洗管线，断言结构性质。"""
+    _require_cases()
     golden = case.get("golden_reply")
     if golden is None:
         pytest.skip("未录制 golden reply - 运行 scripts/record_naturalness.py --record")
@@ -383,28 +565,7 @@ def test_golden_reply_structure(case):
         )
         pytest.skip("该条 golden reply 本身就是元描述 / 工具独白，清洗后为空")
     # ---- 期望门禁：Stage 1.3 / 1.4 修好后自动转 pass ----
-    violations = []
-    # Stage 3：清洗管线不再删工具独白（那族正则连人话都吃），
-    # 所以「独白漏进最终回复」改由**评测口径**量，命中记 violation。
-    if _TOOL_MONOLOGUE_RE.search(cleaned):
-        violations.append(f"工具独白漏进了最终回复：{cleaned!r}")
-    ai_hits = _ai_flavor_hits(cleaned)
-    if ai_hits:
-        violations.append(f"AI 味词命中 {ai_hits}")
-    service = _service_hits(cleaned)
-    if service:
-        violations.append(f"客服腔句式 {service}")
-    # 只比**可见回复**（剥掉 <think> 思维链）—— 见 _visible_answer 的注释：
-    # 思维链里的过渡语不算数，否则会误报「过渡语被误删」。
-    lost = [t for t in _transition_hits(_visible_answer(raw))
-            if t not in _transition_hits(cleaned)]
-    if lost:
-        violations.append(f"过渡语被清洗管线误删 {lost}")
-    if cleaned.startswith(("?", "？")):
-        violations.append("回复以问号开场")
-    prompt = _assemble_prompt(case)
-    if HARD_CAP in prompt:
-        violations.append(f"system prompt 残留硬上限「{HARD_CAP}」")
+    violations = _violations(case)
     if violations:
         pytest.xfail("自然度门禁未达标（Stage 1.3 / 1.4 修好后自动转 pass）："
                      + "；".join(violations))
@@ -412,6 +573,7 @@ def test_golden_reply_structure(case):
 
 def test_reply_length_variance_across_cases():
     """回复长度要有方差 —— 全部一样长说明回复太模板化。"""
+    _require_cases()
     recorded = _recorded_cases()
     if len(recorded) < 2:
         pytest.skip("已录制的 golden reply 不足 2 条（还没录）")
@@ -421,6 +583,7 @@ def test_reply_length_variance_across_cases():
 
 def test_recorded_replies_are_not_all_questions():
     """不能每条回复都以问号结尾（那是客服腔，不是聊天）。"""
+    _require_cases()
     recorded = _recorded_cases()
     if len(recorded) < 2:
         pytest.skip("已录制的 golden reply 不足 2 条（还没录）")

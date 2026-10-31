@@ -10,13 +10,20 @@
     python scripts/record_naturalness.py --record --overwrite
     # 4) 只拼 prompt 对账、不联网：
     python scripts/record_naturalness.py --record --dry-run
+    # 5) 给**别的角色**录一份黄金集（下一个角色就差这一条命令）：
+    python scripts/record_naturalness.py --record --character characters/dfy.yaml
+    #    -> 写 tests/fixtures/naturalness_cases_dfy.json
 
 行为
 ----
 - 没带 --record -> 打印用法 + 非零退出，一个网络请求都不发
 - 没有 key / key 还是占位符 -> 打印怎么用 + 非零退出，一个网络请求都不发
 - 默认幂等：已经录好的条目直接跳过，重复跑不花钱
-- 只写 tests/fixtures/naturalness_cases.json，不碰别的文件
+- 只写黄金集文件（tests/fixtures/naturalness_cases*.json），不碰别的文件
+- **角色感知**：默认录**当前加载的角色**（config.yaml + data/character_selection.yaml
+  解析出来的那个）；--character characters/xxx.yaml 可以给任意角色录一份，
+  黄金集按角色分文件（小汐 = naturalness_cases.json，大肥鱼 = naturalness_cases_dfy.json）。
+  场景（id / input）取自种子集 naturalness_cases.json，场景里提到的角色名换成目标角色的。
 - **system prompt 走生产路径**（app/brain/prompt_layer.build_system_prompt）：
   拼完之后跟两个后端**真正发出去**的那条 system 消息逐字节对账，
   对不上直接失败退出（不再拿一个「看起来差不多」的 prompt 去录）。
@@ -42,6 +49,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -51,13 +59,30 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_CASES = ROOT / "tests" / "fixtures" / "naturalness_cases.json"
+#: 黄金集目录（每个角色一份）
+FIXTURES_DIR = ROOT / "tests" / "fixtures"
+#: 场景种子（20 条 id / input 的来源）：小汐那份
+DEFAULT_CASES = FIXTURES_DIR / "naturalness_cases.json"
 DEFAULT_CONFIG = ROOT / "config.yaml"
+
+#: 角色文件 stem -> 黄金集文件名。
+#: 小汐是**默认角色**，沿用没有后缀的老文件名；别的角色一律 naturalness_cases_<stem>.json。
+_FIXTURE_BY_STEM = {"xiaoxi": "naturalness_cases.json"}
 
 #: BrainController 只认 root 下的这几个 SKILL.md 路径
 #: （app/brain/brain_controller.py::_SKILL_PATH_CANDIDATES）
 _SKILL_RELPATH = ".agents/skills/desktop-pet-tool-usage/SKILL.md"
 
+
+def fixture_name_for(character_file: str) -> str:
+    """角色文件 -> 黄金集文件名（录制脚本和测试门禁共用这一份口径）。"""
+    stem = Path(str(character_file or "").strip()).stem or "default"
+    return _FIXTURE_BY_STEM.get(stem, f"naturalness_cases_{stem}.json")
+
+
+def fixture_path_for(character_file: str) -> Path:
+    """角色文件 -> 黄金集路径（tests/fixtures/ 下）。"""
+    return FIXTURES_DIR / fixture_name_for(character_file)
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -71,7 +96,11 @@ def _parse_args(argv=None):
     parser.add_argument("--config", default=str(DEFAULT_CONFIG),
                         help="配置文件路径（默认 config.yaml）")
     parser.add_argument("--cases", default=str(DEFAULT_CASES),
-                        help="评测集路径（默认 tests/fixtures/naturalness_cases.json）")
+                        help="场景种子路径（默认 tests/fixtures/naturalness_cases.json，只取 id / input）")
+    parser.add_argument("--character", default="",
+                        help="要录的角色文件（默认当前加载的角色），如 characters/dfy.yaml")
+    parser.add_argument("--out", default="",
+                        help="黄金集输出路径（默认按角色推导：tests/fixtures/naturalness_cases_<stem>.json）")
     parser.add_argument("--model", default="",
                         help="临时换模型（默认用配置里的 llm.model）")
     parser.add_argument("--timeout", type=int, default=60,
@@ -86,6 +115,20 @@ def _parse_args(argv=None):
 def _sha256(text: str) -> str:
     """文本的 sha256（utf-8 字节级）。"""
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _temp_root(prefix: str) -> Path:
+    """建一个临时 root（记忆库 / 会话库 / 提醒库都落这儿）。
+
+    不用 TemporaryDirectory：Windows 上 memory sidecar 还攥着日志文件时，
+    rmtree 会抛 PermissionError，把整次录制带崩 —— 钱花了、黄金集却没落盘。
+    """
+    return Path(tempfile.mkdtemp(prefix=prefix))
+
+
+def _cleanup_temp_root(path: Path) -> None:
+    """删临时 root；删不掉就算了（反正是 %TEMP% 里的垃圾）。"""
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _prepare_temp_root(root: Path, tmp_root: Path) -> None:
@@ -262,6 +305,61 @@ def _build_fragments(system_prompt: str, persona: str) -> list:
 
 
 # --------------------------------------------------------------------------
+# 角色 / 黄金集
+# --------------------------------------------------------------------------
+
+def resolve_character(cfg, character_arg: str = "") -> tuple:
+    """返回 (name, persona, character_file)。
+
+    给了 character_arg 就用那个角色文件；没给就用**当前加载的角色**
+    （load_config 已经把 data/character_selection.yaml / config.yaml 的
+    character_file 解析进 cfg.character 了）。
+    """
+    rel = (character_arg or "").strip()
+    if rel:
+        from app.core.config import load_character_entry
+
+        entry = load_character_entry(ROOT, rel)
+        if not entry.ok:
+            raise RuntimeError(f"角色文件不可用：{rel}（{entry.error}）")
+        return entry.name, entry.persona, entry.path
+    return (cfg.character.name or "", cfg.character.persona or "",
+            cfg.character.character_file or "")
+
+
+def _load_case_list(path) -> list:
+    """读一个黄金集文件 -> list[dict]（顶层是数组、或 {"cases": [...]} 都认）。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, dict):
+        data = data.get("cases") or []
+    return data if isinstance(data, list) else []
+
+
+def _seed_character_name(seed_cases: list) -> str:
+    """认出种子集是**哪个角色**的（人设开头形如「你是「小汐」」）。"""
+    for case in seed_cases or []:
+        for frag in (case.get("system_prompt_fragments") or []):
+            found = re.search(r"你是「(.+?)」", frag or "")
+            if found:
+                return found.group(1)
+    return ""
+
+
+def _adapt_input(text: str, old_name: str, new_name: str) -> str:
+    """场景里提到的角色名换成目标角色的名字。
+
+    场景的 **id / 形状不变**（还是那 20 条），只有「叫名字」那条要叫新角色的名字
+    —— 否则录出来的 golden 是在演别的角色。
+    """
+    if not text or not old_name or not new_name or old_name == new_name:
+        return text
+    return text.replace(old_name, new_name)
+
+
+# --------------------------------------------------------------------------
 # 工具调用的还原
 # --------------------------------------------------------------------------
 
@@ -404,17 +502,53 @@ def main(argv=None) -> int:
 
     model = args.model or cfg.llm.model
 
-    cases_path = Path(args.cases)
-    if not cases_path.is_file():
-        print(f"找不到评测集：{cases_path}")
+    # ---- 角色：--character 指定；默认用**当前加载的角色** ------------------
+    try:
+        char_name, char_persona, char_file = resolve_character(cfg, args.character)
+    except Exception as exc:  # noqa: BLE001
+        print(f"角色解析失败：{exc}")
         return 2
-    cases = json.loads(cases_path.read_text(encoding="utf-8"))
-    if isinstance(cases, dict):
-        cases = cases.get("cases") or []
+    cfg.character.name = char_name
+    cfg.character.persona = char_persona
+    cfg.character.character_file = char_file
+
+    # ---- 种子（场景来源）/ 输出（这个角色的黄金集）------------------------
+    seed_path = Path(args.cases)
+    if not seed_path.is_file():
+        print(f"找不到场景种子：{seed_path}")
+        return 2
+    seed_cases = _load_case_list(seed_path)
+    if not seed_cases:
+        print(f"场景种子是空的：{seed_path}")
+        return 2
+
+    out_path = Path(args.out) if args.out else fixture_path_for(char_file)
+    seed_name = _seed_character_name(seed_cases)
+    cases = _load_case_list(out_path) if out_path.is_file() else []
+    if cases:
+        # 已有黄金集：只校正 input（幂等），已录好的 golden reply 一个都不动
+        for case in cases:
+            case["input"] = _adapt_input(case.get("input") or "",
+                                          seed_name, char_name)
+    else:
+        # 新角色：从种子重建场景（角色名换成目标角色的），golden 全部待录
+        cases = [{
+            "id": c.get("id"),
+            "input": _adapt_input(c.get("input") or "", seed_name, char_name),
+            "system_prompt_fragments": [],
+            "golden_reply": None,
+        } for c in seed_cases]
+    seed_ids = [c.get("id") for c in seed_cases]
+    out_ids = [c.get("id") for c in cases]
+    if out_ids != seed_ids:
+        print(f"警告：{out_path.name} 的用例 id 跟种子对不上：{out_ids} != {seed_ids}")
+
+    print(f"角色：{char_name}（{char_file}）")
+    print(f"黄金集：{out_path}")
 
     # ---- 生产 system prompt（临时 root：不碰 data/ 下的任何真库） ----------
-    with tempfile.TemporaryDirectory(prefix="naturalness_record_") as tmp:
-        tmp_root = Path(tmp)
+    tmp_root = _temp_root("naturalness_record_")
+    try:
         built = build_production_prompt(cfg, root=ROOT, tmp_root=tmp_root)
         system_prompt = built["system_prompt"]
         react_prompt = built["react_prompt"]
@@ -437,6 +571,8 @@ def main(argv=None) -> int:
         # 本轮易变上下文（当前时间 / 桌宠实时状态）—— 生产走独立的 user 消息
         from app.brain.llm_client import build_dynamic_context
         dynamic_context = build_dynamic_context(state=built["state"])
+    finally:
+        _cleanup_temp_root(tmp_root)
 
     # prompt 跟评测集里记的片段对不上 -> 提醒（prompt 变了就会出现）
     old_fragments = cases[0].get("system_prompt_fragments") or [] if cases else []
@@ -481,8 +617,6 @@ def main(argv=None) -> int:
             failed += 1
             continue
         case["golden_reply"] = reply
-        # 片段按**这次录制用的 prompt** 回写（逐字子串，staleness 检查不会报 mismatch）
-        case["system_prompt_fragments"] = list(fragments)
         recorded += 1
         for key in totals:
             totals[key] += usage.get(key, 0)
@@ -491,11 +625,16 @@ def main(argv=None) -> int:
         print(f"[录好] {case_id}：{preview}｜prompt {usage['prompt_tokens']} tok，"
               f"cached {usage['cached_tokens']} tok{tag}")
 
-    cases_path.write_text(
+    # 片段按**这次录制用的 prompt** 统一回写（逐字子串，staleness 检查不会报 mismatch）
+    for case in cases:
+        case["system_prompt_fragments"] = list(fragments)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
         json.dumps(cases, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"写回：{cases_path}（新录 {recorded} 条，失败 {failed} 条）")
+    print(f"写回：{out_path}（新录 {recorded} 条，失败 {failed} 条）")
     print(f"token 用量合计：prompt {totals['prompt_tokens']}，"
           f"cached {totals['cached_tokens']}，"
           f"completion {totals['completion_tokens']}，total {totals['total_tokens']}")
