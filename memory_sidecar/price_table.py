@@ -64,7 +64,7 @@ import json
 import os
 
 #: 这张表的版本号（改动阈值时顺手改，方便 /stats 里看出跑的是哪一版）
-KIND_GATE_TABLE_VERSION = "2026-11-04"
+KIND_GATE_TABLE_VERSION = "2026-11-05"
 
 #: 环境变量：整张表用 JSON 覆盖
 KIND_GATE_ENV = "DESKTOP_PET_MEMORY_KIND_GATE"
@@ -80,6 +80,8 @@ KIND_GATE_TABLE = {
     # 语料里没有 event / thought —— 先沿用全局默认，等有数据再标定
     "event": {"min_score_ratio": 0.12, "dense_keep_ratio": 0.75},
     "thought": {"min_score_ratio": 0.12, "dense_keep_ratio": 0.75},
+    # 程序性记忆（工具序列）：新类别，语料里还没有 —— 同样先沿用全局默认
+    "procedural": {"min_score_ratio": 0.12, "dense_keep_ratio": 0.75},
 }
 
 

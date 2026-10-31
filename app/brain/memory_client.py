@@ -79,8 +79,13 @@ MEMORY_BLOCK_HEADER = (
 MEMORY_BLOCK_LEGEND = "（★ 是重要性 0-1）"
 
 #: sidecar 认的生命周期分类（memory_sidecar/store.py 的 HALF_LIFE_DAYS 键）
-SIDECAR_KINDS = ("thought", "topic", "event", "fact", "impression")
+#: "procedural" = 程序性记忆（「怎么做某件事」：工具序列 + 成功率）
+SIDECAR_KINDS = ("thought", "topic", "event", "fact", "impression", "procedural")
 DEFAULT_KIND = "fact"
+
+#: 情感字段的默认值（0 = 中性）。旧卡**不需要迁移**：缺字段就是中性。
+DEFAULT_AROUSAL = 0.0
+DEFAULT_VALENCE = 0.0
 
 #: 界面 / 工具用的老 category（内容类型）→ sidecar kind（生命周期分类）。
 #: 两份映射只有一份实现（工具层 app/engine/tools/_memory.py 也 import 这里），
@@ -101,6 +106,7 @@ KIND_TO_CATEGORY = {
     "event": "event",
     "thought": "other",
     "fact": "fact",
+    "procedural": "skill",
 }
 
 
@@ -121,7 +127,8 @@ class MemoryCard:
     """
 
     __slots__ = ("id", "content", "category", "kind", "key", "importance",
-                 "created_at", "updated_at", "hit_count", "superseded", "fuzzy")
+                 "created_at", "updated_at", "hit_count", "superseded", "fuzzy",
+                 "arousal", "valence")
 
     def __init__(self, raw: dict) -> None:
         raw = raw if isinstance(raw, dict) else {}
@@ -135,6 +142,9 @@ class MemoryCard:
             self.importance = float(raw.get("importance", 0.5))
         except (TypeError, ValueError):
             self.importance = 0.5
+        # 情感（唤醒度 / 效价）：默认 0 = 中性 —— 旧卡没这两个字段也不用迁移
+        self.arousal = _clamp_affect(raw.get("arousal"))
+        self.valence = _clamp_affect(raw.get("valence"))
         self.created_at = _ms_to_seconds(raw.get("createdAt"))
         self.updated_at = _ms_to_seconds(raw.get("updatedAt"))
         try:
@@ -155,6 +165,17 @@ def _ms_to_seconds(ts) -> float:
         return float(ts or 0) / 1000.0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _clamp_affect(value, default: float = DEFAULT_AROUSAL) -> float:
+    """arousal / valence → [-1, 1] 的浮点数（拿不到 / 坏了 → 默认 0 = 中性）。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v:      # NaN
+        return default
+    return max(-1.0, min(1.0, v))
 
 
 #: 卡片 id 各段之间的分隔符（正文里不会出现的控制字符，避免拼接撞车）
@@ -372,10 +393,18 @@ class MemoryClient:
         }
 
     def search(self, query: str, top_k: int = 8, mood: str | None = None,
-               kind: str | None = None, key: str | None = None) -> list:
+               kind: str | None = None, key: str | None = None,
+               route: bool = True, affect: bool = True) -> list:
         """POST /search → 结果列表（失败 → []）。
 
         key: 只看某一张「分区」（工具层拿它保留老的 scope 语义：project / user）。
+        route: 检索**路由**（query 里的时间词 / 事实词 / how-to 词 → 给对应
+            kind 加权；见 app/brain/memory_partitions.py）。
+        affect: **情感偏置**（卡片带 arousal / valence 才生效；中性卡恒为 1.0）。
+
+        ⚠️ 这两层只调**权重**、**不改「哪些行被返回」** —— 哪些行能进结果由
+        sidecar 那套按类别标定过的闸门（memory_sidecar/price_table.py）说了算，
+        我们不绕开它（绕开了评测台的 recall / 陷阱率就不再可比了）。
         """
         payload = {"query": query or "", "top_k": int(top_k or 8)}
         if mood:
@@ -386,7 +415,17 @@ class MemoryClient:
             payload["key"] = key
         data = self._post("/search", payload) or {}
         rows = data.get("results")
-        return rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            return []
+        if rows and (route or affect):
+            try:
+                from app.brain.memory_partitions import rerank_rows
+                rows = rerank_rows(rows, query or "", mood=mood or "",
+                                   now_ms=int(time.time() * 1000),
+                                   route=route, affect=affect)
+            except Exception as e:  # noqa: BLE001 - 调权失败就按原样返回
+                log.debug("检索调权失败，按原顺序返回：%s", e)
+        return rows
 
     def upsert(self, cards) -> int:
         """POST /upsert → 实际写入条数（失败 → 0）。"""
@@ -432,12 +471,16 @@ class MemoryClient:
     # -- 方便工具用的高层封装 ---------------------------------------------
     def make_card(self, text: str, *, key: str = "", kind: str = DEFAULT_KIND,
                   importance: float = 0.5, mood: str = "",
-                  category: str = "") -> dict:
+                  category: str = "", arousal: float = DEFAULT_AROUSAL,
+                  valence: float = DEFAULT_VALENCE) -> dict:
         """造一张记忆卡（形状 = memory_sidecar/store.py 的 _normalize_card）。
 
         category：老的内容类型（preference/fact/event/shared/...）。sidecar 会
         原样保留调用方塞的额外字段，所以卡片里带着它 —— 面板按类别筛、
         主动发言找「共同经历」都靠它，不需要再猜 kind。
+
+        arousal / valence：情感（唤醒度 / 效价，-1~1）。**默认 0 = 中性** ——
+        不给就是中性，检索时的情感权重恒为 1.0（旧卡不需要迁移）。
         """
         text = (text or "").strip()
         kind = (kind or DEFAULT_KIND).strip() or DEFAULT_KIND
@@ -448,6 +491,8 @@ class MemoryClient:
             "text": text,
             "mood": mood or "",
             "importance": max(0.0, min(1.0, float(importance))),
+            "arousal": _clamp_affect(arousal),
+            "valence": _clamp_affect(valence),
         }
         cat = (category or "").strip().lower()
         if cat:
@@ -456,10 +501,12 @@ class MemoryClient:
 
     def add(self, text: str, *, key: str = "", kind: str = DEFAULT_KIND,
             importance: float = 0.5, mood: str = "",
-            category: str = "") -> dict:
+            category: str = "", arousal: float = DEFAULT_AROUSAL,
+            valence: float = DEFAULT_VALENCE) -> dict:
         """记一条 → 写进去的那张卡（失败 → 空 dict，原因在 last_error）。"""
         card = self.make_card(text, key=key, kind=kind, importance=importance,
-                              mood=mood, category=category)
+                              mood=mood, category=category,
+                              arousal=arousal, valence=valence)
         if not card["text"]:
             self.last_error = "内容为空，没有写入"
             return {}
@@ -638,5 +685,5 @@ __all__ = [
     "CATEGORY_TO_KIND", "KIND_TO_CATEGORY", "default_base_url", "DEFAULT_PORT",
     "DEFAULT_BASE_URL", "DEFAULT_TIMEOUT", "DEFAULT_WRITE_TIMEOUT",
     "DEFAULT_MAX_ROWS", "MEMORY_BLOCK_HEADER", "MEMORY_BLOCK_LEGEND",
-    "SIDECAR_KINDS", "DEFAULT_KIND",
+    "SIDECAR_KINDS", "DEFAULT_KIND", "DEFAULT_AROUSAL", "DEFAULT_VALENCE",
 ]

@@ -13,12 +13,15 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
   1. persona        人设（+ 上游注入的会话上下文：SKILL / 长期记忆 / 可用工具列表）
   2. style_guide    characters/style-guide.md —— **逐字**追加，不改写、不重排
   3. slang          已收录黑话表（**只有 confirmed 词条**）—— 常量块
-  4. tool_handbook  工具手册（【工具解锁】等级提示）
-  5. dynamic        会话内稳定动态块（项目级指令文档 + skills）
-  6. 防幻觉基线 + 高风险工具 confirm 协议
-  7. 中文输出约束
-  8. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
-  9. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
+  4. identity       身份记忆（我是谁）—— 常量块（data/identity.json）
+  5. values         价值记忆（底线 → 偏好 → 风格）—— 常量块（data/values.json）
+  6. procedures     程序性记忆（固定套路 + 成功率）—— 常量块（data/procedures.json）
+  7. tool_handbook  工具手册（【工具解锁】等级提示）
+  8. dynamic        会话内稳定动态块（项目级指令文档 + skills）
+  9. 防幻觉基线 + 高风险工具 confirm 协议
+ 10. 中文输出约束
+ 11. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
+ 12. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
 
 顺序变了会让 MiniMax 的前缀缓存整块失效，所以**不要随手调换**。
 
@@ -218,6 +221,42 @@ def slang_prompt_block() -> str:
     except Exception as e:  # noqa: BLE001
         log.debug("取已收录黑话失败，跳过：%s", e)
         return ""
+
+
+# --------------------------------------------------------------------------
+# 记忆分区：身份 / 价值 / 程序性（**常量块**）
+# --------------------------------------------------------------------------
+# 为什么它们能进 system prompt
+# --------------------------
+# 三块都是「每轮都一样」的东西：身份（我是谁）、价值（底线 → 偏好 → 风格）、
+# 程序性（固定套路 + 成功率）。它们**只随文件变**（data/identity.json /
+# values.json / procedures.json），不随这一轮变 —— 所以放 system prompt
+# 不会打掉前缀缓存，反而比放进易变通道更省（本来就在前缀里）。
+#
+# ⚠️ 必须是**常量**：内容只随文件变，不随每轮变。每轮变的内容放 system prompt
+# 会把命中率从 98.9% 打到 1.5%（见模块 docstring）。
+#
+# 为什么不放 sidecar：这三类是**设定**，不是「主人的一条记忆」—— 不该被检索、
+# 不该被半衰期衰减（见 app/brain/memory_partitions.py）。
+
+def memory_partition_blocks() -> list:
+    """身份 / 价值 / 程序性三块（**常量**；读不到就空串，绝不崩聊天）。
+
+    返回固定三段（顺序：身份 → 价值 → 程序性），空的那段是空串。
+    """
+    try:
+        from app.brain import memory_partitions as mp
+    except Exception as e:  # noqa: BLE001
+        log.debug("取记忆分区失败，跳过：%s", e)
+        return ["", "", ""]
+    out = []
+    for fn in (mp.identity_block, mp.values_block, mp.procedures_block):
+        try:
+            out.append(fn() or "")
+        except Exception as e:  # noqa: BLE001
+            log.debug("取记忆分区块失败，跳过：%s", e)
+            out.append("")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -611,6 +650,8 @@ def build_system_prompt(*, persona, style_guide, tool_handbook, dynamic,
         persona,
         style_guide,
         slang_prompt_block(),
+        # 身份 / 价值 / 程序性 —— **常量块**（只随文件变，不随每轮变）
+        *memory_partition_blocks(),
         tool_handbook,
         dynamic,
         anti_hallucination_suffix(),

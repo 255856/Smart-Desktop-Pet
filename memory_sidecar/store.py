@@ -198,6 +198,7 @@ HALF_LIFE_DAYS = {
     "event": 30,        # 发生过的事
     "fact": 90,         # 事实 / 偏好
     "impression": 180,  # 对人的印象
+    "procedural": 180,  # 做法（工具序列）—— 跟「印象」一样，属于该长期记住的
 }
 DEFAULT_HALF_LIFE = 90
 MOOD_BONUS = 1.15
@@ -630,6 +631,21 @@ def _clamp01(v):
         return 0.5
 
 
+def _clamp_affect(v, default=0.0):
+    """情感值（唤醒度 / 效价）→ [-1, 1]。
+
+    缺字段 / 坏值 → default（0.0 = 中性）：旧卡不需要迁移，也不会被
+    排序逻辑当成「有情绪」的那张。
+    """
+    try:
+        f = float(v)
+    except Exception:
+        return default
+    if f != f:      # NaN
+        return default
+    return max(-1.0, min(1.0, f))
+
+
 def _env_float(name, default):
     """读一个浮点环境变量；没设 / 不是数字都退回默认值（环境变量不该把服务搞挂）。"""
     raw = os.environ.get(name)
@@ -946,6 +962,12 @@ class MemoryStore:
         card["text"] = str(raw.get("text") or old.get("text") or "").strip()[:500]
         card["mood"] = str(raw.get("mood") or old.get("mood") or "").strip()[:24]
         card["importance"] = _clamp01(raw.get("importance", old.get("importance", 0.5)))
+        # 情感（唤醒度 / 效价）：**默认 0 = 中性** —— 旧卡没这两个字段也不用迁移，
+        # 检索时的情感权重恒为 1.0（跟没这个功能一样）。
+        card["arousal"] = _clamp_affect(
+            raw.get("arousal") if raw.get("arousal") is not None else old.get("arousal", 0.0))
+        card["valence"] = _clamp_affect(
+            raw.get("valence") if raw.get("valence") is not None else old.get("valence", 0.0))
         card["createdAt"] = _as_int(raw.get("createdAt") or old.get("createdAt") or _now_ms())
         card["updatedAt"] = _as_int(raw.get("updatedAt") or _now_ms())
         card["hitCount"] = _as_int(raw.get("hitCount", old.get("hitCount", 0)))
@@ -975,6 +997,9 @@ class MemoryStore:
             "category": str(card.get("category") or ""),
             "mood": card["mood"],
             "importance": card["importance"],
+            # 情感字段：**永远带这个键**（旧卡 = 0 = 中性）
+            "arousal": _clamp_affect(card.get("arousal")),
+            "valence": _clamp_affect(card.get("valence")),
             "status": card["status"],
             "fuzzy": bool(card.get("fuzzy")),
             "createdAt": card["createdAt"],
