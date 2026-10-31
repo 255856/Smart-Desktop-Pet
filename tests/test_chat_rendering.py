@@ -3062,9 +3062,19 @@ def test_v20_render_markdown_image_thumb_and_click_to_zoom():
     assert 'cursor:zoom-in' in html, (
         f"v20 应给 cursor:zoom-in 视觉提示. 实际: {html[:600]}"
     )
-    # v20 验证 3: 包在 <a href="img-open:KEY"> 里, 可点击放大
-    assert 'href="img-open:' in html, (
-        f"v20 应包 img-open:KEY 锚点 (点击弹原图). 实际: {html[:600]}"
+    # v20 验证 3: 包在 <a href="#img-KEY"> 页内锚点里, 可点击放大
+    # （页内锚点：自定义 scheme 会让 QTextBrowser 换掉整份文档 → 聊天区空白；
+    #   语音条 / 工具折叠早就改成页内锚点了，图片这里也统一）
+    assert 'href="#img-' in html, (
+        f"v20 应包 #img-KEY 页内锚点 (点击弹原图). 实际: {html[:600]}"
+    )
+    assert 'href="img-open:' not in html, (
+        f"v20 不该再用自定义 scheme 锚点. 实际: {html[:600]}"
+    )
+    import re as _re
+    _m = _re.search(r'href="#img-([0-9a-f]+)"', html)
+    assert _m and _m.group(1) in cw._img_open_map, (
+        "锚点 key 必须在 _img_open_map 里, 否则点开打不开"
     )
     assert 'title="点击放大"' in html, (
         f"v20 应给 title 点击放大提示. 实际: {html[:600]}"
@@ -4135,3 +4145,65 @@ def test_summary_entry_is_not_labelled_as_the_owner():
     # 也不能退化成普通用户气泡
     assert "msg msg-user" not in html
     print("[OK] Summary entry renders as its own block, not as the owner speaking")
+
+# --- 2026-11 渲染回归：代码块 / 表格变形（owner 报「排版错乱」） ---------
+
+
+def _cw_for_markdown():
+    from app.core.config import CharacterConfig, LLMConfig
+    return ChatWindow(LLMConfig(), CharacterConfig(name="test"),
+                      "assets/sprites")
+
+
+def test_code_block_with_blank_line_is_not_cut_apart():
+    """代码块里有空行 → 段落切分不能切进 <pre>。
+
+    修复前会生成这种坏 HTML：
+        <p>before</p><pre><code>def f():<p>    return a</code></pre></p>
+    → 代码块变形，而且后面的正文被吞进代码块里。
+    """
+    cw = _cw_for_markdown()
+    src = "\n".join([
+        "before text", "",
+        "```python", "def f():", "    a = 1", "", "    return a", "```", "",
+        "after text",
+    ])
+    html = cw._msg_html(Message(role="assistant", content=src))
+    assert html.count("<pre>") == 1 and html.count("</pre>") == 1, html[:400]
+    inner = html.split("<pre>")[1].split("</pre>")[0]
+    assert "<p>" not in inner and "</p>" not in inner, inner[:300]
+    assert "a = 1" in inner and "return a" in inner, inner[:300]
+    assert html.index("</pre>") < html.index("after text"), html[:400]
+    print("[OK] 代码块带空行不会被段落切分切坏")
+
+
+def test_table_without_leading_pipes_is_still_a_table():
+    """GFM 允许首行不写竖线（`a | b`）—— 以前整张表退回成带 | 的纯文本。"""
+    cw = _cw_for_markdown()
+    html = cw._msg_html(Message(role="assistant", content="a | b\n---|---|\n1 | 2"))
+    assert html.count("<table>") == 1, html[:300]
+    assert "<th>a</th>" in html and "<td>1</td>" in html, html[:300]
+    print("[OK] 无首竖线的表格也能渲染")
+
+
+def test_table_cell_with_escaped_pipe_stays_one_cell():
+    """单元格里的 `\\|` 是内容不是分隔符 —— 以前会被切开，列就错位。"""
+    cw = _cw_for_markdown()
+    src = "| cmd | note |\n|---|---|\n| a \\| b | x |"
+    html = cw._msg_html(Message(role="assistant", content=src))
+    assert html.count("<td>") == 2, html[:300]
+    assert "<td>a | b</td>" in html, html[:300]
+    print("[OK] 表格单元格里的转义竖线不再被切开")
+
+
+def test_table_ragged_rows_are_padded_to_header_width():
+    """模型少写一列 / 多写一列 → 补齐或截断，表格不能参差不齐。"""
+    import re as _re
+    cw = _cw_for_markdown()
+    src = "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n| 1 | 2 | 3 | 4 |"
+    html = cw._msg_html(Message(role="assistant", content=src))
+    rows = _re.findall(r"<tr>(.*?)</tr>", html, _re.S)
+    assert len(rows) == 3, html[:300]
+    for row in rows:
+        assert row.count("<td>") + row.count("<th>") == 3, row
+    print("[OK] 表格行列不齐时按表头补齐")

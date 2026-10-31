@@ -439,7 +439,7 @@ class ChatWindow(QWidget):
         # 切回 setHtml 模拟。新一轮 chat 起始 reset 成 True。按消息分别记折叠状态。
         self._tools_collapsed_by_msg: dict = {}
         self._tools_collapsed_default: bool = True  # 新消息默认折叠
-        # chat 图片缩略图 → 点击放大,img-open:KEY 锚点用 dict 查真 URL
+        # chat 图片缩略图 → 点击放大,页内锚点 #img-KEY 用 dict 查真 URL
         self._img_open_map: dict = {}
         # 语音条 → 点击播放：锚点用**页内锚点**（#vp-KEY），KEY → 音频路径。
         # 不用自定义 scheme —— QTextBrowser 点自定义 scheme 的链接会把它当成
@@ -3471,7 +3471,7 @@ class ChatWindow(QWidget):
                 self._rebuild_chat_view_from_history()
                 return
 
-        # img-open:KEY 在前,不要被 cmd: 分支吞掉
+        # 旧式 img-open:KEY 还在前（历史 HTML 里可能有），不要被 cmd: 分支吞掉
         if scheme == "img-open":
             try:
                 key = url.path().lstrip("/") if hasattr(url, "path") else ""
@@ -5721,7 +5721,7 @@ class ChatWindow(QWidget):
                 key = _img_open_key(url)
                 self._img_open_map[key] = url
                 return (
-                    f'<a href="img-open:{key}" title="点击放大" '
+                    f'<a href="#img-{key}" title="点击放大" '
                     f'style="text-decoration:none;display:inline-block;">'
                     f'<img src="{url}" alt="{alt}" width="{thumb_w}" '
                     f'style="display:block;width:{thumb_w}px;height:auto;'
@@ -5805,22 +5805,42 @@ class ChatWindow(QWidget):
                 f'<li>{_inline_md(_html_escape(it))}</li>' for it in items) + '</ol>')
         text = re.sub(r'(?:^\d+\.\s+.+\n?)+', _save_ol, text, flags=re.MULTILINE)
 
-        # 1g. 表格 (简化 GFM: | col | col | / |---|...|)
+        # 1g. 表格 (简化 GFM)
+        #
+        # 三件必须做对，否则表格会「变形」（实测）：
+        # ① 首尾竖线**可有可无**（GFM 允许 `a | b` 这种写法）——
+        #    原来要求每行都以 | 开头，无竖线的表整张退回成带 | 的纯文本；
+        # ② 单元格里的 `\|` 是**内容**不是分隔符 —— 原来会把它切开，列就错位了；
+        # ③ 行列数不齐（模型少写一列 / 多写一列）—— 原来直接照抄，
+        #    Qt 会按最大列数排版，短行留空 → 表格参差不齐。
+        def _split_row(line: str) -> list:
+            """一行表格 → 单元格列表（首尾竖线可省；转义竖线还原成 |）。"""
+            s = line.strip()
+            if s.startswith('|'):
+                s = s[1:]
+            if s.endswith('|') and not s.endswith('\\|'):
+                s = s[:-1]
+            cells = re.split(r'(?<!\\)\|', s)
+            return [c.strip().replace('\\|', '|') for c in cells]
+
+        def _is_delimiter(line: str) -> bool:
+            """是不是 GFM 的分隔行（|---|---| / :---:|）。"""
+            cells = _split_row(line)
+            if len(cells) < 2:
+                return False
+            return all(re.fullmatch(r':?-{1,}:?', c.replace(' ', ''))
+                       for c in cells)
+
         def _save_table(m: "re.Match[str]") -> str:
             lines = [ln for ln in m.group(0).splitlines() if ln.strip()]
-            if len(lines) < 2:
+            if len(lines) < 2 or not _is_delimiter(lines[1]):
                 return m.group(0)
-            header_cells = [
-                c.strip() for c in lines[0].strip().strip('|').split('|')
-            ]
-            sep = lines[1].strip()
-            if not re.match(
-                r'^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$', sep,
-            ):
-                return m.group(0)
+            header_cells = _split_row(lines[0])
+            ncol = max(1, len(header_cells))
             body_rows = []
             for ln in lines[2:]:
-                cells = [c.strip() for c in ln.strip().strip('|').split('|')]
+                cells = _split_row(ln)[:ncol]          # 多余的列丢掉
+                cells += [''] * (ncol - len(cells))   # 缺的列补空 → 行列对齐
                 body_rows.append(
                     '<tr>' + ''.join(
                         f'<td>{_inline_md(_html_escape(c))}</td>'
@@ -5832,11 +5852,14 @@ class ChatWindow(QWidget):
                     for c in header_cells) + '</tr>'
             )
             return _stash('<table>' + head + ''.join(body_rows) + '</table>')
-        # 表格行末的换行是**可选**的：原来要求每行都以 \n 结尾，
-        # 消息正好以表格结尾时（最后一行后面没有换行），整张表只剩表头，
-        # 数据行变成一串 "|" 原文漏在下面 —— 表格数据凭空少一截。
+
+        # 表头行 + **第二行必须是分隔行**才当表格 —— 靠这条把普通正文挡在外面，
+        # 又能让「正文里有竖线」的段落不被误吞（分隔行不成立时整段原样返回）。
         text = re.sub(
-            r'(?:^[ \t]*\|.*\n?){2,}',
+            r'^[ \t]*(?P<head>[^\n]*\|[^\n]*)\n'
+            r'[ \t]*(?P<sep>[ \t]*\|?[ \t]*:?-+:?[ \t]*'
+            r'(?:\|[ \t]*:?-+:?[ \t]*)*\|?)[ \t]*\n'
+            r'(?P<body>(?:[ \t]*[^\n]*\|[^\n]*\n?)*)',
             _save_table, text, flags=re.MULTILINE,
         )
 
@@ -5848,27 +5871,40 @@ class ChatWindow(QWidget):
         # 3. 行内元素（行内代码 / 图片 / 链接 / 加粗 / 斜体）
         text = _inline_md(text)
 
-        # 7. 还原所有占位 (代码块 + 其他块元素)
-        for i, blk in enumerate(blocks):
-            text = text.replace(f"\x00B{i}\x00", blk)
-
-        # 8. 段落: 双换行分段, 块元素跳过 <p> 包裹
+        # 4. 段落: 双换行分段 + **块元素必须自己成块**
+        #
+        # 占位符**最后才还原**（第 8 步）：代码块正文里有换行，
+        # 先还原再分段的话，段落切分会切进 <pre> 里 →
+        # 生成 "<p>…<pre><code>a = 1<p>return a</code></pre></p>" 这种坏 HTML
+        #（代码块变形 + 后面的正文被吞进代码块里）。实测：带空行的代码块必坏。
         paragraphs = re.split(r'\n{2,}', text)
         out_paragraphs: list[str] = []
         for para in paragraphs:
-            para = para.strip()
-            if not para:
+            if not para.strip():
                 continue
-            if (para.startswith('<h') or para.startswith('<ul')
-                    or para.startswith('<ol') or para.startswith('<pre')
-                    or para.startswith('<blockquote') or para.startswith('<hr')
-                    or para.startswith('<table')):
-                out_paragraphs.append(para)
-            else:
-                out_paragraphs.append(
-                    '<p>' + para.replace("\n", "<br/>") + '</p>'
-                )
-        return "".join(out_paragraphs)
+            # 段落里的块占位符要摘出来单独成块 —— 块元素不能待在 <p> 里
+            for part in re.split(r'(\x00B\d+\x00)', para):
+                if not part.strip():
+                    continue
+                if re.fullmatch(r'\x00B\d+\x00', part):
+                    out_paragraphs.append(part)
+                    continue
+                chunk = part.strip()
+                if (chunk.startswith('<h') or chunk.startswith('<ul')
+                        or chunk.startswith('<ol') or chunk.startswith('<pre')
+                        or chunk.startswith('<blockquote')
+                        or chunk.startswith('<hr') or chunk.startswith('<table')):
+                    out_paragraphs.append(chunk)
+                else:
+                    out_paragraphs.append(
+                        '<p>' + chunk.replace("\n", "<br/>") + '</p>'
+                    )
+
+        # 5. 还原所有占位 (代码块 + 其他块元素) —— 必须排在分段之后
+        html_out = "".join(out_paragraphs)
+        for i, blk in enumerate(blocks):
+            html_out = html_out.replace(f"\x00B{i}\x00", blk)
+        return html_out
 
     def _insert_placeholder(self, msg: Message) -> int:
         """在 chat_view 文档末尾插入占位 div，返回该 div 起始的字符位置（作为 patch anchor）。
