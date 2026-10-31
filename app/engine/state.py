@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
@@ -73,6 +73,14 @@ class PetState:
     feed_like_count: float = 0.0
 
     checkin_date: str = ""
+
+    # 「拍一拍」互动记录（主人双击模型 —— 界面唯一的拍一拍入口）
+    pat_total: int = 0             # 累计被拍次数
+    pat_date: str = ""             # 最近一次被拍的日期（跨日自动清零今日计数）
+    pat_count_today: int = 0       # 今天被拍次数
+    pat_parts_today: dict = field(default_factory=dict)   # 今天各部位被拍次数
+    pat_last_part: str = ""        # 最近一次被拍的部位
+    pat_last_ts: float = 0.0       # 最近一次被拍的时间戳
 
     game_coin_daily_cap: float = 100.0
     game_coin_date: str = ""
@@ -561,6 +569,46 @@ class PetState:
         self._reevaluate_mode()
         self._fire_change()
 
+    # -- 「拍一拍」互动记录 --------------------------------------------------
+    @property
+    def pat_today(self) -> int:
+        """今天被拍了几次（跨日自动归零，不用等下一次拍一拍才清）。"""
+        if self.pat_date != self._today_str():
+            return 0
+        return int(self.pat_count_today)
+
+    def record_pat(self, part: str = "") -> dict:
+        """记一次「拍一拍」（双击模型 = model；控制台也能按部位触发）。
+
+        今日计数跨自然日自动清零。返回 {'part', 'total', 'today', 'parts'}，
+        给台词 / 记忆卡用。
+        """
+        today = self._today_str()
+        if self.pat_date != today:
+            self.pat_date = today
+            self.pat_count_today = 0
+            self.pat_parts_today = {}
+        part = str(part or "").strip()
+        if part:
+            parts = dict(self.pat_parts_today or {})
+            parts[part] = int(parts.get(part, 0)) + 1
+            self.pat_parts_today = parts
+        self.pat_total = int(self.pat_total) + 1
+        self.pat_count_today = int(self.pat_count_today) + 1
+        self.pat_last_part = part
+        self.pat_last_ts = time.time()
+        self._fire_change()
+        return {"part": part, "total": self.pat_total,
+                "today": self.pat_count_today,
+                "parts": dict(self.pat_parts_today or {})}
+
+    def pat_summary(self) -> str:
+        """「拍一拍」小结（给聊天上下文 / 记忆卡用）。没拍过就返回空串。"""
+        today = self.pat_today
+        if not today:
+            return ""
+        return f"主人今天拍了我 {today} 次（累计 {int(self.pat_total)} 次）"
+
     def add_food_likability(self, like: float) -> float:
         """投喂好感：每日上限 feed_like_daily_cap 点，跨自然日重置。返回实际增加量。"""
         import datetime
@@ -666,6 +714,12 @@ class PetState:
             "feed_like_date": self.feed_like_date,
             "feed_like_count": self.feed_like_count,
             "checkin_date": self.checkin_date,
+            "pat_total": self.pat_total,
+            "pat_date": self.pat_date,
+            "pat_count_today": self.pat_count_today,
+            "pat_parts_today": dict(self.pat_parts_today or {}),
+            "pat_last_part": self.pat_last_part,
+            "pat_last_ts": self.pat_last_ts,
             "game_coin_date": self.game_coin_date,
             "game_coin_count": self.game_coin_count,
         }
@@ -690,6 +744,27 @@ class PetState:
             s.feed_like_count = float(d["feed_like_count"])
         if "checkin_date" in d:
             s.checkin_date = str(d["checkin_date"])
+        # 「拍一拍」记录（旧存档没有这些键 → 保持 0）
+        try:
+            s.pat_total = max(0, int(d.get("pat_total") or 0))
+            s.pat_count_today = max(0, int(d.get("pat_count_today") or 0))
+        except (TypeError, ValueError):
+            s.pat_total = 0
+            s.pat_count_today = 0
+        s.pat_date = str(d.get("pat_date") or "")
+        s.pat_last_part = str(d.get("pat_last_part") or "")
+        try:
+            s.pat_last_ts = float(d.get("pat_last_ts") or 0.0)
+        except (TypeError, ValueError):
+            s.pat_last_ts = 0.0
+        parts = d.get("pat_parts_today")
+        s.pat_parts_today = {}
+        if isinstance(parts, dict):
+            for k, v in parts.items():
+                try:
+                    s.pat_parts_today[str(k)] = max(0, int(v))
+                except (TypeError, ValueError):
+                    continue
         if "game_coin_date" in d:
             s.game_coin_date = str(d["game_coin_date"])
         if "game_coin_count" in d:
@@ -700,11 +775,14 @@ class PetState:
         return s
 
     def stats_summary(self) -> str:
+        # 「今天被拍 N 次」也进这一行 —— 它进聊天上下文，桌宠才真能说出
+        # 「主人今天拍了我 3 次」这种话（互动记录 = 它的记忆）。
+        pat = f"今天被拍{self.pat_today}次  " if self.pat_today else ""
         return (f"Lv.{self.level}  体力{self.strength:.0f}  "
                 f"饱食{self.strength_food:.0f}  饮水{self.strength_drink:.0f}  "
                 f"心情{self.feeling:.0f}  健康{self.health:.0f}  "
                 f"好感{self.likability:.0f}/{self.likability_max:.0f}  "
-                f"金币{self.money:.0f}  [{self.mode.value}]")
+                f"金币{self.money:.0f}  {pat}[{self.mode.value}]")
 
 
 def is_night(now_ts: float | None = None) -> bool:

@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+from app.core.pet_control import PAT_PART_LABELS
 from app.core.qt_compat import QObject, Signal, is_qobject_alive
 from app.brain.agent import AgentLoop
 from app.brain.llm_client import LLMClient
@@ -537,6 +538,8 @@ class BrainController(QObject):
         self.root = root
         self.cfg = cfg
         self.state = state
+        # 「拍一拍」写记忆的后台线程（最后一次的句柄，测试/排障用）
+        self._pat_memory_thread = None
         # SKILL.md 加载（缓存到实例避免每轮重读）
         self._skill_text = _get_skill_text(root)
 
@@ -803,6 +806,62 @@ class BrainController(QObject):
         """连接工具动画信号到桌宠。"""
         self.animation_requested.connect(self._do_play_animation)
         self._pet_ref = pet
+        # 「拍一拍」也顺手接上（主程序只调这一个方法）
+        self.connect_pet_interaction(pet)
+
+    def connect_pet_interaction(self, pet) -> None:
+        """连接桌宠的「拍一拍」事件 —— 互动要能进长期记忆。
+
+        拍一拍只绑双击模型（部位=model）；控制台也能按部位触发。
+        """
+        signal = getattr(pet, "pat_requested", None)
+        if signal is None:
+            signal = getattr(pet, "reaction_requested", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_pat_requested)
+        except Exception as e:  # noqa: BLE001
+            log.warning("连接拍一拍事件失败：%s", e)
+
+    def _on_pat_requested(self, part: str) -> None:
+        """主人拍了一下桌宠（双击模型）→ 把这次互动记进长期记忆。
+
+        写 sidecar 是网络 IO，不能卡住 GUI 线程 → 丢后台线程。
+        """
+        if not self._alive():
+            return
+        text = self._pat_memory_text(part)
+        if not text:
+            return
+        thread = threading.Thread(target=self._write_pat_memory, args=(text,),
+                                  name="pet-pat-memory", daemon=True)
+        self._pat_memory_thread = thread
+        thread.start()
+
+    def _pat_memory_text(self, part: str) -> str:
+        """「拍一拍」的长期记忆正文：今天被拍了几次（分部位）。"""
+        state = self.state
+        today = int(getattr(state, "pat_today", 0) or 0)
+        total = int(getattr(state, "pat_total", 0) or 0)
+        parts = dict(getattr(state, "pat_parts_today", {}) or {})
+        detail = "、".join(
+            "%s %d 次" % (PAT_PART_LABELS.get(k, k), v)
+            for k, v in sorted(parts.items()))
+        return "主人今天拍了我 %d 次%s，累计 %d 次。" % (
+            today, ("（%s）" % detail) if detail else "", total)
+
+    def _write_pat_memory(self, text: str) -> None:
+        """把「拍一拍」写进长期记忆（每天一条：计数变了更新同一条，不堆卡）。"""
+        try:
+            client = self.memory_client
+            card = client.make_card(text, key="pet_pat", kind="event",
+                                    importance=0.4, category="event")
+            # 固定 id（按天）→ 计数变化时更新同一条
+            card["id"] = "mem_pat_%s" % time.strftime("%Y-%m-%d")
+            client.upsert([card])
+        except Exception:  # noqa: BLE001
+            log.debug("写拍一拍记忆失败（忽略）", exc_info=True)
 
     def _do_play_animation(self, name: str) -> None:
         """工具触发的动画。"""

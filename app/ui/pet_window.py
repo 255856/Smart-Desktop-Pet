@@ -18,6 +18,9 @@ from app.core.qt_compat import (
     event_global_pos, event_local_pos,
 )
 from app.animation.animations import Animation, Frame
+from app.core.pet_control import (
+    PetPokeService, register_poke_handler, unregister_poke_handler,
+)
 from app.ui import ui_style
 from app.ui.pixmap_utils import clear_pixmap_cache
 
@@ -61,11 +64,20 @@ class HitZone:
     HEAD = "head"
     BODY = "body"
     RAISE = "raise"
+
+
 class PetWindow(QWidget):
     """桌宠本体。"""
     chat_requested = Signal()
     quit_requested = Signal()
-    reaction_requested = Signal(str)   # 触摸了 head / body
+    # 触摸反应事件（摸头 / 身体）：只表示「被摸了一下」，跟「拍一拍」分开
+    reaction_requested = Signal(str)
+    # 「拍一拍」事件：owner 定 —— 拍一拍**只**绑双击模型，参数是部位
+    # （model = 双击模型）。单击热区不再算拍一拍。
+    pat_requested = Signal(str)
+    # 控制台触发「拍一拍」用的中转信号：HTTP 线程发它，Qt 排队回主线程
+    # 处理（HTTP 线程不许碰控件 / 不许改状态）
+    _pat_from_console = Signal(str)
     open_settings_requested = Signal()
     retune_ms_requested = Signal(int)
     scale_changed = Signal(float)
@@ -79,6 +91,10 @@ class PetWindow(QWidget):
     # 喂食冷却：两次有效投喂最小间隔（秒），防止连点刷满状态
     FEED_COOLDOWN_S = 30.0
 
+    # 「拍一拍」冷却：两次拍一拍最小间隔（秒）—— 连点会烦，给它一个自然的间隔
+    PAT_COOLDOWN_S = 1.5
+    # 「拍一拍」台词气泡停留时长（毫秒）
+    PAT_BUBBLE_MS = 2600
 
     status_bar_toggled = Signal(bool)  # True = 显示，False = 隐藏
 
@@ -245,6 +261,13 @@ class PetWindow(QWidget):
         self._attached_state = None
         self._status_visible = False
 
+        # 计数记在 state 上（attach_state 时接上），台词/表情/节流在服务里。
+        # 计数记在 state 上（attach_state 时接上），台词/表情/节流在服务里。
+        self.poke_service = PetPokeService(cooldown_s=self.PAT_COOLDOWN_S)
+        # 控制台也能拍它：HTTP 线程只发信号，Qt 排队回主线程处理
+        self._pat_from_console.connect(self._on_pat_click)
+        register_poke_handler(self._emit_pat_from_console)
+
         # 快捷聊天输入框（底部简单输入框）
         self._chat_input: Optional[QLineEdit] = None
 
@@ -304,15 +327,55 @@ class PetWindow(QWidget):
         ]
 
     def _on_touch_head_click(self) -> None:
+        """摸头 → 摸头反应（拍一拍只绑双击模型，单击这里只做反应）。"""
         self.animator.play_reaction('head')
         self.reaction_requested.emit('head')
 
     def _on_touch_body_click(self) -> None:
+        """身体 → 身体反应。"""
         self.animator.play_reaction('body')
         self.reaction_requested.emit('body')
 
     def _on_touch_raise_click(self) -> None:
+        """举起区 → 点脚丫开聊天。"""
         self.chat_requested.emit()
+
+    def _emit_pat_from_console(self, part: str) -> None:
+        """控制台触发「拍一拍」：只发信号。
+
+        调用方是 HTTP 线程 —— 这里不能碰控件、不能改状态，
+        Qt 会把信号排队到主线程再处理（_on_pat_click）。
+        """
+        self._pat_from_console.emit(str(part or "head"))
+
+    def _on_pat_click(self, part: str) -> None:
+        """一次「拍一拍」：节流 → 表情/动作/台词 → 发出统一事件。
+
+        连点太密就不算一次互动：不发事件、不弹台词、不计数。
+        """
+        result = self.poke_service.poke(part)
+        if not result.get("ok"):
+            log.debug("拍一拍被跳过（%s）：%s", result.get("reason"), part)
+            return
+        self._apply_pat(result)
+        self.pat_requested.emit(str(result.get("part") or part))
+
+    def _apply_pat(self, result: dict) -> None:
+        """把一次拍一拍演出来：表情 + 动作 + 一句台词（走现有气泡通道）。"""
+        part = str(result.get("part") or "")
+        try:
+            emotion = str(result.get("emotion") or "")
+            if emotion:
+                self.play_emotion(emotion)
+            if part != "model":
+                # 「model」= 双击模型：双击自己已经播了动作（转圈圈 / 场景），
+                # 别用触摸反应把它打断。
+                self.animator.play_reaction(part)
+        except Exception:  # noqa: BLE001
+            log.exception("拍一拍反应播放失败")
+        text = str(result.get("text") or "")
+        if text:
+            self.show_bubble(text, duration_ms=self.PAT_BUBBLE_MS)
 
     def _on_chat_input_sent(self) -> None:
         """底部输入框回车发送消息到聊天。"""
@@ -496,6 +559,8 @@ class PetWindow(QWidget):
         if self._attached_state is state:
             return
         self._attached_state = state
+        # 拍一拍的互动计数记在 state 上（主人拍过它几次 → 它自己记得）
+        self.poke_service.state = state
         if state is not None:
             # 在原有 on_change 上叠加刷新 UI，不覆盖其他回调
             original_on_change = getattr(state, 'on_change', None)
@@ -692,6 +757,11 @@ class PetWindow(QWidget):
                 self.move(event_global_pos(evt) - self._drag_start)
             evt.accept()
 
+    def closeEvent(self, evt) -> None:
+        """窗口关闭：注销控制台的「拍一拍」回调（别让注册表攥着死对象）。"""
+        unregister_poke_handler(self._emit_pat_from_console)
+        super().closeEvent(evt)
+
     def hideEvent(self, evt) -> None:
         """隐藏（托盘）时暂停 live2d 渲染循环 + 所有常驻定时器：零 GPU/CPU 开销。"""
         pause = getattr(self.renderer, "pause", None)
@@ -857,6 +927,8 @@ class PetWindow(QWidget):
                 self.animator.trigger_scene('double_click')
             else:
                 self.animator.play_spin()
+            # 双击模型 = 「拍一拍」（owner 定：拍一拍只绑双击）
+            self._on_pat_click("model")
             evt.accept()
 
     _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
