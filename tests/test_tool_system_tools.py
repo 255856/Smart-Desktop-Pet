@@ -109,13 +109,13 @@ SYSTEM_TOOL_SNAPSHOT: dict[str, tuple[str, dict, str]] = {
         "app.engine.tools._system.system_info",
     ),
     "take_screenshot_tool": (
-        "截取当前屏幕截图（返回 base64 编码的 PNG）。用于让桌宠看到用户屏幕内容。",
+        "截取当前屏幕截图（返回 base64 编码的 PNG）。用于让你看到屏幕内容。",
         {"type": "object", "properties": {}},
         "app.engine.tools._system.take_screenshot_tool",
     ),
 }
 
-# 删死副本之前抓的完整内置工具名快照（64 个；MCP 的 7 个是运行时桥接的，不在内）
+# 删死副本之前抓的完整内置工具名快照（65 个；MCP 的 7 个是运行时桥接的，不在内）
 FULL_BUILTIN_TOOL_NAMES = (
     "Task", "add_reminder", "calculate", "cancel_countdown",
     "change_pet_emotion", "clear_bubble", "clipboard_copy", "convert_units",
@@ -132,7 +132,7 @@ FULL_BUILTIN_TOOL_NAMES = (
     "run_script", "say_to_user", "search_files", "send_notification",
     "send_sticker", "set_bluetooth", "set_brightness", "set_tts_mute_until", "set_volume",
     "set_wifi", "submit_slang", "system_info", "take_screenshot_tool",
-    "understand_image", "unmute_tts", "web_search",
+    "understand_image", "unmute_tts", "update_self", "web_search",
 )
 
 

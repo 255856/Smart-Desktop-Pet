@@ -12,6 +12,7 @@ from . import (
     _tts_mute, _subagent, _multimodal,
     _slang,
     _unlock,
+    _self,
 )
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,8 @@ def build_default_tools(
     _pet.register(reg, state=state, items=items, hooks=hooks)
     # 表情包：send_sticker（把已有的 Emotion_* 素材当消息发进聊天）
     _sticker.register(reg)
+    # 自我记忆：update_self（模型改自己的身份/价值/程序性三个区域）
+    _self.register(reg, memory=memory)
     _system.register(reg, hooks=hooks)
     _math.register(reg)
     _file.register(reg)

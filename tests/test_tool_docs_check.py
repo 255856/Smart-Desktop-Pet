@@ -2,8 +2,8 @@
 
 钉死几件事：
 
-1. live 工具数 = 74（64 个内置 + 10 个 MCP：aw 4 + fs 3 + voice 3）；
-2. 两份文档都声明 74（且拆成 64 内置 + 10 MCP = 4 ActivityWatch + 3 filesystem + 3 voice）；
+1. live 工具数 = 75（65 个内置 + 10 个 MCP：aw 4 + fs 3 + voice 3）；
+2. 两份文档都声明 75（且拆成 65 内置 + 10 MCP = 4 ActivityWatch + 3 filesystem + 3 voice）；
 3. 没有 mcp_servers.yaml 时（CI 场景，本机文件被 gitignore）默认表也给出 10 个 MCP 工具；
 4. **五个文件里的 8 处名字来源都被对账**（文档 / SKILL.md / _risk.py / agent.py /
    companion_config.yaml 的 tool_allowlist 段），注入一个假名字进去必须被报出来，
@@ -28,8 +28,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = ROOT / "scripts" / "check_tool_docs.py"
 
-EXPECTED_TOTAL = 74
-EXPECTED_BUILTIN = 64
+EXPECTED_TOTAL = 75
+EXPECTED_BUILTIN = 65
 EXPECTED_MCP = 10
 EXPECTED_AW = 4
 EXPECTED_FS = 3
@@ -111,8 +111,8 @@ def _drop_name(script, monkeypatch, key, gone):
 # --- 数量 / 文档声明 ----------------------------------------------------
 
 
-def test_live_count_is_74(script):
-    """live = 64 内置 + 10 MCP（aw 4 + fs 3 + voice 3）= 74。"""
+def test_live_count_is_75(script):
+    """live = 65 内置 + 10 MCP（aw 4 + fs 3 + voice 3）= 75。"""
     result = script.collect()
     assert len(result["live_builtin"]) == EXPECTED_BUILTIN
     assert len(result["live_mcp"]) == EXPECTED_MCP
@@ -127,8 +127,8 @@ def test_no_unexplained_differences(script):
     assert result["errors"] == [], result["errors"]
 
 
-def test_docs_declare_74(script):
-    """两份文档都声明 74（= 64 内置 + 10 MCP = 4 aw + 3 fs + 3 voice）。"""
+def test_docs_declare_75(script):
+    """两份文档都声明 75（= 65 内置 + 10 MCP = 4 aw + 3 fs + 3 voice）。"""
     for path, total_patterns in (
         (script.DOC_PATH, script.DOC_COUNT_CLAIMS),
         (script.SKILL_PATH, script.SKILL_COUNT_CLAIMS),

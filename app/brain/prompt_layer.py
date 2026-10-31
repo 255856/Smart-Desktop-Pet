@@ -13,15 +13,15 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
   1. persona        人设（+ 上游注入的会话上下文：SKILL / 长期记忆 / 可用工具列表）
   2. style_guide    characters/style-guide.md —— **逐字**追加，不改写、不重排
   3. slang          已收录黑话表（**只有 confirmed 词条**）—— 常量块
-  4. identity       身份记忆（我是谁）—— 常量块（data/identity.json）
-  5. values         价值记忆（底线 → 偏好 → 风格）—— 常量块（data/values.json）
-  6. procedures     程序性记忆（固定套路 + 成功率）—— 常量块（data/procedures.json）
-  7. tool_handbook  工具手册（【工具解锁】等级提示）
-  8. dynamic        会话内稳定动态块（项目级指令文档 + skills）
-  9. 防幻觉基线 + 高风险工具 confirm 协议
- 10. 中文输出约束
- 11. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
- 12. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
+  4. identity       自我认知（我是谁）—— **记忆库里的分区**（kind=identity）
+  5. value         自我价值观（底线 → 偏好 → 风格）—— **记忆库里的分区**（kind=value）
+                     （程序性 kind=procedural 条目多、变化快 → 走易变段按需召回，不进这里）
+  6. tool_handbook  工具手册（【工具解锁】等级提示）
+  7. dynamic        会话内稳定动态块（项目级指令文档 + skills）
+  8. 防幻觉基线 + 高风险工具 confirm 协议
+  9. 中文输出约束
+ 10. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
+ 11. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
 
 顺序变了会让 MiniMax 的前缀缓存整块失效，所以**不要随手调换**。
 
@@ -62,7 +62,7 @@ DYNAMIC_CONTEXT_HEADER = "[系统上下文 · 本轮动态信息，不是主人�
 #: emoji 策略归**行为层**（characters/style-guide.md，逐字追加进 system prompt）管 ——
 #: prompt 里**一个字都不提** emoji：既不禁止，也不指向。
 CHINESE_SYSTEM_SUFFIX = (
-    "你是用简体中文聊天的桌宠，像跟主人面对面说话一样。回答只用最终内容，"
+    "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，"
     "不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、"
     "不要把上面的要求重复念出来。下面是两个对比——\n\n"
     "✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n"
@@ -224,40 +224,39 @@ def slang_prompt_block() -> str:
 
 
 # --------------------------------------------------------------------------
-# 记忆分区：身份 / 价值 / 程序性（**常量块**）
+# 自我记忆：身份 / 价值（**常量块**，内容来自记忆库）
 # --------------------------------------------------------------------------
-# 为什么它们能进 system prompt
-# --------------------------
-# 三块都是「每轮都一样」的东西：身份（我是谁）、价值（底线 → 偏好 → 风格）、
-# 程序性（固定套路 + 成功率）。它们**只随文件变**（data/identity.json /
-# values.json / procedures.json），不随这一轮变 —— 所以放 system prompt
-# 不会打掉前缀缓存，反而比放进易变通道更省（本来就在前缀里）。
+# 这两块是**记忆库里的两个分区**（identity / value），不是写死的文件：
+# 模型可以用 §update_self§ 慢慢改它们（app/engine/tools/_self.py），
+# 改完下一轮就会出现在这里 —— 也就是「她自己一点点长出来的人格」。
 #
-# ⚠️ 必须是**常量**：内容只随文件变，不随每轮变。每轮变的内容放 system prompt
-# 会把命中率从 98.9% 打到 1.5%（见模块 docstring）。
-#
-# 为什么不放 sidecar：这三类是**设定**，不是「主人的一条记忆」—— 不该被检索、
-# 不该被半衰期衰减（见 app/brain/memory_partitions.py）。
+# 为什么进 system prompt（稳定段）而不是易变段：
+#   身份和价值条数少、变化慢 → 整块放稳定段，内容没变就**逐字节相同**，
+#   前缀缓存不会掉（每轮变的东西放 system 会把命中率从 98.9% 打到 1.5%）。
+#   程序性（procedure）条目多、变化快 → 走易变段按需召回，不进这里。
 
-def memory_partition_blocks() -> list:
-    """身份 / 价值 / 程序性三块（**常量**；读不到就空串，绝不崩聊天）。
+#: 自我记忆块的取法（brain 侧注入：读记忆库）
+_self_block_provider = None
 
-    返回固定三段（顺序：身份 → 价值 → 程序性），空的那段是空串。
-    """
+
+def register_self_block_provider(fn) -> None:
+    """注册自我记忆块的取法（fn() → [身份块, 价值块]）。"""
+    global _self_block_provider
+    _self_block_provider = fn
+
+
+def self_memory_blocks() -> list:
+    """身份 + 价值两块（**常量**：没注入或读不到就是空串，绝不崩聊天）。"""
+    if _self_block_provider is None:
+        return ["", ""]
     try:
-        from app.brain import memory_partitions as mp
+        blocks = list(_self_block_provider() or [])
     except Exception as e:  # noqa: BLE001
-        log.debug("取记忆分区失败，跳过：%s", e)
-        return ["", "", ""]
-    out = []
-    for fn in (mp.identity_block, mp.values_block, mp.procedures_block):
-        try:
-            out.append(fn() or "")
-        except Exception as e:  # noqa: BLE001
-            log.debug("取记忆分区块失败，跳过：%s", e)
-            out.append("")
+        log.debug("取自我记忆块失败，跳过：%s", e)
+        return ["", ""]
+    out = [str(blocks[0] or "") if len(blocks) > 0 else "",
+           str(blocks[1] or "") if len(blocks) > 1 else ""]
     return out
-
 
 # --------------------------------------------------------------------------
 # 路径：style guide / 项目文档 / skills
@@ -511,9 +510,9 @@ VOICE_TOOL_GUIDE = (
     "或者你只想丢一句很短的俏皮话过去的时候。\n"
     "**主人点名要某首歌**（「唱《月亮代表我的心》」「翻唱某某歌」「来一首某某」）："
     "调 mcp_voice_sing 并传 song=歌名（同名歌多就补 artist=歌手名）—— "
-    "本机会去找那首歌的音频、下载、分离人声、用桌宠的嗓子 RVC 翻唱、"
+    "本机会去找那首歌的音频、下载、分离人声、用你自己的嗓子 RVC 翻唱、"
     "把原伴奏混回去再播给你。**绝对不要**把歌名当歌词、自己编一段词唱出去"
-    "（主人的原话：「叫桌宠唱某某歌曲她并不会搜索这个歌并且调用 rvc 翻唱，"
+    "（主人的原话：「叫她唱某某歌曲她并不会搜索这个歌并且调用 rvc 翻唱，"
     "导致直接念自己编的词」）。\n"
     "不适合：解释问题、长回答、主人要照着看的内容 —— 那些用文字。\n"
     "频率：语音是打断，不是每轮都要用。绝大多数回合用文字就好，"
@@ -521,7 +520,7 @@ VOICE_TOOL_GUIDE = (
     "措辞铁律：①语音条**前面不要加方括号标签**（「[语音]」「[翻唱]」那种），"
     "主人嫌那玩意儿出戏；要说话就另外发一条普通文字消息；"
     "②按歌词唱的是按这段词现编的调，要这么说明，**不要自称原创歌曲**；"
-    "翻唱出来的要说明这是**翻唱**（桌宠的嗓子唱原曲、伴奏是原曲的），不是原唱，"
+    "翻唱出来的要说明这是**翻唱**（你的嗓子唱原曲、伴奏是原曲的），不是原唱，"
     "伴奏被静音（清唱版）时也要说明；"
     "③找不到那首歌就**如实说找不到**，绝不用自己编的词冒充那首歌；"
     "④工具失败了就说失败（哪一步失败说哪一步），**绝不假装已经发出语音**。\n"
@@ -539,7 +538,7 @@ VOICE_TOOL_GUIDE = (
 #:
 #: 刻意**不**写成"每轮都发" —— 表情包跟语音一样是打断，不是常态。
 STICKER_TOOL_GUIDE = (
-    "【表情包】send_sticker：把桌宠自己的表情当成**一条消息**发进聊天"
+    "【表情包】send_sticker：把自己的表情当成**一条消息**发进聊天"
     "（聊天窗里是一张独立的表情气泡，主人点一下能看大图）。"
     "可选 sticker_id（指定哪一张）或 emotion（按情绪挑一张："
     "happy 开心 / sad 难过 / anger 生气 / fear 害怕 / doubt 狐疑 / "
@@ -651,7 +650,7 @@ def build_system_prompt(*, persona, style_guide, tool_handbook, dynamic,
         style_guide,
         slang_prompt_block(),
         # 身份 / 价值 / 程序性 —— **常量块**（只随文件变，不随每轮变）
-        *memory_partition_blocks(),
+        *self_memory_blocks(),
         tool_handbook,
         dynamic,
         anti_hallucination_suffix(),

@@ -101,6 +101,7 @@ TOOL_RISK_LEVEL: dict[str, int] = {
     "multi_edit":                MEDIUM,
     "remember_fact":             MEDIUM,
     "submit_slang":              MEDIUM, # 写本地词库文件 (data/slang.json)
+    "update_self":                MEDIUM, # 改自己的身份/价值/程序性（长期记忆）
     "forget_memory":             MEDIUM,
     "set_volume":                MEDIUM,
     "set_brightness":            MEDIUM,

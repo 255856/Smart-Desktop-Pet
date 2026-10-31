@@ -174,11 +174,12 @@ tool_unlock:
       - multi_edit
       - add_reminder
       - delete_reminder
-    5:  # 记忆写 + 黑话学习 + 子智能体 (5 个)
+    5:  # 记忆写 + 黑话学习 + 自我塑造 + 子智能体 (6 个)
       - remember_fact
       - forget_memory
       - query_slang
       - submit_slang
+      - update_self
       - Task
     6:  # 计时器 (2 个)
       - countdown
@@ -290,6 +291,7 @@ tool_allowlist:
     - set_wifi
     - submit_slang
     - system_info
+    - update_self
     - take_screenshot_tool
     - understand_image
     - unmute_tts

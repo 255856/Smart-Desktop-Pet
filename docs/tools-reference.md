@@ -1,4 +1,4 @@
-# Tools Reference · 桌宠 74 个工具全集
+# Tools Reference · 桌宠 75 个工具全集
 
 > 模型通过 **Function Calling** 协议（OpenAI 格式）调用这些工具。  
 > 用户口语 → 模型选工具 → `ToolRegistry.execute(name, args_json)` → 字符串结果回给模型 → 模型组织自然语言回复。
@@ -11,14 +11,14 @@
 |------|--------|------|
 | 一、信息查询 | 4 | — |
 | 二、时间与提醒 | 6 | — |
-| 三、搜索、记忆与黑话 | 6 | — |
+| 三、搜索、记忆与黑话 | 7 | — |
 | 四、计算与转换 | 3 | — |
 | 五、应用与文件 | 15 | 2 |
 | 六、桌宠自身 | 6 | — |
 | 七、系统控制 | 20 | 5 |
 | 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3 + 语音 3） | 10 | — |
 | 九、生成 / 委派 | 4 | 1（run_script） |
-| **合计** | **74** | **9** |
+| **合计** | **75** | **9** |
 
 > 十、语音唤醒（非工具）独立章节。
 
@@ -75,7 +75,7 @@
 
 ---
 
-## 三、搜索、记忆与黑话（6）
+## 三、搜索、记忆与黑话（7）
 
 ### `web_search`
 - **触发**："搜一下 / 搜索 / 查一下 / 帮我找 / 最新 XXX"
@@ -112,6 +112,21 @@
 - **不该提交**：打错的字、只出现一次的临时说法、人名 / @ / 表情包 / 纯标点、含义本来就清楚的普通词
 - **参数**：`content: str`（必填）、`meaning: str` / `usage: str` / `example: str` / `risk: str` / `evidence: str`（均可选）
 - **风险**：MEDIUM（写本地文件 `data/slang.json`）
+
+### `update_self`
+- **触发**：她想调整**自己**（而不是记主人的事）—— 「我是谁 / 我在乎什么 / 我做事的套路」变了
+- **作用**：改自己的三个**记忆分区**（跟 话 / 话题 / 事件 / 事实·偏好 / 印象 平级）：
+  - `identity` = 自我认知（我是谁、我跟主人什么关系）
+  - `value` = 价值观（level：底线 / 偏好 / 风格）
+  - `procedural` = 程序性（做某事的固定套路、行事风格与目标）
+- **参数**：`region: str`（identity/value/procedural，必填）、`content: str`（必填）、
+  `action: str`（add / revise / remove，默认 add）、`target: str`（revise/remove 的目标 id）、
+  `level: str`（仅 value：bottom_line/preference/style）、`reason: str`（为什么改，给人看）
+- **改写**：用 `revise` + 旧 id → 旧条目标记过时（**不是删**），主人能在面板上看到演变过程
+- **限速**：每个区域**每天最多改 2 次** —— 人格是慢慢长出来的，别每轮重写自己
+- **怎么进会话**：身份 / 价值进 **system prompt 稳定段**（内容不变就逐字节相同，不掉前缀缓存）；
+  程序性条目多 → 走**易变段按需召回**
+- **风险**：MEDIUM（写长期记忆）
 
 > **已收录词条会进 system prompt**（【已收录黑话】段，**只有 confirmed**）：
 > 模型按语境自然用这些词，不确定就别硬塞，没收录的不用。
@@ -687,7 +702,7 @@ app/engine/tools/
 
 ## 统计
 
-- **74 个工具**（不含语音唤醒） = 64 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
+- **75 个工具**（不含语音唤醒） = 65 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
 - **8 个弹窗 confirm** + 4 个只 log 不弹窗 = 12 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
 - **1270 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

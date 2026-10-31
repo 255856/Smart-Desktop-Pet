@@ -417,17 +417,31 @@ def _seed_partitions(root):
                         success_rate=0.8, samples=5)
 
 
-def test_three_blocks_are_byte_identical_across_three_queries(parts):
-    """**验收**：连续三轮不同 query，身份/价值/程序性三块逐字节相同。
+def test_two_blocks_are_byte_identical_across_three_queries(parts):
+    """**验收**：连续三轮不同 query，身份 / 价值两块逐字节相同。
 
     而且它们落在**稳定段**（system prompt），不是易变段（独立 user 消息）。
+    程序性（procedural）条目多、变化快 → **不进稳定段**（走易变段按需召回）。
     """
     _seed_partitions(parts)
-    identity, values, procedures = prompt_layer.memory_partition_blocks()
-    assert identity and values and procedures
+    import app.brain.self_memory as sm
 
+    class _NoStore:
+        """假客户端（取不到 → 走文件兜底，不联网）。"""
+        last_error = ""
+
+        def list_cards(self, limit=200, **kw):
+            return []
+
+    sm.invalidate_cache()
+    blocks = sm.stable_blocks(_NoStore())
+    identity, values = blocks[0], blocks[1]
+    assert identity and values, (identity, values)
+
+    old_self = prompt_layer._self_block_provider
     old_provider = prompt_layer._memory_block_provider
-    # 记忆块按 query 变（易变通道）—— 证明易变通道确实是活的
+    # 自我记忆块（稳定段）+ 记忆块按 query 变（易变通道）
+    prompt_layer.register_self_block_provider(lambda: sm.stable_blocks(_NoStore()))
     prompt_layer.register_memory_block_provider(
         lambda query="": "【你记得的事】%s" % (query or ""))
     try:
@@ -438,23 +452,30 @@ def test_three_blocks_are_byte_identical_across_three_queries(parts):
                 persona="人设", style_guide="", tool_handbook="", dynamic=""))
             volatiles.append(prompt_layer.build_turn_context(query=query))
     finally:
+        prompt_layer.register_self_block_provider(old_self)
         prompt_layer.register_memory_block_provider(old_provider)
 
     # ① system 串三轮逐字节相同
     assert systems[0].encode("utf-8") == systems[1].encode("utf-8")
     assert systems[1].encode("utf-8") == systems[2].encode("utf-8")
 
-    # ② 三块都在 system 串里，且逐字节相同
-    for block in (identity, values, procedures):
+    # ② 两块都在 system 串里，且逐字节相同
+    for block in (identity, values):
         for sp in systems:
             assert block in sp
             assert sp.encode("utf-8").count(block.encode("utf-8")) == 1
 
-    # ③ 三块**不在**易变段里（易变段每轮都变）
+    # ③ 两块**不在**易变段里（易变段每轮都变）
     assert len(set(volatiles)) == 3
-    for block in (identity, values, procedures):
+    for block in (identity, values):
         for ctx in volatiles:
             assert block not in ctx
+
+    # ④ 程序性**不进稳定段**（条目多、变化快 → 走易变段按需召回）
+    procedures = mp.procedures_block()
+    assert procedures
+    for sp in systems:
+        assert procedures not in sp
 
 
 def test_blocks_do_not_leak_a_timestamp(parts):
@@ -477,13 +498,28 @@ def test_backend_parity_still_holds_with_the_new_blocks(parts):
         def names(self, level=None):
             return ["open_app", "open_website"]
 
-    persona = "你是小汐，住在主人桌面上的桌宠。"
+    persona = "你是小汐，是住在主人身边的女孩。"
     reg = _Reg()
     llm = LLMConfig(api_key="sk-test", model="test-model", stream=False)
+    # 自我记忆块（身份/价值）要进 system —— 注册一个提供者（测试里不联网）
+    import app.brain.self_memory as sm
+
+    class _NoStore:
+        last_error = ""
+
+        def list_cards(self, limit=200, **kw):
+            return []
+
+    sm.invalidate_cache()
+    old_self = prompt_layer._self_block_provider
+    prompt_layer.register_self_block_provider(lambda: sm.stable_blocks(_NoStore()))
     react = AgentLoop(client=None, registry=reg, level_getter=lambda: 3)
     standard = LangChainAgent(llm_cfg=llm, registry=reg, persona=persona,
                               level_getter=lambda: 3)
-    a = react.assemble_system_prompt(persona=persona).encode("utf-8")
-    b = standard.assemble_system_prompt(persona=persona).encode("utf-8")
+    try:
+        a = react.assemble_system_prompt(persona=persona).encode("utf-8")
+        b = standard.assemble_system_prompt(persona=persona).encode("utf-8")
+    finally:
+        prompt_layer.register_self_block_provider(old_self)
     assert a == b
     assert "【我是谁】" in a.decode("utf-8")

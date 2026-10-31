@@ -82,6 +82,10 @@ KIND_GATE_TABLE = {
     "thought": {"min_score_ratio": 0.12, "dense_keep_ratio": 0.75},
     # 程序性记忆（工具序列）：新类别，语料里还没有 —— 同样先沿用全局默认
     "procedural": {"min_score_ratio": 0.12, "dense_keep_ratio": 0.75},
+    # 自我记忆（身份 / 价值）：模型自己写的、极少改动 —— 阈值放松，
+    # 免得「我叫什么 / 我在乎什么」这种自我认知被闸门筛掉。
+    "identity": {"min_score_ratio": 0.05, "dense_keep_ratio": 0.9},
+    "value": {"min_score_ratio": 0.05, "dense_keep_ratio": 0.9},
 }
 
 

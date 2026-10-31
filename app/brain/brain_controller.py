@@ -575,6 +575,28 @@ class BrainController(QObject):
         except Exception as e:  # noqa: BLE001
             log.warning("注册长期记忆块提供者失败：%s", e)
 
+        # 自我记忆（身份 / 价值）：从**记忆库**读 → 稳定段常量块。
+        # 模型可以用 update_self 慢慢改它们 → 改完下一轮就出现在 system 里。
+        try:
+            from app.brain import self_memory
+            from app.brain.prompt_layer import register_self_block_provider
+
+            register_self_block_provider(
+                lambda: self_memory.stable_blocks(self.memory_client))
+        except Exception as e:  # noqa: BLE001
+            log.warning("注册自我记忆块提供者失败：%s", e)
+
+        # 旧文件分区（data/identity.json 等）一次性导进记忆库 —— 之后以记忆库为准。
+        # 失败不影响启动（没导成就用文件兜底）。
+        try:
+            from app.brain import self_memory
+
+            n = self_memory.migrate_legacy_files(self.memory_client)
+            if n:
+                log.info("自我记忆已从旧文件导入 %d 条 → 记忆库", n)
+        except Exception as e:  # noqa: BLE001
+            log.debug("导入旧文件分区失败（忽略）", exc_info=True)
+
         # 接线 SessionStore + skills_dir，让 ChatWindow 能挂到 LangChainAgent
         # 两份对象都做 try/except，失败不阻断桌宠启动
         try:
