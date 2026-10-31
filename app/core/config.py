@@ -275,10 +275,18 @@ def _load_character_yaml(project_root: Path, rel_path: str) -> dict:
         log.warning("读 character yaml 失败 %s: %s", char_path, e)
         return {}
     char_block = raw.get("character") or {}
-    return {
+    out = {
         k: v for k, v in char_block.items()
         if k in ("name", "persona") and isinstance(v, str)
     }
+    # **每个角色可以带自己的音色**：character.tts.voice（edge 音色名）。
+    # 没有就留空 → 用 config.yaml 的全局 tts_voice。
+    tts = char_block.get("tts")
+    if isinstance(tts, dict):
+        voice = tts.get("voice")
+        if isinstance(voice, str) and voice.strip():
+            out["tts_voice"] = voice.strip()
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -309,6 +317,8 @@ class CharacterEntry:
     path: str            # 相对项目根的路径，如 "characters/xiaoxi.yaml"
     name: str = ""
     persona: str = ""
+    #: 角色自带的 edge 音色（character.tts.voice）；空 = 用全局 tts_voice
+    tts_voice: str = ""
     ok: bool = False
     error: str = ""
 
@@ -381,6 +391,12 @@ def load_character_entry(project_root: str | Path, rel_path: str) -> CharacterEn
         return entry
     entry.name = str(name).strip()
     entry.persona = str(persona)
+    # **角色自带的音色**（character.tts.voice）—— 没有就留空，用全局 tts_voice。
+    tts = block.get("tts")
+    if isinstance(tts, dict):
+        voice = tts.get("voice")
+        if isinstance(voice, str) and voice.strip():
+            entry.tts_voice = voice.strip()
     entry.ok = True
     return entry
 
@@ -482,6 +498,9 @@ def switch_character(cfg: "Config | CharacterConfig", project_root: str | Path,
     ch.name = entry.name
     ch.persona = entry.persona
     ch.character_file = entry.path
+    # 角色自带音色 → 跟着换（没有就保持当前的全局音色）
+    if entry.tts_voice and hasattr(ch, "tts_voice"):
+        ch.tts_voice = entry.tts_voice
     msg = "已切换到「%s」" % entry.name
     if persist:
         try:
