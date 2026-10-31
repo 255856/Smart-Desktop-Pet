@@ -3,7 +3,7 @@
 用法:
     cd E:\study\desktop-pet
     $env:PYTHONPATH="E:\study\desktop-pet"
-    python manual_tests\verify_phase3.2_skills.py
+    python scripts\manual\verify_phase3.2_skills.py
 
 输出:
     - 创建临时 skills_dir,放两个 skill 文件
@@ -19,7 +19,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 脚本在 scripts/manual/ 下 → 往上两层才是项目根（app 包所在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
 from app.brain.llm_client import LLMConfig

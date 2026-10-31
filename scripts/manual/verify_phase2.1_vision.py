@@ -3,7 +3,7 @@
 用法:
     cd E:\study\desktop-pet
     $env:PYTHONPATH="E:\study\desktop-pet"
-    python manual_tests\verify_phase2.1_vision.py
+    python scripts\manual\verify_phase2.1_vision.py
 
 输出:
     - 准备一张测试图片(运行时生成纯色 PNG)
@@ -23,7 +23,9 @@ import tempfile
 import zlib
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 脚本在 scripts/manual/ 下 → 往上两层才是项目根（app 包所在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 from app.brain.llm_client import LLMClient, ChatMessage
 from app.brain.llm_client import LLMConfig as LLMConfig

@@ -3,7 +3,7 @@
 用法:
     cd E:\study\desktop-pet
     $env:PYTHONPATH="E:\study\desktop-pet"
-    python manual_tests\verify_phase2.2_plan_mode.py
+    python scripts\manual\verify_phase2.2_plan_mode.py
 
 输出:
     [OK] plan() 是 async generator
@@ -18,7 +18,9 @@ import asyncio
 import sys
 
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 脚本在 scripts/manual/ 下 → 往上两层才是项目根（app 包所在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 from langchain_core.messages import AIMessageChunk
 

@@ -3,7 +3,7 @@
 用法:
     cd E:\study\desktop-pet
     $env:PYTHONPATH="E:\study\desktop-pet"
-    python manual_tests\verify_phase3.4_reasoning_effort.py
+    python scripts\manual\verify_phase3.4_reasoning_effort.py
 
 输出:
     - LLMConfig 不同 reasoning_effort 值(低/中/高/未设)
@@ -15,7 +15,9 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 脚本在 scripts/manual/ 下 → 往上两层才是项目根（app 包所在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 from app.brain.langchain_agent import LangChainAgent, LangChainAgentConfig
 from app.brain.llm_client import LLMClient, ChatMessage

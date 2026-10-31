@@ -3,7 +3,7 @@
 用法:
     cd E:\study\desktop-pet
     $env:PYTHONPATH="E:\study\desktop-pet"
-    python manual_tests\verify_phase2.3_agents_md.py
+    python scripts\manual\verify_phase2.3_agents_md.py
 
 输出:
     - 在 cwd 下临时写一个 AGENTS.md
@@ -19,7 +19,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 脚本在 scripts/manual/ 下 → 往上两层才是项目根（app 包所在）
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
 from langchain.agents import create_agent as _real_create_agent
 

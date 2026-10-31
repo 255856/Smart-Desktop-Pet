@@ -21,7 +21,7 @@ PowerShell(Windows):
 ```powershell
 cd E:\study\desktop-pet
 $env:PYTHONPATH="E:\study\desktop-pet"
-python manual_tests\verify_phase2.2_plan_mode.py
+python scripts\manual\verify_phase2.2_plan_mode.py
 ```
 
 ## 跟 pytest 跑过的 994 个测试的关系
