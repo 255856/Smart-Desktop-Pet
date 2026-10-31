@@ -1763,6 +1763,8 @@ class UIController(QObject):
             return self._live2d_action_delete(str(params.get("id") or ""))
         if action == "live2d_action_play":
             return self._live2d_action_play(str(params.get("id") or ""))
+        if action == "live2d_model_action_play":
+            return self._live2d_model_action_play(str(params.get("key") or ""))
         if action == "live2d_preview":
             return self._live2d_preview(params.get("bundle"))
         return {"ok": False, "error": "未知动作：%s" % action}
@@ -1872,6 +1874,23 @@ class UIController(QObject):
         r.play_custom_action(cid)
         return {"ok": True, "id": cid}
 
+    def _live2d_model_action_play(self, key: str) -> dict:
+        """播放模型 profile 里定义的动作（挥手 / 招手 / 点头…）。"""
+        r = self._live2d_renderer()
+        if r is None:
+            return {"ok": False, "error": "当前不是 Live2D 渲染器"}
+        key = key.strip()
+        if not key:
+            return {"ok": False, "error": "没给动作名"}
+        try:
+            actions = getattr(getattr(r, "profile", None), "actions", None) or {}
+        except Exception:  # noqa: BLE001
+            actions = {}
+        if key not in actions:
+            return {"ok": False, "error": "模型没有这个动作：%s" % key}
+        r.play_animation(key)
+        return {"ok": True, "key": key}
+
     def _live2d_preview(self, bundle) -> dict:
         """试穿一套外观（约 2.6 秒后恢复）。"""
         from app.core.live2d_config import dict_to_bundle
@@ -1888,7 +1907,8 @@ class UIController(QObject):
         场景配置存在 ``data/live2d_scenes/<模型目录名>.json``，换模型自动换一份。
         """
         from app.core.live2d_config import (action_configs, hook_options,
-                                            item_labels, scene_configs)
+                                            item_labels, model_action_configs,
+                                            scene_configs)
         r = self._live2d_renderer()
         if r is None:
             return {"available": False, "groups": [], "active": [],
@@ -1912,6 +1932,7 @@ class UIController(QObject):
             "labels": item_labels(r),
             "scenes": scene_configs(r),
             "actions": action_configs(r),
+            "modelActions": model_action_configs(r),
             "hooks": hook_options(r),
             "models": self._live2d_models(),
         }

@@ -97,6 +97,21 @@ def test_load_profile_from_yaml(fake_model):
     assert [c.id for c in profile.categories] == ["special", "hair", "gear", "face"]
 
 
+def test_actions_in_menu_adds_play_category(fake_model):
+    """actions_in_menu: true → 动作进外观配置，跟表情/配件平级（点了就播）。"""
+    profile = load_model_profile(fake_model)
+    assert not any(c.play for c in profile.categories), "默认不该加动作分类"
+
+    yaml_path = fake_model / "fake.model.yaml"
+    yaml_path.write_text(yaml_path.read_text(encoding="utf-8")
+                         + "\nactions_in_menu: true\n", encoding="utf-8")
+    profile = load_model_profile(fake_model)
+    act = [c for c in profile.categories if c.play]
+    assert len(act) == 1 and act[0].id == "action"
+    # 动作没写 label 时用动作键兜底
+    assert [i.label for i in act[0].items] == ["jump"]
+
+
 def test_filename_prefix_classification(fake_model):
     """exp3 文件名"类别 名称"前缀决定分组。"""
     profile = load_model_profile(fake_model)

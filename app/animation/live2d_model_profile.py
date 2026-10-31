@@ -41,6 +41,8 @@ class Category:
     hairstyle: bool = False        # 该组是否是"发型"（兼容旧 supports_hairstyles 接口）
     items: list[MenuItem] = field(default_factory=list)
     source: str = ""               # exp3 文件名的类别前缀（auto 模式匹配用）
+    declared: list[str] = field(default_factory=list)  # YAML 显式声明的条目名
+    play: bool = False             # True=动作分类：条目是「点一下就播」的动作，不是外观开关
 
     def params(self) -> list[str]:
         """该组全部条目会用到的参数（互斥组切换前整组复位）。"""
@@ -62,11 +64,17 @@ class Category:
 class ActionSpec:
     """一次性动作（play_animation 的目标）。"""
     kind: str = "expr"             # expr=自定义表情 | pose=参数插值 | item=引用分类条目
+                                   # | motion=模型自带动作组
     item: str = ""                 # kind=item：引用的分类条目名
     params: list[dict] = field(default_factory=list)        # kind=expr
     param: str = ""                # kind=pose
     value: float = 0.0             # kind=pose
     duration_ms: int = 800         # 播放时长（之后恢复当前情绪/待机）
+    motion_group: str = ""         # kind=motion：模型自带动作组（model3.json 注册名）
+    return_motion_group: str = ""  # 动作结束切回的动作组（举手 → 举手切默认手）
+    return_after_ms: int = 0       # 多久后切回（0 = 动作时长结束后切回）
+    pose_anim: str = ""            # kind=pose_anim：点头 / 摇头 等姿态动画
+    label: str = ""                 # 菜单里显示的名字（默认用动作键 / 旧标签）
 
 
 @dataclass
@@ -108,6 +116,16 @@ class Live2DModelProfile:
     hide_parts: list[str] = field(default_factory=list)
     # 挂机随机表情
     random_enabled: bool = False
+    # 「玩一下」菜单展示哪些动作（动作键）。留空 = 用 app 默认那几个。
+    quick_play: list[str] = field(default_factory=list)
+    # 是否把动作也放进「外观配置」里（跟表情/配件平级，点一下就播）
+    actions_in_menu: bool = False
+    # 眼球跟踪写入的参数（默认 ParamEyeBallX/Y）。
+    # sign 同样按模型定：有些模型眼球 Y 是向上为正（大肥鱼就是），
+    # 不翻符号会「头朝下、眼珠朝天」。
+    tracking_eyes: list[dict] = field(default_factory=list)
+    # 不进任何菜单的条目名（模型自带的、用户不想要的表情/动作）
+    exclude_items: set[str] = field(default_factory=set)
     random_min_s: int = 25
     random_max_s: int = 70
     random_pool: list[str] = field(default_factory=list)   # 表情名（默认=全部情绪组条目）
@@ -122,6 +140,13 @@ class Live2DModelProfile:
     # 头身姿态角度参数（走路/拖拽偏转，回待机回正）
     pose_angle_params: list[str] = field(default_factory=lambda: [
         "ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleY"])
+    # 鼠标/视线跟踪写入的**模型自己的输入参数**。
+    # 默认空 = 走 pixi 的标准路径（写 ParamAngleX/Y/Z）。
+    # 有些模型把头绑在自己的输入参数上（如 VTS 风格的 AngleX/AngleY/AngleZ = OX/OY/OZ），
+    # 而 Cubism 物理的输出会**覆盖**标准参数 —— 这时写标准参数头身都不动，
+    # 必须写模型自己的输入参数，由它的物理链铺到头 → 胸腔 → 肩/盆骨/裙/手臂。
+    # YAML 写法：tracking: {params: [{id: AngleX, gain: 25, axis: x}, ...]}
+    tracking_params: list[dict] = field(default_factory=list)
 
     def category(self, cid: str) -> Optional[Category]:
         for c in self.categories:
@@ -191,7 +216,7 @@ class Live2DModelProfile:
         （Live2DRenderer.capabilities() 会覆盖 has_stickers）。
         """
         toggle_groups = [c for c in self.categories
-                         if not c.emotion and not c.hairstyle]
+                         if not c.emotion and not c.hairstyle and not c.play]
         return ModelCapabilities(
             has_emotion_group=self.emotion_category() is not None,
             has_hairstyle_group=self.hairstyle_category() is not None,
@@ -259,6 +284,8 @@ def _scan_expression_files(model_dir: Path, settings_name: str
     candidates: list[Path] = []
     root = sorted(model_dir.glob("*.exp3.json"))
     sub = sorted(model_dir.glob("Expressions/*.exp3.json"))
+    # Exp3/：另一批官方热键包把表情放这里（大肥鱼就是）
+    sub += sorted(model_dir.glob("Exp3/*.exp3.json"))
     # Expressions/ 优先（超频猫猫在子目录，冰糖在根目录，二者不冲突）
     candidates.extend(sub)
     candidates.extend(root)
@@ -318,6 +345,16 @@ def _parse_categories(cfg: dict, scanned: list[tuple[str, str, dict[str, float],
         cats[cid] = cat
         order.append(cid)
 
+    # 显式声明的条目名 → 分类（auto 模式下用来精确分组，不靠文件名前缀）
+    explicit: dict[str, str] = {}
+    for cc in cat_cfgs:
+        cid = str(cc.get("id") or cc.get("label"))
+        names = [str(x) for x in (cc.get("items") or [])]
+        if cid in cats:
+            cats[cid].declared = names
+        for nm in names:
+            explicit.setdefault(nm, cid)
+
     if mode == "model3":
         # model3.json 注册表（冰糖）：Name -> File
         registered: list[tuple[str, str]] = []
@@ -358,12 +395,16 @@ def _parse_categories(cfg: dict, scanned: list[tuple[str, str, dict[str, float],
                 name=name, label=profile.emotion_labels.get(name, name),
                 category=cid, params=params, file=fname))
     else:
-        # auto 模式：文件名前缀归组
+        # auto 模式：优先按 YAML 显式声明的条目名归组，没有声明的再按文件名前缀
         for prefix, name, params, rel in scanned:
             params = {k: v for k, v in params.items() if k not in exclude_params}
             if not params or _is_watermark_item(profile, name, params):
                 continue
-            cid = next((c.id for c in cats.values() if c.source == prefix), None)
+            if name in profile.exclude_items:
+                continue      # profile 明确不要的条目
+            cid = explicit.get(name)
+            if cid is None:
+                cid = next((c.id for c in cats.values() if c.source == prefix), None)
             if cid is None:
                 # 未声明的前缀：自动建组
                 cid = prefix or "misc"
@@ -384,13 +425,28 @@ def _settings_file(profile: "Live2DModelProfile") -> str:
 
 
 def _parse_action(d: Any) -> ActionSpec:
-    """动作条目：字符串（引用条目名）或 dict（use/params/param 内联）。"""
+    """动作条目：字符串（引用条目名）或 dict（use/params/param/motion 内联）。"""
     if isinstance(d, str):
         return ActionSpec(kind="item", item=d, duration_ms=1600)
     d = d or {}
+    label = str(d.get("label") or "")
     if d.get("use"):
-        return ActionSpec(kind="item", item=str(d["use"]),
+        return ActionSpec(kind="item", item=str(d["use"]), label=label,
                           duration_ms=int(d.get("hold_ms") or d.get("duration_ms") or 1600))
+    if d.get("pose_anim"):
+        # 姿态动画（点头 / 摇头）：{pose_anim: nod, duration_ms: 1200}
+        return ActionSpec(kind="pose_anim", pose_anim=str(d["pose_anim"]), label=label,
+                          duration_ms=int(d.get("duration_ms")
+                                          or d.get("hold_ms") or 1200))
+    if d.get("motion"):
+        # 模型自带动作组：{motion: 举手, return: 举手回, hold_ms: 2000}
+        return ActionSpec(
+            kind="motion",
+            motion_group=str(d["motion"]),
+            return_motion_group=str(d.get("return") or ""),
+            label=label,
+            duration_ms=int(d.get("hold_ms") or d.get("duration_ms") or 1600),
+            return_after_ms=int(d.get("return_after_ms") or 0))
     if d.get("param") is not None:
         return ActionSpec(kind="pose", param=str(d["param"]),
                           value=float(d.get("value", 0.0)),
@@ -458,8 +514,33 @@ def load_model_profile(model_dir: str | Path,
     if pp:
         profile.pose_angle_params = [str(x) for x in pp]
 
+    # 跟踪参数（头/身）：模型自己的输入参数（大肥鱼 = AngleX/AngleY/AngleZ）
+    tr = cfg.get("tracking") or {}
+    tp = tr.get("params") or []
+    profile.tracking_params = [
+        {"id": str(p.get("id")),
+         "gain": float(p.get("gain", 25)),
+         "axis": str(p.get("axis", "x")),
+         # 正负号：鼠标 Y 向下为正，各模型头部俯仰参数正方向不同（大肥鱼要 -1）
+         "sign": -1 if float(p.get("sign", 1)) < 0 else 1}
+        for p in tp if isinstance(p, dict) and p.get("id")
+    ]
+    # 眼球参数（默认标准 ParamEyeBallX/Y；模型可覆盖方向）
+    te = tr.get("eyes") or []
+    profile.tracking_eyes = [
+        {"id": str(p.get("id")),
+         "gain": float(p.get("gain", 1)),
+         "axis": str(p.get("axis", "x")),
+         "sign": -1 if float(p.get("sign", 1)) < 0 else 1}
+        for p in te if isinstance(p, dict) and p.get("id")
+    ]
+
     # 随机表情：YAML 提供池子与默认节奏；config.yaml 的 random_cfg 只做开关/节奏覆盖
     rnd = cfg.get("random") or {}
+    # 「玩一下」菜单：模型可以自己决定展示哪些动作（以及叫什么名字）
+    profile.quick_play = [str(x) for x in (cfg.get("quick_play") or [])]
+    profile.actions_in_menu = bool(cfg.get("actions_in_menu", False))
+    profile.exclude_items = {str(x) for x in (cfg.get("exclude_items") or [])}
     profile.random_enabled = bool(rnd.get("enabled", False))
     profile.random_min_s = int(rnd.get("min_s") or 25)
     profile.random_max_s = int(rnd.get("max_s") or 70)
@@ -480,6 +561,18 @@ def load_model_profile(model_dir: str | Path,
     # 分类与条目（依赖 watermark 排除项，最后解析）
     scanned = _scan_expression_files(model_dir, "")
     _parse_categories(cfg, scanned, profile)
+
+    # 动作分类：模型的动作（挥手/招手/点头…）也进外观配置，跟表情/配件平级。
+    # 这类条目不是外观开关 —— 点了就播一下。
+    # （必须放在 _parse_categories 之后：它会整体重建 profile.categories）
+    # 开关是模型自己声明的（actions_in_menu），不默认给所有模型加。
+    if profile.actions and profile.actions_in_menu:
+        act_cat = Category(id="action", label="动作", mode="play", play=True)
+        for key, spec in profile.actions.items():
+            act_cat.items.append(MenuItem(
+                name=key, label=spec.label or key, category="action",
+                params={}, file=""))
+        profile.categories.append(act_cat)
 
     # 无 YAML / YAML 未启用随机时：有情绪组就默认给一个温和的随机节奏
     if not cfg.get("random") and profile.emotion_category():

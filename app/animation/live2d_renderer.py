@@ -163,6 +163,11 @@ def _build_settings_payload(model_dir: Path, settings_name: str,
         sleep_file = _motion_file(model_dir, profile.motions_cfg, "sleep_file")
         if profile.sleep_motion_group and sleep_file:
             motions[profile.sleep_motion_group] = [{"File": sleep_file}]
+        # 额外动作组（profile motions.groups）：模型自带的手势/自写动作
+        for gname, rel in (profile.motions_cfg.get("groups") or {}).items():
+            rel = str(rel or "")
+            if rel and (model_dir / rel).is_file():
+                motions[str(gname)] = [{"File": rel}]
         if motions:
             fr["Motions"] = motions
             log.info("Live2D: 注入动作组 %s",
@@ -485,6 +490,12 @@ class Live2DRenderer(PetRenderer):
         # 同步一次画布尺寸（防止页面加载时 view 尚未布局导致 fit 到错误尺寸）
         w, h = self.widget_size
         self._js(f"window.live2d.resize({w}, {h});")
+        # 跟踪参数（模型自己的头/身输入参数，如 AngleX/AngleY/AngleZ）：
+        # 必须在模型 ready 后下发，之后鼠标跟随才写对参数。
+        if self.profile.tracking_params:
+            self._js("window.live2d.setTrackParams("
+                     f"{json.dumps(self.profile.tracking_params)}, "
+                     f"{json.dumps(self.profile.tracking_eyes)});")
         log.info("Live2D 模型加载成功: %d 个表情", len(self._expressions))
 
         # 水印处理（按 profile 模式）：
@@ -721,6 +732,9 @@ class Live2DRenderer(PetRenderer):
         """
         for p in self.profile.pose_angle_params:
             self._js(f"window.live2d.setParam({json.dumps(p)}, 0.0, 400);")
+        # 模型用自己的跟踪参数时，姿态偏移也要回正（否则拖拽歪头会一直挂着）
+        if self.profile.tracking_params:
+            self._js("window.live2d.setPose(0, 0, 0);")
         # 收起思考等叠加的手势条目
         if self._overlay_items:
             overlay, self._overlay_items = self._overlay_items, []
@@ -840,7 +854,12 @@ class Live2DRenderer(PetRenderer):
         elif self.profile.touch_params:
             self._play_custom_expr("__pet_touch", self.profile.touch_params,
                                    hold_ms=hold)
-        self._js(f"window.live2d.setParam('ParamAngleX', {tilt}, 150);")
+        if self.profile.tracking_params:
+            # 模型用自己的跟踪参数（AngleX/AngleY）：走桥端姿态偏移
+            self._js("window.live2d.setPose(0.30, 0.0, "
+                     f"{int(hold)});")
+        else:
+            self._js(f"window.live2d.setParam('ParamAngleX', {tilt}, 150);")
         QTimer.singleShot(hold, self._restore_emotion_if_awake)
 
     def play_animation(self, anim_name: str) -> None:
@@ -875,6 +894,24 @@ class Live2DRenderer(PetRenderer):
         if spec.kind == "expr":
             self._play_custom_expr(slot, spec.params, hold_ms=dur + 250)
             return
+        if spec.kind == "pose_anim":
+            # 点头 / 摇头：桥端叠加在跟踪值上的姿态动画（不与模型 motion 抢参数）
+            self._js("window.live2d.playPoseAnim("
+                     f"{json.dumps(spec.pose_anim)}, {int(spec.duration_ms)});")
+            QTimer.singleShot(spec.duration_ms + 200, self._idle_if_awake)
+            return
+        if spec.kind == "motion":
+            # 模型自带动作组（如「挥手」「抚胸」）：model3.json 里注入过的组名
+            self._js("window.live2d.playMotion("
+                     f"{json.dumps(spec.motion_group)});")
+            back = spec.return_motion_group
+            if back:
+                delay = spec.return_after_ms or (spec.duration_ms + 300)
+                QTimer.singleShot(delay, lambda: self._js(
+                    "window.live2d.playMotion("
+                    f"{json.dumps(back)});"))
+            QTimer.singleShot(spec.duration_ms + 300, self._idle_if_awake)
+            return
         # 姿态类：setParam 平滑插值，结束回待机（角度回正）
         if spec.param:
             self._js(
@@ -903,8 +940,12 @@ class Live2DRenderer(PetRenderer):
 
     def start_drag(self) -> None:
         self.note_activity()
-        self._js("window.live2d.setParam('ParamAngleX', 0.5, 200);")
-        self._js("window.live2d.setParam('ParamAngleY', -0.3, 200);")
+        if self.profile.tracking_params:
+            # 模型用自己的跟踪参数：走桥端姿态偏移（拖拽时持续挂着）
+            self._js("window.live2d.setPose(0.35, -0.20, 0);")
+        else:
+            self._js("window.live2d.setParam('ParamAngleX', 0.5, 200);")
+            self._js("window.live2d.setParam('ParamAngleY', -0.3, 200);")
         # 拖拽场景组合（toggles 进 overlay，end_drag→set_idle 收起）
         b = self.scene_store.effective_bundle("dragging") if self.scene_store else None
         if b is not None and not b.is_empty():
@@ -922,6 +963,11 @@ class Live2DRenderer(PetRenderer):
         self.set_idle()
 
     def set_walk(self, direction: str) -> None:
+        if self.profile.tracking_params:
+            # 模型用自己的跟踪参数：整体朝移动方向偏一点
+            v = 0.45 if direction == 'left' else -0.45
+            self._js(f"window.live2d.setPose(0.0, {v}, 0);")
+            return
         if direction == 'left':
             self._js("window.live2d.setParam('ParamAngleY', 1.0, 300);")
         elif direction == 'right':
@@ -1042,8 +1088,9 @@ class Live2DRenderer(PetRenderer):
                 items.append(("__default__", "默认发型"))
             items.extend((it.name, it.label) for it in cat.items)
             if items:
-                kind = "emotion" if cat.emotion else ("hairstyle" if cat.hairstyle
-                                                      else "category")
+                kind = ("emotion" if cat.emotion else
+                        "hairstyle" if cat.hairstyle else
+                        "action" if cat.play else "category")
                 groups.append({"id": cat.id, "label": cat.label, "kind": kind,
                                "mode": cat.mode, "items": items})
         return groups
@@ -1070,6 +1117,10 @@ class Live2DRenderer(PetRenderer):
         if cat is None:
             return
         self.note_activity()
+        if cat.play:
+            # 动作分类：点了就播一下（不改变外观激活状态）
+            self.play_animation(item_id)
+            return
         if item_id == "__default__":
             # 组复位：情绪组回自然表情（走 ExpressionManager），其余整组参数归零（发型默认）
             if cat.emotion:
@@ -1281,15 +1332,25 @@ class Live2DRenderer(PetRenderer):
 
 
     def get_play_options(self) -> list[tuple[str, str]]:
-        """玩一下菜单数据：[(动作名, 标签)]（profile 已配置的动作）。"""
-        names = list(_DEFAULT_QUICK_PLAY)
-        names.extend(k for k in self.profile.actions if k not in _DEFAULT_QUICK_PLAY)
+        """玩一下菜单数据：[(动作名, 标签)]（profile 已配置的动作）。
+
+        模型可以在 profile 里声明 quick_play（展示哪些动作）+ 每个动作的 label
+        —— 名字要跟实际播出来的一致，别让菜单写着「转圈圈」结果播的是挥手。
+        """
+        if self.profile.quick_play:
+            names = list(self.profile.quick_play)
+        else:
+            names = list(_DEFAULT_QUICK_PLAY)
+            names.extend(k for k in self.profile.actions
+                         if k not in _DEFAULT_QUICK_PLAY)
         out: list[tuple[str, str]] = []
         for name in names:
             spec = self.profile.actions.get(name)
             if spec is None:
                 continue
-            if spec.kind == "item":
+            if spec.label:
+                label = spec.label
+            elif spec.kind == "item":
                 item = self.profile.find_item(spec.item)
                 label = item.label if item else spec.item
             else:

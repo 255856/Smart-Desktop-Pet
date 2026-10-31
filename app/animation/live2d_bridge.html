@@ -44,6 +44,29 @@ window.live2d = {
     fitFactor: 0.94,   // 模型占画布比例（留一点边距）
     hiddenWatermarkDrawables: [],  // 被隐藏的水印图层 index
 
+    // ---- 跟踪（头/身）参数 ----
+    // 为什么需要可配：标准 Live2D 头转参数是 ParamAngleX/Y/Z，pixi 的 focusController
+    // 写的也是它。但很多 VTS 风格模型把头绑在**自己的输入参数**上
+    // （AngleX/AngleY/AngleZ = OX/OY/OZ），而且物理会把标准参数**覆盖**掉
+    // （Cubism 物理的输出是覆盖不是累加）—— 此时写标准参数头身都不动。
+    // 模型在 profile 里声明自己的跟踪输入参数后，这里直接写它，
+    // 由模型的物理链把它铺到头 → 胸腔 → 肩/盆骨/裙/手臂/尾巴。
+    _trackParams: [],   // [{id, gain, axis}]，axis: x | y
+    _trackSmooth: {x: 0, y: 0},
+    _look: {x: 0, y: 0},   // 最近一次的鼠标归一化偏移（-1~1）
+    // 一次性姿态偏移（歪头 / 拖拽 / 走路朝向）：叠加在跟踪值上，到期自动回正。
+    // 同样是「归一化」单位（-1~1），由各参数的 gain 换算成模型单位。
+    _pose: {x: 0, y: 0, until: 0},
+    // 姿态动画（点头/摇头）：叠加在跟踪值上
+    _poseAnim: {kind: "", until: 0},
+    _lastTrackT: 0,
+
+    // 身体整体跟随鼠标的微倾幅度（弧度，nx=1 时约 ±2.3°），身体为刚性图片时也能看到动。
+    // 放在对象上而不是 loadModel 内部 —— focus() 用得到它
+    // （之前定义在 loadModel 的局部作用域里，focus() 引用会 ReferenceError 被 try/catch 吞掉，
+    //   整体微倾其实从来没生效过）。
+    BODY_SWAY: 0.04,
+
     // 帧率（性能）：交互时 _activeFps，静置 4s 后降到 _idleFps。
     // 透明窗口每帧都要重新合成，桌宠静置时没人看 —— 待机帧率调低能把
     // WebEngine 渲染 + 宿主透明合成这两份开销一起砍掉（实测省一半以上）。
@@ -138,6 +161,17 @@ window.live2d = {
                 this.__keptHooked = true;
             }
             const imK = this.model.internalModel;
+            // 跟踪参数每帧写（头 + 身体）。afterMotionUpdate 在 motion 之后、
+            // saveParameters 之前触发 → 值进参数基线（不会被帧末 loadParameters 抹掉），
+            // 且模型的物理链当帧就能读到 → 头动带身体动。
+            //
+            // ⚠️ 钩子标记必须记在 **internalModel** 上，不能记在 window.live2d 上：
+            // 换模型会换一个新的 internalModel，标记留在外层会导致新模型没挂钩子
+            // （表现为「鼠标不跟随、身体不动」）。
+            if (!imK.__trackHooked) {
+                imK.__trackHooked = true;
+                imK.on("afterMotionUpdate", () => this._write_track_params());
+            }
             imK.on("beforeModelUpdate", () => {
                 const core = this.model && this.model.internalModel.coreModel;
                 if (!core) return;
@@ -559,15 +593,159 @@ window.live2d = {
         } catch (e) { /* ignore */ }
     },
 
+    // 设置模型自己的跟踪输入参数（由 profile 传入）。
+    // list: [{id: "AngleX", gain: 25, axis: "x"}, ...]
+    setTrackParams(list, eyes) {
+        const norm = (p, defAxis) => ({
+            id: String(p.id),
+            gain: (p.gain === undefined || p.gain === null) ? 25 : Number(p.gain),
+            axis: String(p.axis || defAxis),
+            // 正负号：鼠标 Y 是「向下为正」，而不同模型的头部俯仰/眼球参数正方向不一样
+            // （大肥鱼的 AngleY、ParamEyeBallY 都是向上为正 → 需要 -1 才不会上下颠倒）
+            sign: (p.sign === undefined || p.sign === null)
+                ? 1 : (Number(p.sign) < 0 ? -1 : 1),
+        });
+        this._trackParams = (Array.isArray(list) ? list : [])
+            .filter(p => p && p.id).map(p => norm(p, "x"));
+        // 眼球：默认标准参数（ParamEyeBallX/Y），模型可自带覆盖与方向
+        const eyeList = Array.isArray(eyes) && eyes.length ? eyes : [
+            {id: "ParamEyeBallX", axis: "x"},
+            {id: "ParamEyeBallY", axis: "y"},
+        ];
+        this._eyeParams = eyeList.filter(p => p && p.id).map(p => norm(p, "x"));
+        console.log("[Live2D] track params:", JSON.stringify(this._trackParams),
+                    "eyes:", JSON.stringify(this._eyeParams));
+        return this._trackParams.length;
+    },
+
+    // 每帧写跟踪参数。
+    //
+    // 为什么必须每帧写、且写在 afterMotionUpdate：
+    //   * 写在 afterMotionUpdate（motion 之后、saveParameters 之前）→ 值会进参数基线，
+    //     既不会被帧末的 loadParameters() 抹掉，模型的物理链当帧就能读到；
+    //   * 物理链是模型自己的：跟踪输入 → ParamAngleX/Y/Z（头）→ ParamBodyAngleX/Y/Z
+    //     （胸腔）→ 肩/盆骨/裙摆/手臂/尾巴，一整套身体跟着动。
+    //   * 每帧写的是「鼠标位置 + 一次性姿态偏移」，**没有任何自主动作**：
+    //     鼠标不动 → 模型不动（模型自带的呼吸/尾巴摆动是它自己的物理，不算）。
+    _write_track_params() {
+        const im = this.model && this.model.internalModel;
+        const core = im && im.coreModel;
+        if (!core) return;
+        const now = performance.now();
+        // 时间基平滑：帧率无关（30fps 交互 / 12fps 静置 手感一致），也不会因
+        // 掉帧而突然跳一大截。
+        const dt = this._lastTrackT
+            ? Math.min(0.2, (now - this._lastTrackT) / 1000) : 0.016;
+        this._lastTrackT = now;
+        const s = this._trackSmooth;
+        const l = this._look;
+        const k = 1 - Math.exp(-dt / 0.09);   // 时间常数 ~90ms
+        s.x += (l.x - s.x) * k;
+        s.y += (l.y - s.y) * k;
+
+        // 待机摇摆：**不要**。鼠标不动时模型就该静止（用户明确要求「只跟随鼠标」）。
+        // 之前这里加的正弦摇摆会让角色自己左右晃 —— 看着像在跟鼠标抢控制权。
+        // 模型自带的呼吸（pixi breath → ParamBreath → 胸腔起伏）保留，那是自然的呼吸。
+
+        // 一次性姿态偏移到期回正（拖拽歪头 / 摸头反应）
+        const po = this._pose;
+        if (po.until && now > po.until) { po.x = 0; po.y = 0; po.until = 0; }
+
+        // 姿态动画（点头 / 摇头）：叠加在跟踪值上。
+        // 不走模型自带 motion —— motion 动的是模型参数，会和这里的每帧写入互相覆盖。
+        const t = now / 1000;
+        const pa = this._poseAnim;
+        let animX = 0, animY = 0;
+        if (pa.kind) {
+            if (now < pa.until) {
+                if (pa.kind === "nod") animY = Math.sin(t * 8.5) * 0.30;
+                else if (pa.kind === "shake") animX = Math.sin(t * 10.5) * 0.26;
+                else if (pa.kind === "tilt") animX = 0.28;
+            } else {
+                pa.kind = "";
+            }
+        }
+        // 没有自定义跟踪参数时，姿态动画退回标准头参数
+        // （pixi 的 focusController 是「加」上去的，所以点头是叠在鼠标跟随之上的）。
+        if (!this._trackParams.length) {
+            if (animX || animY) {
+                try { core.setParameterValueById("ParamAngleX", animX * 30); }
+                catch (e) { }
+                try { core.setParameterValueById("ParamAngleY", animY * 30); }
+                catch (e) { }
+            }
+            return;
+        }
+
+        // 跟踪值 = 鼠标位置（平滑后）+ 一次性姿态偏移 + 姿态动画。
+        // 没有任何自主动作 —— 鼠标不动，模型就不动。
+        const baseX = s.x + po.x + animX;
+        const baseY = s.y + po.y + animY;
+        for (const p of this._trackParams) {
+            let v;
+            if (p.axis === "y") {
+                v = baseY * p.gain * p.sign;
+            } else if (p.axis === "z") {
+                // 侧倾：斜着看时才转（对齐 pixi 的 ParamAngleZ = x*y*-30）
+                v = (s.x * s.y) * -p.gain;
+            } else {
+                v = baseX * p.gain * p.sign;
+            }
+            try { core.setParameterValueById(p.id, v); }
+            catch (e) { /* 模型没有这个参数 */ }
+        }
+        // 眼球：按模型配置写（方向跟头一样按 sign 翻 —— 有些模型眼球 Y 是向上为正）
+        for (const p of (this._eyeParams || [])) {
+            const v = (p.axis === "y")
+                ? (s.y + po.y + animY) * p.gain * p.sign
+                : (s.x + po.x + animX) * p.gain * p.sign;
+            try { core.setParameterValueById(p.id, v); }
+            catch (e) { /* 模型没有这个参数 */ }
+        }
+    },
+
+    // 姿态动画：点头 / 摇头 / 歪头。直接叠加在跟踪值上，
+    // 不与模型自带 motion 抢参数（motion 会在每帧覆盖同名参数）。
+    playPoseAnim(kind, ms) {
+        this._poseAnim.kind = String(kind || "");
+        this._poseAnim.until = performance.now() + (Number(ms) || 0);
+        return true;
+    },
+
+    // 一次性姿态偏移：歪头 / 拖拽 / 走路朝向。
+    // dx、dy 是归一化单位（-1~1）；holdMs > 0 时到期自动回正，0 = 一直保持。
+    setPose(dx, dy, holdMs) {
+        this._pose.x = Number(dx) || 0;
+        this._pose.y = Number(dy) || 0;
+        this._pose.until = (holdMs && holdMs > 0)
+            ? performance.now() + Number(holdMs) : 0;
+        return true;
+    },
+
     focus(nx, ny) {
         if (!this.model) return;
+        nx = Math.max(-1, Math.min(1, Number(nx) || 0));
+        ny = Math.max(-1, Math.min(1, Number(ny) || 0));
+        this._look.x = nx;
+        this._look.y = ny;
+
+        if (!this._trackParams.length) {
+            // 默认路径：pixi 的 focusController（写标准 ParamAngleX/Y/Z + 眼球）
+            try {
+                const w = this.app ? this.app.screen.width : 0;
+                const h = this.app ? this.app.screen.height : 0;
+                this.model.focus(w / 2 + nx * w / 2,
+                                 h / 2 + ny * h / 2);
+            } catch (e) { /* 旧版 API 无 focus */ }
+        }
+        // 整体微倾只对「身体是刚性」的模型有意义。
+        // 模型有自己的跟踪参数时，身体已经通过绑定动了（头/胸/肩/裙/手臂/尾），
+        // 再整体旋转等于让脚在地上滑 —— 所以关掉。
         try {
-            // nx/ny 为 -1~1 的归一化偏移（相对画面中心），映射到画布坐标
-            const w = this.app ? this.app.screen.width : 0;
-            const h = this.app ? this.app.screen.height : 0;
-            this.model.focus(w / 2 + (nx || 0) * w / 2,
-                             h / 2 + (ny || 0) * h / 2);
-        } catch (e) { /* 旧版 API 无 focus */ }
+            if (this.model && !this._trackParams.length) {
+                this.model.rotation = this._look.x * this.BODY_SWAY;
+            }
+        } catch (e) { /* ignore */ }
     },
 
     resize(w, h) {
