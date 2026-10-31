@@ -895,3 +895,40 @@ class TestFrontendTabs:
         assert 'id="stats"' in html
         for label in ("累计 token", "累计花费", "缓存命中率"):
             assert label in html
+
+
+class TestMemoryPartitions:
+    """记忆分区（身份 / 价值 / 程序性）—— 常量块，要在控制台的网络视图里看得见。"""
+
+    def test_partitions_endpoint_returns_three_blocks(self, panel):
+        d = _get_json(panel["app"], "/api/memory/partitions")
+        assert d["ok"] is True, d
+        keys = [b["key"] for b in d["blocks"]]
+        assert keys == ["identity", "values", "procedures"], keys
+        for b in d["blocks"]:
+            assert b["header"], b
+            assert b["path"], b
+            assert b["count"] == len(b["items"]), b
+
+    def test_partitions_show_the_real_content(self, panel):
+        d = _get_json(panel["app"], "/api/memory/partitions")
+        by_key = {b["key"]: b for b in d["blocks"]}
+        # 身份：文件不存在时用代码内兜底值，也要看得见
+        assert by_key["identity"]["count"] >= 1, by_key["identity"]
+        assert by_key["identity"]["items"][0]["text"], by_key["identity"]
+        # 价值：分层（底线 → 偏好 → 风格）
+        levels = [it.get("level") for it in by_key["values"]["items"]]
+        assert levels and all(levels), by_key["values"]
+        # 程序性：步骤 + 成功率
+        proc = by_key["procedures"]["items"]
+        assert proc and proc[0]["steps"], proc
+
+    def test_partitions_are_shown_in_the_network_pane(self, panel):
+        """前端：网络视图里得有分区面板（不然主人看不到）。"""
+        r = _request(panel["app"], "GET", "/")
+        assert r.status_code == 200
+        html = r.text
+        assert 'id="memPartitions"' in html, "网络视图里没有分区面板"
+        assert 'data-pane="net"' in html
+        assert "/api/memory/partitions" in html, "前端没去取分区数据"
+

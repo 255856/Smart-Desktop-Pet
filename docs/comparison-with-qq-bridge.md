@@ -1200,7 +1200,7 @@ A 已经有 `tests/` **86 个 `test_*.py` 测试文件**（实测）—— **A �
 | 黑话 / 口头禅学习回路 | ✅ **同款移植**（§app/engine/tools/_slang.py§：candidate/confirmed/rejected 三态 + 容量上限 + 排序 + 坏文件隔离 + **只有 confirmed 注入提示词**（常量块）） |
 | 时间感 / 消息时效 | ✅ §context_provider§（时段提示 / 规律 hint） |
 | token 账本 + 定价 + 控制台 | ✅ §model_prices.py§（读时算钱）+ 台账 + 控制台成本页（人民币口径、逐行传 model） |
-| 长期记忆引擎 | ✅（**纯 Python** sidecar，与 qq-bridge 同源思路但独立实现） |
+| 长期记忆引擎 | ✅（**纯 Python** sidecar，与 qq-bridge 同源思路但独立实现）；**分区**（身份 / 价值 / 程序性三块常量 + 情感权重 + 检索路由）+ **控制台可见**（§/api/memory/partitions§，记忆 Tab 的「网络」视图里单独一块面板） |
 | 上下文压缩 / 工具结果裁剪 | ✅ §compaction.py§（0.8 / 0.16 / 最近 8 条原文）+ §fit_tool_payload§（50000/45000/2000） |
 | 结构化 tool result 协议 | ✅ 两后端都对齐（standard 走 §wrap_tool_fn§ + §ToolPhaseBudget§ middleware：单工具 60s / 整轮 120s） |
 | agent loop / 工具并行 | ✅ 自研 ReAct + LangChain 双后端（不换 DSH） |
