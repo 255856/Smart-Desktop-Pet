@@ -450,6 +450,12 @@ CHAT_BUBBLE_CSS = (
     "margin:0 1px;background-color:#b9b3c9;border-radius:1px;vertical-align:bottom;}"
     "div.voice-bubble .voice-dur{color:#475569;font-size:9pt;vertical-align:middle;}"
     "div.voice-bubble .voice-missing{color:#dc2626;font-size:9pt;}"
+    # 表情包（sticker bubble）：表情包是「一条消息」，独立于工具块
+    "div.sticker-bubble{text-align:center;background-color:#f7f7fb;"
+    "border:1px solid #e2e8f0;border-radius:12px;padding:6px 8px 4px 8px;"
+    "margin:2px 0 8px 0;}"
+    "div.sticker-bubble .sticker-img{border-radius:8px;cursor:zoom-in;}"
+    "div.sticker-bubble .sticker-cap{color:#a0a0b4;font-size:8pt;margin-top:3px;}"
     "div.msg-notice{color:#6b7280;font-size:10pt;font-style:italic;"
     "border-left:3px solid #a45b2e;padding:2px 10px;margin:4px 0;}"
 )
@@ -534,6 +540,9 @@ div.voice-bubble .voice-wave{display:inline-block;vertical-align:middle;margin:0
 div.voice-bubble .voice-wave .voice-bar{display:inline-block;width:2px;margin:0 1px;background-color:$voice_bar;border-radius:1px;vertical-align:bottom;}
 div.voice-bubble .voice-dur{color:$text_quiet;font-size:9pt;vertical-align:middle;}
 div.voice-bubble .voice-missing{color:$text_mark_fail;font-size:9pt;}
+div.sticker-bubble{text-align:center;background-color:$bg_soft;border:1px solid $border_soft;border-radius:12px;padding:6px 8px 4px 8px;margin:4px 0 8px 0;}
+div.sticker-bubble .sticker-img{border-radius:8px;cursor:zoom-in;}
+div.sticker-bubble .sticker-cap{color:$text_muted;font-size:8.5pt;margin-top:3px;}
 
 div.thinking{font-size:9.5pt;color:$text_quiet;background-color:$bg_soft;border-left:3px solid $text_terminal_head;padding:8px 12px;margin:4px 0 8px 0;border-radius:0 4px 4px 0;}
 div.thinking .thinking-head{color:$text_think_head;font-weight:600;margin-bottom:2px;}

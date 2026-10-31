@@ -114,6 +114,10 @@ from app.brain.compaction import (
 # 配置 dataclass 是零依赖的，从轻量模块拿。
 from app.brain.langchain_config import LangChainAgentConfig
 from app.engine.tools import ToolRegistry
+# 表情包（send_sticker）：目录 + 产物解析 + 本地图 -> data URL
+from app.engine.stickers import (STICKER_TOOL_NAME,
+                                resolve_sticker_artifact,
+                                sticker_data_url)
 from app.voice.asr import SpeechRecognizer, asr_available
 from app.engine.chat_store import SHARED_BUCKET, ChatStore
 
@@ -459,6 +463,11 @@ class ChatWindow(QWidget):
         # 合成好了 / 失败了之后补进聊天窗的消息（不进 LLM 历史，
         # 但重建聊天区时要一起画出来）。
         self._voice_arrived: list = []
+        # 表情包（send_sticker）：已经**单独画成气泡**的工具调用键
+        # （name, args, result）—— 同一张不画两遍。
+        self._sticker_shown: set = set()
+        # 已经单独画出来的表情包（重建聊天区时要一起画出来）
+        self._sticker_arrived: list = []
         self._voice_job_timer = QTimer(self)
         self._voice_job_timer.setInterval(self._voice_job_poll_ms())
         self._voice_job_timer.timeout.connect(self._check_voice_jobs)
@@ -3833,6 +3842,8 @@ class ChatWindow(QWidget):
         # 合成好了 / 失败了再自己发进聊天（主人什么都不用做）。
         # 这一步**不能**被「没有当前气泡」挡住 —— 语音条是界面自己的事。
         self._track_voice_job(name, args or "", result or "")
+        # 表情包：结果一到就画成独立气泡（**不等这一轮说完**）
+        self._handle_sticker_tool(name, args or "", result or "", status or "")
         if self._current_bot_msg is None:
             return
         # run_script：把 [OK] path\n--- stdout ---\n…\n--- stderr ---\n… 的结构化结果
@@ -5172,6 +5183,112 @@ class ChatWindow(QWidget):
             '</div>'
         ) % (cls, play, wave_html, dur_txt)
 
+    # ------------------------------------------------------------------
+    # 表情包（send_sticker）
+    #
+    # 表情包是**一条消息**，跟语音条一个级别：结果一到就画成独立气泡，
+    # **不等这一轮说完**（等了主人就看不到"桌宠现在什么心情"）。
+    # ------------------------------------------------------------------
+
+    def _sticker_bubbles_html(self, tools: list) -> str:
+        """消息里的表情包气泡（历史回放走这条路）。
+
+        已经**单独画过**的（这一轮里 send_sticker 的结果一到就画了）
+        跳过 —— 同一张表情不画两遍。
+        """
+        if not tools:
+            return ""
+        rows = []
+        for t in tools:
+            name, args, result, status = _unpack_tool(t)
+            if name != STICKER_TOOL_NAME:
+                continue
+            # 只有真成了才出表情包（失败的那步在工具块里已经标红）
+            if _tool_status(result, status) != "ok":
+                continue
+            if (name, args, result) in getattr(self, "_sticker_shown", set()):
+                continue
+            art = resolve_sticker_artifact(name, args, result)
+            if not art or not art.get("exists"):
+                continue
+            html = self._sticker_bubble_html(art)
+            if html:
+                rows.append(html)
+        return "".join(rows)
+
+    def _sticker_bubble_html(self, art: dict) -> str:
+        """一张表情包的气泡 HTML —— 图片 + 名字，点图看大图。
+
+        图读不出来（文件没了 / 不是 png）就返回空串 —— **绝不画坏图**。
+        """
+        path = str(art.get("path") or "")
+        url = sticker_data_url(path)
+        if not url:
+            return ""
+        label = _html_escape(str(art.get("label") or "表情包"))
+        # 点开看大图：跟聊天里的普通图片走同一套 img-open 锚点
+        key = _img_open_key(path)
+        self._img_open_map[key] = "file:///" + path.replace("\\", "/")
+        return (
+            '<div class="sticker-bubble">'
+            '<a href="#img-%s" title="点击看大图">'
+            '<img class="sticker-img" src="%s" alt="%s" width="160" height="160"/>'
+            '</a>'
+            '<div class="sticker-cap">%s</div>'
+            '</div>'
+        ) % (key, url, label, label)
+
+    def _handle_sticker_tool(self, name: str, args: str, result: str,
+                             status: str = "") -> None:
+        """send_sticker 的结果到了 → **立刻**画一个表情包气泡。
+
+        这一步**不能**被"没有当前气泡"挡住 —— 表情包是界面自己的事。
+        """
+        if name != STICKER_TOOL_NAME:
+            return
+        try:
+            if _tool_status(result, status) != "ok":
+                return
+            art = resolve_sticker_artifact(name, args, result)
+            # 文件没了 / 解析不出来 → 不画气泡（工具块里已经如实标红）
+            if not art or not art.get("exists"):
+                log.info("表情包产物不可用，跳过气泡：%s", art)
+                return
+            html = self._sticker_bubble_html(art)
+            if not html:
+                return
+            self._sticker_shown.add((name, args, result))
+            self._sticker_arrived.append(art)
+            self._insert_sticker_bubble(html)
+        except Exception:  # noqa: BLE001
+            log.exception("表情包气泡渲染失败")
+
+    def _insert_sticker_bubble(self, html: str) -> None:
+        """把表情包气泡插进聊天区。
+
+        插在**流式占位气泡前面**（而不是追加到末尾）：占位气泡每次刷新都会
+        把"锚点 -> 末尾"整段删掉重画（_refresh_streaming_message），追加在
+        末尾的表情包会被一起擦掉。插在锚点前面、再把锚点往后挪，就不会被擦。
+        """
+        try:
+            cursor = self.chat_view.textCursor()
+            anchor = getattr(self, "_streaming_anchor_pos", None)
+            if anchor is None:
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                cursor.insertHtml(html)
+                cursor.insertBlock()
+            else:
+                cursor.setPosition(anchor)
+                start = cursor.position()
+                cursor.insertHtml(html)
+                cursor.insertBlock()
+                # 占位气泡被往后挪了这么远 → 锚点跟着挪
+                self._streaming_anchor_pos = start + (cursor.position() - start)
+            sb = self.chat_view.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:  # noqa: BLE001
+            log.exception("插入表情包气泡失败")
+
     def _thoughts_html(self, thoughts: list) -> str:
         """思考块：折叠展示（默认收起，主人点开看推理过程）。
 
@@ -5398,8 +5515,10 @@ class ChatWindow(QWidget):
             )
             # 语音条：语音是「一条消息」，不受「显示工具步骤」那个开关影响
             voice_html = self._voice_bubbles_html(msg.tools, msg_ts=msg.ts)
+            # 表情包：同样是一条消息（这一轮里已经单独画过的会跳过）
+            sticker_html = self._sticker_bubbles_html(msg.tools)
             prepend = (thoughts_html + execs_html + file_edits_html
-                       + tools_html + voice_html)
+                       + tools_html + voice_html + sticker_html)
             if prepend:
                 body_html = prepend + body_html
 
@@ -5831,6 +5950,11 @@ class ChatWindow(QWidget):
         # 3.5 后到的语音条（合成好了 / 失败了才出现的那些）也要画出来
         for msg in list(getattr(self, "_voice_arrived", []) or []):
             self._render_message(msg)
+        # 3.6 已经单独画出来的表情包（这一轮里 send_sticker 的结果）也要画出来
+        for art in list(getattr(self, "_sticker_arrived", []) or []):
+            html = self._sticker_bubble_html(art)
+            if html:
+                self._insert_sticker_bubble(html)
         # 4. 重建 streaming 占位 (如果还在 streaming)
         if streaming:
             self._streaming_anchor_pos = self._insert_placeholder(
