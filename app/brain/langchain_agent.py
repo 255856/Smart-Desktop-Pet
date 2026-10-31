@@ -705,6 +705,14 @@ class LangChainAgent:
             # post-LLM 拦截器：状态差时改写 preemptive 问文案，加在最后
             if getattr(self, "_post_llm_guard", None) is not None:
                 middlewares.append(self._post_llm_guard.as_middleware())
+            # **整轮工具预算**（Stage 3.3 的预算在 standard 路径上也生效）——
+            # 工具是 LangGraph 的 ToolNode 内部调的，只能用 middleware 拦。
+            try:
+                from app.brain.tool_budget_middleware import ToolPhaseBudget
+                self._tool_budget = ToolPhaseBudget()
+                middlewares.append(self._tool_budget.as_middleware())
+            except Exception as e:  # noqa: BLE001
+                log.warning("整轮工具预算中间件加载失败: %s", e)
         except Exception as e:  # noqa: BLE001
             log.warning("HallucinationGuard 加载失败,降级无 middleware: %s", e)
             middlewares = []
@@ -894,6 +902,13 @@ class LangChainAgent:
         含「checkpoint 救援」：报 2013 'tool call result does not follow tool call' 时，
         清掉本 thread 的 checkpoint 后重试一次。
         """
+        # **整轮工具预算重新计时**（预算按轮算，不按进程算）
+        _budget = getattr(self, "_tool_budget", None)
+        if _budget is not None:
+            try:
+                _budget.reset()
+            except Exception:  # noqa: BLE001
+                pass
         # 国产模型默认忽略 tool_choice 字段。命中 aw_query 等专用 intent 时，
         # 直接走 app.integrations.activitywatch 同步调工具，把 ToolMessage + AI tool_call
         # 拼进 messages，让 LLM 看到完整「问 → 调 → 结果」三段式

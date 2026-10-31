@@ -227,3 +227,57 @@ def test_standard_langchain_level_error_is_reported_as_failure():
     tool_ev = next(ev for ev in events if ev[0] == "tool")
     assert tool_ev[3].startswith("失败：")
     assert _tool_status(tool_ev[3], "") == "fail"
+
+
+class TestToolPhaseBudget:
+    """整轮工具预算：ReAct 路径早有（agent.py），standard 路径靠 middleware 补上。"""
+
+    def test_budget_runs_out_and_resets(self):
+        from app.brain.tool_budget_middleware import ToolPhaseBudget
+
+        b = ToolPhaseBudget(budget_seconds=0.01)
+        time.sleep(0.05)
+        assert b.remaining() <= 0
+        b.exhausted = True
+        b.blocked = 7
+        b.reset()
+        assert b.exhausted is False
+        assert b.blocked == 0
+        assert b.remaining() > 0
+
+    def test_zero_budget_means_no_limit(self):
+        from app.brain.tool_budget_middleware import ToolPhaseBudget
+
+        b = ToolPhaseBudget(budget_seconds=0)
+        assert b.remaining() == float("inf")
+
+    def test_middleware_blocks_the_call_when_exhausted(self):
+        import asyncio
+        from app.brain.tool_budget_middleware import ToolPhaseBudget
+
+        b = ToolPhaseBudget(budget_seconds=0.01)
+        time.sleep(0.03)
+        mw = b.as_middleware()
+        called = []
+
+        class _Req:
+            tool_call = {"name": "web_search", "id": "call_1", "args": {}}
+
+        async def _handler(request):
+            called.append(1)
+            return "真跑了"
+
+        async def _run():
+            # wrap_tool_call 装饰后拿到的是 LangChain 的 middleware 协议对象，
+            # 真正的钩子是 awrap_tool_call（bind 后的 async 函数）。
+            fn = getattr(mw, "awrap_tool_call", None)
+            assert fn is not None, "拿不到中间件的 awrap_tool_call 钩子"
+            return await fn(_Req(), _handler)
+
+        out = asyncio.run(_run())
+        assert out is not None, "预算用尽时中间件必须给出一个 ToolMessage"
+        assert not called, "预算用尽后不该再执行工具"
+        assert b.exhausted is True
+        assert b.blocked == 1
+        assert "预算" in str(getattr(out, "content", out))
+    print("[OK] 整轮工具预算：standard 路径也生效了")
