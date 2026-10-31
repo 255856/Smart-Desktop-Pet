@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import copy
+import dataclasses
 import json
 import os
 import sys
@@ -86,6 +88,12 @@ def _parse_args(argv=None):
                    help="要跑的阶段（逗号分隔）")
     p.add_argument("--sleep", type=float, default=0.5, help="请求之间的间隔秒")
     p.add_argument("--reps", type=int, default=3, help="P6 每条问题重复几遍")
+    p.add_argument("--tier-cases", default="chat_casual,low_mood,long_question",
+                   help="T 阶段跑哪几条用例（逗号分隔）")
+    p.add_argument("--waste-case", default="long_question",
+                   help="W 阶段用哪条用例（CoT 最容易吃光预算的那条）")
+    p.add_argument("--waste-budget", type=int, default=1024,
+                   help="W 阶段强制的输出预算（历史事故点：1024）")
     return p.parse_args(argv)
 
 
@@ -289,13 +297,98 @@ async def one_request(client, url: str, headers: dict, model: str,
 
 
 # --------------------------------------------------------------------------
+# T / W 阶段：分档预算 + 早期止损（端到端，真 AgentLoop + 真 API）
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _budget_overrides(budget=None, abort=True):
+    """临时改写「场景预算」和「早期止损」，用来做改动前后的 A/B。
+
+    budget=None  -> 用真实的分档（改动后的行为）
+    budget=int   -> 强制用这份预算（模拟「档位选小了」的事故现场）
+    abort=False  -> 关掉早期止损（改动前的行为）
+    """
+    import app.brain.agent as agent_mod
+    import app.brain.llm_client as lc_mod
+
+    orig_resolve = agent_mod.resolve_output_budget
+    orig_load = lc_mod.load_output_budget
+    if budget is not None:
+        agent_mod.resolve_output_budget = lambda *a, **k: budget
+    if not abort:
+        base = orig_load()
+        lc_mod.load_output_budget = lambda *a, **k: dataclasses.replace(
+            base, waste_abort_enabled=False)
+    try:
+        yield
+    finally:
+        agent_mod.resolve_output_budget = orig_resolve
+        lc_mod.load_output_budget = orig_load
+
+
+async def _run_tier_case(lcfg, prod_prompt, turn_ctx, case, budget, abort,
+                         tag: str, phase: str) -> dict:
+    """跑一次真 AgentLoop（真 API），记录 token / 答案 / 重问。"""
+    from app.brain.agent import AgentLoop
+    from app.brain.llm_client import LLMClient
+
+    class _NoTools:
+        def names(self):
+            return []
+
+        def to_openai(self):
+            return []
+
+        def execute(self, name, args):
+            return ""
+
+    lclient = LLMClient(lcfg, prod_prompt)
+    agent = AgentLoop(lclient, _NoTools(), max_turns=3)
+    usage_events = []
+    texts = []
+    metas = []
+    with _budget_overrides(budget, abort):
+        try:
+            async for ev, data in agent.run([
+                    {"role": "user", "content": turn_ctx},
+                    {"role": "user", "content": case["input"]}]):
+                if ev == "meta" and isinstance(data, dict):
+                    metas.append(data)
+                    if data.get("event") == "usage":
+                        usage_events.append(data)
+                elif ev == "text":
+                    texts.append(data)
+        finally:
+            await lclient.close()
+
+    each = [int(u.get("completion_tokens") or 0) for u in usage_events]
+    answer = texts[-1] if texts else ""
+    return {
+        "phase": phase,
+        "tag": tag,
+        "case": case["id"],
+        "budget": budget if budget is not None else "tier",
+        "abort": bool(abort),
+        "requests": len(usage_events),
+        "completion_tokens": sum(each),
+        "completion_each": each,
+        "prompt_tokens": sum(int(u.get("prompt_tokens") or 0)
+                             for u in usage_events),
+        "answer_chars": len(answer),
+        "answer_head": answer[:200],
+        "cot_only_retry": any(m.get("event") == "cot_only_retry" for m in metas),
+        "wasted": any(m.get("wasted") for m in metas),
+    }
+
+
+# --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 
 async def run(args) -> int:
     import httpx
     from app.core.api_keys import is_placeholder_key
-    from app.core.config import load_config
+    from app.core.config import LLMConfig, load_config
 
     cfg = load_config(args.config)
     llm = cfg.llm
@@ -321,6 +414,10 @@ async def run(args) -> int:
           f"用例：{len(cases)} 条  阶段：{sorted(phases)}")
 
     results: list[dict] = []
+    # LLM 配置（T / W / P8 阶段共用同一份）
+    lcfg = LLMConfig(api_key=api_key, base_url=base_url, model=model,
+                     stream=True, temperature=0.8,
+                     max_tokens=cfg.llm.max_tokens, timeout=args.timeout)
     timeout = httpx.Timeout(args.timeout)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async def go(phase: str, case: dict, prompt: str, user_text: str,
@@ -453,9 +550,6 @@ async def run(args) -> int:
                 def execute(self, name, args):
                     return ""
 
-            lcfg = LLMConfig(api_key=api_key, base_url=base_url, model=model,
-                             stream=True, temperature=0.8,
-                             max_tokens=cfg.llm.max_tokens, timeout=args.timeout)
             for cid in ("long_question", "short_question"):
                 c = next(x for x in cases if x["id"] == cid)
                 for i in range(args.reps):
@@ -499,6 +593,54 @@ async def run(args) -> int:
                     results.append(rec)
                     print(f"  [P8] {c['id']} run{i} 重问={bool(metas)} "
                           f"最终回复={rec['prod_head'][:60]!r}", flush=True)
+                    await asyncio.sleep(args.sleep)
+
+        # --- T：分档预算（端到端：真 AgentLoop + 真 API）---
+        # before = 一律用 config.yaml 的 max_tokens（改动前）
+        # after  = 按场景分档 + 早期止损（改动后）
+        if "T" in phases:
+            print("\n== T 分档预算（端到端）：before(一律满档) vs after(分档+止损)==")
+            wanted = [x.strip() for x in args.tier_cases.split(",") if x.strip()]
+            for cid in wanted:
+                c = next((x for x in cases if x["id"] == cid), None)
+                if c is None:
+                    print(f"  跳过未知用例 {cid}")
+                    continue
+                for tag, budget, abort in (
+                        ("before", int(cfg.llm.max_tokens or 4096), False),
+                        ("after", None, True)):
+                    rec = await _run_tier_case(lcfg, prod_prompt, turn_ctx, c,
+                                               budget, abort, tag=tag,
+                                               phase="T_tier_flow")
+                    results.append(rec)
+                    print(f"  [T] {cid:<18} {tag:<7} 请求={rec['requests']} "
+                          f"输出token={rec['completion_tokens']:<6} "
+                          f"各次={rec['completion_each']} "
+                          f"答案={rec['answer_chars']}字 "
+                          f"重问={rec['cot_only_retry']}", flush=True)
+                    await asyncio.sleep(args.sleep)
+
+        # --- W：CoT 吃光预算的浪费（止损前 vs 止损后）---
+        # 同一份（强制的小）预算，只差「要不要提前止损」：
+        #   before = 跑满整个预算才发现没有正文（改动前）
+        #   after  = 思维链占掉大半就停（改动后）
+        if "W" in phases:
+            print("\n== W CoT 吃光预算：浪费多少 token（止损前 vs 止损后）==")
+            c = next((x for x in cases if x["id"] == args.waste_case), None)
+            if c is None:
+                print(f"  跳过未知用例 {args.waste_case}")
+            else:
+                for tag, abort in (("before", False), ("after", True)):
+                    rec = await _run_tier_case(lcfg, prod_prompt, turn_ctx, c,
+                                               int(args.waste_budget), abort,
+                                               tag=tag, phase="W_waste")
+                    results.append(rec)
+                    print(f"  [W] {c['id']:<18} {tag:<7} 预算={args.waste_budget} "
+                          f"请求={rec['requests']} "
+                          f"各次输出token={rec['completion_each']} "
+                          f"合计={rec['completion_tokens']} "
+                          f"答案={rec['answer_chars']}字 "
+                          f"重问={rec['cot_only_retry']}", flush=True)
                     await asyncio.sleep(args.sleep)
 
     out = Path(args.results)

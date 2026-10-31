@@ -15,7 +15,7 @@ from app.brain.llm_client import (COT_ONLY_RETRY_HINT as _COT_ONLY_RETRY_HINT,
                                   LLMClient, MAX_COT_ONLY_RETRIES as _MAX_COT_ONLY_RETRIES,
                                   _build_full_system_prompt,
                                   count_request_actions, detect_action_intent,
-                                  is_low_cjk_reply)
+                                  is_low_cjk_reply, resolve_output_budget)
 from app.brain.prompt_layer import (build_dynamic_block, build_system_prompt,
                                     build_tool_handbook, load_style_guide)
 from app.engine.tools import ToolRegistry
@@ -988,6 +988,19 @@ class AgentLoop:
             log.info("AgentLoop: 主人这句话含 %d 个并列要求，"
                      "本轮若只完成一部分会纠正一次", required_actions)
 
+        # 输出预算**分档**（companion_config.yaml 的 output_budget 段）：
+        # 一句「几点了」不该跟一篇长技术回答抢同一个 4096 的输出预算。
+        # 档位只看两件事：要不要调工具（工具那一轮最容易长篇思考）、
+        # 主人这句话有多长。
+        needs_tools = intent is not None or required_actions >= 1
+        scene_budget = resolve_output_budget(first_user_text, needs_tools)
+        # 分档只往下调，**绝不越过**配置里的天花板（llm.max_tokens）
+        cfg_max = getattr(getattr(self.client, "cfg", None), "max_tokens", None)
+        if isinstance(cfg_max, int) and cfg_max > 0:
+            scene_budget = min(scene_budget, cfg_max)
+        log.info("AgentLoop: 本轮输出预算 %d token（%s）",
+                 scene_budget, "工具/长回答" if needs_tools else "闲聊/普通")
+
         # 工具裁剪：按意图只下发相关工具；识别不出意图就全量下发
         tools = self._select_tools(intent, all_tools)
         if all_tools and tools is not None and len(tools) < len(all_tools):
@@ -1011,6 +1024,8 @@ class AgentLoop:
             tool_calls: list[dict] = []
             # 整轮只有思维链（客户端在 finish 事件里给的标记）
             cot_only = False
+            # 这次请求是不是被「早期止损」掐断的（思维链吃光预算）
+            wasted = False
 
             # 抗幻觉第 3 层：连续多轮纯调工具 → 去掉 tools 强制 final
             force_final = consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_TURNS
@@ -1022,10 +1037,12 @@ class AgentLoop:
                                 "reason": f"连续 {consecutive_tool_only} 轮纯调工具无文字",
                                 "turn": turn})
 
-            # 重问那一轮用更大的输出预算（CoT 已经把原预算吃光了）
+            # 本次请求的输出预算：
+            #   - 普通轮：**场景档位**预算（短闲聊小档、长回答/工具密集满档）；
+            #   - 重问那一轮：满档预算（CoT 已经把原预算吃光了）。
             stream_kwargs: dict = {}
-            if retry_max_tokens and _supports_max_tokens(self.client):
-                stream_kwargs["max_tokens"] = retry_max_tokens
+            if _supports_max_tokens(self.client):
+                stream_kwargs["max_tokens"] = retry_max_tokens or scene_budget
             async for ev, data in self.client.chat_stream_events(
                     messages,
                     tools=None if force_final else tools,
@@ -1049,6 +1066,8 @@ class AgentLoop:
                     if isinstance(data, dict):
                         # Stage 2.10：整轮只有思维链（CoT 吃光输出预算）
                         cot_only = bool(data.get("cot_only"))
+                        # 客户端是不是「早期止损」掐断的（思维链吃光预算）
+                        wasted = bool(data.get("wasted"))
                     if data.get("content") and not content_parts:
                         content_parts.append(data["content"])
                     tool_calls = data.get("tool_calls") or []
@@ -1075,7 +1094,8 @@ class AgentLoop:
                             _COT_ONLY_RETRY_MAX_TOKENS)
                 yield ("meta", {"event": "cot_only_retry",
                                 "reason": "回复只有思维链，没有可见答案",
-                                "turn": turn})
+                                "turn": turn,
+                                "wasted": wasted})
                 # 把「上一条只有思维链」告诉模型，重问才有意义
                 messages.append({"role": "assistant",
                                  "content": _COT_ONLY_RETRY_MARK})

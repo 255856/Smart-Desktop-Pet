@@ -104,6 +104,8 @@ class ThinkBlockFilter:
     def __init__(self) -> None:
         self._in_think = False
         self._buf = ""      # 还没判定归属的尾巴
+        #: 被思维链吃掉的字符数（早期止损的判据用）
+        self.thinking_chars = 0
 
     @staticmethod
     def _partial_tail(buf: str, tag: str) -> int:
@@ -127,6 +129,8 @@ class ThinkBlockFilter:
                 if idx < 0:
                     # 还没闭合：留够「半个闭标签」的尾巴，其余丢掉
                     keep = self._partial_tail(self._buf, self._CLOSE)
+                    # 这段被丢掉的就是思维链 —— 记下来（止损判据）
+                    self.thinking_chars += len(self._buf) - keep
                     self._buf = self._buf[-keep:] if keep else ""
                     break
                 self._buf = self._buf[idx + len(self._CLOSE):]
@@ -152,6 +156,7 @@ class ThinkBlockFilter:
         """流结束时把还挂着的尾巴交出去（还在 CoT 里就不给主人看）。"""
         tail, self._buf = self._buf, ""
         if self._in_think:
+            self.thinking_chars += len(tail)
             return ""
         return tail
 
@@ -197,6 +202,188 @@ TRUNCATED_RETRY_MARK = "（上一条回复被截断了，没有说完）"
 #: 否则重问还是同样的截断（实测 1024 → 4096 才有意义）。
 #: ⚠️ 只作用在**这一次**重问请求上，其它请求的预算不变（成本可控）。
 COT_ONLY_RETRY_MAX_TOKENS = 4096
+
+
+# ---------------------------------------------------------------------------
+# 输出侧预算（按场景分级）—— 一句闲聊不该跟一篇长回答用同一个预算
+# ---------------------------------------------------------------------------
+#
+# 背景：config.yaml 的 llm.max_tokens 是**所有请求共用**的天花板，于是一句
+# 「几点了」也拿到 4096。max_tokens 是天花板不是预付款（实测 1024 → 用了
+# 4281 token，4096 → 用了 3380），所以真正的浪费不是「预算给大了」，而是
+# **思维链把预算吃光、正文一个字没出** —— 那时候整条回复被丢掉重问一遍。
+#
+# 这里做两件事：
+#   1) 分档：按场景选一份输出预算（短闲聊用小档，长回答/工具密集用满档）；
+#   2) 早期止损：思维链用掉预算的一大半、还没吐出任何可见正文 →
+#      **停掉这次请求**（剩下的预算不再烧），交给上层用满档重问一次。
+#
+# 配置在 app/core/companion_config.yaml 的 output_budget 段
+# （**不读 config.yaml**，那里放 API key）。
+
+#: companion_config.yaml 里输出预算段的键名
+OUTPUT_BUDGET_SECTION = "output_budget"
+
+#: 场景档位名（短闲聊 / 普通问题 / 长回答或工具密集）
+SCENE_SHORT = "short"
+SCENE_MEDIUM = "medium"
+SCENE_LONG = "long"
+
+
+@dataclass(frozen=True)
+class OutputBudget:
+    """输出侧预算配置（值来自 companion_config.yaml 的 output_budget 段）。"""
+
+    #: 任何场景的下限：一句普通短回复（连同它那份思维链）必须装得下
+    floor: int = 512
+    #: 短闲聊
+    short: int = 1024
+    #: 普通问题
+    medium: int = 2048
+    #: 长回答 / 工具密集（满档）
+    long: int = 4096
+    #: 主人这句话 ≤ 这么多字且不需要工具 → short 档
+    short_input_chars: int = 24
+    #: 主人这句话 ≥ 这么多字 → long 档
+    long_input_chars: int = 80
+    #: 「思维链吃光预算」的早期止损开关
+    waste_abort_enabled: bool = True
+    #: 止损线：思维链占本次预算的多少比例
+    waste_abort_ratio: float = 0.6
+    #: 止损线的下限（token）：小额请求别被误杀
+    waste_abort_min_tokens: int = 200
+    #: 思维链字符数 → token 的粗估系数（实测中位 4.0，取保守值）
+    chars_per_token: float = 3.5
+
+    def budget_for(self, scene: str) -> int:
+        """场景 → 本次请求的输出预算（永远 ≥ floor）。"""
+        table = {SCENE_SHORT: self.short, SCENE_MEDIUM: self.medium,
+                 SCENE_LONG: self.long}
+        return max(self.floor, int(table.get(scene, self.medium)))
+
+    def classify(self, text: str, needs_tools: bool = False) -> str:
+        """主人这一句 → 场景档位。
+
+        只看两件事：**要不要调工具**（工具那一轮最容易长篇思考）、
+        **这句话有多长**。不猜模型要写多少字。
+        """
+        n = len((text or "").strip())
+        if needs_tools:
+            return SCENE_LONG
+        if n >= self.long_input_chars:
+            return SCENE_LONG
+        if n <= self.short_input_chars:
+            return SCENE_SHORT
+        return SCENE_MEDIUM
+
+    def abort_threshold_tokens(self, max_tokens: int) -> int:
+        """止损线（token）：思维链占本次预算这么多就算「光思考不出答案」。
+
+        0 = 不止损（开关关着，或这次请求没有预算上限）。
+        """
+        if not self.waste_abort_enabled or max_tokens <= 0:
+            return 0
+        return max(self.waste_abort_min_tokens,
+                   int(max_tokens * self.waste_abort_ratio))
+
+
+def _read_output_budget_section() -> dict:
+    """读 companion_config.yaml 的 output_budget 段（只读，不改）。
+
+    走 yaml 原文：companion_config 的 dataclass 会丢掉没登记的字段
+    （跟 app/brain/compaction.py 读 context_compaction 段一个路子）。
+    加载顺序跟它一致：用户覆盖表 > 仓库默认表。
+    """
+    try:
+        from app.core import companion_config as cc
+    except Exception as e:  # noqa: BLE001 - 配置读不到不影响聊天
+        log.debug("读输出预算配置失败（companion_config 不可用）：%s", e)
+        return {}
+    try:
+        base = cc._read_yaml(cc._default_yaml_path()) or {}
+        user = cc._read_yaml(cc._user_yaml_path()) or {}
+        merged = cc._merge(base, user)
+    except Exception as e:  # noqa: BLE001
+        log.warning("读输出预算配置失败：%s", e)
+        return {}
+    block = merged.get(OUTPUT_BUDGET_SECTION)
+    return block if isinstance(block, dict) else {}
+
+
+_cached_output_budget: Optional[OutputBudget] = None
+
+
+def _int_field(block: dict, key: str, fallback: int, low: int = 1) -> int:
+    try:
+        value = int(block.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value >= low else fallback
+
+
+def _float_field(block: dict, key: str, fallback: float,
+                 low: float, high: float) -> float:
+    try:
+        value = float(block.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+    if value != value:            # NaN
+        return fallback
+    return max(low, min(high, value))
+
+
+def load_output_budget(*, force: bool = False) -> OutputBudget:
+    """读输出预算配置（进程内缓存；force=True 强制重读 yaml）。"""
+    global _cached_output_budget
+    if _cached_output_budget is not None and not force:
+        return _cached_output_budget
+    block = _read_output_budget_section()
+    defaults = OutputBudget()
+    abort = block.get("waste_abort") or {}
+    if not isinstance(abort, dict):
+        abort = {}
+    enabled = abort.get("enabled", defaults.waste_abort_enabled)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
+    _cached_output_budget = OutputBudget(
+        floor=_int_field(block, "floor", defaults.floor),
+        short=_int_field(block, "short", defaults.short),
+        medium=_int_field(block, "medium", defaults.medium),
+        long=_int_field(block, "long", defaults.long),
+        short_input_chars=_int_field(block, "short_input_chars",
+                                     defaults.short_input_chars, low=0),
+        long_input_chars=_int_field(block, "long_input_chars",
+                                    defaults.long_input_chars, low=0),
+        waste_abort_enabled=bool(enabled),
+        waste_abort_ratio=_float_field(abort, "ratio",
+                                       defaults.waste_abort_ratio, 0.05, 1.0),
+        waste_abort_min_tokens=_int_field(abort, "min_tokens",
+                                          defaults.waste_abort_min_tokens,
+                                          low=0),
+        chars_per_token=_float_field(abort, "chars_per_token",
+                                     defaults.chars_per_token, 1.0, 20.0),
+    )
+    return _cached_output_budget
+
+
+def _waste_estimate_tokens(think_chars: int) -> float:
+    """思维链字符数 → token 的粗估（早期止损的判据用）。
+
+    实测 MiniMax-M3 的英文思维链约 4 字符/token（中位 3.98，p25 3.26），
+    配置里取 3.5 这个保守系数 —— 宁可早停一点，也不要把预算烧光。
+    """
+    cfg = load_output_budget()
+    return think_chars / max(1.0, cfg.chars_per_token)
+
+
+def resolve_output_budget(text: str, needs_tools: bool = False,
+                          *, force: bool = False) -> int:
+    """主人这一句 → 本次请求该用的输出预算（token）。
+
+    这是「按场景分档」的唯一入口：短闲聊拿小档，长回答/工具密集拿满档。
+    """
+    cfg = load_output_budget(force=force)
+    return cfg.budget_for(cfg.classify(text, needs_tools))
 
 
 # 中文约束片段：以对话示例形式给出，强化但避免被模型当成"待输出文本"复述
@@ -1418,9 +1605,32 @@ class LLMClient:
             think_filter = _ThinkBlockFilter()
             tc_acc: dict[int, dict] = {}
             finish_reason = ""
+            # 「思维链吃光预算」的早期止损（见上面 OutputBudget 段）：
+            # 思维链已经用掉本次预算的一大半、还没吐出任何可见正文 →
+            # **停掉这次请求**，剩下的预算不再烧，交给上层用满档重问一次。
+            budget = int(payload.get("max_tokens") or 0)
+            abort_threshold = load_output_budget().abort_threshold_tokens(budget)
+            reasoning_chars = 0
+            wasted = False
             try:
                 async for line in resp.aiter_lines():
                     if cancel_check is not None and cancel_check():
+                        break
+                    if wasted:
+                        break
+                    if (abort_threshold and not content_parts and not tc_acc
+                            and _waste_estimate_tokens(
+                                think_filter.thinking_chars + reasoning_chars)
+                            >= abort_threshold):
+                        wasted = True
+                        log.warning(
+                            "LLMClient: 思维链已占本次预算 %.0f%%（约 %d token）"
+                            "且没有可见正文 → 停掉这次请求（止损）",
+                            100.0 * _waste_estimate_tokens(
+                                think_filter.thinking_chars + reasoning_chars)
+                            / max(1, budget),
+                            int(_waste_estimate_tokens(
+                                think_filter.thinking_chars + reasoning_chars)))
                         break
                     if not line or not line.startswith("data:"):
                         continue
@@ -1454,6 +1664,7 @@ class LLMClient:
                     )
                     if reasoning_chunk:
                         reasoning_parts.append(reasoning_chunk)
+                        reasoning_chars += len(reasoning_chunk)
                         yield ("meta", {"event": "reasoning_delta",
                                         "content": reasoning_chunk})
 
@@ -1502,7 +1713,9 @@ class LLMClient:
                     yield ("text", clean)
 
             tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
-            if not saw_content and not tool_calls:
+            # ⚠️ 被止损的请求不走「从思维链里捞答案」那条路：
+            #    思维链是在中途被掐断的，捞出来的只会是半句胡话。
+            if not saw_content and not tool_calls and not wasted:
                 # 模型整轮只吐 reasoning 不吐 content → 直接从已收到的思考痕迹
                 # 里捞答案，**不再重发一次请求**（那是第二次计费）。
                 full_text = _answer_from_reasoning("".join(reasoning_parts))
@@ -1529,6 +1742,14 @@ class LLMClient:
             # v31: usage 归一化（多了缓存命中 / 未命中 / 写入三个桶）+ 落台账。
             # 形状跟 chat_stream 和 LangChain 那条路径完全一致。
             usage = normalize_usage(usage_acc)
+            if wasted and not usage.get("got_real"):
+                # 被止损的请求拿不到 API 的 usage（流被掐断了）：
+                # 用收到的字符数估一个值记进台账 —— 省下来的钱要看得见。
+                est = int(_waste_estimate_tokens(
+                    think_filter.thinking_chars + reasoning_chars
+                    + sum(len(c) for c in content_parts)))
+                usage["completion_tokens"] = est
+                usage["total_tokens"] = usage.get("prompt_tokens", 0) + est
             record_usage(usage, backend="lightweight",
                          model=getattr(self.cfg, "model", ""),
                          request_index=request_index)
@@ -1536,7 +1757,10 @@ class LLMClient:
             # 原因：CoT 的 token 计入 max_tokens，CoT 过长会把输出预算吃光，
             # 整条回复被截断（清洗管线把 CoT 剥光后什么都不剩）。
             # ⚠️ 工具调用轮**不算**：那一轮正文本来就该是空的。
-            cot_only = (not tool_calls) and is_cot_only_reply("".join(raw_parts))
+            # ⚠️ 被止损的请求**也算** CoT-only：它正是「光思考不出答案」的现场，
+            #    上层要靠这个标记用满档重问一次。
+            cot_only = (not tool_calls) and (
+                wasted or is_cot_only_reply("".join(raw_parts)))
             yield ("finish", {
                 "reason": finish_reason,
                 "tool_calls": tool_calls,
@@ -1547,6 +1771,8 @@ class LLMClient:
                 # (老 ollama / 本地) 不返 usage, got_real=False, 上层 fallback
                 "usage": usage,
                 "cot_only": cot_only,
+                # 本次请求是不是被「早期止损」掐断的（思维链吃光预算）
+                "wasted": wasted,
             })
 
     async def _stream_with_force_prompt(

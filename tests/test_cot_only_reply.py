@@ -29,7 +29,8 @@ from app.brain.agent import (AgentLoop, _COT_ONLY_RETRY_HINT,  # noqa: E402
                              _COT_ONLY_RETRY_MAX_TOKENS,
                              _EMPTY_REPLY_FALLBACKS)
 from app.brain.llm_client import (LLMClient, is_cot_only_reply,  # noqa: E402
-                                  is_low_cjk_reply, sanitize_text)
+                                  is_low_cjk_reply, load_output_budget,
+                                  sanitize_text)
 from app.core.config import LLMConfig  # noqa: E402
 
 # 一段典型的英文思维链（MiniMax-M3 的真实风格）
@@ -298,14 +299,21 @@ class TestAgentRetriesOnCotOnly:
         assert texts[0] in _EMPTY_REPLY_FALLBACKS
 
     def test_retry_uses_bigger_output_budget(self):
-        """重问那一轮要用更大的输出预算（原预算已经被 CoT 吃光了）。"""
+        """重问那一轮要用更大的输出预算（原预算已经被 CoT 吃光了）。
+
+        Stage：普通轮走**场景档位**预算（短闲聊拿小档），
+        重问那一轮拿**满档**（CoT 已经把小档吃光了）。
+        """
         client = _ScriptedClient([
             {"text": "", "cot_only": True},
             {"text": "喵~主人，今天也要加油哦"},
         ])
         _run_agent(client)
-        assert client.max_tokens_seen[0] is None, "第一轮不该改预算"
+        first = client.max_tokens_seen[0]
+        assert first is not None, "普通轮应该带场景档位预算"
+        assert first >= load_output_budget().floor, "档位预算不许低于下限"
         assert client.max_tokens_seen[1] == _COT_ONLY_RETRY_MAX_TOKENS
+        assert client.max_tokens_seen[1] > first, "重问必须比普通轮宽裕"
 
     def test_retry_tells_the_model_what_happened(self):
         """重问要把「上一条只有思维链」告诉模型。"""
