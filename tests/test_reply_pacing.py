@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""回复逐句投递 —— 「一句话一条消息」（跟 qq-bridge 一个路子）。
+"""回复逐句投递 —— 一条回复一个气泡，句子一句句长出来（跟 qq-bridge 一个路子）。
 
 owner 原话：「聊天窗口回复还是一下子蹦出来…我需要按照 qq-bridge 一样
-一句话一句话回复」。
+一句话一句话回复」；后来又报「回复出现了多个桌宠名字」。
 
 这里锁住四件事：
-  1. 一段 N 句的回复 → 聊天区里 N 条**独立气泡**，句与句之间有间隔；
-     一句话的回复**立刻**到（不许磨蹭）；
+  1. 一段 N 句的回复 → **一个**气泡，句子按间隔一句句长出来（名字/时间只出现一次；
+      一句话的回复**立刻**到，不许磨蹭）；
   2. **一个字都不能丢** —— 气泡拼回去 == 原回复（切分点上少了空白而已），
-     网址不能被劈开、emoji 不能被劈成半个；
+      网址不能被劈开、emoji 不能被劈成半个、数字不能跟单位被劈开；
   3. **模型看到的历史不变** —— 还是**一整条** assistant 消息；
   4. 主人叫停 → 剩下的句子不发了。
 """
@@ -157,36 +157,49 @@ def test_split_reply_sentences_splits_by_sentence():
 
 
 # ---------------------------------------------------------------------------
-# 2. 逐句投递：一句话一条气泡，句与句之间有间隔
+# ---------------------------------------------------------------------------
+# 2. 逐句投递：一条回复一个气泡，句子一句句长出来，句与句之间有间隔
 # ---------------------------------------------------------------------------
 
-def test_reply_arrives_as_one_bubble_per_sentence(tmp_path):
-    """A4：三句话的回复 → 聊天区里三条独立气泡，句与句之间有间隔。"""
+
+
+def test_split_reply_sentences_keeps_number_with_its_unit():
+    """「体力只剩 25 了」是一句话 —— 不能被空格劈开。
+
+    owner 截图里的现象：回复变成「体力只剩」+「25 了，主人光顾着改代码没管我。」
+    两条，名字也挂了两遍。原来只防了「左端是数字」（5 秒），没防「右端是数字」。
+    """
+    text = "想被喂一顿，体力只剩 25 了，主人光顾着改代码没管我。"
+    sentences, tail = split_reply_sentences(text)
+    assert sentences == [text], sentences
+    assert tail == "", tail
+def test_reply_arrives_as_one_bubble_growing_sentence_by_sentence(tmp_path):
+    """A4：三句话的回复 → **一个**气泡，句子一句句长出来。
+
+    owner 报的现象：「回复出现了多个桌宠名字」—— 原来每句都新建一个带
+    msg-label（名字+时间）的独立气泡，一条回复挂了好几次名字。
+    """
     cw = _cw(tmp_path)
     _fast_gaps(cw)
-    reply = "今天也要好好吃饭哦。小汐在家等主人回来喵。主人忙完了记得歇一歇。"
+    reply = "今天也要好好吃饭哦。主人忙完了记得歇一歇。两只猫在打盹呢。"
     marks = _run_reply(cw, reply)
     assert len(marks) == 3, marks
-    # 每条气泡都是完整的一句
+    # 每一步送出来的是完整的一句
     assert [s for _, s in marks] == [
-        "今天也要好好吃饭哦。", "小汐在家等主人回来喵。", "主人忙完了记得歇一歇。",
+        "今天也要好好吃饭哦。", "主人忙完了记得歇一歇。", "两只猫在打盹呢。",
     ], marks
     # 句与句之间有间隔（第一句立刻到，后面的隔一会儿）
     assert marks[0][0] < 0.2, marks
     gaps = [marks[i + 1][0] - marks[i][0] for i in range(len(marks) - 1)]
     for gap in gaps:
         assert gap >= 0.03, "两句之间没有间隔：%r" % gaps
-    # 聊天区里三条气泡都在，且没有把整段回复塞进一个气泡
+    # 聊天区：整段回复在**一个**气泡里，名字只出现一次
     text = cw.chat_view.toPlainText()
-    for sentence in ("今天也要好好吃饭哦。", "小汐在家等主人回来喵。",
-                     "主人忙完了记得歇一歇。"):
+    for sentence in ("今天也要好好吃饭哦。", "主人忙完了记得歇一歇。",
+                     "两只猫在打盹呢。"):
         assert text.count(sentence) == 1, text
-    assert reply not in text, "整段回复被塞进了一个气泡"
-
-
-def test_single_sentence_reply_arrives_immediately(tmp_path):
-    """A4：一句话的回复**立刻**到（不许等间隔）。"""
-    cw = _cw(tmp_path)
+    assert reply in text, "整段回复应该在同一个气泡里"
+    assert text.count("小汐") == 1, "名字只能出现一次：%r" % text
     _fast_gaps(cw, lo=3000, hi=4000)   # 间隔调很大：立刻到才说明是「第一条」
     reply = "好的，主人。"
     marks = _run_reply(cw, reply)

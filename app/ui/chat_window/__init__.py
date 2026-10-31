@@ -4395,42 +4395,33 @@ class ChatWindow(QWidget):
         if getattr(self, "_reply_final", False):
             self._finish_reply_pacing()
 
-    def _reply_sentence_message(self, sentence: str) -> Message:
-        """一句回复对应的气泡消息。
+    def _reply_bubble_message(self) -> Message:
+        """当前这条回复对应的**气泡**消息（一条回复只有一个气泡）。
 
-        工具块（已执行操作 / 语音条）**只显示一次**：谁在它之后发出来，
-        就挂在谁身上（别每个气泡都重复一份）。
+        内容 = 已经发出的句子 + 还没成句的尾巴；工具块跟着这个气泡走。
         """
-        tools = []
+        sent = "".join(str(s) for s in (getattr(self, "_reply_sent", None) or []))
+        tail = str(getattr(self, "_reply_tail", "") or "")
         try:
-            all_tools = list(
-                getattr(self._current_bot_msg, "tools", None) or [])
-            shown = int(getattr(self, "_reply_tools_shown", 0))
-            if shown < len(all_tools):
-                tools = all_tools[shown:]
-                self._reply_tools_shown = len(all_tools)
+            tools = list(getattr(self._current_bot_msg, "tools", None) or [])
         except Exception:  # noqa: BLE001
             tools = []
         return Message(
             role="assistant",
-            content=sentence,
+            content=sent + tail,
             emotion=getattr(self._current_bot_msg, "emotion", None),
             speaker=self.char_cfg.name,
             tools=tools,
         )
 
     def _reply_placeholder_html(self) -> str:
-        """占位气泡的 HTML：还没成句的尾巴 + 打字指示器。
+        """占位气泡的 HTML：已经发出的句子 + 尾巴 + 打字指示器。
 
-        工具块不在这里（工具块跟着真正发出去的那条气泡走）。
+        **一条回复只有一个气泡**：逐句投递时是把这个气泡的正文加长，
+        不是每句新建一个气泡 —— 否则一条回复会挂好几个名字和时间
+        （owner 截图：每句后面都跟一次「大肥鱼 21:37」）。
         """
-        msg = Message(
-            role="assistant",
-            content=getattr(self, "_reply_tail", "") or "",
-            emotion=getattr(self._current_bot_msg, "emotion", None),
-            speaker=self.char_cfg.name,
-        )
-        return self._msg_html(msg, streaming_meta="typing…")
+        return self._msg_html(self._reply_bubble_message(), streaming_meta="typing…")
 
     def _streaming_html(self, finished: bool) -> str:
         """流式占位气泡该显示什么。"""
@@ -4441,31 +4432,22 @@ class ChatWindow(QWidget):
         return self._msg_html(self._current_bot_msg, streaming_meta="typing…")
 
     def _render_reply_bubble(self, sentence: str) -> None:
-        """把一句回复作为**独立气泡**发出去（占位气泡让位给它）。"""
-        html = self._msg_html(self._reply_sentence_message(sentence))
-        anchor = getattr(self, "_streaming_anchor_pos", None)
-        cursor = self.chat_view.textCursor()
-        if anchor is None:
+        """把这一句并进**同一个**回复气泡（名字/时间只出现一次）。
+
+        原来每句都新建一个带 msg-label 的完整气泡 → 一条回复挂了好几个名字
+        （owner 截图：每句后面都跟一次「大肥鱼 21:37」），而且视图跟
+        history 对不上（history 里只有一条消息 → 重建历史后形状变了）。
+        现在：整条回复一个气泡，逐句只是把气泡正文加长。
+        """
+        if getattr(self, "_streaming_anchor_pos", None) is None:
             # 没有占位气泡（理论上不该发生）→ 退化成普通追加
+            cursor = self.chat_view.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertHtml(html)
+            cursor.insertHtml(self._reply_placeholder_html())
             cursor.insertBlock()
-        else:
-            cursor.setPosition(anchor)
-            cursor.movePosition(QTextCursor.MoveOperation.End,
-                                 QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.insertHtml(html)
-            # 后面还有句子 → 重建占位气泡（打字指示器）；说完了就不重建
-            if self._reply_queue or not getattr(self, "_reply_final", False):
-                new_anchor = cursor.position()
-                cursor.insertHtml(self._reply_placeholder_html())
-                cursor.insertBlock()
-                self._streaming_anchor_pos = new_anchor
-            else:
-                self._streaming_anchor_pos = None
-        sb = self.chat_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+            return
+        # 从锚点重画整个气泡：正文变长、名字还是只有一个
+        self._refresh_streaming_message()
 
     def _pacing_feed_final(self, text: str) -> None:
         """收尾：把最后一段（可能没有句末标点）也排进队列。"""
@@ -4482,55 +4464,31 @@ class ChatWindow(QWidget):
         self._reply_tail = ""
 
     def _flush_reply_extras(self) -> None:
-        """收尾时把「多出来的两块」补上。
+        """（已并入最终气泡，这里保留空实现以兼容老调用点。）
 
-        ① 正文尾部追加的多模态产物链接（图片 / 视频）；
-        ② 最后一句之后才跑完的工具（工具块挂在下一条气泡上，
-           没有下一条了就自己成一条）。
+        原来这里会**另外**补两条气泡：正文尾部追加的多模态产物、
+        以及最后一句之后才跑完的工具块。
+        现在一条回复只有一个气泡，最终气泡（_current_bot_msg）本身
+        就带全文 + 全部工具块 —— 再补一份就是重复。
         """
-        base = getattr(self, "_reply_base_text", "") or ""
-        content = getattr(self._current_bot_msg, "content", "") or ""
-        extra = ""
-        if base and content.startswith(base):
-            extra = content[len(base):].strip()
-        if extra:
-            try:
-                self._render_message(Message(
-                    role="assistant", content=extra,
-                    emotion=getattr(self._current_bot_msg, "emotion", None),
-                    speaker=self.char_cfg.name))
-            except Exception:  # noqa: BLE001
-                log.exception("多模态产物补气泡失败")
-        try:
-            all_tools = list(
-                getattr(self._current_bot_msg, "tools", None) or [])
-            shown = int(getattr(self, "_reply_tools_shown", 0))
-            if shown < len(all_tools):
-                rest = all_tools[shown:]
-                self._reply_tools_shown = len(all_tools)
-                self._render_message(Message(
-                    role="assistant", content="",
-                    emotion=getattr(self._current_bot_msg, "emotion", None),
-                    speaker=self.char_cfg.name, tools=rest))
-        except Exception:  # noqa: BLE001
-            log.exception("工具块补气泡失败")
-
+        return
     def _flush_pacing_tail(self) -> None:
-        """叫停 / 收尾：把占位气泡里剩下的尾巴收成一条（没有尾巴就删掉占位）。"""
+        """叫停 / 收尾：尾巴并进**同一条**气泡（没有尾巴就删掉占位）。"""
         anchor = getattr(self, "_streaming_anchor_pos", None)
         if anchor is None:
             return
         tail = (getattr(self, "_reply_tail", "") or "").strip()
         try:
-            cursor = self.chat_view.textCursor()
-            cursor.setPosition(anchor)
-            cursor.movePosition(QTextCursor.MoveOperation.End,
-                                 QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
             if tail:
-                cursor.insertHtml(
-                    self._msg_html(self._reply_sentence_message(tail)))
-                cursor.insertBlock()
+                # 尾巴是这条回复的一部分 → 并进气泡（名字只出现一次）
+                self._reply_tail = tail
+                self._refresh_streaming_message(finished=True)
+            else:
+                cursor = self.chat_view.textCursor()
+                cursor.setPosition(anchor)
+                cursor.movePosition(QTextCursor.MoveOperation.End,
+                                 QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
         except Exception:  # noqa: BLE001
             log.exception("逐句投递收尾（尾巴）失败")
         self._streaming_anchor_pos = None
@@ -4538,10 +4496,9 @@ class ChatWindow(QWidget):
 
     def _finish_reply_pacing(self) -> None:
         """逐句投递送完了 → 正式收尾（写历史 / 落库 / 通知桌宠）。"""
-        try:
-            self._flush_reply_extras()
-        except Exception:  # noqa: BLE001
-            log.exception("逐句投递收尾失败")
+        # 正文尾部追加的多模态产物、以及最后才跑完的工具块，
+        # 都已经在**最终那条气泡**里（_current_bot_msg 带全文 + 全部工具），
+        # 不用再单独补气泡 —— 补了会跟最终气泡重复一份。
         self._finalize_reply()
 
     def _flush_trace_text(self) -> None:
@@ -4746,13 +4703,12 @@ class ChatWindow(QWidget):
             emotion=parsed.emotion.value if parsed.emotion else "",
             tools=tools_list,
         )
-        if getattr(self, "_reply_pacing_on", False):
-            # 逐句投递：正文已经一句一条发出去了，别再把整段塞回占位气泡
-            self._streaming_anchor_pos = None
-        else:
-            self._refresh_streaming_message(
-                finished=True,
-                emotion=parsed.emotion.value if parsed.emotion else "")
+        # 收尾：把气泡换成**完整消息**（全文 + 全部工具块）。
+        # 逐句投递时正文已经一句句长在同一个气泡里了，这里只补齐最终文本，
+        # 让视图跟 history 一致（重建历史不再变形）。
+        self._refresh_streaming_message(
+            finished=True,
+            emotion=parsed.emotion.value if parsed.emotion else "")
 
         self._detect_hallucination(parsed.text, self._current_bot_msg.tools)
 

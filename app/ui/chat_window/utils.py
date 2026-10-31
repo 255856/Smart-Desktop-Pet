@@ -724,7 +724,11 @@ def _split_by_cjk_spaces(text: str) -> list:
         prev_last = cur[-1] if cur else ""
         curr_first = tokens[i][0] if tokens[i] else ""
         left_is_number = prev_last.isdigit()
-        if (not left_is_number) and (
+        right_is_number = curr_first.isdigit()
+        # 两边都不拆：
+        #  · 左端是数字 → 「5 秒」「3.4 KB」这种「数字+单位」是一件事；
+        #  · 右端是数字 → 「体力只剩 25 了」是一句话（owner 截图里被劈成两句）。
+        if (not left_is_number) and (not right_is_number) and (
                 _is_cjk_char(prev_last) or _is_cjk_char(curr_first)):
             groups.append(cur)
             cur = tokens[i]
