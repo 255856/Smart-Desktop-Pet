@@ -26,7 +26,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .store import LIST_DEFAULT_LIMIT, MemoryStore
+from .store import LIST_DEFAULT_LIMIT, MemoryStore, prewarm_imports
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8788
@@ -331,6 +331,13 @@ class MemorySidecarServer:
 
     def __init__(self, store, host=DEFAULT_HOST, port=DEFAULT_PORT, warmup=True):
         self.store = store if store is not None else MemoryStore()
+        # 冷启动：chromadb / bm25s / jieba 三个重 import 在后台预热
+        # （store 构造时已经起过一次，这里再调一次是幂等的）——
+        # 目的只有一个：**第一次检索不付这笔钱**。
+        try:
+            prewarm_imports()
+        except Exception:  # noqa: BLE001 - 预热失败不许影响起服务
+            pass
         self.host = host or DEFAULT_HOST
         self.requested_port = int(port or 0)
         self.warmup = bool(warmup)

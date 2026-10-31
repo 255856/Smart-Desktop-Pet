@@ -526,6 +526,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("[评测] 闸门：minSimilarity=%s minScoreRatio=%s denseKeepRatio=%s "
                   "预算=%sms" % (knob.get("minSimilarity"), knob.get("minScoreRatio"),
                                 knob.get("denseKeepRatio"), knob.get("modelBudgetMs")))
+            kind_gate = knob.get("kindGate") or {}
+            if kind_gate:
+                print("[评测] 按类别的闸门（价目表 v%s）：" % knob.get("kindGateVersion"))
+                for kind in sorted(kind_gate):
+                    row = kind_gate[kind] or {}
+                    print("[评测]   %-11s min_score_ratio=%-5s dense_keep_ratio=%s"
+                          % (kind, row.get("min_score_ratio"), row.get("dense_keep_ratio")))
         errors = {}
 
         def _search(q: str, k: int) -> list:
@@ -548,6 +555,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "models": health.get("models") or {},
                 "degraded": bool(health.get("degraded")),
                 "metrics": aggs,
+                "gate": knob,
                 "results": [
                     {"qid": r.qid, "text": r.text, "kind": r.kind,
                      "got": r.got, "relevant": list(r.relevant),

@@ -72,10 +72,20 @@ def test_dfy_yaml_exists_and_parses():
     assert isinstance(char.get("name"), str) and char["name"].strip(), "缺 character.name"
     assert isinstance(char.get("persona"), str) and char["persona"].strip(), "缺 character.persona"
 
-    # 跟 xiaoxi.yaml 同形：同样的顶层键、同样的两个字段
+    # 跟 xiaoxi.yaml 同形：同样的顶层键；**name / persona 必填**，
+    # **tts 可选**（角色可以自带 edge 音色 —— 大肥鱼有，小汐用全局默认）。
     xiaoxi = yaml.safe_load(XIAOXI.read_text(encoding="utf-8"))
     assert set(raw.keys()) == set(xiaoxi.keys()) == {"character"}
-    assert set(char.keys()) == set(xiaoxi["character"].keys()) == {"name", "persona"}
+    required = {"name", "persona"}
+    assert required <= set(char.keys()), char.keys()
+    assert set(char.keys()) <= required | {"tts"}, char.keys()
+    # tts 段如果写了，必须给出音色名（空字符串等于没写）
+    if "tts" in char:
+        tts = char["tts"]
+        assert isinstance(tts, dict), "character.tts 应该是 mapping"
+        voice = tts.get("voice")
+        assert isinstance(voice, str) and voice.strip(), \
+            "character.tts.voice 必须是非空字符串"
 
 
 def test_name_is_da_feiyu():

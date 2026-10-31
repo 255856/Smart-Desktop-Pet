@@ -922,6 +922,134 @@ def test_cli_exposes_the_gate_knobs(tmp_path):
     assert search["modelBudgetMs"] == 1500
 
 
+
+
+# ── 按类别的闸门（price_table.py 的「价目表」） ─────────────────────────────
+def test_kind_gate_thresholds_exist_and_come_from_the_price_table():
+    """A1：每一类都有阈值线，而且**有出处**（不是散在逻辑里的魔数）。"""
+    from memory_sidecar import price_table
+
+    table = price_table.KIND_GATE_TABLE
+    for kind in ("fact", "impression", "topic", "event", "thought"):
+        assert kind in table, kind
+        entry = table[kind]
+        assert 0.0 <= entry["min_score_ratio"] <= 1.0, entry
+        assert 0.0 <= entry["dense_keep_ratio"] <= 1.0, entry
+    # fact 这一类是实测收紧的（近似陷阱住在 fact 里）
+    assert table["fact"]["min_score_ratio"] > 0.12
+    # fact 的语义保命符是**关掉**的：实测陷阱 d02 的余弦是那一轮最高的，
+    # 开着就等于把陷阱救回来
+    assert table["fact"]["dense_keep_ratio"] == 0.0
+    assert price_table.KIND_GATE_TABLE_VERSION
+
+
+def test_kind_gate_is_used_by_the_gate(tmp_path):
+    """按类别的线要真的在闸门里起作用：同样两个分数，不同类别的命运不同。"""
+    store = make_store(tmp_path, min_similarity=0.0)
+
+    def row(cid, final, kind):
+        return (float(final), {"id": cid, "text": "x", "kind": kind}, float(final), 1.0, None)
+
+    # 同样两个分数，fact 那一类被裁掉、impression 那一类留着：
+    #   0.05 < 1.0 x fact 的 0.28      -> 裁掉
+    #   0.09 >= 1.0 x impression 的 0.08 -> 留着
+    scored = [row("top", 1.0, "fact"), row("f_low", 0.05, "fact"),
+              row("i_low", 0.09, "impression")]
+    kept = [r[1]["id"] for r in store._gate(scored, {})]
+    assert kept == ["top", "i_low"], kept
+    store.close()
+
+
+def test_kind_gate_can_be_overridden(tmp_path, monkeypatch):
+    """可覆盖：构造参数、环境变量（JSON）、全局旋钮，三条路都通。"""
+    store = make_store(tmp_path, kind_gate={"fact": {"min_score_ratio": 0.01,
+                                                       "dense_keep_ratio": 0.0}})
+    assert store.kind_gate["fact"]["min_score_ratio"] == 0.01
+    assert store.kind_gate["fact"]["dense_keep_ratio"] == 0.0
+    store.close()
+
+    from memory_sidecar import price_table as pt
+    monkeypatch.setenv(pt.KIND_GATE_ENV,
+                       json.dumps({"impression": {"min_score_ratio": 0.42}}))
+    from_env = make_store(tmp_path)
+    assert from_env.kind_gate["impression"]["min_score_ratio"] == 0.42
+    from_env.close()
+
+    # 全局旋钮**显式**给了值 -> 接管所有类别（老用法：一把梭收紧）
+    monkeypatch.setenv(store_mod.MIN_SCORE_RATIO_ENV, "0.6")
+    global_knob = make_store(tmp_path)
+    assert all(v["min_score_ratio"] == 0.6 for v in global_knob.kind_gate.values())
+    global_knob.close()
+
+
+def test_kind_gate_is_reported_in_stats(tmp_path):
+    """按类别的表要能从 /stats 读回来（排查用）。"""
+    store = make_store(tmp_path)
+    search = store.stats()["search"]
+    assert search["kindGate"]["fact"]["min_score_ratio"] == 0.28
+    assert search["kindGateVersion"]
+    store.close()
+
+
+# ── 冷启动：重 import 不许压在第一次检索上 ─────────────────────────────────
+def test_heavy_imports_are_prewarmed_in_the_background():
+    """chromadb / bm25s / jieba 的 import 在后台预热，别压在第一次检索上。"""
+    store_mod.prewarm_imports()        # 幂等：起过就当起过了
+    store_mod._wait_prewarm(timeout=60)
+    ready = store_mod.imports_ready()
+    assert ready["bm25s"] and ready["jieba"], ready
+    assert store_mod.prewarm_imports() is False, "预热跑完之后不该再起一组"
+
+
+def test_prewarm_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv(store_mod.PREWARM_ENV, "0")
+    assert store_mod.prewarm_imports() is False
+
+
+def test_cold_search_does_not_wait_for_the_models(tmp_path):
+    """冷启动的第一轮检索**不等模型**：模型没热就先用词面结果回答。
+
+    实测：模型要十几秒，等它等于白等预算（跑不完也是白跑）。
+    """
+    class NotReadyEmbedder(FakeEmbedder):
+        """还没加载好的向量模型（ready=False）。"""
+
+        @property
+        def ready(self):
+            return False
+
+    store = make_store(tmp_path, embedder=NotReadyEmbedder(), model_budget=0.8)
+    store.init()
+    store.upsert([{"id": "c1", "kind": "fact", "text": "主人的猫叫团子，是个橘猫"}])
+
+    t0 = time.time()
+    res = store.search("我的猫叫什么", top_k=3)
+    elapsed = time.time() - t0
+    assert elapsed < 0.5, "冷启动不该等模型（实测 %.2fs）" % elapsed
+    assert res["modelPending"] is True, "这一轮是「模型还没好，先给词面结果」"
+    assert [r["id"] for r in res["results"]] == ["c1"], res
+    store.close()
+
+
+def test_cold_rerank_does_not_burn_the_budget(tmp_path):
+    """精排模型没热的时候也不许烧掉整个预算。"""
+
+    class NotReadyRerank(FakeRerank):
+        @property
+        def ready(self):
+            return False
+
+    store = make_store(tmp_path, reranker=NotReadyRerank(), model_budget=0.8)
+    store.init()
+    store.upsert([{"id": "c1", "kind": "fact", "text": "主人的猫叫团子，是个橘猫"}])
+
+    t0 = time.time()
+    res = store.search("我的猫叫什么", top_k=3)
+    elapsed = time.time() - t0
+    assert elapsed < 0.5, "精排没热不该白等预算（实测 %.2fs）" % elapsed
+    assert res["results"], "词面腿照常回答"
+    store.close()
+
 # ── DEFECT 3：category 要跟着卡一起出去（/list 与 /search 同一套字段） ────
 def test_public_card_keeps_category_key_and_status(tmp_path):
     store = make_store(tmp_path, min_similarity=0.0)

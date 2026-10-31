@@ -56,10 +56,13 @@ import json
 import math
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from .price_table import KIND_GATE_TABLE_VERSION, resolve_kind_gate
 
 # ── 常量与配置 ────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -246,13 +249,15 @@ def _get_jieba():
         with _jieba_lock:
             if _jieba is None:
                 try:
-                    import jieba
+                    with _heavy_import_lock:
+                        import jieba
 
                     try:
                         jieba.setLogLevel(60)  # 别往 stderr 刷 "Building prefix dict"
                     except Exception:
                         pass
                     _jieba = jieba
+                    _heavy_ready["jieba"] = True
                 except Exception:
                     _jieba = False
     return _jieba or None
@@ -300,19 +305,63 @@ def lexical_score(query_tokens, text_tokens):
 # ── 模型（懒加载 + 串行化） ────────────────────────────────────────────────
 _HF_LOCK = threading.RLock()  # 进程级：加载与推理都串行，避免并发加载炸 meta tensor
 
+#: **重 import 的全局锁**：Python 的 import 系统在多线程同时 import 的时候
+#: 会偶发 KeyError（本机实测：torch 跟 chromadb 同时 import ->
+#: "KeyError: 'torch.nn.modules.adaptive'"，两边都炸）。
+#: 所以所有重 import（torch / sentence_transformers / chromadb / bm25s / jieba）
+#: 一律排队：宁可慢一点，也不让冷启动偶发降级。
+_heavy_import_lock = threading.RLock()
+
+
+#: 便宜探测的结果（进程级缓存：一次就够）
+_gpu_present_cache = None
+
+
+def _gpu_present():
+    """本机有没有 NVIDIA 显卡？**不 import torch**。
+
+    为什么不用 torch 问：本机 ``import torch`` 要 ~3.3s，而它此刻只是被
+    「选哪个精排模型」顺带叫起来的 —— 冷启动第一秒最宝贵，不该为它付 3.3s。
+    这里改成一次便宜的探测（nvidia-smi 能不能列出一块卡，~100ms）。
+
+    判错的代价只是「精排模型可能选得慢一点」（没卡却选到 GPU 版 = 跑 CPU，
+    慢但不会算错），**不会影响正确性**；模型放哪个设备仍然以 torch 自己的
+    说法为准（见 _pick_device）。
+    """
+    global _gpu_present_cache
+    if _gpu_present_cache is not None:
+        return _gpu_present_cache
+    ok = False
+    try:
+        exe = shutil.which("nvidia-smi")
+        if exe:
+            out = subprocess.run([exe, "-L"], capture_output=True, timeout=10)
+            ok = out.returncode == 0 and b"GPU" in (out.stdout or b"")
+    except Exception:
+        ok = False
+    _gpu_present_cache = bool(ok)
+    return _gpu_present_cache
+
+
+def _torch_cuda_available():
+    """问 torch 本人有没有 CUDA（**只在真的要加载模型时**才问）。"""
+    with _heavy_import_lock:
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
 
 def _cuda_available():
     """有没有 CUDA。单独抽成一个函数：测试 monkeypatch 它就等于「换一台机器」。"""
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+    return _gpu_present()
 
 
 def _pick_device():
-    return "cuda" if _cuda_available() else "cpu"
+    """模型放哪个设备上？这里才 import torch（反正模型加载本来就要它）。"""
+    return "cuda" if _torch_cuda_available() else "cpu"
 
 
 def resolve_rerank_model(explicit=None, env=None, cuda_ok=None):
@@ -369,7 +418,9 @@ class TransformersEmbedder:
             # 先查磁盘再 import：缺模型时连 transformers 都不必加载（毫秒级失败）
             if not download and not model_in_cache(self.model_name):
                 raise model_missing_error("向量模型", self.model_name)
-            from sentence_transformers import SentenceTransformer
+            _wait_prewarm()          # 别跟预热抢 numpy 的 import
+            with _heavy_import_lock:
+                from sentence_transformers import SentenceTransformer
 
             try:
                 model = SentenceTransformer(
@@ -433,7 +484,9 @@ class TransformersReranker:
             download = allow_runtime_download()
             if not download and not model_in_cache(self.model_name):
                 raise model_missing_error("精排模型", self.model_name)
-            from sentence_transformers import CrossEncoder
+            _wait_prewarm()          # 别跟预热抢 numpy 的 import
+            with _heavy_import_lock:
+                from sentence_transformers import CrossEncoder
 
             try:
                 self._model = CrossEncoder(
@@ -459,16 +512,103 @@ class TransformersReranker:
 
 
 # ── 可选依赖的导入（抽成模块函数，测试里可以直接 monkeypatch 成"不可用"） ──
-def _import_chromadb():
-    import chromadb
+#: 三个重 import「已经**完整**加载好了」的标记。
+#: 别拿 "xxx in sys.modules" 当就绪标志：别的线程正 import 它的时候，
+#: 模块对象已经进了 sys.modules，但**还是半成品**（用它会报
+#: "partially initialized module 'bm25s' has no attribute 'BM25'"）。
+_heavy_ready = {"chromadb": False, "bm25s": False, "jieba": False}
 
-    return chromadb
+
+def _import_chromadb():
+    if _heavy_ready["chromadb"]:
+        return sys.modules["chromadb"]   # 预热干的：完整加载好了，不用碰锁
+    with _heavy_import_lock:
+        import chromadb
+
+        _heavy_ready["chromadb"] = True
+        return chromadb
 
 
 def _import_bm25s():
-    import bm25s
+    if _heavy_ready["bm25s"]:
+        return sys.modules["bm25s"]      # 预热干的：完整加载好了，不用碰锁
+    with _heavy_import_lock:
+        import bm25s
 
-    return bm25s
+        _heavy_ready["bm25s"] = True
+        return bm25s
+
+
+# ── 冷启动：把三个重 import 挪到后台 ──────────────────────────────────────
+# 本机实测（进程内第一次 import）：chromadb 1.5s / bm25s 1.1s / jieba 首次分词 0.6s。
+# 这三个曾经**压在第一次检索的关键路径上**（第一次检索要重建 BM25 索引 +
+# 打开 Chroma collection），于是「刚启动就问一句」要多等 ~2.4s。
+# 改法：进程一起来就在后台把它们 import 掉，检索只管用已经热好的那份。
+# 预热是**串行**的（见 _prewarm_worker）：并行的 import 会偶发 KeyError。
+PREWARM_ENV = "DESKTOP_PET_MEMORY_PREWARM"
+_import_warm_lock = threading.Lock()
+_import_warm_thread = None
+#: 预热跑完了没（模型加载要等它：numpy / torch 的 import 不能跟别的并发）
+_prewarm_done = threading.Event()
+
+
+def _prewarm_worker():
+    """后台把三个重 import 弄热（bm25s / jieba / chromadb）。
+
+    **串行**，不并行：并行 import 会偶发 KeyError（见 _heavy_import_lock）。
+    顺序也讲究：bm25s / jieba 在前（BM25 腿是冷启动唯一能立刻答的腿），
+    chromadb 在后（向量腿冷启动本来就用不上）。
+    """
+
+    def one(fn):
+        try:
+            fn()
+        except Exception:
+            pass    # 预热失败不算错：真用到时还会再 import 一次，按老路降级
+
+    try:
+        one(_import_bm25s)
+        one(lambda: tokenize("预热分词"))
+        one(_import_chromadb)
+    finally:
+        _prewarm_done.set()
+
+
+def prewarm_imports():
+    """后台预热三个重 import（幂等：重复调用不会起第二组线程）。
+
+    返回 True = 这次真的起了后台线程。
+    """
+    global _import_warm_thread
+    if _prewarm_done.is_set():
+        return False        # 已经预热过了：不再起第二组
+    if str(os.environ.get(PREWARM_ENV, "")).strip().lower() in ("0", "off", "no", "false"):
+        return False
+    with _import_warm_lock:
+        if _import_warm_thread is not None and _import_warm_thread.is_alive():
+            return False
+        _import_warm_thread = threading.Thread(
+            target=_prewarm_worker, name="memory-sidecar-prewarm", daemon=True)
+        _import_warm_thread.start()
+        return True
+
+
+def _wait_prewarm(timeout=60.0):
+    """等预热跑完（模型加载前调）。
+
+    为什么必须等：numpy / torch 的 import **并发会炸**（本机实测
+    "cannot import name 'NDArray' from partially initialized module 'numpy._typing'"），
+    预热跟模型加载撞上就是偶发降级。预热只要 ~3s，等它比偶发炸掉划算。
+    """
+    th = _import_warm_thread
+    if th is None:
+        return              # 从没起过预热（或者被关了）：没什么可等的
+    th.join(timeout)
+
+
+def imports_ready():
+    """三个 import 热好了吗？（/stats、测试看用）"""
+    return {k: bool(v) for k, v in _heavy_ready.items()}
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────────
@@ -504,6 +644,21 @@ def _env_float(name, default):
 def _env_or(value, name, default):
     """显式参数 > 环境变量 > 默认值（三个旋钮统一走这条优先级）。"""
     return float(value) if value is not None else _env_float(name, default)
+
+
+def _env_override(name):
+    """环境变量里**显式给**的浮点值（没设 / 不是数字 -> None = 不接管）。
+
+    用来判断「主人是不是真的拧了这个旋钮」：没拧就走按类别标定出来的表，
+    拧了就一把梭接管（老行为不变）。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
 
 
 def _short_hash(text):
@@ -619,7 +774,14 @@ class MemoryStore:
         min_score_floor=None,
         min_similarity=None,
         dense_keep_ratio=None,
+        kind_gate=None,
+        prewarm=True,
     ):
+        # 冷启动第一件事：把三个重 import（chromadb / bm25s / jieba）扔到后台。
+        # 要放在**最前面** —— 后面还有建 BM25 索引、选精排模型等一堆事，
+        # 预热线程跟它们重叠才划算。
+        if prewarm and (use_vector or use_bm25):
+            prewarm_imports()
         self.data_dir = str(data_dir or DEFAULT_DATA_DIR)
         self.cards_path = os.path.join(self.data_dir, CARDS_FILE)
         self.chroma_dir = os.path.join(self.data_dir, CHROMA_SUBDIR)
@@ -637,6 +799,18 @@ class MemoryStore:
             _env_or(min_similarity, MIN_SIMILARITY_ENV, DEFAULT_MIN_SIMILARITY))
         self.dense_keep_ratio = _clamp01(
             _env_or(dense_keep_ratio, DENSE_KEEP_RATIO_ENV, DEFAULT_DENSE_KEEP_RATIO))
+        # 按类别的闸门阈值（价目表，见 memory_sidecar/price_table.py）：
+        #   覆盖方式：构造参数 kind_gate / 环境变量 DESKTOP_PET_MEMORY_KIND_GATE
+        #   全局旋钮**显式**给了值时接管对应的那一列（老用法：一把梭收紧全部）
+        self.kind_gate = resolve_kind_gate(
+            table=kind_gate,
+            ratio_override=(min_score_ratio if min_score_ratio is not None
+                            else _env_override(MIN_SCORE_RATIO_ENV)),
+            dense_override=(dense_keep_ratio if dense_keep_ratio is not None
+                            else _env_override(DENSE_KEEP_RATIO_ENV)),
+            fallback_ratio=self.min_score_ratio,
+            fallback_dense=self.dense_keep_ratio,
+        )
         self.embed_model = embed_model
         # 精排模型：没指定就按设备自动选（有 CUDA → v2-m3，否则 base）
         self.rerank_model, self.rerank_reason = resolve_rerank_model(rerank_model)
@@ -668,6 +842,9 @@ class MemoryStore:
         self._bm25_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._index_lock = threading.RLock()
+        #: 后台预热模型的线程（冷启动时不等它，见 _vector_leg_ready）
+        self._model_warm_lock = threading.Lock()
+        self._model_warm_thread = None
         #: 向量索引的挂起队列：id -> "upsert" / "delete"（写卡时记账，检索前补齐）
         self._pending_vectors = {}
         #: 卡片代次：每次写卡 +1；BM25 索引记着自己是从哪一代建出来的（脏了就重建）
@@ -1292,8 +1469,63 @@ class MemoryStore:
         return out
 
     # -- 「模型那一路」的时间预算 ------------------------------------------
+    def _vector_leg_ready(self):
+        """向量腿「这一轮就能用」吗？—— 向量模型已经加载好了。
+
+        冷启动时模型要十几秒：这一轮等它等于**白等预算**（跑不完也是白跑），
+        不如先拿词面结果回答，模型在后台加载，下一轮就用上了。
+        注入的假模型没有 ready 属性 -> 视为「直接可用」（测试 / 离线用法）。
+        """
+        if not self.use_vector or self._embedder is None:
+            return False
+        ready = getattr(self._embedder, "ready", None)
+        if ready is None:
+            return True
+        return bool(ready)
+
+    def _warm_models_async(self):
+        """后台把两个模型加载起来（这一轮不等，下一轮就能用）。"""
+        with self._model_warm_lock:
+            if self._model_warm_thread is not None and self._model_warm_thread.is_alive():
+                return
+            th = threading.Thread(target=self._warm_models_worker,
+                                  name="memory-sidecar-model-warm", daemon=True)
+            self._model_warm_thread = th
+            th.start()
+
+    def _warm_models_worker(self):
+        if self.use_vector:
+            try:
+                self._embed(["预热"])
+            except Exception:
+                pass    # 加载失败有冷却 + 降级标记，这里不重复报错
+        if self.use_rerank:
+            try:
+                self._rerank("预热", ["预热"])
+            except Exception:
+                pass
+
+    def _rerank_leg_ready(self):
+        """精排腿「这一轮就能用」吗？—— 精排模型已经加载好了。
+
+        冷启动时精排模型要十几秒：这一轮等它等于**白等预算**（跑不完也是白跑），
+        不如先拿词面结果回答，模型在后台加载，下一轮就用上了。
+        注入的假模型没有 ready 属性 -> 视为「直接可用」（测试 / 离线用法）。
+        """
+        if not self.use_rerank or self._reranker is None:
+            return False
+        ready = getattr(self._reranker, "ready", None)
+        if ready is None:
+            return True
+        return bool(ready)
+
     def _vector_phase(self, query):
         """补齐向量索引 + 算查询向量 + 查一次（只在 _run_in_budget 的线程里跑）。"""
+        if not self._vector_leg_ready():
+            # 模型还没热：这一轮不等它（省下整个预算），但后台把它加载起来
+            self._warm_models_async()
+            self.model_timeouts += 1
+            return None
         with self._index_lock:
             try:
                 self.sync_index()
@@ -1339,7 +1571,7 @@ class MemoryStore:
     def _gate(self, scored, sims=None):
         """相关度闸门：这一问够不着就别硬塞（老实现有，迁到 sidecar 时丢了）。
 
-        规则（阈值全部**标定出来的**，曲线见 docs/memory-sidecar.md 4.1）：
+        规则（阈值全部**标定出来的**，见 memory_sidecar/price_table.py）：
 
         ① 门禁（绝对，看余弦相似度）：最像的那条卡都不够像 → 这一问跟记忆库没
            关系，一条都不给。为什么不用「最终分」当门禁：最终分是**重排分 × 衰减
@@ -1347,9 +1579,14 @@ class MemoryStore:
            0.000~0.110，而有答案的问句里「我不能吃什么」只有 0.034）—— 拿它当
            绝对门槛必然要么放噪声、要么裁掉真答案。
         ② 补位行门槛（相对，看最终分）：低于「顶行 × min_score_ratio」的尾巴
-           丢掉；但语义/字面明显是同一件事（cos ≥ 顶行 × dense_keep_ratio）的行
-           保留 —— 复合问句的另外一半常被交叉编码器判低。
-        ③ 顶行永远保留，最高分 <= 0（一条正分都没有）则整轮不给。
+           丢掉 —— **每一类一条线**（价目表）：近似陷阱住在 fact 这一类，
+           就把 fact 收紧；别的类不受连坐（复合问句的另外一半大多在
+           impression / topic，收紧它们等于砍召回）。
+        ③ 语义保命符（相对，看余弦）：跟顶行明显是同一件事的行（cos ≥ 顶行 ×
+           dense_keep_ratio）即使精排分低也保留 —— 复合问句的另外一半常被交叉
+           编码器判低。**同样每一类一条线**：某一类的陷阱会被它救回来时，
+           这一类就把它关掉（fact 就是这么关的：陷阱 d02 的余弦是那一轮最高的）。
+        ④ 顶行永远保留，最高分 <= 0（一条正分都没有）则整轮不给。
 
         闸门只做减法：它不会把任何一行排到前面，也不改行内顺序。
         """
@@ -1362,21 +1599,22 @@ class MemoryStore:
         top_sim = max(sims.values()) if sims else None
         if top_sim is not None and self.min_similarity > 0 and top_sim < self.min_similarity:
             return []
-        if self.min_score_ratio <= 0:
-            return list(scored)
-        cut = top * self.min_score_ratio
-        sim_cut = top_sim * self.dense_keep_ratio if top_sim is not None else None
         kept = []
         for row in scored:
+            # 这一行属于哪一类，就用哪一类的线（表里没有的类别退回全局旋钮）
+            entry = self.kind_gate.get(str((row[1] or {}).get("kind") or "").strip())
+            ratio = entry["min_score_ratio"] if entry else self.min_score_ratio
+            dense = entry["dense_keep_ratio"] if entry else self.dense_keep_ratio
             if not kept:                      # 顶行永远在
                 kept.append(row)
                 continue
-            if float(row[0]) >= cut:
+            if ratio <= 0 or float(row[0]) >= top * ratio:
                 kept.append(row)
                 continue
-            sim = sims.get(row[1]["id"])
-            if sim is not None and sim_cut is not None and sim >= sim_cut:
-                kept.append(row)              # 语义上就是同一件事：别裁
+            if dense > 0 and top_sim is not None:
+                sim = sims.get(row[1]["id"])
+                if sim is not None and sim >= top_sim * dense:
+                    kept.append(row)          # 语义上就是同一件事：别裁
         return kept
 
     def sync_index(self):
@@ -1606,6 +1844,11 @@ class MemoryStore:
         """
         if not self.use_rerank or self._reranker is None or self._rerank_ready:
             return self._rerank(query, texts), False
+        if not self._rerank_leg_ready():
+            # 模型还没热：这一轮不等它（预算白烧），后台加载，下一轮就有精排了
+            self._warm_models_async()
+            self.model_timeouts += 1
+            return None, True
         return self._run_in_budget(lambda: self._rerank(query, texts)), True
 
     def _rerank(self, query, texts):
@@ -1678,20 +1921,22 @@ class MemoryStore:
             self._rebuild_bm25()
             if self._bm25_error:
                 errors.append("bm25: %s" % self._bm25_error)
-            vector_n = 0
-            if self.use_vector:
-                active = self._active_cards()
-                if active:
-                    try:
-                        vector_n = self._rebuild_vectors(active)
-                    except Exception as e:
-                        errors.append("vector: %s" % e)
-                else:
-                    try:
+        vector_n = 0
+        if self.use_vector:
+            active = self._active_cards()
+            if active:
+                # 算向量（= 加载模型）不占着 _index_lock（见 ensure_vector_index）
+                try:
+                    vector_n = self._rebuild_vectors(active)
+                except Exception as e:
+                    errors.append("vector: %s" % e)
+            else:
+                try:
+                    with self._index_lock:
                         self._ensure_chroma()
-                    except Exception as e:
-                        errors.append("chroma: %s" % e)
-            return {"vector": vector_n, "bm25": len(self._bm25_ids), "errors": errors}
+                except Exception as e:
+                    errors.append("chroma: %s" % e)
+        return {"vector": vector_n, "bm25": len(self._bm25_ids), "errors": errors}
 
     def _rebuild_vectors(self, active, recreate=False):
         """把 active 卡的向量整体重写一遍（先算向量再写，避免写坏后索引是空的）。"""
@@ -1708,8 +1953,8 @@ class MemoryStore:
         """确保向量索引覆盖所有 active 卡：缺（被删了 / 之前降级没写进去）就重建。"""
         if not self.use_vector:
             return 0
+        active = self._active_cards()
         with self._index_lock:
-            active = self._active_cards()
             try:
                 col = self._ensure_chroma()
                 count = int(col.count())
@@ -1723,13 +1968,17 @@ class MemoryStore:
                     return 0
             if not active:
                 return count
-            if force or count < len(active):
-                try:
-                    return self._rebuild_vectors(active)
-                except Exception as e:
-                    self._vector_error = str(e)
-                    return 0
+            need = force or count < len(active)
+        if not need:
             return count
+        # ⚠️ 算向量（= 加载模型，本机十几秒）**不占着 _index_lock**：
+        #    占着锁会把同时到来的检索全堵在门外（实测第一次检索白等 0.8s 预算，
+        #    答案还没算完就超时了）。写索引那一步自己会拿锁。
+        try:
+            return self._rebuild_vectors(active)
+        except Exception as e:
+            self._vector_error = str(e)
+            return 0
 
     def warmup(self):
         """串行预热：向量模型 → 重排模型 → 补齐向量索引。
@@ -2158,6 +2407,9 @@ class MemoryStore:
                     "minScoreFloor": self.min_score_floor,
                     "minSimilarity": self.min_similarity,
                     "denseKeepRatio": self.dense_keep_ratio,
+                    # 按类别的闸门阈值（价目表）：每一类一条线，可被覆盖
+                    "kindGate": {k: dict(v) for k, v in self.kind_gate.items()},
+                    "kindGateVersion": KIND_GATE_TABLE_VERSION,
                     "lastSearchMs": self.last_search_ms,
                 },
                 "degraded": bool(reasons),
