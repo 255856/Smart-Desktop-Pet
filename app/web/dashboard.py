@@ -2035,15 +2035,31 @@ const MemNet = (function(){
         index[g.id]=nodes.length;
         nodes.push({id:g.id,kind:k,pos:pos,size:11+imp*17,glow:0.85+imp*0.15,m:m});
       });
+      /* 每个节点最多 5 个语义邻居，避免全连接时连线爆炸。
+         贪心选边：按权重降序遍历，只有两端都还没满 5 个邻居才保留这条边 */
+      const MAX_NEIGHBORS = 5;
+      const degree = {};  // 每个节点当前邻居数
+      const allEdges = [];
       (graph.edges||[]).forEach(function(e){
         const ia=index[e.a],ib=index[e.b];
         if(ia===undefined||ib===undefined)return;
         const w=Math.max(0,Math.min(1,Number(e.w)||0));
-        const link={a:e.a,b:e.b,w:w,ia:ia,ib:ib};
+        allEdges.push({a:e.a,b:e.b,w:w,ia:ia,ib:ib});
+      });
+      allEdges.sort((x,y)=>y.w-x.w);  // 权重高的优先选
+      const keptEdges = [];
+      allEdges.forEach(function(e){
+        if((degree[e.a]||0)>=MAX_NEIGHBORS)return;
+        if((degree[e.b]||0)>=MAX_NEIGHBORS)return;
+        degree[e.a]=(degree[e.a]||0)+1;
+        degree[e.b]=(degree[e.b]||0)+1;
+        keptEdges.push(e);
+      });
+      keptEdges.forEach(function(link){
+        const c=KIND[nodes[link.ia].kind].c;
+        segs.push({a:nodes[link.ia].pos,b:nodes[link.ib].pos,
+          col:[c[0],c[1],c[2],0.26+link.w*0.6],link:link});
         edgeLinks.push(link);
-        const c=KIND[nodes[ia].kind].c;
-        segs.push({a:nodes[ia].pos,b:nodes[ib].pos,
-          col:[c[0],c[1],c[2],0.26+w*0.6],link:link});
       });
     }else{
       /* 没有向量时的退路：按 kind 摆球面，位置只表示分类 */
