@@ -482,11 +482,26 @@ class TestRvcSafety:
         assert 0 < timeout_s <= 180, "RVC 超时 %s 秒，太大" % timeout_s
         assert timeout_s < 240, "RVC 超时必须小于 MCP 调用超时（240 秒）"
 
-    def test_rvc_python_never_falls_back_to_path(self, tmp_path):
-        """解释器只认配置里那个；配置错了就**立刻失败**，不回落 PATH 上的 python。"""
+    def test_rvc_python_never_falls_back_to_path(self, tmp_path, monkeypatch):
+        """解释器**绝不**回落到 PATH 上的 python。
+
+        本机踩过的坑：用 E:\Python\python.exe 跑 RVC → 那个解释器装不下 RVC
+        依赖 → 进程卡在等 CPU → 白占 4.2 GB 内存 → 桌宠被拖死。
+
+        现在允许**自愈**：配置路径写错（手写少个反斜杠 E:\AIRVC\…）时，在
+        本机**已知的 RVC venv 位置**里找一遍；找不到才失败。但绝不用 PATH 上的。
+        """
         cfg = {"rvc": {"python": str(tmp_path / "没有这个解释器.exe")}}
         py = vs._rvc_python(cfg)
-        assert py == tmp_path / "没有这个解释器.exe"
+        # 绝不能是 PATH 上的 python
+        on_path = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                    if p and (Path(p) / "python.exe").is_file()]
+        assert str(py) not in on_path, "绝不能回落到 PATH 上的 python"
+        # 自愈最多挑「本机已知的 RVC venv」，不会随便找个 python
+        if py.is_file():
+            assert "rvc" in str(py).lower(), str(py)
+        # 本机一个 RVC venv 都找不到 → 必须明确失败
+        monkeypatch.setattr(vs, "_find_local_rvc_python", lambda _c: None)
         ok, why = vs._check_rvc_python(cfg)
         assert ok is False
         assert "不在本机" in why
@@ -501,6 +516,9 @@ class TestRvcSafety:
         """
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
+        # 这个文件必须**存在** —— 否则会触发「配置路径不对」的自愈，
+        # 拿到的是本机真的 RVC venv（那不是这个测试要验的东西）
+        (venv / "python.exe").write_bytes(b"")
         cfg = {"rvc": {"python": str(venv / "python.exe")}}
         env = vs._rvc_env(cfg)
         assert env["PATH"].split(os.pathsep)[0] == str(venv)

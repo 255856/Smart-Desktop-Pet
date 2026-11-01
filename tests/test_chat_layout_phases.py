@@ -55,13 +55,16 @@ def test_the_name_sits_on_the_same_side_as_its_bubble(qapp, tmp_path):
 
 
 def test_tool_steps_show_what_she_is_doing(qapp, tmp_path):
-    """步骤行要写「她在做什么」（读取记忆 / 写入文件 / 查找资料），不只是工具名。"""
-    from app.ui.chat_window.utils import tool_phase
-    assert tool_phase('recall_memory') == '读取记忆'
-    assert tool_phase('remember_fact') == '写入记忆'
-    assert tool_phase('write_file') == '写入文件'
-    assert tool_phase('web_search') == '查找资料'
-    assert tool_phase('mcp_voice_sing') == '合成语音'
-    assert tool_phase('open_app') == '打开应用'
-    assert tool_phase('some_unknown_tool') == '执行中'
+    """步骤行要写**状态**（读取中 / 写入中 / 合成中），不只是工具名。
 
+    工具名后面的中文说明**不要**（owner：查看本机音色/唱几句这种不要）。
+    """
+    from app.ui.chat_window.utils import tool_phase
+    assert tool_phase('recall_memory') == '读取中'
+    assert tool_phase('remember_fact') == '写入中'
+    assert tool_phase('write_file') == '写入中'
+    assert tool_phase('read_file') == '读取中'
+    assert tool_phase('web_search') == '检索中'
+    assert tool_phase('mcp_voice_sing') == '合成中'
+    assert tool_phase('open_app') == '启动中'
+    assert tool_phase('some_unknown_tool') == '执行中'

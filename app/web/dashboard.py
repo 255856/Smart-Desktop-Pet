@@ -312,7 +312,8 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   /* 记忆视图：网络 / 列表 切换（统一使用 .view-mode / .vm-btn） */
 
   /* 深色神经网络画布卡片 */
-  .mem-net{position:relative;height:560px;border-radius:14px;overflow:hidden;
+  .mem-layout{display:flex;gap:14px;align-items:stretch;}
+  .mem-net{position:relative;flex:1;min-width:0;height:680px;border-radius:14px;overflow:hidden;
     background:radial-gradient(120% 120% at 50% 20%,#0e1830 0%,#0a1122 55%,#070c18 100%);
     border:1px solid #1c2942;}
   .mem-net canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;}
@@ -320,7 +321,11 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .mem-net-legend{position:absolute;left:14px;top:14px;display:flex;flex-direction:column;gap:7px;
     background:rgba(10,17,34,.55);border:1px solid rgba(120,150,210,.18);border-radius:11px;
     padding:11px 13px;backdrop-filter:blur(6px);}
-  .mem-net-legend .lg-row{display:flex;align-items:center;gap:8px;font-size:11.5px;color:#c3cde4;}
+  .mem-net-legend .lg-row{display:flex;align-items:center;gap:8px;font-size:11.5px;color:#c3cde4;
+    cursor:pointer;padding:3px 6px;margin:-3px -6px;border-radius:6px;transition:background .12s;}
+  .mem-net-legend .lg-row:hover{background:rgba(120,150,210,.12);}
+  .mem-net-legend .lg-row.active{background:rgba(120,150,210,.2);color:#fff;}
+  .mem-net-legend .lg-row.active .lg-dot{box-shadow:0 0 8px currentColor;}
   .mem-net-legend .lg-dot{width:9px;height:9px;border-radius:50%;flex:none;}
   .mem-net-legend .lg-note{margin-top:3px;padding-top:8px;font-size:10.5px;line-height:1.7;
     color:#8fa0c4;border-top:1px solid rgba(120,150,210,.16);}
@@ -336,9 +341,9 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .mem-net-badge{position:absolute;left:14px;bottom:14px;font-size:11px;color:#a9badb;
     background:rgba(10,17,34,.55);border:1px solid rgba(120,150,210,.18);border-radius:9px;
     padding:5px 10px;backdrop-filter:blur(6px);font-variant-numeric:tabular-nums;}
-  .mem-net-reset{position:absolute;right:14px;top:52px;font-size:11px;color:#c3cde4;
+  .mem-net-reset{position:absolute;right:330px;top:14px;font-size:11px;color:#c3cde4;
     background:rgba(10,17,34,.55);border:1px solid rgba(120,150,210,.22);border-radius:9px;
-    padding:6px 11px;cursor:pointer;font-family:inherit;backdrop-filter:blur(6px);}
+    padding:6px 11px;cursor:pointer;font-family:inherit;backdrop-filter:blur(6px);z-index:5;}
   .mem-net-reset:hover{color:#fff;border-color:rgba(140,170,235,.4);}
   .mem-tip{position:absolute;z-index:5;max-width:280px;pointer-events:none;opacity:0;
     background:rgba(14,22,42,.92);border:1px solid rgba(140,170,235,.3);border-radius:10px;
@@ -352,24 +357,27 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   .mem-net-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
     justify-content:center;gap:10px;color:#8fa0c4;font-size:13px;}
   .mem-net-empty .ic{opacity:.7;}
-  .mem-node-detail{margin-top:14px;background:var(--surface-sunken);border:1px solid var(--line);
-    border-radius:13px;padding:14px 16px;font-size:13px;line-height:1.65;}
+  .mem-node-detail{position:absolute;right:14px;top:14px;bottom:14px;width:300px;
+    background:rgba(14,22,42,.92);border:1px solid rgba(140,170,235,.25);border-radius:12px;
+    padding:14px 16px;font-size:13px;line-height:1.65;overflow-y:auto;z-index:6;
+    backdrop-filter:blur(8px);color:#e6ecf8;}
   .mem-node-detail .nd-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
-  .mem-node-detail .nd-close{margin-left:auto;border:1px solid var(--border);background:var(--surface);
-    border-radius:8px;font-size:11px;padding:4px 11px;cursor:pointer;font-family:inherit;color:var(--sub);}
-  .mem-node-detail .nd-content{word-break:break-word;white-space:pre-wrap;}
-  .mem-node-detail .nd-meta{margin-top:10px;font-size:11.5px;color:var(--sub);display:flex;gap:14px;flex-wrap:wrap;}
-  .mem-node-detail .nd-section{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);}
-  .mem-node-detail .nd-section-t{font-size:11px;font-weight:700;color:var(--faint);
+  .mem-node-detail .nd-close{margin-left:auto;border:1px solid rgba(140,170,235,.3);background:rgba(20,30,55,.6);
+    border-radius:8px;font-size:11px;padding:4px 11px;cursor:pointer;font-family:inherit;color:#c3cde4;}
+  .mem-node-detail .nd-close:hover{background:rgba(30,45,80,.8);color:#fff;}
+  .mem-node-detail .nd-content{word-break:break-word;white-space:pre-wrap;color:#f0f4fb;font-size:14px;}
+  .mem-node-detail .nd-meta{margin-top:10px;font-size:11.5px;color:#a9badb;display:flex;gap:14px;flex-wrap:wrap;}
+  .mem-node-detail .nd-section{margin-top:12px;padding-top:10px;border-top:1px solid rgba(120,150,210,.25);}
+  .mem-node-detail .nd-section-t{font-size:11px;font-weight:700;color:#a9badb;
     letter-spacing:.6px;margin-bottom:7px;}
   .mem-node-detail .nd-near{display:flex;align-items:center;gap:9px;width:100%;
-    text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:9px;
-    padding:6px 10px;margin-bottom:5px;cursor:pointer;font-family:inherit;font-size:12.5px;color:var(--text);}
-  .mem-node-detail .nd-near:hover{border-color:var(--accent-lt);background:var(--accent-bg);}
+    text-align:left;background:rgba(20,30,55,.5);border:1px solid rgba(120,150,210,.18);border-radius:9px;
+    padding:6px 10px;margin-bottom:5px;cursor:pointer;font-family:inherit;font-size:12.5px;color:#dfe6f5;}
+  .mem-node-detail .nd-near:hover{border-color:rgba(140,170,235,.5);background:rgba(30,45,80,.6);}
   .mem-node-detail .nd-near-k{width:8px;height:8px;border-radius:50%;flex:none;}
-  .mem-node-detail .nd-near-t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .mem-node-detail .nd-near-w{font-size:11px;color:var(--faint);flex:none;font-variant-numeric:tabular-nums;}
-  .mem-node-detail .nd-empty{font-size:12px;color:var(--faint);}
+  .mem-node-detail .nd-near-t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dfe6f5;}
+  .mem-node-detail .nd-near-w{font-size:11px;color:#8fa0c4;flex:none;font-variant-numeric:tabular-nums;}
+  .mem-node-detail .nd-empty{font-size:12px;color:#8fa0c4;}
 
   /* 记忆分区（身份 / 价值 / 程序性）：常量块，不在 sidecar，但每轮进 system prompt */
   .mem-partitions{margin-top:14px;background:var(--surface-sunken);border:1px solid var(--line);
@@ -828,6 +836,7 @@ _HTML_PAGE = r"""<!DOCTYPE html>
         <button type="button" class="mem-net-reset" id="memReset">重置视角</button>
         <div class="mem-tip" id="memTip"></div>
         <div class="mem-net-empty" id="memNetEmpty" style="display:none;"></div>
+        <div class="mem-node-detail" id="memNodeDetail" style="display:none;"></div>
       </div>
       <!-- 记忆分区（身份 / 价值 / 程序性）：不在 sidecar 里，但每轮都进 system prompt -->
       <div class="mem-partitions vm-pane active" data-pane="net" id="memPartitions"></div>
@@ -2004,6 +2013,7 @@ const MemNet = (function(){
   let graphMode="neighbors";
   let graphReason="";
   let rotXv=0.25,rotYv=0,dist=16,dragging=false,last=[0,0],hover=-1,selected=-1,hovering=false;
+  let kindFilter=null;
   let raf=0,running=false,pxr=1,mvp=ident();
   let nbPos,nbCol,nbGlow,ebSt,ebEn,ebSf,ebCol,nodeCount=0,edgeVCount=0,ready=false;
 
@@ -2056,7 +2066,7 @@ const MemNet = (function(){
         const imp=Math.max(0,Math.min(1,Number(m.importance)||0));
         const pos=[Number(g.x)||0,Number(g.y)||0,Number(g.z)||0];
         index[g.id]=nodes.length;
-        nodes.push({id:g.id,kind:k,pos:pos,size:11+imp*17,glow:0.85+imp*0.15,m:m});
+        nodes.push({id:g.id,kind:k,pos:pos,size:11+imp*17,glow:0.85+imp*0.15,imp:imp,m:m});
       });
       /* 每个节点最多 5 个语义邻居，避免全连接时连线爆炸。
          贪心选边：按权重降序遍历，只有两端都还没满 5 个邻居才保留这条边 */
@@ -2105,7 +2115,7 @@ const MemNet = (function(){
         const imp=Math.max(0,Math.min(1,Number(m.importance)||0));
         const r=R-imp*2.2+(j%4)*0.3;
         nodes.push({id:m.id,kind:k,pos:[v[0]*r,v[1]*r,v[2]*r],
-          size:11+imp*17,glow:0.85+imp*0.15,m:m});
+          size:11+imp*17,glow:0.85+imp*0.15,imp:imp,m:m});
       });
       /* 中心光球：各分类的汇合点 */
       nodes.forEach(function(n){
@@ -2150,11 +2160,25 @@ const MemNet = (function(){
     }
     nodes.forEach((n,i)=>{const c=KIND[n.kind].c;
       pos[i*3]=n.pos[0];pos[i*3+1]=n.pos[1];pos[i*3+2]=n.pos[2];
-      col[i*4]=c[0];col[i*4+1]=c[1];col[i*4+2]=c[2];
+      /* 重要性越高，颜色越亮（向白色靠拢） */
+      const imp=n.imp||0, bright=0.5+imp*0.5;
+      let r=c[0]*bright+(1-bright)*0.5;
+      let g=c[1]*bright+(1-bright)*0.5;
+      let b=c[2]*bright+(1-bright)*0.5;
+      /* 类型筛选：非选中类型稍微变暗，选中类型加亮 */
+      let glowMul=1;
+      if(kindFilter && n.kind!==kindFilter){
+        r*=0.55; g*=0.55; b*=0.55;
+        glowMul=0.6;
+      }
+      else if(kindFilter && n.kind===kindFilter){
+        bright+=0.15; /* 选中类型更亮 */
+      }
+      col[i*4]=r;col[i*4+1]=g;col[i*4+2]=b;
       col[i*4+3]=n.size*(i===selected?1.5:1);
-      let g=n.glow*(i===selected?1.6:1);
-      if(sel&&i!==selected&&near[n.id])g*=1.25;
-      glow[i]=g;});
+      let gn=n.glow*glowMul*(i===selected?1.6:1);
+      if(sel&&i!==selected&&near[n.id])gn*=1.25;
+      glow[i]=gn;});
     if(hub){
       const ci=nodes.length;
       col[ci*4]=0.72;col[ci*4+1]=0.84;col[ci*4+2]=1.0;col[ci*4+3]=34;glow[ci]=1;
@@ -2176,7 +2200,15 @@ const MemNet = (function(){
           a=Math.min(1,a*2.4+0.25);
           r=Math.min(1,r+0.22);g=Math.min(1,g+0.22);b=Math.min(1,b+0.22);
         }
-        /* 选中之后，其它线保持原样（只是不额外加亮） */
+      }
+      /* 类型筛选：两端都属于选中类型的边加亮，其他边稍微压暗 */
+      if(kindFilter && s.link){
+        const na=nodes[s.link.ia], nb=nodes[s.link.ib];
+        const bothMatch = (na.kind===kindFilter && nb.kind===kindFilter);
+        const oneMatch = (na.kind===kindFilter || nb.kind===kindFilter);
+        if(bothMatch){ a=Math.min(1,a*2.5+0.2); r=Math.min(1,r+0.15); g=Math.min(1,g+0.15); b=Math.min(1,b+0.15); }
+        else if(oneMatch){ a*=1.2; }
+        else { a*=0.35; r*=0.6; g*=0.6; b*=0.6; }
       }
       for(let k=0;k<6;k++){
         const vi=i*6+k;
@@ -2203,7 +2235,7 @@ const MemNet = (function(){
     gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc,sz,gl.FLOAT,false,0,0);}
   function frame(){
-    rotYv+=hovering?0:0.0016;resize();
+    rotYv+=0.0016;resize();
     gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND);gl.disable(gl.DEPTH_TEST);
     let m=ident();m=rotY(m,rotYv);m=rotX(m,rotXv);
@@ -2279,7 +2311,7 @@ const MemNet = (function(){
     const nearHtml=near.length
       ? '<div class="nd-section"><div class="nd-section-t">'+nearTitle+'</div>'+
         near.slice(0,6).map(function(x){
-          return '<button type="button" class="nd-near" data-id="'+esc(x.node.id)+'">'+
+          return '<button type="button" class="nd-near" data-id="'+esc(x.node.id)+'" data-kind="'+x.node.kind+'" data-content="'+esc(x.node.m.content)+'">'+
             '<span class="nd-near-k k-'+x.node.kind+'"></span>'+
             '<span class="nd-near-t">'+esc(x.node.m.content)+'</span>'+
             (semantic
@@ -2289,6 +2321,7 @@ const MemNet = (function(){
           ? '<div class="nd-section"><div class="nd-section-t">'+nearTitle+'</div>'
             +'<div class="nd-empty">没有语义上够近的其它记忆。</div></div>' : '');
     el.style.display="block";
+    document.getElementById("memReset").style.right="330px";
     el.innerHTML='<div class="nd-head"><span class="cat-tag" style="background:rgba('+rgb+',.2);color:rgb('+rgb+')">'+c.t+'</span><b>记忆详情</b>'
       +'<button class="nd-close" id="ndClose">关闭</button></div>'
       +'<div class="nd-content">'+esc(m.content)+'</div>'
@@ -2301,9 +2334,28 @@ const MemNet = (function(){
         const k=nodes.findIndex(function(x){return x.id===btn.dataset.id;});
         if(k>=0)select(k);
       };
+      /* 悬浮显示完整内容，复用 mem-tip 深色浮层 */
+      btn.onmouseenter=function(){
+        const tip=document.getElementById("memTip");
+        const kd=btn.dataset.kind||"other";
+        const c=KIND[kd]||KIND.other;
+        const rgb=c.c.map(v=>Math.round(v*255)).join(",");
+        tip.innerHTML='<span class="tip-kind" style="background:rgba('+rgb+',.22);color:rgb('+rgb+')">'+c.t+'</span>'
+          +'<div class="tip-text">'+esc(btn.dataset.content)+'</div>';
+        const rect=btn.getBoundingClientRect();
+        const canvasRect=document.getElementById("memCanvas").getBoundingClientRect();
+        tip.style.left=(rect.left-canvasRect.left+20)+"px";
+        tip.style.top=(rect.top-canvasRect.top-10)+"px";
+        tip.classList.add("show");
+      };
+      btn.onmouseleave=function(){
+        document.getElementById("memTip").classList.remove("show");
+      };
     });
     document.getElementById("ndClose").onclick=function(){
-      el.style.display="none";clearSelection();};
+      el.style.display="none";
+      document.getElementById("memReset").style.right="14px";
+      clearSelection();};
   }
   function bind(){
     const tip=document.getElementById("memTip");
@@ -2350,7 +2402,8 @@ const MemNet = (function(){
   }
   function legend(){
     const rows=KIND_ORDER.map(function(k){
-      return '<div class="lg-row"><span class="lg-dot k-'+k+'"></span>'+KIND[k].t+'</div>';}).join("");
+      const active=kindFilter===k?' active':'';
+      return '<div class="lg-row'+active+'" data-kind="'+k+'"><span class="lg-dot k-'+k+'"></span>'+KIND[k].t+'</div>';}).join("");
     const note=layoutKind==="semantic"
       ? (graphMode==="all"
           ? '位置 = 向量主成分 · 连线 = 全部相似关系'
@@ -2358,8 +2411,14 @@ const MemNet = (function(){
       : '分类图：按 kind 摆位，连线只表示「同类」，不代表语义 —— '+graphReason;
     document.getElementById("memLegend").innerHTML=rows
       +'<div class="lg-note">'+note+'<br>拖拽旋转 · 滚轮缩放 · 点击节点看近邻'
-      +'<br>选中节点时它的连线会更亮'
-      +'<br>指针停在画布上时暂停自转</div>';
+      +'<br>点击左上角类型可筛选高亮</div>';
+    document.querySelectorAll('#memLegend .lg-row').forEach(function(el){
+      el.addEventListener('click',function(){
+        const k=this.dataset.kind;
+        kindFilter = (kindFilter===k) ? null : k;
+        legend(); uploadNodes(); uploadEdges();
+      });
+    });
   }
   function screenPoints(){
     const w=canvas.clientWidth,h=canvas.clientHeight;

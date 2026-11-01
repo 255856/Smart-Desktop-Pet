@@ -573,11 +573,26 @@ def _rvc_python(cfg: dict) -> Path:
     raw = str(_rvc_cfg(cfg).get("python") or "").strip()
     if not raw:
         return Path("")
-    return _abs(raw)
+    p = _abs(raw)
+    if p.is_file():
+        return p
+    # 配置里的路径不存在 → **自愈**：在本机已知位置里找一遍
+    # （手写少一个反斜杠就会变成 E:\AIRVC\…，真实是 E:\AI\RVC\…）
+    alt = _find_local_rvc_python(cfg)
+    if alt is not None:
+        if str(alt) not in _RVC_PYTHON_FALLBACK_WARNED:
+            _RVC_PYTHON_FALLBACK_WARNED.add(str(alt))
+            log.warning("配置的 RVC 解释器不存在（%s），改用本机找到的：%s",
+                        p, alt)
+        return alt
+    return p
 
 
 #: 解释器自检结果的缓存（按解释器路径）—— 自检要起一次 python，不能每次都跑。
 _RVC_PYTHON_CHECK: dict = {}
+
+#: 已经提示过「配置路径不对、已自愈」的路径（别刷屏）
+_RVC_PYTHON_FALLBACK_WARNED: set = set()
 
 
 def _rvc_env(cfg: dict) -> dict:
@@ -601,6 +616,31 @@ def _rvc_env(cfg: dict) -> dict:
     return env
 
 
+
+def _find_local_rvc_python(cfg: dict) -> Optional[Path]:
+    """在本机已知的几个位置里找 RVC 解释器（配置路径写错时的自愈）。
+
+    背景：配置里那条路径**手写少一个反斜杠**就会变成 E:\AIRVC\… 这种，
+    而真实位置是 E:\AI\RVC\… —— 找不到就永远「合成失败」，还看不出原因。
+    这里只在本机磁盘上找，**不下载、不安装**。
+    """
+    cands = []
+    root = _abs(_rvc_cfg(cfg).get("root") or "")
+    if root:
+        # E:\AI\RVC\Retrieval-...\ → E:\AI\RVC\venv\Scripts\python.exe
+        cands.append(root.parent / "venv" / "Scripts" / "python.exe")
+    cands += [
+        Path(r"E:\AI\RVC\venv\Scripts\python.exe"),
+        Path(r"E:\AIRVC\venv\Scripts\python.exe"),
+    ]
+    for c in cands:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
 def _check_rvc_python(cfg: dict, timeout: float = 60.0) -> tuple:
     """确认 RVC 解释器**真的能跑 RVC**。返回 (好?, 说明)。
 
@@ -612,8 +652,17 @@ def _check_rvc_python(cfg: dict, timeout: float = 60.0) -> tuple:
     """
     py = _rvc_python(cfg)
     if not py.is_file():
-        return False, ("RVC 解释器不在本机：%s（不会回退到 PATH 上的 python，"
-                       "也不会下载或安装任何东西）" % py)
+        # 配置里的路径不存在（**常见：手写时少了个反斜杠**，比如把
+        # E:\AI\RVC 写成 E:\AIRVC）→ 在本机已知的几个位置里找一遍，
+        # 找到就用它并记一条警告；找不到才报错。
+        alt = _find_local_rvc_python(cfg)
+        if alt is not None:
+            log.warning("配置的 RVC 解释器不存在（%s），改用本机找到的：%s",
+                        py, alt)
+            py = alt
+        else:
+            return False, ("RVC 解释器不在本机：%s（不会回退到 PATH 上的 python，"
+                           "也不会下载或安装任何东西）" % py)
     key = str(py)
     cached = _RVC_PYTHON_CHECK.get(key)
     if cached is not None:

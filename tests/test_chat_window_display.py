@@ -172,7 +172,9 @@ def test_voice_tool_step_shows_name_status_duration_and_file(tmp_path,
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert '<span class="tool-name">mcp_voice_speak</span>' in html, (
         "英文工具名不是主显示")
-    assert '<span class="tool-cn">念一段话</span>' in html, "中文小提示没了"
+    # 中文小提示按 owner 的要求**去掉了**；阶段还在（合成中）
+    assert 'tool-cn' not in html, html
+    assert '合成中' in html, html
     assert "[完成]" in html
     assert "3.4 秒" in html, "语音时长没显示"
     assert "24.1 KB" in html, "语音体积没显示"
@@ -630,7 +632,9 @@ def test_tool_row_shows_english_tool_name_first():
     cw._tools_collapsed_by_msg[id(msg)] = False
     html = cw._tool_steps_html(msg.tools, msg_id=id(msg))
     assert '<span class="tool-name">web_search</span>' in html, html
-    assert '<span class="tool-cn">联网搜索</span>' in html, html
+    # 中文说明**去掉了**（owner 的要求：查看本机音色/唱几句这种不要）→ 只留阶段
+    assert 'tool-cn' not in html, html
+    assert '检索中' in html, html
     # 折叠态预览也是英文名在前
     cw._tools_collapsed_by_msg[id(msg)] = True
     preview = cw._tool_steps_html(msg.tools, msg_id=id(msg))

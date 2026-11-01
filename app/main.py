@@ -102,7 +102,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-banner", action="store_true",
                    help="关闭启动横幅（纯日志输出）")
     p.add_argument("--with-dashboard", action="store_true",
-                   help="启动时自动打开 Agent Trace 面板 (http://127.0.0.1:8766)")
+                   help="（控制台后台服务默认就会起；这个参数只额外打开浏览器）")
+    p.add_argument("--no-dashboard", action="store_true",
+                   help="**不**启动控制台后台服务 (http://127.0.0.1:8766)")
     return p.parse_args()
 
 
@@ -711,9 +713,11 @@ class App:
         self.state_mgr.mode_changed.connect(self._on_mode_changed)
         self.brain.connect_tool_animation(self.pet)
 
-        # 启动 Dashboard（如果指定）
-        if args.with_dashboard:
-            self._start_dashboard()
+        # 控制台后台服务：**默认启动**（owner 要的：每次开桌宠就能在浏览器里看）
+        # —— 只有显式 --no-dashboard 才不起。
+        if not getattr(args, "no_dashboard", False):
+            self._start_dashboard(
+                open_browser=bool(getattr(args, "with_dashboard", False)))
 
         banner.done(f"{cfg.character.name} 已就绪 · 双击托盘图标唤起")
 
@@ -754,8 +758,12 @@ class App:
             return True
         return self._start_demo()
 
-    def _start_dashboard(self) -> bool:
-        """启动 FastAPI Agent Trace 子进程（开发者用，端口 8766）。"""
+    def _start_dashboard(self, open_browser: bool = False) -> bool:
+        """启动控制台后台服务（FastAPI，端口 8766）。
+
+        默认**只起服务、不弹浏览器**（每天开桌宠都弹网页太吵）；
+        想顺手打开浏览器就带 --with-dashboard。
+        """
         port = TRACE_PORT
         log.info("启动开发者控制台 (port=%d)…", port)
         control_url = getattr(self.ui, "control_url", "") if self.ui else ""
@@ -770,7 +778,8 @@ class App:
             self.banner.ok("控制台", f"{url}  (pid={pid})")
             self.banner.info("浏览器已自动打开",
                             "也可用托盘菜单『控制台（开发）』随时打开")
-            QTimer.singleShot(500, lambda: open_in_browser(url))
+            if open_browser:
+                QTimer.singleShot(500, lambda: open_in_browser(url))
             return True
         else:
             self.banner.warn("控制台启动超时", "查看 data/dashboard.log")

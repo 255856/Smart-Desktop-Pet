@@ -1274,7 +1274,16 @@ class ChatWindow(QWidget):
         self.input_edit.setObjectName("chat_input")
         self.input_edit.setPlaceholderText(
             "输入消息，回车发送（Shift+回车 或 Ctrl+回车 换行）")
-        self.input_edit.setMaximumHeight(110)
+        # 输入框：**两行高度起步**，随内容长高（上限 5 行）。
+        # 原来只设了上限、没设下限 → 布局把它按 sizeHint 拉高，
+        # 底部留一大片空白（owner 报的）。
+        self._input_min_height = self._chat_input_min_height()
+        self.input_edit.setMinimumHeight(self._input_min_height)
+        self.input_edit.setMaximumHeight(self._input_min_height * 3)
+        self.input_edit.textChanged.connect(self._auto_grow_input)
+        # 布局会把它按 sizeHint 拉高 → 用**固定高度**顶住（两行），
+        # 多余的纵向空间留给上面的聊天区。
+        self.input_edit.setFixedHeight(self._input_min_height)
         # 自定义按键事件：Enter 发送，Shift+Enter 换行
         self.input_edit.keyPressEvent = self._input_key_press
         # / 命令补全 —— 让主人输入 "/skills/" 时 popup 列出当前 skills_dir 下所有 skill 名字
@@ -5061,10 +5070,9 @@ class ChatWindow(QWidget):
                 f'<span class="tool-target">· <b>{_html_escape(target)}</b></span>'
                 if target else ""
             )
-            cn_html = (
-                f'<span class="tool-cn">{_html_escape(cn_name)}</span>'
-                if cn_name else ""
-            )
+            # 工具名后面的中文说明**不要**（owner：「查看本机音色/唱几句这种不要」）——
+            # 只留阶段（读取中 / 写入中 / 合成中…），说明信息去工具手册里查。
+            cn_html = ""
             phase = tool_phase(name)
             rows.append(
                 f'<div class="tool-row {state}">'
@@ -5090,12 +5098,11 @@ class ChatWindow(QWidget):
             # 折叠态:head + 第一条工具预览;head 文字「已执行操作 · N ▾」
             # 不出现"点击展开"字样,只靠箭头指示
             first_name, first_args, first_result, first_status = _unpack_tool(tools[0])
-            first_en, first_cn, first_target = _tool_display(first_name, first_args)
+            first_en, _first_cn, first_target = _tool_display(first_name, first_args)
             preview = (
                 '<div class="tools-preview">'
                 '▸ ' + _html_escape(first_en) +
-                (f'<span class="tool-cn">{_html_escape(first_cn)}</span>'
-                 if first_cn else '') +
+                # 中文说明同样不要（owner）；折叠态只留工具名 + 目标 + 状态
                 (' · ' + _html_escape(first_target[:40]) if first_target else '') +
                 '  ' + (_unpack_status_mark(first_result, first_status)) +
                 self._tools_tail_summary(states) +
@@ -5971,6 +5978,32 @@ class ChatWindow(QWidget):
         cursor.insertBlock()
         # 延后到下一事件循环再滚, 让 layout 把 scroll bar maximum 算准
         QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _chat_input_min_height(self) -> int:
+        """两行文字 + 上下内边距（CSS 里 padding: 6px 10px）。"""
+        try:
+            line = int(self.input_edit.fontMetrics().lineSpacing())
+        except Exception:  # noqa: BLE001
+            line = 20
+        return max(36, line * 2 + 14)
+
+    def _auto_grow_input(self) -> None:
+        """输入框随内容长高（两行 → 上限）。"""
+        edit = getattr(self, "input_edit", None)
+        if edit is None:
+            return
+        try:
+            # 用**行数 × 行高**算高度：空文档的 document().size() 返回的是
+            # sizeHint（~150px）→ 会把输入框顶到上限。
+            lines = max(1, int(edit.document().blockCount()))
+            line_h = int(edit.fontMetrics().lineSpacing())
+            h = lines * line_h + 14     # padding 6 + 6
+            h = max(self._input_min_height,
+                    min(h, self._input_min_height * 3))
+            if edit.height() != h:
+                edit.setFixedHeight(h)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _scroll_to_bottom(self) -> None:
         """滚到 chat_view 底部(配合 _render_message / _insert_placeholder 延后用)。

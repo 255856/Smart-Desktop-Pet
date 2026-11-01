@@ -346,14 +346,22 @@ def test_tool_calls_display():
     assert 'class="tools"' in html
     assert "已执行操作" in html
     # 折叠态只显示第一条工具(add_reminder)
-    assert "设置提醒" in html and "下午三点开会" in html
+    # 工具名后面**不再有中文说明**（owner：查看本机音色/唱几步这种不要）→ 只留阶段
+    assert "下午三点开会" in html
+    assert "设置提醒" not in html
+    # 折叠态只有一行预览（工具名 + 目标），没有阶段也没有中文说明
+    assert "设置中" not in html
     # 后续工具不直接展示
-    assert "联网搜索" not in html
+    assert "检索中" not in html
     # 工具卡片置于最终结果上方
     assert html.index("已执行操作") < html.index("完成")
-    # 旧版 2 元组 (name, summary) 仍兼容：已知工具显示中文名
+    # 旧版 2 元组 (name, summary) 仍兼容：工具名照常显示（中文说明已去掉）
     msg2 = Message(role="assistant", content="好", tools=[("calculate", "结果是7")])
-    assert "计算" in cw._msg_html(msg2)
+    html_calc = cw._msg_html(msg2)
+    assert "calculate" in html_calc
+    cw._tools_collapsed_by_msg[id(msg2)] = False
+    html_calc2 = cw._msg_html(msg2)
+    assert "计算中" in html_calc2       # 展开态只留阶段
     # 未知工具名兜底显示原名
     msg3 = Message(role="assistant", content="好", tools=[("my_custom_thing", "done")])
     assert "my_custom_thing" in cw._msg_html(msg3)
@@ -373,8 +381,9 @@ def test_tool_calls_display():
     cw._tools_collapsed_by_msg[id(msg)] = False
     html2 = cw._msg_html(msg)
     # 全部工具都展示
-    assert "设置提醒" in html2 and "下午三点开会" in html2
-    assert "联网搜索" in html2 and "十月新番" in html2
+    assert "下午三点开会" in html2
+    assert "检索中" in html2 and "十月新番" in html2
+    assert "设置中" in html2          # 展开态每一步都有阶段
     # 失败状态
     assert "失败" in html2 and "星穹铁道" in html2
     # 英文工具名是**主显示**（专业、像日志）；中文标签只当副的小提示
