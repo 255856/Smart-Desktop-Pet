@@ -92,6 +92,10 @@ QT_ROOTS = ("pyqt5", "pyqt6", "pyside2", "pyside6")
 #
 # mcp_servers.yaml 是 .gitignore 的本机文件，CI 上没有 -> 用下面这张默认表兜底。
 # 默认表必须跟 shipped 配置一致：aw 4 个 + fs 3 个 + voice 3 个 = 10 个。
+# 外部 MCP server（npm / PyPI 装的）：工具名随版本变，脚本验证不了 →
+# 文档里的这些名字一律豁免（只是不许「文档说有、注册表没有」误报）。
+EXTERNAL_MCP_PREFIXES: tuple = ("mcp_playwright_", "mcp_fetch_")
+
 DEFAULT_MCP_SERVERS: dict = {
     "aw": "app.mcp.activitywatch_server",
     "fs": "app.mcp.filesystem_server",
@@ -269,6 +273,11 @@ FS_CLAIMS = [
 # --- 各来源的名字提取 ----------------------------------------------------
 # 每个来源一个 reader 函数：collect() 只通过 SOURCE_SPECS 里的 read 取名字，
 # 所以测试可以替换 read 来注入假名字（不用改仓库里的任何文件）。
+
+
+def _is_external(name: str) -> bool:
+    """外部 MCP server 的工具名（名字随版本变 → 豁免）。"""
+    return str(name or "").startswith(EXTERNAL_MCP_PREFIXES)
 
 
 def _read_doc_names() -> set:
@@ -468,8 +477,10 @@ def _allowlist_diff(policy, live: set, scope: set,
                      if n in exact or any(n.startswith(p) for p in prefixes))
     uncovered = scope - set(covered)
     dead_exact = set(n for n in exact if n not in live)
+    # 外部 MCP server 的前缀命中不了「仓库内注册表」→ 不算死前缀
     dead_prefixes = set(p for p in prefixes
-                        if not any(n.startswith(p) for n in live))
+                        if not any(n.startswith(p) for n in live)
+                        and not p.startswith(EXTERNAL_MCP_PREFIXES))
     intentional = ((uncovered & allowed_set)
                    | (dead_exact & allowed_set)
                    | (dead_prefixes & allowed_set))
@@ -560,6 +571,9 @@ def collect(strict_docs: bool = False) -> dict:
         # 「只有资料里有」默认算错误；白名单那条是死策略条目 —— 只报告不阻断
         src_blocking = spec.get("only_in_source_blocking", True)
         for n in diff["only_in_source"]:
+            # 外部 MCP server 的工具名豁免（名字随版本变 → 验证不了）
+            if _is_external(n):
+                continue
             differences.append({
                 "source": key, "file": spec.get("file", key),
                 "kind": "only_in_source", "kind_label": "只有资料里有",

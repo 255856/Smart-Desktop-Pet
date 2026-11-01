@@ -113,6 +113,41 @@
 - **参数**：`content: str`（必填）、`meaning: str` / `usage: str` / `example: str` / `risk: str` / `evidence: str`（均可选）
 - **风险**：MEDIUM（写本地文件 `data/slang.json`）
 
+### MCP 外部工具（playwright / fetch）
+
+| 工具 | 说明 |
+|---|---|
+| `mcp_fetch_fetch` | 网页正文抓取 → Markdown |
+| `mcp_playwright_browser_click` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_close` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_console_messages` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_drag` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_drop` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_emulate_media` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_evaluate` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_file_upload` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_fill_form` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_find` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_handle_dialog` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_hover` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_navigate` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_navigate_back` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_network_request` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_network_requests` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_press_key` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_resize` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_run_code_unsafe` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_select_option` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_snapshot` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_tabs` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_take_screenshot` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_type` | Playwright 浏览器自动化（用系统 Edge） |
+| `mcp_playwright_browser_wait_for` | Playwright 浏览器自动化（用系统 Edge） |
+
+> **等级**：playwright 的 25 个工具 schema 约 **9.5k token**（占全部工具的 41%），
+> 默认锁 **Lv9**（`companion_config.yaml` 的 `mcp_levels.playwright`），平时不进 prompt；
+> 想让它一直可用就把它改成 `1` —— 代价是每轮多 ~9.5k token。
+> fetch 只有 1 个工具，跟默认一样 Lv5 解锁。
 ### `use_skill`
 
 取一个**技能**（行为覆盖包）来用。`skills/` 目录里每个 `.md` 就是一个技能
@@ -508,7 +543,7 @@ ActivityWatch 与文件系统那 7 个工具**不在** `_RISKY_TOOLS` 里（只�
 ### `generate_image`
 - **触发**：画一张猫的图
 - **作用**：按 prompt 生成图片，返回 http(s) URL（落盘后给本地 file:// 路径）
-- **参数**：`prompt: str`，`size: str`（如 1024x1024）
+- **参数**：`prompt: str`，`size: str`（如 764x764）
 - **后端**：config.yaml 的 `multimodal` 段（base_url / api_key / image_model）
 
 ### `generate_video`

@@ -156,8 +156,14 @@ def test_docs_cover_every_live_tool(script):
     for key in ("docs/tools-reference.md",
                 ".agents/skills/desktop-pet-tool-usage/SKILL.md"):
         diff = result["sources"][key]["diff"]
-        assert diff["only_in_live"] == [], key + " 漏了工具：" + str(diff["only_in_live"])
-        assert diff["only_in_source"] == [], key + " 写了不存在的工具：" + str(diff["only_in_source"])
+        # 外部 MCP server（npm/PyPI 装的）工具名随版本变 → 豁免
+        ext = script.EXTERNAL_MCP_PREFIXES
+        only_live = [n for n in diff["only_in_live"]
+                     if not str(n).startswith(ext)]
+        only_src = [n for n in diff["only_in_source"]
+                    if not str(n).startswith(ext)]
+        assert only_live == [], key + " 漏了工具：" + str(only_live)
+        assert only_src == [], key + " 写了不存在的工具：" + str(only_src)
 
 
 def test_default_mcp_table_without_yaml(script, tmp_path, monkeypatch):
@@ -309,9 +315,13 @@ def test_allowlist_covers_every_live_tool(script):
     """
     result = script.collect()
     diff = result["sources"][script.ALLOWLIST_SOURCE_KEY]["diff"]
-    assert diff["only_in_live"] == [], diff
-    assert diff["only_in_source"] == [], diff
-    assert diff["dead_prefixes"] == [], diff
+    ext = script.EXTERNAL_MCP_PREFIXES
+    assert [n for n in diff["only_in_live"]
+            if not str(n).startswith(ext)] == [], diff
+    assert [n for n in diff["only_in_source"]
+            if not str(n).startswith(ext)] == [], diff
+    assert [p for p in diff["dead_prefixes"]
+            if not str(p).startswith(script.EXTERNAL_MCP_PREFIXES)] == [], diff
 
 
 def test_uncovered_registry_tool_is_blocking(script, monkeypatch, capsys):

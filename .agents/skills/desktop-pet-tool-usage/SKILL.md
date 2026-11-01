@@ -238,6 +238,32 @@ You have **76 tools** available (66 内置 + 10 个 MCP 工具（4 个 ActivityW
 | `submit_slang` | `content` |
 | `update_self` | `region` |
 | `use_skill` | `name` |
+| `mcp_fetch_fetch` | (见 tools-reference) |
+| `mcp_playwright_browser_click` | (见 tools-reference) |
+| `mcp_playwright_browser_close` | (见 tools-reference) |
+| `mcp_playwright_browser_console_messages` | (见 tools-reference) |
+| `mcp_playwright_browser_drag` | (见 tools-reference) |
+| `mcp_playwright_browser_drop` | (见 tools-reference) |
+| `mcp_playwright_browser_emulate_media` | (见 tools-reference) |
+| `mcp_playwright_browser_evaluate` | (见 tools-reference) |
+| `mcp_playwright_browser_file_upload` | (见 tools-reference) |
+| `mcp_playwright_browser_fill_form` | (见 tools-reference) |
+| `mcp_playwright_browser_find` | (见 tools-reference) |
+| `mcp_playwright_browser_handle_dialog` | (见 tools-reference) |
+| `mcp_playwright_browser_hover` | (见 tools-reference) |
+| `mcp_playwright_browser_navigate` | (见 tools-reference) |
+| `mcp_playwright_browser_navigate_back` | (见 tools-reference) |
+| `mcp_playwright_browser_network_request` | (见 tools-reference) |
+| `mcp_playwright_browser_network_requests` | (见 tools-reference) |
+| `mcp_playwright_browser_press_key` | (见 tools-reference) |
+| `mcp_playwright_browser_resize` | (见 tools-reference) |
+| `mcp_playwright_browser_run_code_unsafe` | (见 tools-reference) |
+| `mcp_playwright_browser_select_option` | (见 tools-reference) |
+| `mcp_playwright_browser_snapshot` | (见 tools-reference) |
+| `mcp_playwright_browser_tabs` | (见 tools-reference) |
+| `mcp_playwright_browser_take_screenshot` | (见 tools-reference) |
+| `mcp_playwright_browser_type` | (见 tools-reference) |
+| `mcp_playwright_browser_wait_for` | (见 tools-reference) |
 | `get_current_time` | (无) |
 | `get_pet_status` | (无) |
 | `system_info` | (无) |

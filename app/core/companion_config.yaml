@@ -199,7 +199,14 @@ tool_unlock:
       - lock_screen
       - set_wifi
       - set_bluetooth
-  mcp_default_level: 8              # MCP server 注册的外部工具默认锁 Lv8
+  # MCP server 注册的外部工具默认锁几级。8 → 桌面宠通常到不了，
+  # 语音/浏览器这些**主人明确装的**能力要能用，所以放到 5。
+  mcp_default_level: 5
+  # 每个 MCP server 单独定级：playwright 的 25 个工具 schema 就有 ~9.5k token，
+  # 平时别进 prompt；要用时把这个数改小（比如 1 = 一直可用）。
+  mcp_levels:
+    playwright: 9          # 浏览器自动化：25 个工具 ≈ 9.5k token → 锁到 Lv9
+    fetch: 5              # 网页正文抓取：1 个工具 → 跟默认一样
   rewards_title:
     1:  "Lv.1 时刻陪伴"
     2:  "Lv.2 解锁联网 + 信息获取"
@@ -303,6 +310,8 @@ tool_allowlist:
     - mcp_aw_                      # ActivityWatch (aw server)
     - mcp_fs_                      # 文件系统沙箱 (fs server)
     - mcp_voice_                   # 语音 (voice server)：念 / 唱 / 查本机音色
+    - mcp_playwright_              # 浏览器自动化 (playwright MCP，用系统 Edge)
+    - mcp_fetch_                   # 网页正文抓取 (官方 fetch MCP server)
 
 # 输入侧预算（Stage 4.4）—— 输入 token 的天花板 + 超预算的可见告警
 #

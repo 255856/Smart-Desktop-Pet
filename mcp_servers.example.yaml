@@ -53,3 +53,22 @@ servers:
     command: python
     args: ["-m", "app.mcp.activitywatch_server"]
     enabled: false
+
+  # 浏览器自动化（Playwright 官方 MCP）—— 用**系统里已装的 Chrome**，不额外下 Chromium。
+  # 工具：browser_navigate / browser_snapshot / browser_click / browser_type …（约 20 个）
+  # ⚠️ 这些工具的 schema 会进 prompt（每轮都带）→ 不用的时候 enabled: false。
+  - name: playwright
+    description: "浏览器自动化（Playwright MCP，用系统 Chrome）"
+    command: npx
+    args: ["-y", "@playwright/mcp@latest",
+            "--browser", "msedge",
+            "--headless", "--isolated"]
+    enabled: true
+
+  # 网页正文抓取（官方参考实现 mcp-server-fetch，PyPI）
+  # 工具：fetch（把网页转成干净的 markdown 给模型读）—— 比搜索结果更完整。
+  - name: fetch
+    description: "网页正文抓取（官方 fetch MCP server）"
+    command: python
+    args: ["-m", "mcp_server_fetch"]
+    enabled: true

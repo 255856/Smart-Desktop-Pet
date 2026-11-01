@@ -19,12 +19,14 @@ log = logging.getLogger(__name__)
 TOOL_UNLOCK: dict[int, list[str]] = {}
 UNLOCK_REWARDS: dict[int, str] = {}
 UNLOCK_CELEBRATE: dict[int, str] = {}
+MCP_SERVER_LEVELS: dict = {}
 MCP_DEFAULT_LEVEL: int = 8
 
 _LOADED = False
 
 
 def load_unlock_config(cfg=None) -> None:
+    global MCP_SERVER_LEVELS
     """加载 tool_unlock 配置。多次调用幂等。
 
     cfg: 传入的 companion_config 对象。若为 None 或没有 tool_unlock 字段
@@ -80,6 +82,13 @@ def load_unlock_config(cfg=None) -> None:
         MCP_DEFAULT_LEVEL = int(getattr(block, "mcp_default_level", 8) or 8)
     except (TypeError, ValueError):
         MCP_DEFAULT_LEVEL = 8
+    # 每个 MCP server 可以单独定级：playwright 的 25 个工具 schema 就有
+    # 9.5k token，放高一点，平时不进 prompt（要用时主人自己调高）。
+    _lv = getattr(block, "mcp_levels", None) or {}
+    try:
+        MCP_SERVER_LEVELS = {str(k): int(v) for k, v in dict(_lv).items()}
+    except (TypeError, ValueError, AttributeError):
+        MCP_SERVER_LEVELS = {}
     _LOADED = True
     log.info("工具解锁配置已加载: %d 级, Lv1 解锁 %d 个, Lv10 解锁 %d 个",
              len(TOOL_UNLOCK),
@@ -137,9 +146,22 @@ def short_mcp_name(name: str) -> str:
     return f"{server}_{tool_name}"
 
 
+def mcp_server_of(name: str) -> Optional[str]:
+    """从 mcp_<server>_<tool> 里取出 server 名。"""
+    if not name.startswith("mcp_"):
+        return None
+    rest = name[4:]
+    if "_" not in rest:
+        return None
+    return rest.split("_", 1)[0]
+
+
 def level_for_tool(name: str) -> Optional[int]:
     """反查工具名对应的最低解锁等级。None 表示未在配置里 (按 SAFE 处理 → Lv1 解锁)。"""
     if is_mcp_tool(name):
+        srv = mcp_server_of(name)
+        if srv and srv in MCP_SERVER_LEVELS:
+            return MCP_SERVER_LEVELS[srv]
         return MCP_DEFAULT_LEVEL
     for lvl in sorted(TOOL_UNLOCK.keys()):
         if name in TOOL_UNLOCK[lvl]:
@@ -150,7 +172,8 @@ def level_for_tool(name: str) -> Optional[int]:
 def is_unlocked(name: str, level: int) -> bool:
     """检查工具是否在给定等级下对 LLM 可见。"""
     if is_mcp_tool(name):
-        return level >= MCP_DEFAULT_LEVEL
+        req = level_for_tool(name)
+        return level >= (req if req is not None else MCP_DEFAULT_LEVEL)
     req = level_for_tool(name)
     if req is None:
         return True  # 未配置的默认可见 (Lv1 解锁)

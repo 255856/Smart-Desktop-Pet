@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -61,6 +62,27 @@ class MCPStdioClient:
         self._initialized = False
         self._tools: list[dict] = []
 
+    def _popen_argv(self) -> list[str]:
+        """拼 Popen 的 argv —— Windows 上 .cmd/.bat **不能直接 exec**。
+
+        npx / npm 在 Windows 上是 .cmd（shutil.which 返回 npx.CMD），
+        直接 Popen(["npx", ...]) 会 WinError 2（系统找不到指定的文件）。
+        这种要走 cmd /c。
+        """
+        cmd = self.config.command
+        args = list(self.config.args)
+        if os.name == "nt":
+            found = shutil.which(cmd) or cmd
+            if found.lower().endswith((".cmd", ".bat")):
+                comspec = os.environ.get("COMSPEC") or "cmd.exe"
+                # cmd /c 的坑：路径带空格（C:\Program Files\…）时它会把引号
+                # 吃掉再按空格拆词 → "C:\Program 不是内部或外部命令"。
+                # 用 call 这个**内置命令**：它按规矩处理引号（实测可行）。
+                return [comspec, "/c", "call", found, *args]
+            if os.path.isabs(found):
+                return [found, *args]
+        return [cmd, *args]
+
     async def start(self) -> None:
         """启动子进程。"""
         if self.proc is not None and self.proc.poll() is None:
@@ -69,7 +91,7 @@ class MCPStdioClient:
         env.update(self.config.env)
         try:
             self.proc = subprocess.Popen(
-                [self.config.command, *self.config.args],
+                self._popen_argv(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -145,6 +145,18 @@ def main() -> int:
         print("  %6.2fs  %-5s %s" % (e["t"], e["kind"], extra))
     print()
     print("首句文字  : %s" % ("%.2fs" % first_text if first_text else "（没有）"))
+    _reg = getattr(brain, "tool_registry", None)
+    _lvl = 7
+    try:
+        _lvl = int(getattr(state, "level", 7) or 7)
+    except Exception:
+        _lvl = 7
+    _tools = _reg.to_openai_for_level(_lvl) if _reg is not None else []
+    if _tools:
+        import json as _json
+        _blob = _json.dumps(_tools, ensure_ascii=False)
+        print("工具 schema: %d 个 / %d 字符（粗估 %d token）"
+              % (len(_tools), len(_blob), len(_blob) // 2.2))
     print("首次工具  : %s" % ("%.2fs" % first_tool if first_tool else "（没有）"))
     print("整轮总耗时: %.2fs" % total)
     try:
