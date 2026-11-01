@@ -81,7 +81,38 @@ class _AgentWorker(QThread):
             done_fallback: str = ""   # done 事件 payload 作为 last-resort 兜底
             reasoning_parts: list[str] = []   # 收集推理模型的思考内容（Trace 用）
             # LangChainAgent 提供 run_sync（在持久 loop 里跑，跨调用不切换）
-            if hasattr(self.agent, "run_sync"):
+            if hasattr(self.agent, "run_sync_streaming"):
+                # standard 后端：**边跑边回调**（首句立刻上屏，别等整轮跑完）
+                def _on_event(ev):
+                    kind, *payload = ev
+                    if kind == "text":
+                        full.append(payload[0])
+                        self.chunk.emit(payload[0])
+                    elif kind == "tool":
+                        name = payload[0] if len(payload) > 0 else ""
+                        args = payload[1] if len(payload) > 1 else ""
+                        result = payload[2] if len(payload) > 2 else ""
+                        status = payload[3] if len(payload) > 3 else ""
+                        self.tool_used.emit(name, args, result, status)
+                    elif kind == "meta":
+                        self.meta.emit("meta", payload[0] if payload else {})
+                    elif kind in ("plan", "reflection", "reasoning"):
+                        payload_dict = payload[0] if payload else {}
+                        if not isinstance(payload_dict, dict):
+                            payload_dict = {"text": str(payload_dict)}
+                        text = (payload_dict.get("text")
+                                or payload_dict.get("content", ""))
+                        self.meta.emit("meta", {"kind": "thought",
+                                              "text": str(text)})
+                    elif kind == "done":
+                        if payload and payload[0]:
+                            done_fallback = str(payload[0])
+
+                self.agent.run_sync_streaming(
+                    self.messages, cancel_check=self.cancel_event.is_set,
+                    on_event=_on_event)
+            elif hasattr(self.agent, "run_sync"):
+                # 老式同步接口（一次性给全部事件）
                 events = self.agent.run_sync(
                     self.messages, cancel_check=self.cancel_event.is_set)
                 for kind, *payload in events:
@@ -103,8 +134,10 @@ class _AgentWorker(QThread):
                         payload_dict = payload[0] if payload else {}
                         if not isinstance(payload_dict, dict):
                             payload_dict = {"text": str(payload_dict)}
-                        text = payload_dict.get("text") or payload_dict.get("content", "")
-                        self.meta.emit("meta", {"kind": "thought", "text": str(text)})
+                        text = (payload_dict.get("text")
+                                or payload_dict.get("content", ""))
+                        self.meta.emit("meta", {"kind": "thought",
+                                                  "text": str(text)})
                     elif kind == "done":
                         # 防御：如果之前没收到任何 text，把 done payload 当兜底
                         if payload and payload[0]:

@@ -95,36 +95,45 @@ def main() -> int:
     first_text = None
     first_tool = None
     events = []
+    def _handle(kind, payload):
+        nonlocal first_text, first_tool
+        now = time.time() - t0
+        if kind == "text":
+            txt = str(payload[0] or "")
+            if first_text is None and txt.strip():
+                first_text = now
+            events.append({"t": round(now, 2), "kind": "text",
+                           "len": len(txt), "preview": txt[:40]})
+        elif kind == "tool":
+            name = payload[0] if payload else "?"
+            if first_tool is None:
+                first_tool = now
+            events.append({"t": round(now, 2), "kind": "tool", "name": str(name)})
+        elif kind == "meta":
+            pp = payload[0] if payload else {}
+            ev = {"event": (pp or {}).get("event") if isinstance(pp, dict) else None}
+            if isinstance(pp, dict) and pp.get("usage"):
+                u = pp["usage"]
+                ev["usage"] = {
+                    "prompt": u.get("prompt_tokens"),
+                    "completion": u.get("completion_tokens"),
+                    "cache_hit": (u.get("cache_hit_tokens")
+                                  or u.get("cache_hit")),
+                    "cache_miss": (u.get("cache_miss_tokens")
+                                   or u.get("cache_miss")),
+                }
+            events.append(dict(ev, t=round(now, 2), kind="meta"))
+        elif kind == "done":
+            events.append({"t": round(now, 2), "kind": "done"})
+
     try:
-        for kind, *payload in agent.run_sync(msgs):
-            now = time.time() - t0
-            if kind == "text":
-                txt = str(payload[0] or "")
-                if first_text is None and txt.strip():
-                    first_text = now
-                events.append({"t": round(now, 2), "kind": "text",
-                               "len": len(txt), "preview": txt[:40]})
-            elif kind == "tool":
-                name = payload[0] if payload else "?"
-                if first_tool is None:
-                    first_tool = now
-                events.append({"t": round(now, 2), "kind": "tool", "name": str(name)})
-            elif kind == "meta":
-                p = payload[0] if payload else {}
-                ev = {"event": (p or {}).get("event") if isinstance(p, dict) else None}
-                if isinstance(p, dict) and p.get("usage"):
-                    u = p["usage"]
-                    ev["usage"] = {
-                        "prompt": u.get("prompt_tokens"),
-                        "completion": u.get("completion_tokens"),
-                        "cache_hit": (u.get("cache_hit_tokens")
-                                      or u.get("cache_hit")),
-                        "cache_miss": (u.get("cache_miss_tokens")
-                                       or u.get("cache_miss")),
-                    }
-                events.append(dict(ev, t=round(now, 2), kind="meta"))
-            elif kind == "done":
-                events.append({"t": round(now, 2), "kind": "done"})
+        if hasattr(agent, "run_sync_streaming"):
+            # standard 后端：**边跑边回调** → 时间轴才是真的
+            agent.run_sync_streaming(
+                msgs, on_event=lambda ev: _handle(ev[0], list(ev[1:])))
+        else:
+            for kind, *payload in agent.run_sync(msgs):
+                _handle(kind, payload)
     except Exception as e:  # noqa: BLE001
         print("[异常] %s: %s" % (type(e).__name__, str(e)[:200]))
 

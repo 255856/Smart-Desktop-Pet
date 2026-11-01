@@ -1452,6 +1452,22 @@ class LangChainAgent:
             return out
         return LangChainAgent._get_loop().run_coro(collect(), timeout=timeout)
 
+    def run_sync_streaming(self, messages: list[dict],
+                          cancel_check=None, timeout: float = 300.0,
+                          on_event=None) -> None:
+        """同步版 run：**边跑边回调**（和 run_sync 只差这一点）。
+
+        run_sync 把事件**攒完**才返回 → 聊天窗拿到的文字是「整段一次性」→
+        首句要等整轮跑完（含所有工具往返）才上屏（实测一轮 29 秒，
+        主人对着空气泡干等）。这里每收到一个事件就回调一次 → 首句立刻上屏。
+        """
+        async def drive():
+            async for ev in self.run(messages, cancel_check=cancel_check):
+                if on_event is not None:
+                    on_event(ev)
+
+        LangChainAgent._get_loop().run_coro(drive(), timeout=timeout)
+
     def run_sync(self, messages: list[dict],
                  cancel_check: Optional[Callable[[], bool]] = None,
                  timeout: float = 300.0) -> list[tuple]:

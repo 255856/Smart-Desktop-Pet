@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import urllib.parse
 from typing import Optional
 
@@ -209,7 +210,29 @@ def _ddg_search(query: str, n: int, timeout_s: float) -> list[dict]:
             params = {}
         if "timeout" in params:
             kwargs["timeout"] = timeout_s
-        results = method(query, **kwargs) or []
+        # ddgs 内部会挨个试多个引擎（html.duckduckgo / startpage / opera / brave …），
+        # 每个都按 timeout 等 → 一次**失败**的搜索能白等 30 秒以上（实测 32.2 秒）。
+        # 放进守护线程 + join(总时限)：超时就放弃 —— 宁可明确失败，
+        # 也别让主人对着一个空结果干等半分钟。
+        box: dict = {}
+
+        def _run():
+            try:
+                box["rows"] = method(query, **kwargs) or []
+            except Exception as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        th = threading.Thread(target=_run, daemon=True, name="ddg-search")
+        th.start()
+        th.join(max(4.0, float(timeout_s)))
+        if th.is_alive():
+            raise RuntimeError(
+                "搜索后端超时（%.0f 秒）：DuckDuckGo 在这台机器上连不通。"
+                "请在 config.yaml 配 tavily_api_key 走 Tavily。"
+                % timeout_s)
+        if "error" in box:
+            raise RuntimeError("搜索后端不可用：%s" % box["error"])
+        results = box.get("rows") or []
         for r in results[:n]:
             out.append({
                 "title": (r.get("title") or "").strip(),
