@@ -122,20 +122,22 @@ Start-Process python -ArgumentList "docs/demo/serve.py","--model-dir","E:\live2d
 | **自动朗读 / 主动搭话开关** | 偏好设置，localStorage 持久化 |
 | **查看记忆 / 遗忘 / 提醒列表** | 每条记忆与提醒支持单独删除 |
 | **清空对话 / 导出对话** | 聊天历史管理（导出为 .txt） |
-| **工具清单** | 查看网页版 18 个与桌面版同名对齐的工具 |
+| **工具清单** | 查看网页版 24 个工具（其中 23 个与桌面版同名） |
 | **鼠标移动 / 点击模型** | 视线跟随；点击摸头 → 爱心特效 + 亲密度 +1 |
 | **重置 / 切换模型** | 内置 Hiyori Pro/Free、Miara Pro 循环切换 |
 
 ## Agent 工具对齐 / Tool Alignment
 
-网页 Demo 注册了 **18 个与桌面版 `app/engine/tools/` 同名**的工具（浏览器沙箱内可用的子集），
+网页 Demo 注册了 **24 个工具**（浏览器沙箱内可用的子集），其中 **23 个**与桌面版 `app/engine/tools/` 同名，
 配置 LLM Key 后由模型通过 **Function Calling 自主多轮调用**（ReAct：调用 → 观察 → 总结），
 全流程可在调试面板 **Agent Trace** 中观察：
 
-`get_current_time` `date_info` `calculate` `convert_units` `get_weather`（open-meteo，无需 key）
+`get_current_time` `countdown` `list_countdowns` `cancel_countdown` `say_to_user` `date_info`
+`calculate` `convert_units` `get_weather`（open-meteo，无需 key）
 `web_search`（Tavily，无 key 用 mock）`remember_fact` `recall_memory` `forget_memory`
 `add_reminder` `list_reminders` `delete_reminder` `open_website` `clipboard_copy`
-`send_notification` `change_pet_emotion` `play_animation` `get_pet_status`
+`send_notification` `change_pet_emotion` `play_animation` `get_pet_status` `feed_self`
+`daily_checkin`（网页 Demo 独有，桌面版无同名工具）
 
 > 桌面版专属工具（打开本地应用、文件读写、截图、系统控制等）受浏览器安全沙箱限制，不在网页版范围内。
 > 服务商不支持 `tools` 参数时自动降级为普通流式对话。
@@ -185,9 +187,9 @@ GitHub Pages 设置：`Settings → Pages → Branch: gh-pages / root`。
 
 ### CDN 选择
 
-- **PIXI v7** — `cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js`
-- **pixi-live2d-display cubism4** — `cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js`
-- **Live2DCubismCore** — `cubism.live2d.com/sdk-web/bin/CubismSdkForWeb-4-r.1/Core/live2dcubismcore.min.js`
+- **PIXI v7** — `cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js`
+- **pixi-live2d-display cubism4** — `cdn.jsdelivr.net/npm/pixi-live2d-display@0.3.0/dist/cubism4.min.js`
+- **Live2DCubismCore** — `cdn.jsdelivr.net/npm/live2d-cubism-core@1.0.2/lib/live2dcubismcore.min.js`
 
 > `vendor/` 已内置 pixi / Cubism Core / pixi-live2d-display 三个运行时的本地副本，
 > **离线也能运行**；加载顺序为 vendor → jsdelivr → unpkg 三级 fallback。

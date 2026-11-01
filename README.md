@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![PyQt5](https://img.shields.io/badge/UI-PyQt5%2BWebEngine-41CD52?logo=qt&logoColor=white)](https://riverbankcomputing.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1270%20passed%20%2F%208%20skipped-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2393%20passed%20%2F%2024%20skipped-brightgreen?logo=pytest)](tests/)
 [![Verify](https://img.shields.io/badge/verify_features-82%20checks-blueviolet)](scripts/verify_features.py)
 [![Live2D Demo](https://img.shields.io/badge/Live2D%20Demo-Try%20Online-6c5ce7?logo=githubpages&logoColor=white)](https://255856.github.io/Smart-Desktop-Pet/)
 
@@ -25,7 +25,7 @@
 ## 它能做什么？
 
 - **真智能**：手写 **ReAct Agent** 循环 + **3 层抗幻觉**（强制调工具 → 跨轮持续到 `max_turns` → 工具结果直接总结），可选 **LangChain** 后端
-- **68 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令 + **ActivityWatch 活动感知**（mcp_aw_get_recent_activities / current_window / query / buckets，桌宠能主动汇报主人最近在做什么）
+- **75 个工具**：时间 / 提醒 / 记忆 / 计算 / 文件 / 截图 / 系统 / 应用 / 网页搜索（Tavily + DuckDuckGo）/ 快捷指令 + **ActivityWatch 活动感知**（mcp_aw_aw_get_recent_activities / mcp_aw_aw_get_current_window / mcp_aw_aw_status / mcp_aw_aw_get_browser_tabs，桌宠能主动汇报主人最近在做什么）
 - **真记忆**：**独立记忆进程** `memory_sidecar`（HTTP `127.0.0.1:8788`，桌宠自动拉起）：**Chroma 向量 + BM25 关键词 + 交叉编码器精排**，JSON 记忆卡是真值、索引随时能重建；重要度评分 + 时间衰减 + 冲突改写 + 长期演化
 - **真说话**：**3 引擎 TTS**（edge-tts / GPT-SoVITS 本地克隆 / MiniMax 云端）+ 浏览器 SpeechRecognition **ASR 按住说话** + 嘴型同步
 - **真模样**：**双渲染**（Live2D Cubism 4 + pixi-live2d-display / PNG 帧动画），模型缺失自动 fallback
@@ -257,7 +257,7 @@ python scripts/prefetch_models.py --check
 | 渲染 | Live2D / PNG / **Voice** | ✓ Live2D |
 | 语音 | Speech / ASR / TTS / Voice | ✓ Speech / ASR / TTS / Voice |
 | 大脑 | ReAct + LangChain + Multi-Agent | ✓ ReAct + Multi-Agent |
-| 工具 | 52 个 | ✓ 18 个（browser sandbox） |
+| 工具 | 75 个 | ✓ 24 个（browser sandbox） |
 | 记忆 | sidecar 进程：向量 + 关键词 + 精排 / 持久化 | ✓ localStorage |
 | 提醒 | 系统通知 + cron | ✓ Browser Notifications |
 | 游戏 | 五子棋 / 象棋 / 狼人杀 | ✗（browser sandbox） |
@@ -334,7 +334,7 @@ mcp_servers.yaml:
 - [TTS 集成](docs/tts-integration.md)
 - [ActivityWatch 集成](docs/activitywatch-integration.md) — 桌宠如何读你的活动窗口
 - [状态对 Agent 决策的耦合](docs/innovation-2-companion-policy.md)
-- [桌面版工具参考](docs/tools-reference.md) — 68 个工具详细说明
+- [桌面版工具参考](docs/tools-reference.md) — 75 个工具详细说明
 
 ## 测试
 
@@ -351,7 +351,7 @@ pytest tests/test_langchain_agent.py -v
 
 测试结果：
 
-- **1270 passed** / 8 skipped
+- **2393 passed** / 22 skipped
 - 验证：82 项功能检查
 - 19 个 AST 守卫 + 量化 / 钩子 / 决策一致性 / post-LLM 拦截器测试
 
@@ -395,7 +395,7 @@ CI 在 Windows runner 上跑（Qt / pywin32 / WMI 亮度 / 电量等都依赖 Wi
 ## What can it do?
 
 - **Real intelligence**: hand-rolled **ReAct Agent** loop + **3-layer anti-hallucination** (force tool calls → keep going up to `max_turns` → summarize tool outputs), with an optional **LangChain** backend
-- **68 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts + **ActivityWatch activity awareness** (mcp_aw_get_recent_activities / current_window / query / buckets — the pet proactively reports what the owner has been doing)
+- **75 tools**: time / reminder / calc / files / screenshot / system / apps / web search (Tavily + DuckDuckGo) / shortcuts + **ActivityWatch activity awareness** (mcp_aw_aw_get_recent_activities / mcp_aw_aw_get_current_window / mcp_aw_aw_status / mcp_aw_aw_get_browser_tabs — the pet proactively reports what the owner has been doing)
 - **Real memory**: a **standalone sidecar process** (`memory_sidecar`, HTTP `127.0.0.1:8788`, auto-started by the pet): **Chroma vector + BM25 keyword + cross-encoder rerank**, with JSON memory cards as the source of truth (the indexes are derived and rebuildable); importance scoring + time decay + conflict rewriting + long-term evolution
 - **Real voice**: **3 TTS engines** (edge-tts / GPT-SoVITS local cloning / MiniMax cloud) + browser SpeechRecognition **ASR hold-to-talk** + mouth-sync
 - **Real look**: **dual renderer** (Live2D Cubism 4 + pixi-live2d-display / PNG frame animation), graceful fallback when the model is missing
@@ -711,7 +711,7 @@ pytest tests/test_langchain_agent.py -v
 
 Test results:
 
-- **1270 passed** / 8 skipped
+- **2393 passed** / 22 skipped
 - Verification: 82 feature checks
 - Innovation #2: 19 AST guards + quantize / hook / decision-consistency / post-LLM interceptor tests
 

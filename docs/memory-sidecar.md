@@ -134,7 +134,7 @@ GET /list?kind=fact&limit=20
 | --- | --- |
 | `id` | **必填**，主键 |
 | `text` | **必填**，卡片正文（截断到 500 字） |
-| `kind` | `fact`（默认）/ `event` / `topic` / `thought` / `impression`，决定时间衰减半衰期 |
+| `kind` | `fact`（默认）/ `event` / `topic` / `thought` / `impression` / `procedural` / `identity` / `value`，决定时间衰减半衰期 |
 | `key` | 归属标识（会话 / 人物），检索时可按它过滤 |
 | `mood` | 写入时的情绪；检索时同情绪有 1.15 倍加成 |
 | `importance` | 0~1，权重 = `0.5 + 0.5 * importance` |
@@ -146,7 +146,7 @@ GET /list?kind=fact&limit=20
 `supersede(old_id, new_card)` 的语义就是 UPDATE：旧卡 `status=superseded`、
 `supersededBy=新 id`，新卡 `supersedes=旧 id`，检索只返回新卡。
 
-半衰期（天）：`thought` 2 / `topic` 7 / `event` 30 / `fact` 90 / `impression` 180。
+半衰期（天）：`thought` 2 / `topic` 7 / `event` 30 / `fact` 90 / `impression` 180 / `procedural` 180 / `identity` 3650 / `value` 3650（`memory_sidecar/store.py` 的 `HALF_LIFE_DAYS`，未列的 kind 用默认 90）。
 
 ## 4. 打分
 
@@ -173,8 +173,8 @@ final  = rel * (0.4 + 0.6 * decay) * mood * imp  # 没有精排时 rel 退回 mi
 | 规则 | 看什么 | 阈值 | 怎么算出来的 |
 | --- | --- | --- | --- |
 | ① 余弦门禁 | 最像的那条卡的余弦相似度（`gate.topSim`） | **0.42** | 有答案的问句**下限 0.456**、四条无答案问句**上限 0.376** → 取中间 |
-| ② 补位行门槛 | 这一行的最终分 / 顶行最终分 | **0.12** | 融合/重排分的相对窗口（老实现量到 0.088~0.19） |
-| ③ 语义保命符 | 这一行的余弦 / 顶行余弦 | **0.75** | 复合问句的另外一半 0.907（要留）、近似陷阱 0.690（要丢） |
+| ② 补位行门槛 | 这一行的最终分 / 顶行最终分 | **0.12**（按类别另标：fact 0.28 / impression 0.08 / topic 0.30 / identity·value 0.05） | 融合/重排分的相对窗口（老实现量到 0.088~0.19） |
+| ③ 语义保命符 | 这一行的余弦 / 顶行余弦 | **0.75**（fact 关掉 = 0；identity·value 0.9） | 复合问句的另外一半 0.907（要留）、近似陷阱 0.690（要丢） |
 
 - ① 关门 = 这一问跟记忆库没有关系 → **一条都不给**（`results: []`）。
 - ② 只裁「顺带捞回来的」尾巴；③ 保证「确实是同一件事、只是精排判低」的行不被裁
@@ -190,6 +190,10 @@ final  = rel * (0.4 + 0.6 * decay) * mood * imp  # 没有精排时 rel 退回 mi
 | hit-rate | 1.000 | 1.000 |
 | 无关注入（平均 / 最多） | 4.0 行 / 6 行 | **0.0 行 / 0 行** |
 | 近似陷阱压过答案 | 0 | **0** |
+
+② ③ 两档阈值**按 kind 分线**（`memory_sidecar/price_table.py` 的 `KIND_GATE_TABLE`，版本 2026-11-05）：
+`fact` 0.28/0（关保命符）、`impression` 0.08/0.75、`topic` 0.30/0.75、`event`·`thought`·`procedural` 0.12/0.75、
+`identity`·`value` 0.05/0.9。表里没有的 kind 退回下面的全局旋钮。
 
 三个旋钮（构造函数 kwarg / 环境变量 / 命令行都行，优先级：显式参数 > 环境变量 > 默认）：
 

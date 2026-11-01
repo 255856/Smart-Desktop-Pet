@@ -13,12 +13,12 @@
 | 二、时间与提醒 | 6 | — |
 | 三、搜索、记忆与黑话 | 7 | — |
 | 四、计算与转换 | 3 | — |
-| 五、应用与文件 | 15 | 2 |
+| 五、应用与文件 | 15 | 0 |
 | 六、桌宠自身 | 6 | — |
 | 七、系统控制 | 20 | 5 |
 | 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3 + 语音 3） | 10 | — |
-| 九、生成 / 委派 | 4 | 1（run_script） |
-| **合计** | **75** | **9** |
+| 九、生成 / 委派 | 4 | 0 |
+| **合计** | **75** | **5** |
 
 > 十、语音唤醒（非工具）独立章节。
 
@@ -157,11 +157,11 @@
 
 ## 五、应用与文件（15）
 
-### `open_app` ⚠️ 危险
+### `open_app` ⚠️ LOW
 - **触发**："打开 QQ / 启动 Chrome / 计算器"
 - **作用**：查找并启动 Windows 应用（内置注册表 → 已装应用扫描 → 路径猜测 三层降级）
 - **查找顺序**：内置映射（如"计算器"→`calc.exe`）→ 已装应用相似度搜索 → 完整路径
-- **危险点**：可能启动非预期应用；需用户在弹窗里点确认
+- **危险点**：可能启动非预期应用（LOW 档，不弹确认框）
 
 ### `open_website`
 - **触发**："打开 baidu.com / 访问 https://github.com/xxx"
@@ -539,20 +539,18 @@ ActivityWatch 与文件系统那 7 个工具**不在** `_RISKY_TOOLS` 里（只�
 
 ---
 
-## 危险工具清单（9 个）
+## 危险工具清单（25 个）
 
-集中在 `app/engine/tools/_risk.py` 的 `TOOL_RISK_LEVEL`（5 档：SAFE / LOW / MEDIUM / HIGH / IRREVERSIBLE），自动派生 `_RISKY_TOOLS`（≥ LOW）。`backend=lightweight` 走 `app/brain/agent.py` 的 `DANGEROUS_TOOLS` 弹窗拦截，`backend=standard` 走 `app/brain/hallucination_guard.RiskyToolConfirm` 中间件 + `PostLLMStateGuard` post-LLM 拦截器。
+集中在 `app/engine/tools/_risk.py` 的 `TOOL_RISK_LEVEL`（5 档：SAFE / LOW / MEDIUM / HIGH / IRREVERSIBLE），自动派生 `_RISKY_TOOLS`（≥ MEDIUM）。`backend=lightweight` 走 `app/brain/agent.py` 的 `DANGEROUS_TOOLS` 弹窗拦截，`backend=standard` 走 `app/brain/hallucination_guard.RiskyToolConfirm` 中间件 + `PostLLMStateGuard` post-LLM 拦截器。
 
-弹窗 confirm 的 8 个：
+弹窗 confirm 的 6 个：
 
 ```python
-DANGEROUS_TOOLS = {
-    "open_app", "open_website", "lock_screen", "kill_process",
-    "run_script", "set_wifi", "set_bluetooth", "shutdown_computer",
-}
+DANGEROUS_TOOLS = {"lock_screen", "kill_process", "run_script",
+                   "set_wifi", "set_bluetooth", "shutdown_computer"}
 ```
 
-只打 WARNING log 不弹窗的 4 个：`send_notification` / `send_email` / `set_brightness` / `set_volume`（owner 自己可控，但 _RISKY_TOOLS 集合里）。
+只打 WARNING log 不弹窗的 19 个：`add_reminder` / `clipboard_copy` / `delete_file` / `delete_reminder` / `edit_file` / `forget_memory` / `generate_audio` / `generate_image` / `generate_video` / `multi_edit` / `remember_fact` / `send_email` / `send_notification` / `set_brightness` / `set_tts_mute_until` / `set_volume` / `submit_slang` / `Task` / `update_self`（owner 自己可控，但 _RISKY_TOOLS 集合里）。
 
 执行流程（`backend=lightweight`）：
 
@@ -703,6 +701,6 @@ app/engine/tools/
 ## 统计
 
 - **75 个工具**（不含语音唤醒） = 65 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
-- **8 个弹窗 confirm** + 4 个只 log 不弹窗 = 12 个 `_RISKY_TOOLS` 成员
+- **6 个弹窗 confirm** + 19 个只 log 不弹窗 = 25 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
-- **1270 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）
+- **2393 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）
