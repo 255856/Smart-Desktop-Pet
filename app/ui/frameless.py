@@ -53,6 +53,8 @@ class FramelessResizer(QObject):
         # attach 时给所有 descendant 装 eventFilter,用于 child 上的 release
         # 兜底清 overrideCursor;事件流处理时会先看 obj 是否在 _win 内。
         self._children: set = set()
+        # 标题栏缓存（None = 没查过 / False = 没有标题栏）
+        self._title_bar_cache = None
 
     def attach(self) -> "FramelessResizer":
         if self._attached:
@@ -69,6 +71,28 @@ class FramelessResizer(QObject):
         return self
 
     # ---- 边缘命中 ----
+    def _title_bar_rect(self):
+        """标题栏（objectName='titlebar'）的全局矩形；没有就 None。
+
+        标题栏是**拖动把手**：鼠标在上面应该是「拖窗口」而不是「拖上边缘」。
+        边缘判断若把标题栏那一条也算成上边缘，两者会抢事件
+        （owner 报的「边缘判断有点问题」）。
+        """
+        if self._title_bar_cache is not False:
+            if self._title_bar_cache is None:
+                bar = None
+                for w in self._win.findChildren(QWidget):
+                    if w.objectName() == "titlebar":
+                        bar = w
+                        break
+                self._title_bar_cache = bar
+            bar = self._title_bar_cache
+            if bar is None:
+                return None
+            g = bar.mapToGlobal(bar.rect().topLeft())
+            return (g.x(), g.y(), bar.width(), bar.height())
+        return None
+
     def _edge_at(self, gpos: QPoint):
         r = self._win.frameGeometry()
         m = self.EDGE
@@ -82,6 +106,13 @@ class FramelessResizer(QObject):
             edges |= Qt.TopEdge
         if y >= r.bottom() - m:
             edges |= Qt.BottomEdge
+        # 标题栏那条不算上边缘（标题栏是拖动把手）
+        if edges & Qt.TopEdge:
+            bar = self._title_bar_rect()
+            if bar is not None:
+                bx, by, bw, bh = bar
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    edges &= ~Qt.TopEdge
         return edges
 
     # ---- 光标 ----
@@ -174,6 +205,12 @@ class FramelessResizer(QObject):
             height = height + dy
             if height < min_h:
                 height = min_h
+        # 几何没变就别 setGeometry：每一次 setGeometry 都是一次整窗重绘
+        # （半透明窗口 + 长聊天内容 = 明显卡顿）
+        cur = self._win.geometry()
+        if (cur.left(), cur.top(), cur.width(), cur.height()) == (
+                left, top, width, height):
+            return
         self._win.setGeometry(left, top, width, height)
 
     # ---- 事件 ----

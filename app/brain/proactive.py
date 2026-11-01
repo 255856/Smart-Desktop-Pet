@@ -342,7 +342,7 @@ class ProactiveBrain(QObject):
     def _read_idle_minutes(self) -> Optional[float]:
         """查 AW aw-watcher-afk 拿主人空闲分钟数；任何环节失败都返 None（不打扰策略）。"""
         try:
-            from app.integrations.activitywatch import get_idle_status
+            from app.core.integrations.activitywatch import get_idle_status
             return get_idle_status(
                 server_url=(getattr(self._aw_cfg, "server_url", None) or None),
                 hostname=(getattr(self._aw_cfg, "hostname", None) or None),
@@ -353,7 +353,7 @@ class ProactiveBrain(QObject):
     def _is_in_meeting(self) -> bool:
         """当前窗口是否是会议软件；AW 不可达或失败返 False（保守不自动静音）。"""
         try:
-            from app.integrations.activitywatch import is_focus_meeting
+            from app.core.integrations.activitywatch import is_focus_meeting
             return is_focus_meeting(
                 server_url=(getattr(self._aw_cfg, "server_url", None) or None),
                 hostname=(getattr(self._aw_cfg, "hostname", None) or None),
@@ -401,7 +401,7 @@ class ProactiveBrain(QObject):
     def _fetch_focus_line(self) -> Optional[str]:
         """当前焦点窗口一句话描述 (复用 AW 集成)。失败返 None。"""
         try:
-            from app.integrations.activitywatch import get_current_window_one_liner
+            from app.core.integrations.activitywatch import get_current_window_one_liner
             return get_current_window_one_liner(
                 server_url=(getattr(self._aw_cfg, "server_url", None) or None),
                 hostname=(getattr(self._aw_cfg, "hostname", None) or None),
@@ -447,7 +447,7 @@ class ProactiveBrain(QObject):
         if aw_cfg is None or not getattr(aw_cfg, "enabled", False):
             return ""
         try:
-            from app.integrations.activitywatch import (
+            from app.core.integrations.activitywatch import (
                 get_current_window_one_liner,
                 get_recent_activities_summary,
             )

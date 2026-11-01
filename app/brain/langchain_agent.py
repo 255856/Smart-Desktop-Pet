@@ -823,7 +823,7 @@ class LangChainAgent:
     def _aw_tool_allowed(self, oai_name: str) -> bool:
         """预取用的 aw 工具（mcp_aw_<tool>）是否还在执行期白名单里。
 
-        预取走的是 app.integrations.activitywatch（集成层，**不经过注册表**），
+        预取走的是 app.core.integrations.activitywatch（集成层，**不经过注册表**），
         工具层那道白名单闸拦不到它 —— 这里手动查一次：
         用户把 mcp_aw_ 前缀从白名单里去掉 = 不许碰活动记录，那就真的不碰。
         """
@@ -836,7 +836,7 @@ class LangChainAgent:
     async def _call_aw(self, tool_name: str, args: dict) -> list:
         """直接调 aw_* 工具，同步返 LangChain message 序列。
 
-        用 app.integrations.activitywatch 调（不走 MCP，同步快），失败返 [] 不影响流程。
+        用 app.core.integrations.activitywatch 调（不走 MCP，同步快），失败返 [] 不影响流程。
         """
         import uuid as _uuid
         # 白名单闸：预取不经过注册表，工具层那道闸拦不到它 —— 这里补一道。
@@ -845,7 +845,7 @@ class LangChainAgent:
             log.info("AW 预取跳过：%s 不在执行期白名单里", oai_name)
             return []
         try:
-            from app.integrations.activitywatch import (
+            from app.core.integrations.activitywatch import (
                 get_recent_activities_summary,
                 get_current_window_one_liner,
             )
@@ -910,7 +910,7 @@ class LangChainAgent:
             except Exception:  # noqa: BLE001
                 pass
         # 国产模型默认忽略 tool_choice 字段。命中 aw_query 等专用 intent 时，
-        # 直接走 app.integrations.activitywatch 同步调工具，把 ToolMessage + AI tool_call
+        # 直接走 app.core.integrations.activitywatch 同步调工具，把 ToolMessage + AI tool_call
         # 拼进 messages，让 LLM 看到完整「问 → 调 → 结果」三段式
         intent = None
         injected_tool_msgs: list = []

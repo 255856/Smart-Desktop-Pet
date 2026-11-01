@@ -185,9 +185,9 @@ ffmpeg 截：`ffmpeg -i input.wav -ss 00:00:01 -t 5 -c copy ref.wav`
 
 ### PyInstaller 打包报错
 
-- `pyinstaller-hooks/hook_preimport.py` 已在 `desktop-pet.spec` 引用，必须保留
-- `build.py` 会自动收集 `assets/`、`characters/`、`docs/` 等数据文件
-- 打包前看 `requirements-build.txt` 与 `pyinstaller-hooks/hook_preimport.py` 注释
+- `packaging/pyinstaller-hooks/hook_preimport.py` 已在 `packaging/desktop-pet.spec` 引用，必须保留
+- `packaging/build.py` 会自动收集 `assets/`、`characters/`、`docs/` 等数据文件
+- 打包前看 `requirements-build.txt` 与 `packaging/pyinstaller-hooks/hook_preimport.py` 注释
 
 ### 打包后看不到桌宠
 

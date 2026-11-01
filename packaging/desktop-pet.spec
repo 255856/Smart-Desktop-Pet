@@ -7,7 +7,8 @@ from pathlib import Path
 SPEC_DIR = getattr(sys, "_PYINSTALLER_SPEC_DIR", None)
 if SPEC_DIR is None:
     SPEC_DIR = Path(__file__).resolve().parent if "__file__" in dir() else Path(sys.argv[0]).resolve().parent
-ROOT = Path(SPEC_DIR)
+# ROOT = 项目根（spec 在 packaging/ 下 → 上一层）
+ROOT = Path(SPEC_DIR).parent
 
 data_files = []
 assets_root = ROOT / "assets"

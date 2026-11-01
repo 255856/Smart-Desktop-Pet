@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 
-from app.experiments.state_decision_consistency import (
+from app.eval.state_decision_consistency import (
     run_experiment, _build_scenarios, _STATE_GRID, main as exp_main,
 )
 
@@ -76,7 +76,7 @@ def test_main_writes_results_file(tmp_path=None):
         exp_main()
     except SystemExit:
         pass
-    results = Path(__file__).parent.parent / "app" / "experiments" / "results" / "state_decision_consistency.json"
+    results = Path(__file__).parent.parent / "app" / "eval" / "results" / "state_decision_consistency.json"
     assert results.is_file(), f"结果文件应存在: {results}"
     data = json.loads(results.read_text(encoding="utf-8"))
     # sanity

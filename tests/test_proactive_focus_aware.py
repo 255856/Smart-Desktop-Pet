@@ -46,7 +46,7 @@ def _mock_aw_get_json(events: List[Any], buckets: Any):
 
 def test_get_idle_status_afk_10min():
     """aw-watcher-afk 最新事件 status=afk, duration=600s → 返 10.0 分钟。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     buckets = [{"id": f"aw-watcher-afk_{activitywatch._hostname()}"}]
     events = [{"data": {"status": "afk"}, "duration": 600.0}]
@@ -59,7 +59,7 @@ def test_get_idle_status_afk_10min():
 
 def test_get_idle_status_not_afk_returns_zero():
     """最近事件 not-afk → 返 0.0（主人在用电脑）。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     buckets = [{"id": f"aw-watcher-afk_{activitywatch._hostname()}"}]
     events = [{"data": {"status": "not-afk"}, "duration": 3.0}]
@@ -72,7 +72,7 @@ def test_get_idle_status_not_afk_returns_zero():
 
 def test_get_idle_status_no_bucket_returns_none():
     """aw-server 不可达或没装 afk watcher → 返 None（不阻塞主动搭话）。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     # 没有 buckets 数据
     with mock.patch.object(activitywatch, "_http_get_json", return_value=None):
@@ -82,7 +82,7 @@ def test_get_idle_status_no_bucket_returns_none():
 
 def test_is_focus_meeting_matches_chinese_keyword():
     """窗口标题含「腾讯会议」→ True。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     buckets = [{"id": f"aw-watcher-window_{activitywatch._hostname()}"}]
     events = [{"data": {"app": "TencentMeeting", "title": "腾讯会议 #12345"},
@@ -95,7 +95,7 @@ def test_is_focus_meeting_matches_chinese_keyword():
 
 def test_is_focus_meeting_matches_zoom_keyword():
     """窗口标题含「Zoom Meeting」→ True。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     buckets = [{"id": f"aw-watcher-window_{activitywatch._hostname()}"}]
     events = [{"data": {"app": "zoom.exe", "title": "Zoom Meeting"},
@@ -108,7 +108,7 @@ def test_is_focus_meeting_matches_zoom_keyword():
 
 def test_is_focus_meeting_no_data_returns_false():
     """AW 不可达或没数据 → False（保守不自动静音）。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     with mock.patch.object(activitywatch, "_http_get_json", return_value=None):
         assert activitywatch.is_focus_meeting() is False
@@ -116,7 +116,7 @@ def test_is_focus_meeting_no_data_returns_false():
 
 def test_is_focus_meeting_normal_window_returns_false():
     """普通窗口（VSCode）→ False。"""
-    from app.integrations import activitywatch
+    from app.core.integrations import activitywatch
 
     buckets = [{"id": f"aw-watcher-window_{activitywatch._hostname()}"}]
     events = [{"data": {"app": "Code", "title": "main.py - myproject"},
@@ -178,7 +178,7 @@ def test_proactive_read_idle_minutes_returns_value():
     """_read_idle_minutes 走 get_idle_status, 解析返回 12.5。"""
     brain = _make_proactive()
     with mock.patch(
-        "app.integrations.activitywatch.get_idle_status",
+        "app.core.integrations.activitywatch.get_idle_status",
         return_value=12.5,
     ):
         assert brain._read_idle_minutes() == pytest.approx(12.5)
@@ -188,7 +188,7 @@ def test_proactive_read_idle_minutes_graceful_on_failure():
     """get_idle_status 抛异常 → _read_idle_minutes 返 None（不阻塞）。"""
     brain = _make_proactive()
     with mock.patch(
-        "app.integrations.activitywatch.get_idle_status",
+        "app.core.integrations.activitywatch.get_idle_status",
         side_effect=RuntimeError("aw server down"),
     ):
         assert brain._read_idle_minutes() is None
@@ -197,12 +197,12 @@ def test_proactive_read_idle_minutes_graceful_on_failure():
 def test_proactive_meeting_detection():
     brain = _make_proactive()
     with mock.patch(
-        "app.integrations.activitywatch.is_focus_meeting",
+        "app.core.integrations.activitywatch.is_focus_meeting",
         return_value=True,
     ):
         assert brain._is_in_meeting() is True
     with mock.patch(
-        "app.integrations.activitywatch.is_focus_meeting",
+        "app.core.integrations.activitywatch.is_focus_meeting",
         return_value=False,
     ):
         assert brain._is_in_meeting() is False
@@ -211,7 +211,7 @@ def test_proactive_meeting_detection():
 def test_proactive_meeting_detection_graceful_on_failure():
     brain = _make_proactive()
     with mock.patch(
-        "app.integrations.activitywatch.is_focus_meeting",
+        "app.core.integrations.activitywatch.is_focus_meeting",
         side_effect=RuntimeError("boom"),
     ):
         assert brain._is_in_meeting() is False
@@ -279,7 +279,7 @@ def test_prepare_skips_when_idle_exceeds_threshold():
     worker.failed.connect(lambda e: failed_payload.append(e))
 
     with mock.patch(
-        "app.integrations.activitywatch.get_idle_status",
+        "app.core.integrations.activitywatch.get_idle_status",
         return_value=60.0,
     ):
         worker.run()
@@ -316,7 +316,7 @@ def test_prepare_skips_and_mutes_when_in_meeting():
     worker.done.connect(lambda text: (done_payload.append(text), done_signal.set()))
 
     with mock.patch(
-        "app.integrations.activitywatch.is_focus_meeting",
+        "app.core.integrations.activitywatch.is_focus_meeting",
         return_value=True,
     ):
         worker.run()
@@ -375,11 +375,11 @@ def test_prepare_runs_normally_when_not_idle_no_meeting():
 
     with mock.patch.object(llm_mod, "LLMClient", side_effect=fake_init), \
          mock.patch(
-             "app.integrations.activitywatch.get_idle_status",
+             "app.core.integrations.activitywatch.get_idle_status",
              return_value=0.0,
          ), \
          mock.patch(
-             "app.integrations.activitywatch.is_focus_meeting",
+             "app.core.integrations.activitywatch.is_focus_meeting",
              return_value=False,
          ):
         worker.run()
@@ -575,15 +575,15 @@ def test_prepare_injects_screen_excerpt_when_conditions_met():
 
     with mock.patch.object(llm_mod, "LLMClient", side_effect=fake_init), \
          mock.patch(
-             "app.integrations.activitywatch.get_idle_status",
+             "app.core.integrations.activitywatch.get_idle_status",
              return_value=0.0,
          ), \
          mock.patch(
-             "app.integrations.activitywatch.is_focus_meeting",
+             "app.core.integrations.activitywatch.is_focus_meeting",
              return_value=False,
          ), \
          mock.patch(
-             "app.integrations.activitywatch.get_current_window_one_liner",
+             "app.core.integrations.activitywatch.get_current_window_one_liner",
              return_value="当前窗口: Code - myproject/main.py (持续 60s)",
          ), \
          mock.patch(

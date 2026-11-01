@@ -139,6 +139,9 @@ class PetWindow(QWidget):
             int(self.SPRITE_SIZE.height() * scale),
         )
         self._scale = scale
+        # 缩放防抖：拖滑杆时合并成一次（见 apply_display_size）
+        self._scale_timer: Optional[QTimer] = None
+        self._pending_scale = None
 
         # 创建渲染器（live2d 失败 fallback sprite）
         from app.animation.renderer_factory import create_renderer
@@ -1131,7 +1134,33 @@ class PetWindow(QWidget):
 
         live2d 的显示控件是固定尺寸的 QWebEngineView，只改窗口大小没用，
         必须同步调 renderer.set_size 让模型按新画布重新 fit。
+
+        **防抖**：拖滑杆时每一格都会走到这里 → 每次都 resize WebEngine +
+        让 Live2D 重新 fit（卡得没法拖）→ 合并成「停手 150ms 后应用一次」。
         """
+        scale = float(scale)
+        self._scale = scale
+        if not self.isVisible():
+            # 还没显示（启动时）：立刻应用，别让窗口先闪一下旧尺寸
+            self._apply_display_size_now(scale)
+            return
+        if self._scale_timer is None:
+            self._scale_timer = QTimer(self)
+            self._scale_timer.setSingleShot(True)
+            self._scale_timer.timeout.connect(self._apply_pending_scale)
+        self._pending_scale = scale
+        self._scale_timer.start(150)
+
+    def _apply_pending_scale(self) -> None:
+        """防抖到期：把待应用的缩放真正落地。"""
+        pending = getattr(self, "_pending_scale", None)
+        if pending is None:
+            return
+        self._pending_scale = None
+        self._apply_display_size_now(pending)
+
+    def _apply_display_size_now(self, scale: float) -> None:
+        """真正改尺寸（窗口 + 显示控件 + 渲染器）。"""
         self._scale = float(scale)
         self._window_size = QSize(
             int(self.SPRITE_SIZE.width() * self._scale),

@@ -18,7 +18,7 @@
 | `app/brain/companion_policy.py` | 40 条规则（`RULES_TABLE`）+ 13 条 favor 规则 + `lookup_decision()` |
 | `app/brain/_companion_registry.py` | `thread_id → PetState` 注册表，让 dynamic_prompt 拿到 state |
 | `app/brain/_companion_log.py` | `trace_decision()` / `trace_outcome()` 落 JSON-line 到 `data/companion_log.txt` |
-| `app/experiments/state_decision_consistency.py` | 实验 1 跑数脚本（100 scenario × 27 state） |
+| `app/eval/state_decision_consistency.py` | 实验 1 跑数脚本（100 scenario × 27 state） |
 | `tests/test_*` | 19+ 个测试覆盖（risk / policy / outcome hook / 决策一致性 / post-LLM 拦截器 / 双路径注入） |
 
 ### 2.2 修改文件
@@ -131,7 +131,7 @@ Dashboard `localhost:8766/api/companion` 实时读这个文件，主人能直接
 
 54% 表示：100 个 scenario 中，桌宠状态在（sat, mood, level）三档变化时，54 个任务至少有一个状态下决策不一样（跟其它状态比）。100% 表示 `lookup_decision` 永远跟 `RULES_TABLE` 优先级排序一致，查表路径无 bug。
 
-详细数据在 `app/experiments/results/state_decision_consistency.json`（论文 §4 引用）。
+详细数据在 `app/eval/results/state_decision_consistency.json`（论文 §4 引用）。
 
 ## 8. 性能 / 资源开销
 

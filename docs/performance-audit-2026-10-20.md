@@ -132,7 +132,7 @@ def _wait_all_sentence_workers(self, timeout_s: float = 120.0) -> None:
 
 ### C4. 主动发言的 ActivityWatch 抓取在 GUI 线程做同步 HTTP，最长 24 秒
 
-**位置**：`app/brain/proactive.py:217` → `:175-178` → `app/integrations/activitywatch.py:37-83`
+**位置**：`app/brain/proactive.py:217` → `:175-178` → `app/core/integrations/activitywatch.py:37-83`
 
 ```python
 # proactive.py:217  (QTimer.timeout 槽 → 主线程)

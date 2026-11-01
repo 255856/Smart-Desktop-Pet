@@ -49,6 +49,9 @@ logs/
 # 根目录的提醒存档（state_manager 默认路径）
 reminders.json
 
+# 评测脚本的产出（每次跑都会变）
+app/eval/results/
+
 # 运行时调试输出
 debug_compare.txt
 agent_compare.txt

@@ -11,7 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# ROOT = 项目根（这个脚本在 packaging/ 下 → 上一层）
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _clean():
@@ -44,7 +45,7 @@ def _clean():
 
 def _write_spec_file() -> str:
     """动态生成 spec 文件"""
-    spec_path = ROOT / "desktop-pet.spec"
+    spec_path = ROOT / "packaging" / "desktop-pet.spec"
     spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 """Auto-generated spec for desktop-pet."""
 import os

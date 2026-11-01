@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def register(reg: ToolRegistry, tavily_api_key: Optional[str] = None,
-             max_results: int = 5, request_timeout_s: float = 10.0) -> None:
+             max_results: int = 5, request_timeout_s: float = 20.0) -> None:
     """注册 web_search 工具。
 
     Args:
@@ -168,6 +168,16 @@ def _clean_search_body(text: str) -> str:
         if noise_count >= 1 and len(line) < 60:
             # 短行大概率是导航/按钮
             continue
+        # 整行的「链接汤」（[中国 天气](/zh-hans/) 北京 * [上海]…）→ 整行丢掉。
+        # 百度/知乎的导航条**常常就是一整行**，逐行过滤看不出来；
+        # 不过滤的话，模型拿到的前 800 字全是导航（实测）→ 等于没搜。
+        _links = re.findall(r'\[[^\]]{0,60}\]\([^)]*\)', line)
+        if _links:
+            _link_chars = sum(len(c) for c in _links)
+            if _link_chars > len(line) * 0.4:
+                continue
+            # 剩下的零星链接：留文字、去掉 URL（摘要里有 URL 就够）
+            line = re.sub(r'\[([^\]]{0,60})\]\([^)]*\)', r'\1', line)
         # 去重（同一行重复出现）
         if line in seen:
             continue

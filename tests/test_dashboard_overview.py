@@ -209,14 +209,32 @@ def _dig(data, path):
 _VOLATILE_DATA_FILES = frozenset({
     "companion_log.txt",
     "token-usage.jsonl",
+    # 桌宠运行时自己写的（app 开着就会变）
+    "pet_state.json",
+    "pet_state.bak.json",
+    "chat_history.db",
+    "settings.json",
+    "reminders.json",
+    "langchain_checkpoints.db",
+    "langchain_checkpoints.db-shm",
+    "langchain_checkpoints.db-wal",
+    # 记忆 sidecar 的真值卡（sidecar 在跑就会写）
+    "cards.json",
 })
+
+# 同一目录下的前缀也算运行时易变（sidecar 的向量索引）。
+_VOLATILE_DATA_PREFIXES = ("memory_sidecar/chroma/",)
 
 
 def _is_volatile(path: Path) -> bool:
-    """这个文件是不是运行时自己会变的（日志 / 账本）。"""
+    """这个文件是不是运行时自己会变的（日志 / 账本 / sidecar 产物）。"""
     if path.suffix == ".log":
         return True
-    return path.name in _VOLATILE_DATA_FILES
+    if path.name in _VOLATILE_DATA_FILES:
+        return True
+    rel = path.as_posix()
+    return any(rel.endswith(p) or ("/" + p) in rel
+               for p in _VOLATILE_DATA_PREFIXES)
 
 
 def _snapshot(path: Path):
