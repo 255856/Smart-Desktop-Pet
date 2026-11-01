@@ -52,6 +52,21 @@ python main.py
 
 完整字段见 [docs/config-reference.md](docs/config-reference.md)。
 
+## 模型与技能（都在项目里）
+
+| 东西 | 位置 | 说明 |
+|---|---|---|
+| RVC 权重 / 索引 | `models/rvc/weights/`、`models/rvc/indices/` | 大肥鱼音色（5 个 .pth + 1 个 .index） |
+| RVC F0 / 编码器 | `models/rvc/rmvpe/`、`hubert_base/`、`pretrained_v2/` | 音高提取与内容编码 |
+| 人声分离模型 | `models/rvc/pymss_weights/` | 翻唱前分离人声 |
+| RVC 脚本 | `scripts/rvc/rvc_sing.py`、`rvc_fetch.py` | 唱歌 / 下载+分离 |
+| TTS 权重 | `GPT-SoVITS-*/` | GPT-SoVITS 本体与音色权重 |
+| 参考音频 | `voice/<角色>/` | 各角色的参考音色 |
+| 技能 | `skills/*.md` | 行为覆盖包，模型用 `use_skill` 自己取 |
+
+> `models/` 体积大，**不进版本库**（`.gitignore`）；目录结构写在 `docs/config-reference.md`。
+> RVC **代码本体**（WebUI + 它的 venv）仍在本机 RVC 安装目录里 —— 那是别人的项目，不搬。
+
 ## 目录结构
 
 ```
