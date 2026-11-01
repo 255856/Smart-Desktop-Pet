@@ -13,6 +13,7 @@ from . import (
     _slang,
     _unlock,
     _self,
+    _skills,
 )
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def build_default_tools(
     hooks: Optional[dict[str, Callable[[str], None]]] = None,
     tavily_api_key: Optional[str] = None,
     cfg: Optional[object] = None,
+    skills_dir=None,
 ) -> ToolRegistry:
     """用各子系统组装默认工具集。
 
@@ -48,6 +50,8 @@ def build_default_tools(
     _memory.register(reg, memory=memory)
     # 黑话/口头禅学习回路: query_slang / submit_slang（词表, 独立 JSON）
     _slang.register(reg)
+    # 技能（行为覆盖包）：模型自己用 use_skill 去取
+    _skills.register(reg, skills_dir=skills_dir)
     _pet.register(reg, state=state, items=items, hooks=hooks)
     # 表情包：send_sticker（把已有的 Emotion_* 素材当消息发进聊天）
     _sticker.register(reg)

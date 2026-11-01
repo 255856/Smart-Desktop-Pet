@@ -352,6 +352,29 @@ def _load_skills(skills_dir=None) -> str:
         return ""
 
 
+def _skill_catalogue(skills_dir=None) -> str:
+    """**技能清单**（只有名字 + 一句话说明，不含正文）。
+
+    正文不能全塞进 prompt（会把人设冲掉）—— 但模型得知道有哪些技能，
+    才能在任务对味时自己去调 use_skill 取。
+    """
+    try:
+        from app.brain.skills import list_skills, skill_description
+        d = Path(skills_dir) if skills_dir else app_root() / "skills"
+        if not d.is_dir():
+            return ""
+        names = list_skills(d)
+        if not names:
+            return ""
+        # **只列名字**：技能正文/说明一律不进 prompt —— poem 那种「用诗回话」
+        # 的说明一旦漏进来就会改掉人设（这是 skills 门禁要防的事）。
+        # 模型想知道某个技能干什么，让它自己 use_skill 取。
+        return "可用技能（用 use_skill 取）：" + "、".join(names)
+    except Exception as e:  # noqa: BLE001
+        log.debug("列技能失败，跳过：%s", e)
+        return ""
+
+
 def build_dynamic_block(*, project_docs=None, skills=None,
                         cwd=None, skills_dir=None) -> str:
     """会话内**稳定**动态块：项目级指令文档 + skills。
@@ -378,6 +401,11 @@ def build_dynamic_block(*, project_docs=None, skills=None,
         skills = _load_skills(skills_dir)
     if skills:
         parts.append(skills.strip())
+    # 技能**清单**（只有名字+一句话）→ 模型知道有哪些技能可调
+    # 正文仍然不塞进来（会把人设冲掉）→ 需要时用 use_skill 取。
+    catalogue = _skill_catalogue(skills_dir)
+    if catalogue:
+        parts.append(catalogue)
     return "\n\n".join(parts)
 
 

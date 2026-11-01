@@ -46,7 +46,7 @@ def test_allowlist_policy_comes_from_yaml_with_two_levels():
     policy = load_tool_allowlist(force=True)
     assert policy is not None, "yaml 里必须有 tool_allowlist 段"
     assert policy.from_yaml is True
-    assert len(policy.exact) == 65, policy.exact
+    assert len(policy.exact) == 66, policy.exact
     for p in DEFAULT_ALLOWLIST_PREFIXES:
         assert p in policy.prefixes, policy.prefixes
 

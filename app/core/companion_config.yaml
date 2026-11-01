@@ -180,6 +180,7 @@ tool_unlock:
       - query_slang
       - submit_slang
       - update_self
+      - use_skill
       - Task
     6:  # 计时器 (2 个)
       - countdown
@@ -293,6 +294,7 @@ tool_allowlist:
     - submit_slang
     - system_info
     - update_self
+    - use_skill
     - take_screenshot_tool
     - understand_image
     - unmute_tts
@@ -375,8 +377,9 @@ voice:
   rvc:
     python: 'E:\AI\RVC\venv\Scripts\python.exe'
     root: 'E:\AI\RVC\Retrieval-based-Voice-Conversion-WebUI-main'
-    sing_script: 'E:\SnowLuma\rvc_sing.py'
-    model: da_fei_yu.pth        # 本机已有的音色权重（**不下载**）
+    sing_script: 'scripts/rvc/rvc_sing.py'   # **项目内**（相对项目根解析）
+    # 音色权重：**放在项目里** models/rvc/weights/（不下载、不依赖 RVC 安装目录）
+    model: models/rvc/weights/da_fei_yu.pth
     sing_speed: 0.92            # 念白语速（放慢更像唱）
     sing_base: 329.63           # 旋律基准音高 Hz
     # RVC 单次推理的墙钟上限（秒）。
@@ -387,7 +390,7 @@ voice:
     timeout_s: 180
 
     # —— 翻唱（mcp_voice_sing 传 song 时的链路：找歌 → 下载 → 分离 → 音转音 → 混伴奏）——
-    fetch_script: 'E:\SnowLuma\rvc_fetch.py'   # 下载 + 人声分离（现成脚本，不重写）
+    fetch_script: 'scripts/rvc/rvc_fetch.py'   # **项目内**（相对项目根解析）
     separate_model: bs_roformer_anvuew_sdr_12.45.ckpt  # 人声分离模型（**本机已有，不下载**）
     voice_lib: 'data/voice_out/voice_lib'         # 翻唱用的本地语音库（下载+分离产物落这儿）
     ffmpeg: 'C:\Program Files\ffmpeg\bin\ffmpeg.exe'   # 混伴奏用

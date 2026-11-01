@@ -1,12 +1,12 @@
 ---
 name: desktop-pet-tool-usage
-description: When and how to call each of the 75 available tools (65 builtin + 10 MCP tools - 4 ActivityWatch + 3 filesystem + 3 voice) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
+description: When and how to call each of the 76 available tools (66 builtin + 10 MCP tools - 4 ActivityWatch + 3 filesystem + 3 voice) — open_app / open_website / add_reminder / remember_fact / system_info / mcp_aw_aw_get_recent_activities etc. Model MUST consult this before responding to action requests.
 user-invocable: false
 ---
 
 # Tool Usage Skill — desktop-pet
 
-You have **75 tools** available (65 内置 + 10 个 MCP 工具（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
+You have **76 tools** available (66 内置 + 10 个 MCP 工具（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）)。**The user can ONLY see what tools you actually call** — text in your reply that claims you did something is invisible to them unless a tool was called.
 
 > 本文件由 `app/brain/brain_controller.py` 直接注入到 system prompt 最前面。清单必须与
 > `app/engine/tools/` 的实际注册保持一致：2026-10-04 审计发现旧版写着 31 个工具，
@@ -215,7 +215,7 @@ You have **75 tools** available (65 内置 + 10 个 MCP 工具（4 个 ActivityW
 
 ---
 
-## 📋 Quick reference (75 tools: 65 内置 + 10 MCP（4 ActivityWatch + 3 filesystem + 3 voice）)
+## 📋 Quick reference (76 tools: 66 内置 + 10 MCP（4 ActivityWatch + 3 filesystem + 3 voice）)
 
 | 工具 | 必填参数 |
 |---|---|
@@ -237,6 +237,7 @@ You have **75 tools** available (65 内置 + 10 个 MCP 工具（4 个 ActivityW
 | `query_slang` | (无) |
 | `submit_slang` | `content` |
 | `update_self` | `region` |
+| `use_skill` | `name` |
 | `get_current_time` | (无) |
 | `get_pet_status` | (无) |
 | `system_info` | (无) |

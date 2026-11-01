@@ -560,8 +560,13 @@ def _rvc_weight_path(cfg: dict) -> Path:
     model = str(rvc.get("model") or "da_fei_yu.pth")
     if os.path.isabs(model):
         return Path(model)
+    # 相对路径 → **先按项目根解析**（模型现在放在项目里 models/rvc/weights/）
+    p = _abs(model)
+    if p.is_file():
+        return p
+    # 项目里没有 → 回退 RVC 安装目录的 assets/weights
     root = _abs(rvc.get("root") or "")
-    return root / "assets" / "weights" / model
+    return root / "assets" / "weights" / Path(model).name
 
 def _rvc_python(cfg: dict) -> Path:
     r"""RVC 解释器 —— **只认配置里那一个**。
@@ -1174,6 +1179,8 @@ def _separate_model(cfg: dict) -> tuple:
     name = str(_rvc_cfg(cfg).get("separate_model")
                or "bs_roformer_anvuew_sdr_12.45.ckpt")
     roots = []
+    # **项目里的** models/rvc/pymss_weights（模型已经搬进项目了）
+    roots.append(_abs("models/rvc/pymss_weights"))
     env = os.environ.get("PYMSS_MODEL_DIR")
     if env:
         roots.append(Path(env))

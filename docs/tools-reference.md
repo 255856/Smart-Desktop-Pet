@@ -1,4 +1,4 @@
-# Tools Reference · 桌宠 75 个工具全集
+# Tools Reference · 桌宠 76 个工具全集
 
 > 模型通过 **Function Calling** 协议（OpenAI 格式）调用这些工具。  
 > 用户口语 → 模型选工具 → `ToolRegistry.execute(name, args_json)` → 字符串结果回给模型 → 模型组织自然语言回复。
@@ -18,7 +18,7 @@
 | 七、系统控制 | 20 | 5 |
 | 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3 + 语音 3） | 10 | — |
 | 九、生成 / 委派 | 4 | 0 |
-| **合计** | **75** | **5** |
+| **合计** | **76** | **5** |
 
 > 十、语音唤醒（非工具）独立章节。
 
@@ -113,6 +113,15 @@
 - **参数**：`content: str`（必填）、`meaning: str` / `usage: str` / `example: str` / `risk: str` / `evidence: str`（均可选）
 - **风险**：MEDIUM（写本地文件 `data/slang.json`）
 
+### `use_skill`
+
+取一个**技能**（行为覆盖包）来用。`skills/` 目录里每个 `.md` 就是一个技能
+（例如 `domain-modeling` 建模、`systematic-debugging` 排障、`poem` 用诗回话）。
+模型觉得任务对味就自己调它，工具把这轮该守的规矩原样返回。
+
+- 风险等级：**LOW**（只读 `skills/*.md`，不改任何东西）
+- 不带名字调用 → 返回可用技能清单
+- 主人手动激活仍然支持：`/skills/<名字>`（聊天开头输入即可）
 ### `update_self`
 - **触发**：她想调整**自己**（而不是记主人的事）—— 「我是谁 / 我在乎什么 / 我做事的套路」变了
 - **作用**：改自己的三个**记忆分区**（跟 话 / 话题 / 事件 / 事实·偏好 / 印象 平级）：
@@ -700,7 +709,7 @@ app/engine/tools/
 
 ## 统计
 
-- **75 个工具**（不含语音唤醒） = 65 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
+- **76 个工具**（不含语音唤醒） = 66 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
 - **6 个弹窗 confirm** + 19 个只 log 不弹窗 = 25 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
 - **2400 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

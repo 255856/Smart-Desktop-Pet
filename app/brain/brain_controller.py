@@ -641,6 +641,8 @@ class BrainController(QObject):
                     "alarm": self._fire_alarm,
                 },
                 tavily_api_key=tavily_key,
+                # 技能目录：让模型能用 use_skill 自己取技能
+                skills_dir=getattr(self, "skills_dir", None),
                 cfg=cfg,
             )
             # Stage 3.1：冻结「存量工具」基线 —— 从这一刻起，白名单外的

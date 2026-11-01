@@ -101,6 +101,30 @@ def list_skills(skills_dir: Path | str) -> list[str]:
     return out
 
 
+def skill_description(skills_dir: Path | str, name: str) -> str:
+    """技能的**一句话说明**（给提示词里的技能清单用）。
+
+    取文件里第一行 `# Skill: xxx` 之后的第一段非空文字；
+    超过 200 字就截断。读不到就返回空串。
+    """
+    if not _validate_name(name):
+        return ""
+    p = Path(skills_dir) / (name + ".md")
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or s.startswith(">") or s.startswith("---"):
+            continue
+        lines.append(s)
+        if len(" ".join(lines)) > 200:
+            break
+    return " ".join(lines)[:200].strip()
+
+
 def load_skill(skills_dir: Path | str, name: str) -> str | None:
     """按名字加载单个 skill 的内容(markdown 原文,加一点头标)。"""
     if not _validate_name(name):
