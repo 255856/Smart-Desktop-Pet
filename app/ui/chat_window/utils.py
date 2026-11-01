@@ -173,6 +173,52 @@ def _tool_label(name: str, args: str) -> Tuple[str, str]:
     return cn, target
 
 
+def tool_phase(name: str) -> str:
+    """工具的**阶段**（她在做什么）：读取记忆 / 写入文件 / 查找资料 …
+
+    为什么要有：光一个英文工具名（recall_memory）主人看不出「她现在在干什么」；
+    qq-bridge 的步骤行会写「思考中 / 写入中 / 读取中」—— 这里对齐那个观感。
+    """
+    n = str(name or "").strip()
+    if not n:
+        return "执行中"
+    # 精确匹配优先（mcp_voice_sing 之类带命名空间的）
+    exact = {
+        "mcp_voice_sing": "合成语音",
+        "mcp_voice_speak": "合成语音",
+        "mcp_voice_status": "查看音色",
+        "mcp_aw_aw_get_recent_activities": "看看你在忙什么",
+        "mcp_fs_read_file": "读取文件",
+    }
+    if n in exact:
+        return exact[n]
+    groups = (
+        (("recall_memory", "asks_memory"), "读取记忆"),
+        (("remember_fact", "forget_memory", "update_self", "submit_slang",
+          "query_slang"), "写入记忆"),
+        (("read_file", "read_text_file", "glob_files", "grep_files",
+          "list_files"), "读取文件"),
+        (("write_file", "edit_file", "multi_edit", "delete_file"),
+         "写入文件"),
+        (("web_search", "fetch_url_text", "search_files"), "查找资料"),
+        (("take_screenshot_tool", "understand_image", "ocr_image"),
+         "读取屏幕"),
+        (("open_app", "open_website", "open_terminal",
+          "open_file_explorer", "open_notepad"), "打开应用"),
+        (("add_reminder", "delete_reminder", "list_reminders",
+          "countdown", "cancel_countdown"), "设置提醒"),
+        (("system_info", "get_current_time", "date_info",
+          "get_battery", "get_volume", "get_brightness"), "读取状态"),
+        (("play_animation", "feed_self", "change_pet_emotion",
+          "say_to_user", "clear_bubble"), "做出反应"),
+        (("calculate", "convert_units"), "算数"),
+    )
+    for names, label in groups:
+        if n in names:
+            return label
+    return "执行中"
+
+
 def _tool_display(name: str, args: str) -> Tuple[str, str, str]:
     """(英文工具名, 中文标签, 动作目标)。
 

@@ -153,7 +153,7 @@ class _NoCmdNavQTextBrowser(QTextBrowser):
 # 工具 UI 元数据 + 工具结果状态 + 工具元组解包 — 拆到 chat_window.utils
 from .utils import (  # noqa: F401
     _TOOL_UI_META, _CIRCLED_NUMS, _TOOL_FAIL_MARKERS,
-    _unpack_tool, _tool_label, _tool_display, _tool_status,
+    _unpack_tool, _tool_label, _tool_display, _tool_status, tool_phase,
     _unpack_status_mark, _tool_step_class, _tool_fail_reason,
     _voice_result_note, resolve_voice_artifact, _VOICE_KIND,
     split_reply_sentences, reply_pacing_settings, compute_reply_gap_ms,
@@ -3730,12 +3730,12 @@ class ChatWindow(QWidget):
         cursor = self.chat_view.textCursor()
         if anchor is None:
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertHtml(html)
+            self._insert_msg_html(cursor, html, is_user=False)
             cursor.insertBlock()
             return
         cursor.setPosition(anchor)
         start = cursor.position()
-        cursor.insertHtml(html)
+        self._insert_msg_html(cursor, html, is_user=False)
         cursor.insertBlock()
         self._streaming_anchor_pos = start + (cursor.position() - start)
 
@@ -5065,9 +5065,11 @@ class ChatWindow(QWidget):
                 f'<span class="tool-cn">{_html_escape(cn_name)}</span>'
                 if cn_name else ""
             )
+            phase = tool_phase(name)
             rows.append(
                 f'<div class="tool-row {state}">'
                 f'<span class="tool-num">{num}</span>'
+                f'<span class="tool-phase">{_html_escape(phase)}</span>'
                 f'<span class="tool-name">{_html_escape(en_name)}</span>'
                 f'{cn_html}'
                 f'{target_html}'
@@ -5544,6 +5546,15 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 border_color = ui_style.MOOD_NONE
             msg_style = f' style="border-left:3px solid {border_color};"'
+        # **对齐写进内联样式**（QQ 那样：主人的在右、她的在左，名字跟气泡同侧）。
+        # Qt 富文本对「继承来的块对齐」最不可靠 —— 上一条主人消息是右对齐时，
+        # 下一条（她的）名字会跟着右对齐 → 名字和气泡分家（owner 报的「名字错位」）。
+        # 内联样式优先级最高，不吃继承。
+        align = "right" if is_user else "left"
+        if msg_style:
+            msg_style = msg_style[:-1] + f' text-align:{align};"'
+        else:
+            msg_style = f' style="text-align:{align};"'
         return (
             f'<div class="msg {role_class}"{msg_style}>'
             f'{label_html}'
@@ -5927,6 +5938,24 @@ class ChatWindow(QWidget):
         sb.setValue(sb.maximum())
         return anchor
 
+    def _insert_msg_html(self, cursor, html: str, *, is_user: bool) -> None:
+        """插入一条消息的 HTML，并把**对齐写进块格式**。
+
+        Qt 富文本里 CSS 的 text-align **盖不住**「插入时继承来的块对齐」——
+        上一条是右对齐（主人）时，下一条（她的）名字会跟着右对齐 →
+        名字和气泡分家（owner 报的「名字错位」）。
+        QQ 的做法：主人的消息靠右、她的靠左，**名字跟气泡同侧**。
+        """
+        try:
+            from app.core.qt_compat import Qt
+            fmt = cursor.blockFormat()
+            fmt.setAlignment(Qt.AlignmentFlag.AlignRight if is_user
+                            else Qt.AlignmentFlag.AlignLeft)
+            cursor.setBlockFormat(fmt)
+        except Exception:  # noqa: BLE001
+            pass
+        cursor.insertHtml(html)
+
     def _render_message(self, msg: Message, streaming: bool = False) -> None:
         """渲染一条消息到 chat_view 末尾，强制独立段落。
 
@@ -5938,7 +5967,7 @@ class ChatWindow(QWidget):
         html = self._msg_html(msg)
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertHtml(html)
+        self._insert_msg_html(cursor, html, is_user=(msg.role == "user"))
         cursor.insertBlock()
         # 延后到下一事件循环再滚, 让 layout 把 scroll bar maximum 算准
         QTimer.singleShot(0, self._scroll_to_bottom)
@@ -6028,7 +6057,7 @@ class ChatWindow(QWidget):
         cursor.setPosition(anchor)
         cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
-        cursor.insertHtml(html)
+        self._insert_msg_html(cursor, html, is_user=False)
 
         if was_at_bottom:
             sb.setValue(sb.maximum())

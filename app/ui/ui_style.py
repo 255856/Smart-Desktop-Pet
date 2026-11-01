@@ -422,6 +422,7 @@ CHAT_BUBBLE_CSS = (
     # 工具步骤的状态 / 附注（跟 CHAT_MD_CSS 一一对应，两套样式不许漂移）
     "div.tools .tools-head-link{color:#9ca3af;text-decoration:none;font-size:8.5pt;}"
     "div.tools .tool-row .tool-num{color:#a0a0b4;margin-right:5px;}"
+    "div.tools .tool-row .tool-phase{color:#a0a0b4;font-size:8.5pt;margin-right:6px;}"
     "div.tools .tool-row .tool-cn{color:#a0a0b4;font-size:8pt;margin-left:5px;}"
     "div.tools .tool-row .tool-target{color:#9ca3af;margin:0 4px;}"
     "div.tools .tool-row .tool-mark-cell{margin-left:6px;}"
@@ -517,6 +518,7 @@ div.tools{font-size:8.5pt;color:$text_sub;background-color:transparent;border:no
 div.tools .tools-head-link{color:$text_muted;text-decoration:none;font-size:8.5pt;}
 div.tools .tool-row{display:block;margin:1px 0;}
 div.tools .tool-row .tool-num{color:$text_muted;margin-right:5px;}
+div.tools .tool-row .tool-phase{color:$text_muted;font-size:8.5pt;margin-right:6px;}
 div.tools .tool-row .tool-name{color:$text_quiet;font-weight:600;font-family:Consolas,Menlo,monospace;}
 div.tools .tool-row .tool-cn{color:$text_muted;font-size:8pt;margin-left:5px;}
 div.tools .tool-row .tool-target{color:$text_muted;margin:0 4px;}

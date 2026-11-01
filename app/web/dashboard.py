@@ -1379,6 +1379,29 @@ function rawKindClass(k){
   return map[k]||"rk-other";
 }
 
+function toolPhase(name){
+  const n=String(name||"");
+  const exact={"mcp_voice_sing":"合成语音","mcp_voice_speak":"合成语音",
+    "mcp_voice_status":"查看音色",
+    "mcp_aw_aw_get_recent_activities":"看看你在忙什么",
+    "mcp_fs_read_file":"读取文件"};
+  if(exact[n]) return exact[n];
+  const groups=[
+    [["recall_memory","asks_memory"],"读取记忆"],
+    [["remember_fact","forget_memory","update_self","submit_slang","query_slang"],"写入记忆"],
+    [["read_file","read_text_file","glob_files","grep_files","list_files"],"读取文件"],
+    [["write_file","edit_file","multi_edit","delete_file"],"写入文件"],
+    [["web_search","fetch_url_text","search_files"],"查找资料"],
+    [["take_screenshot_tool","understand_image","ocr_image"],"读取屏幕"],
+    [["open_app","open_website","open_terminal","open_file_explorer","open_notepad"],"打开应用"],
+    [["add_reminder","delete_reminder","list_reminders","countdown","cancel_countdown"],"设置提醒"],
+    [["system_info","get_current_time","date_info","get_battery","get_volume","get_brightness"],"读取状态"],
+    [["play_animation","feed_self","change_pet_emotion","say_to_user","clear_bubble"],"做出反应"],
+    [["calculate","convert_units"],"算数"]];
+  for(const g of groups){ if(g[0].indexOf(n)>=0) return g[1]; }
+  return "执行中";
+}
+
 function renderToolCard(p){
   const name=p.name||p.tool_name||"?";
   const cn=TOOL_NAME[name]||name;
@@ -1401,7 +1424,7 @@ function renderToolCard(p){
       + '<button class="expand-btn" onclick="toggleResult(&#39;'+rid+'&#39;,this)">展开结果 ▾</button>';
   }
   return '<div class="tl-card tool">'
-    + '<div class="cap">'+icon("wrench")+' '+esc(cn)+'<span class="mini-tag">'+esc(name)+'</span></div>'
+    + '<div class="cap">'+icon("wrench")+' '+esc(cn)+'<span class="mini-tag">'+esc(name)+'</span>'+'<span class="mini-tag" style="margin-left:6px;">'+esc(toolPhase(name))+'</span></div>'
     + kvHtml+resultHtml
     + '</div>';
 }
