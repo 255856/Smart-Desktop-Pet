@@ -107,7 +107,10 @@ def load_region(client, kind: str, limit: int = 80) -> list:
     if c is None:
         return []
     try:
-        rows = c.list_cards(limit=limit) or []
+        # **按 kind 在服务端过滤**（sidecar 的 /list 支持 ?kind=）——
+        # 拉回全部再自己筛的话，记忆卡一多就轮不到自我区域，
+        # 她会「忘了自己是谁」。
+        rows = c.list_cards(limit=limit, kind=kind) or []
     except Exception:  # noqa: BLE001
         log.debug("读自我区域 %s 失败", kind, exc_info=True)
         return []
@@ -240,9 +243,18 @@ def invalidate_cache() -> None:
 
 #: 每天每区域的编辑次数（§update_self§ 用）
 def _edit_log_path(root: Optional[Path] = None) -> Path:
+    """编辑流水的位置（**跟着数据目录走**，别用 CWD 相对路径）。
+
+    用相对路径的话：换个目录启动 / 打包版运行 → 写失败被静默吞掉 →
+    「每天最多改 2 次」这条限速等于没有。
+    """
     if root is not None:
         return Path(root) / _EDIT_LOG_FILE
-    return Path(_EDIT_LOG_FILE)
+    try:
+        from app.brain.memory_partitions import data_dir
+        return Path(data_dir()) / _EDIT_LOG_FILE
+    except Exception:  # noqa: BLE001
+        return Path(_EDIT_LOG_FILE)
 
 
 

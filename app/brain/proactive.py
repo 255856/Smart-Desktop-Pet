@@ -44,9 +44,20 @@ _OCR_RATE_LIMIT_S = 300   # 5 分钟一次
 _OCR_MAX_CHARS = 200     # 截前 200 字, 够 LLM 拿类别
 
 
-# v57: RoutineProfiler 数据目录 (在项目根 cwd/data 下, 默认)
-_ROUTINE_DATA_DIR = "data"
+# v57: RoutineProfiler 数据目录（在项目根的 data/ 下，默认）
 _ROUTINE_REFRESH_THREAD_NAME = "proactive-rp-refresh"
+
+
+def _data_dir() -> Path:
+    """数据目录（跟着 §DESKTOP_PET_DATA_DIR§ / 项目根走）。
+
+    **别用 CWD 相对路径**：换个目录启动（打包版、服务化）就找不到了。
+    """
+    try:
+        from app.brain.memory_partitions import data_dir
+        return Path(data_dir())
+    except Exception:  # noqa: BLE001
+        return Path("data")
 
 
 # --------------------------------------------------------------------------
@@ -113,6 +124,9 @@ REASON_WEIGHTS = {
 
 #: 自主想法的种子（桌宠自己那些小念头）。主人可以在 data/proactive_ideas.json
 #: 里追加自己的想法（一个 JSON 字符串数组），会跟种子一起进池子。
+#:
+#: ⚠️ 路径跟着**数据目录**走（DESKTOP_PET_DATA_DIR / 项目根的 data/），
+#: 别用 CWD 相对路径 —— 换个目录启动就读不到主人的想法池了。
 IDEA_SEEDS = [
     "想问主人今天有没有好好吃饭",
     "突然想知道主人最喜欢的一首歌是哪首",
@@ -267,7 +281,7 @@ class ProactiveBrain(QObject):
         self._last_screen_ocr_ts: float = 0.0
         # v57: 规律学习 — 离线聚合 AW 历史的 RoutineProfiler, 失败时不阻塞
         try:
-            self.rp = RoutineProfiler(_ROUTINE_DATA_DIR)
+            self.rp = RoutineProfiler(str(_data_dir()))
         except Exception:  # noqa: BLE001
             self.rp = None
         # worker 每次独立构造 LLMClient（不复用），避免 httpx 连接绑在已 close 的子 loop 上
@@ -526,7 +540,8 @@ class ProactiveBrain(QObject):
                     break
         if not picked:
             picked = ["idea"]
-        self._recent_reasons.append(picked[0])
+        # **整组都记**（一次挑两个理由时，第二个也要参与「最近两轮」降权）
+        self._recent_reasons.extend(picked)
         if len(self._recent_reasons) > 6:
             self._recent_reasons = self._recent_reasons[-6:]
         return picked
@@ -535,7 +550,7 @@ class ProactiveBrain(QObject):
         """桌宠自己的念头：种子 + 主人自己加的（data/proactive_ideas.json）。"""
         pool = list(IDEA_SEEDS)
         try:
-            path = Path(IDEAS_FILE)
+            path = _data_dir() / "proactive_ideas.json"
             if path.exists():
                 extra = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(extra, list):

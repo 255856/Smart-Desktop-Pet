@@ -521,7 +521,7 @@ def test_every_character_with_a_golden_set_is_green():
             if bad:
                 problems.append(f"{entry.name} / {case.get('id')}：{'；'.join(bad)}")
     if problems:
-        pytest.xfail("有角色的黄金集没达标：" + " | ".join(problems))
+        assert not problems, "有角色的黄金集没达标：" + " | ".join(problems)
 
 
 @pytest.mark.parametrize("case", _PARAM_CASES, ids=_PARAM_IDS)
@@ -567,8 +567,7 @@ def test_golden_reply_structure(case):
     # ---- 期望门禁：Stage 1.3 / 1.4 修好后自动转 pass ----
     violations = _violations(case)
     if violations:
-        pytest.xfail("自然度门禁未达标（Stage 1.3 / 1.4 修好后自动转 pass）："
-                     + "；".join(violations))
+        assert not violations, ("自然度门禁未达标：" + "；".join(violations))
 
 
 def test_reply_length_variance_across_cases():
@@ -590,7 +589,8 @@ def test_recorded_replies_are_not_all_questions():
     tails = [sanitize_text(c["golden_reply"]).rstrip() for c in recorded]
     tails = [t for t in tails if t]
     if tails and all(t.endswith(("?", "？")) for t in tails):
-        pytest.xfail("所有回复都以问号结尾 —— 太客服腔（Stage 1.4 调完 prompt 再看）")
+        assert not (tails and all(t.endswith(("?", "？")) for t in tails)), \
+            "所有回复都以问号结尾 —— 太客服腔"
 
 
 def test_app_prompt_has_no_hard_cap():
@@ -600,8 +600,7 @@ def test_app_prompt_has_no_hard_cap():
     Stage 1.4 删掉之后自动转 pass。
     """
     assembled = _build_full_system_prompt(PERSONA_SNIPPET)
-    if HARD_CAP in assembled:
-        pytest.xfail(f"system prompt 还残留硬上限「{HARD_CAP}」（Stage 1.4 会删）")
+    # 硬门禁：system prompt 里不能有「回复 1~3 句」硬上限（Stage 1.4 已删）。
     assert HARD_CAP not in assembled
 
 

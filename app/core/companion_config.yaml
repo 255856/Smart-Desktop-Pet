@@ -184,9 +184,10 @@ tool_unlock:
     6:  # 计时器 (2 个)
       - countdown
       - cancel_countdown
-    7:  # 多媒体生成 (2 个)
+    7:  # 多媒体生成 + 表情包 (3 个)
       - generate_image
       - generate_audio
+      - send_sticker
     8:  # 高级生成 + MCP 工具 (1 个内建 + 全部 MCP 外部)
       - generate_video
     9:  # HIGH 危险工具 (2 个)
@@ -223,7 +224,7 @@ tool_unlock:
 
 # 工具白名单 (Stage 3.1) —— 执行期第三道闸
 # 姿态: 存量工具默认放行, 增量工具默认拒绝。
-#   - 存量(本表列出的 61 个内置工具)默认放行;
+#   - 存量(本表列出的 65 个内置工具)默认放行;
 #   - 增量(此后新增的任何工具)默认拒绝, 必须显式登记进本表才可用。
 # 两级形式: exact(精确名) + prefixes(前缀桶, 本项目自带的 MCP 命名空间)。
 # 闸在 app/engine/tools/_core.py::execute() 里, 模型硬点名也拦得住。

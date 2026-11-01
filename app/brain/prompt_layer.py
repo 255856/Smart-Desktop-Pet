@@ -10,7 +10,8 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
 
 段顺序（固定）
 --------------
-  1. persona        人设（+ 上游注入的会话上下文：SKILL / 长期记忆 / 可用工具列表）
+  1. persona        人设（+ 上游注入的会话上下文：SKILL / 可用工具列表；
+                     **长期记忆已搬走** —— 走易变通道）
   2. style_guide    characters/style-guide.md —— **逐字**追加，不改写、不重排
   3. slang          已收录黑话表（**只有 confirmed 词条**）—— 常量块
   4. identity       自我认知（我是谁）—— **记忆库里的分区**（kind=identity）
@@ -21,7 +22,8 @@ ReAct（轻量）与 standard（LangChain）两个后端以前**各自**拼 syst
   8. 防幻觉基线 + 高风险工具 confirm 协议
   9. 中文输出约束
  10. 长度策略（Stage 1.4：不再是硬上限「回复 1~3 句」）
- 11. 【说话方式】+【任务执行协议】（Stage 1.6：_STYLE_RULE 拆成两段）
+ 11. 【说话方式】（Stage 1.6 从 _STYLE_RULE 拆出来的第一段）
+ 12. 【任务执行协议】（Stage 1.6 拆出来的第二段）
 
 顺序变了会让 MiniMax 的前缀缓存整块失效，所以**不要随手调换**。
 

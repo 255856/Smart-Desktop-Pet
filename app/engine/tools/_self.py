@@ -35,7 +35,7 @@ def _update_self(client, region, content, action, target, level, reason) -> str:
     """update_self 的实现。"""
     region = str(region or "").strip().lower()
     if region not in SELF_KINDS:
-        return "错误：region 只能是 identity / value / procedure。"
+        return "错误：region 只能是 %s。" % " / ".join(SELF_KINDS)
     action = str(action or "add").strip().lower()
     if action not in ("add", "revise", "remove"):
         return "错误：action 只能是 add / revise / remove。"
@@ -77,7 +77,18 @@ def _update_self(client, region, content, action, target, level, reason) -> str:
                 return "错误：要改哪一条？把它的 id 填进 target。"
             old = None
             try:
-                for row in client.list_cards(limit=200) or []:
+                # 先在这个区域里找（kind 过滤在服务端做），
+                # 找不到再全库兜底 —— 目标卡可能属于别的区域。
+                rows = []
+                for kw in ({"kind": region, "limit": 200}, {"limit": 500}):
+                    try:
+                        rows = client.list_cards(**kw) or []
+                    except Exception:  # noqa: BLE001
+                        rows = []
+                    if any(str(r.get("id") or "") == target_id
+                           for r in rows if isinstance(r, dict)):
+                        break
+                for row in rows:
                     if isinstance(row, dict) and str(row.get("id") or "") == target_id:
                         old = row
                         break

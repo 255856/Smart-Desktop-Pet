@@ -730,7 +730,9 @@ def _split_by_cjk_spaces(text: str) -> list:
         #  · 右端是数字 → 「体力只剩 25 了」是一句话（owner 截图里被劈成两句）。
         if (not left_is_number) and (not right_is_number) and (
                 _is_cjk_char(prev_last) or _is_cjk_char(curr_first)):
-            groups.append(cur)
+            # 空格**留在前一段**：拼回去要跟原文一模一样
+            #（不然气泡里的字会在回复结束时肉眼可见地变一次）
+            groups.append(cur + " ")
             cur = tokens[i]
         else:
             cur = cur + " " + tokens[i]

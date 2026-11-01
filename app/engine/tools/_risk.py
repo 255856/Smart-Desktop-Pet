@@ -46,7 +46,7 @@ RISK_RATIONALE: dict[int, str] = {
     IRREVERSIBLE: "锁屏 / 杀进程 / 文件物理删除, 主人立刻被影响, 难撤销",
 }
 
-# 工具风险等级主表 (65 个工具)
+# 工具风险等级主表（65 个内置工具 + MCP 工具共 69 条）
 TOOL_RISK_LEVEL: dict[str, int] = {
     # ---- SAFE (0): 纯读 / 纯计算 / 纯查询 ----
     "get_current_time":          SAFE,

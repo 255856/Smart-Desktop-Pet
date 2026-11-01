@@ -21,10 +21,25 @@ from __future__ import annotations
 import logging
 import time
 
-from app.engine.tools._core import TOOL_PHASE_BUDGET_SECONDS
+from app.engine.tools._core import (
+    TOOL_PHASE_BUDGET_SECONDS,
+    TOOL_RESULT_MAX_CHARS,
+)
 
 log = logging.getLogger(__name__)
 
+
+def _fit_one(text: str, room: int) -> str:
+    """把一条工具结果裁到 room 个字符（保头保尾 + 省略标记）。"""
+    if room <= 0:
+        return ""
+    if len(text) <= room:
+        return text
+    head = max(1, int(room * 0.9))
+    tail = max(0, room - head - 30)
+    omitted = len(text) - head - tail
+    marker = "\n…（中间省略 %d 字）…\n" % omitted
+    return text[:head] + marker + (text[-tail:] if tail else "")
 
 class ToolPhaseBudget:
     """整轮工具预算（墙钟秒）。
@@ -34,11 +49,18 @@ class ToolPhaseBudget:
     - §blocked§：被挡下的工具调用次数。
     """
 
-    def __init__(self, budget_seconds: float = TOOL_PHASE_BUDGET_SECONDS) -> None:
+    def __init__(self, budget_seconds: float = TOOL_PHASE_BUDGET_SECONDS,
+                 max_chars: int = TOOL_RESULT_MAX_CHARS) -> None:
         self.budget_seconds = float(budget_seconds or 0)
+        # 整轮工具结果的**字符预算**（跟 ReAct 的 fit_tool_payload 同一口径）：
+        # standard 后端以前只有单工具裁剪，整轮总量没人管 → 一轮能塞进
+        # 几十万字符，把模型上下文顶爆。
+        self.max_chars = int(max_chars or 0)
         self.started = time.monotonic()
         self.exhausted = False
         self.blocked = 0
+        self.chars_used = 0
+        self.chars_trimmed = 0
 
     @staticmethod
     def _fmt_seconds(v: float) -> str:
@@ -50,10 +72,12 @@ class ToolPhaseBudget:
         return ("%.1f" % v) if v < 10 else ("%.0f" % v)
 
     def reset(self) -> None:
-        """新一轮开始：预算重新计时。"""
+        """新一轮开始：预算重新计时（字符预算也归零）。"""
         self.started = time.monotonic()
         self.exhausted = False
         self.blocked = 0
+        self.chars_used = 0
+        self.chars_trimmed = 0
 
     @property
     def elapsed(self) -> float:
@@ -92,7 +116,31 @@ class ToolPhaseBudget:
                     tool_call_id=tool_call_id or "",
                     name=tool_name or "",
                 )
-            return await handler(request)
+            result = await handler(request)
+            # 整轮工具结果的**字符预算**（跟 ReAct 的 fit_tool_payload 同一口径）：
+            # standard 后端以前只有单工具裁剪，整轮总量没人管 —— 一轮能塞进
+            # 几十万字符，把模型上下文顶爆。
+            content = getattr(result, "content", None)
+            if outer.max_chars > 0 and isinstance(content, str):
+                room = outer.max_chars - outer.chars_used
+                if room <= 0:
+                    outer.chars_trimmed += 1
+                    return ToolMessage(
+                        content=("（整轮工具结果已超字符预算（%d 字），"
+                                 "这条不再展开；请用已有信息回答。）"
+                                 % outer.max_chars),
+                        tool_call_id=tool_call_id or "",
+                        name=tool_name or "",
+                    )
+                if len(content) > room:
+                    outer.chars_trimmed += 1
+                    content = _fit_one(content, room)
+                    try:
+                        result.content = content
+                    except Exception:  # noqa: BLE001
+                        pass
+                outer.chars_used += len(content)
+            return result
 
         return _budget_gate
 

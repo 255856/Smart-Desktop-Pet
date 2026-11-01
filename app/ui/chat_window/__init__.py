@@ -3716,14 +3716,35 @@ class ChatWindow(QWidget):
         msg = Message(role="assistant", content=str(job.get("note") or ""),
                       tools=[(tool, args, text, "ok")])
         self._voice_arrived.append(msg)
-        self._render_message(msg)
+        self._insert_message_before_anchor(msg)
+
+    def _insert_message_before_anchor(self, msg: Message) -> None:
+        """把一条消息插在**流式占位气泡之前**。
+
+        占位气泡每次重画都会把「anchor → 末尾」整段删掉再重画 ——
+        追加在它后面的东西（语音条）会被一起抹掉。
+        插在前面、再把 anchor 往后挪，就不会被擦。
+        """
+        html = self._msg_html(msg)
+        anchor = getattr(self, "_streaming_anchor_pos", None)
+        cursor = self.chat_view.textCursor()
+        if anchor is None:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertHtml(html)
+            cursor.insertBlock()
+            return
+        cursor.setPosition(anchor)
+        start = cursor.position()
+        cursor.insertHtml(html)
+        cursor.insertBlock()
+        self._streaming_anchor_pos = start + (cursor.position() - start)
 
     def _voice_job_failed(self, job: dict) -> None:
         """合成失败 → 如实说出来（不装没发生，也不给一个坏掉的语音条）。"""
         err = str(job.get("error") or "不知道是哪一步失败了")
         msg = Message(role="system", content="合成失败：%s" % err)
         self._voice_arrived.append(msg)
-        self._render_message(msg)
+        self._insert_message_before_anchor(msg)
 
     def _show_image_popup(self, url: str) -> None:
         """点击 chat 缩略图弹原图 QDialog, Esc / 点 × 关闭。
@@ -4200,9 +4221,13 @@ class ChatWindow(QWidget):
         #   文字会一直等到最后**一次性蹦出来**（owner 报的「一下子全输出了」）。
         #   所以：TTS 不接管文字的时候，文字**立刻**流式出（更快，也更对）。
         if getattr(self, "_reply_pacing_on", False):
-            # 逐句投递：成句的部分排队发出去；占位气泡只显示还没成句的尾巴
+            # 逐句投递：成句的部分排队发出去；占位气泡显示「已发的句子 + 尾巴」
             self._pacing_feed(sanitized)
-            self._current_bot_msg.content = self._reply_tail
+            # content 要存**已显示的全文**（已发句子 + 尾巴），不是只有尾巴：
+            # 出错 / 叫停时走的是 _current_bot_msg 的渲染路径，
+            # 这里只留尾巴的话，主人已经看到的句子会被整段抹掉。
+            self._current_bot_msg.content = ("".join(self._reply_sent)
+                                             + self._reply_tail)
             if changed:
                 self._refresh_streaming_message()
         elif changed and self._streaming_shows_live():
@@ -4336,9 +4361,11 @@ class ChatWindow(QWidget):
             return
         if not accumulated:
             return
+        rescanned = False
         if len(accumulated) < self._reply_sent_pos:
             # 清洗后的文本跳变了（sanitize 会回头改字）→ 从头重扫
             self._reply_sent_pos = 0
+            rescanned = True
         scan = accumulated[self._reply_sent_pos:]
         try:
             sentences, tail = split_reply_sentences(
@@ -4347,7 +4374,14 @@ class ChatWindow(QWidget):
             return
         self._reply_sent_pos = len(accumulated) - len(tail)
         self._reply_tail = tail
-        fresh = [s for s in sentences if not self._reply_sent_has(s)]
+        if rescanned:
+            # 从头重扫：已经发过的不再发一遍（文本变过，位置对不上了）
+            fresh = [s for s in sentences if not self._reply_sent_has(s)]
+        else:
+            # 增量扫描：扫描位置保证这些都是**新出现的**句子 ——
+            # 模型真连说两遍一样的（「好的。好的，我马上来。」）两句都要发出来，
+            # 不能按文本全等去重（那会把第二句静默吞掉）。
+            fresh = list(sentences)
         if fresh:
             self._pacing_enqueue(fresh)
 
@@ -4446,6 +4480,9 @@ class ChatWindow(QWidget):
             cursor.insertHtml(self._reply_placeholder_html())
             cursor.insertBlock()
             return
+        # 正文与气泡保持一致（出错 / 收尾时都拿它当权威来源）
+        self._current_bot_msg.content = ("".join(str(s) for s in (getattr(self, "_reply_sent", None) or []))
+                                         + str(getattr(self, "_reply_tail", "") or ""))
         # 从锚点重画整个气泡：正文变长、名字还是只有一个
         self._refresh_streaming_message()
 
@@ -4482,16 +4519,19 @@ class ChatWindow(QWidget):
             if tail:
                 # 尾巴是这条回复的一部分 → 并进气泡（名字只出现一次）
                 self._reply_tail = tail
+                self._current_bot_msg.content = ("".join(self._reply_sent) + tail)
                 self._refresh_streaming_message(finished=True)
+                # **别清 anchor**：收尾还要把这条气泡换成最终消息；
+                # 清了就变成「碎片气泡 + 又追加一条完整气泡」= 同一条回复显示两次。
             else:
                 cursor = self.chat_view.textCursor()
                 cursor.setPosition(anchor)
                 cursor.movePosition(QTextCursor.MoveOperation.End,
                                  QTextCursor.MoveMode.KeepAnchor)
                 cursor.removeSelectedText()
+                self._streaming_anchor_pos = None
         except Exception:  # noqa: BLE001
             log.exception("逐句投递收尾（尾巴）失败")
-        self._streaming_anchor_pos = None
         self._reply_tail = ""
 
     def _finish_reply_pacing(self) -> None:
@@ -4813,7 +4853,15 @@ class ChatWindow(QWidget):
             except Exception:  # noqa: BLE001
                 log.exception("close lc agent on fail")
             self._lc_agent = None
-        self._current_bot_msg.content = f"[错误] {err}"
+        if getattr(self, "_reply_pacing_on", False):
+            # 逐句投递中：已经显示的句子**留着**，错误接在后面（别把话抹掉）。
+            # 权威来源是 _reply_sent + _reply_tail（气泡里显示的就是它）。
+            shown = "".join(str(s) for s in (getattr(self, "_reply_sent", None) or []))
+            shown += str(getattr(self, "_reply_tail", "") or "")
+            self._current_bot_msg.content = (("%s\n[错误] %s" % (shown, err)) if shown
+                                            else ("[错误] %s" % err))
+        else:
+            self._current_bot_msg.content = f"[错误] {err}"
         self._current_bot_msg.emotion = Emotion.SAD
         # 即使失败也尝试把 multimodal 产物补回来
         self._reinject_multimodal_from_tools(self._current_bot_msg)
@@ -5974,13 +6022,16 @@ class ChatWindow(QWidget):
         if anchor is None:
             self._render_message(self._current_bot_msg)
             return
+        # 主人正在往上翻看历史时**别把他拽回底部**（重画一次就滚一次）
+        sb = self.chat_view.verticalScrollBar()
+        was_at_bottom = sb.value() >= sb.maximum() - 4
         cursor.setPosition(anchor)
         cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
         cursor.insertHtml(html)
 
-        sb = self.chat_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        if was_at_bottom:
+            sb.setValue(sb.maximum())
 
     def _typing_dots_html(self) -> str:
         """回复等待中的「三点跳动」动画：三个圆点依次点亮、循环流动。

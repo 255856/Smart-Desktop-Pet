@@ -34,9 +34,11 @@ class _FakeClient:
         self.last_error = ""
 
     def list_cards(self, limit: int = 200, include_superseded: bool = False,
-                   with_category: bool = False) -> list:
+                   with_category: bool = False, kind: str = "") -> list:
         out = [dict(c) for c in self.cards.values()
                if c.get("status") == "active"]
+        if kind:
+            out = [c for c in out if str(c.get("kind") or "") == kind]
         return out[:limit]
 
     def make_card(self, text, key="", kind="fact", importance=0.5,

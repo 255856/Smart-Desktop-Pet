@@ -255,6 +255,36 @@ def test_history_keeps_one_assistant_message(tmp_path):
     assert assistant[0].content == reply, assistant[0].content
 
 
+def test_the_error_keeps_the_sentences_already_shown(tmp_path):
+    """出错时**不能**把主人已经看到的句子抹掉（逐句气泡的直接回归）。
+
+    逐句投递期间正文在 _reply_sent 里；如果出错时拿 _current_bot_msg
+    重画（那里只有尾巴），主人刚看到的话会整段消失。
+    """
+    cw = _cw(tmp_path)
+    _fast_gaps(cw)
+    reply = "第一句在这里。第二句也在这里。"
+    # 只喂一半 → 第一句已经发出去，第二句还挂在尾巴里
+    cw._reply_pacing_reset()
+    cw._current_bot_msg = Message(role="assistant", content="", speaker="小汐")
+    cw._streaming_raw = ""
+    cw._san_len = 0
+    cw._streaming_san = ""
+    cw._streaming_anchor_pos = cw._insert_placeholder(cw._current_bot_msg)
+    cw._on_chunk(reply)
+    t0 = time.monotonic()
+    while not cw._reply_sent and time.monotonic() - t0 < 5.0:
+        app.processEvents()
+        time.sleep(0.002)
+    assert cw._reply_sent, "第一句没发出去"
+    shown = "".join(cw._reply_sent)
+    # 现在出错
+    cw._on_failed("模拟失败")
+    text = cw.chat_view.toPlainText()
+    assert shown in text, "出错后已显示的句子被抹掉了：%r" % text
+    assert "[错误]" in text, text
+
+
 def test_bubbles_text_equals_original_reply(tmp_path):
     """A5：气泡拼回去 == 原回复（切分点上少了空白而已）。"""
     cw = _cw(tmp_path)

@@ -28,6 +28,7 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger(__name__)
@@ -569,7 +570,8 @@ class MemoryClient:
 
     def list_cards(self, limit: int = 200,
                    include_superseded: bool = False,
-                   with_category: bool = False) -> list:
+                   with_category: bool = False,
+                   kind: str = "") -> list:
         """记忆卡列表（按更新时间倒序；拿不到 → []）。
 
         先问 sidecar 的 /list，端点不存在（404）就退到读 cards.json ——
@@ -582,9 +584,15 @@ class MemoryClient:
         （主动发言）时，就从 sidecar 的真值文件 cards.json 里按 id 补回来。
         """
         limit = max(1, int(limit or 200))
+        kind = str(kind or "").strip()
         rows = []
         if not self._list_missing:
-            data = self._call("GET", "/list?limit=%d" % limit, None,
+            # kind 过滤**在服务端做**（sidecar 的 /list 支持 ?kind=）——
+            # 否则调用方只能拉回一大堆别的类别再自己筛，条数一多就被挤掉。
+            url = "/list?limit=%d" % limit
+            if kind:
+                url += "&kind=" + urllib.parse.quote(kind)
+            data = self._call("GET", url, None,
                               breaker=False, track_failure=False)
             got = (data or {}).get("cards")
             if isinstance(got, list):
@@ -593,6 +601,8 @@ class MemoryClient:
                 self._list_missing = True
         if self._list_missing:
             rows = self._cards_from_file()
+        if kind:
+            rows = [c for c in rows if str(c.get("kind") or "") == kind]
         if not include_superseded:
             rows = [c for c in rows
                     if str(c.get("status") or "active") == "active"]
