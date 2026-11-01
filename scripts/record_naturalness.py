@@ -433,7 +433,7 @@ def _usage_of(obj: dict) -> dict:
 
 def _ask_one(model: str, api_key: str, base_url: str, system_prompt: str,
              user_text: str, dynamic_context: str, temperature: float,
-             max_tokens: int, timeout: int) -> tuple:
+             max_tokens: int, timeout: int, tools=None) -> tuple:
     """发一次 chat/completions，返回 (模型**原始**回复, token 用量)。
 
     消息排布跟生产一致：system + 本轮易变上下文（独立 user 消息）+ 主人原话。
@@ -452,6 +452,9 @@ def _ask_one(model: str, api_key: str, base_url: str, system_prompt: str,
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -591,6 +594,18 @@ def main(argv=None) -> int:
         print("--dry-run：一个网络请求都不发，什么都没写。")
         return 0
 
+    # 工具 schema（跟生产一致：按等级过滤后的注册表）
+    tools_payload = []
+    try:
+        registry = getattr(built.get("brain"), "tool_registry", None)
+        if registry is not None:
+            tools_payload = registry.to_openai_for_level(
+                int(built.get("level") or 10))
+    except Exception as exc:  # noqa: BLE001
+        print("取工具 schema 失败（工具类场景会退化成瞎猜）：%s" % exc)
+        tools_payload = []
+    print("工具 schema：%d 个（跟生产一致）" % len(tools_payload))
+
     failed = 0
     recorded = 0
     totals = {"prompt_tokens": 0, "completion_tokens": 0,
@@ -611,6 +626,7 @@ def main(argv=None) -> int:
                 temperature=cfg.llm.temperature,
                 max_tokens=cfg.llm.max_tokens,
                 timeout=args.timeout,
+                tools=tools_payload,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[失败] {case_id}：{exc}")

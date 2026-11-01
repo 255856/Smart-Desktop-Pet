@@ -37,7 +37,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[</tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[记事本已打开。"
   },
   {
     "id": "tool_failure",
@@ -57,7 +57,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"remember_fact\">]<]minimax[>[<<arguments>{\"content\":\"主人明天（2026-11-02）上午十点要交房租\",\"category\":\"fact\",\"kind\":\"fact\",\"importance\":0.85,\"scope\":\"user\"}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<invoke name=\"add_reminder\">]<]minimax[>[<<arguments>{\"text\":\"该交房租啦，主人别忘了\",\"at_time\":\"2026-11-02 09:30\"}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   },
   {
     "id": "asks_memory",
@@ -67,7 +67,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"recall_memory\">]<]minimax[>[<<arguments>{}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"recall_memory\">]<]minimax[>[<<arguments>{\"keyword\":\"房租\",\"limit\":10}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<invoke name=\"list_reminders\">]<]minimax[>[<<arguments>{}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   },
   {
     "id": "noise",
@@ -97,7 +97,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"recall_memory\">]<]minimax[>[<<arguments>{\"keyword\": \"城市 天气 住\"}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<invoke name=\"get_weather\">]<]minimax[>[<<arguments>{\"days\": 2}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   },
   {
     "id": "praise",
@@ -157,7 +157,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_current_time\">]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"get_current_time\">]<]minimax[>[<<arguments>{}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   },
   {
     "id": "follow_up",
@@ -167,7 +167,7 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"recall_memory\">]<]minimax[>[<<arguments>{\"keyword\":\"买\",\"limit\":10}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<invoke name=\"recall_memory\">]<]minimax[>[<<arguments>{\"keyword\":\"店\",\"limit\":10}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   },
   {
     "id": "call_name",
@@ -197,6 +197,6 @@
       "你是用简体中文说话的人，像跟主人面对面说话一样。回答只用最终内容，不要做任何铺垫、不要解释你在想什么、不要复述主人刚才问的问题、不要把上面的要求重复念出来。下面是两个对比——\n\n✅ 像这样：「嘿嘿~主人来啦，今天想干嘛呀？~」\n❌ 不要这样：「我需要以可爱软萌角色回答。主人问我想做什么，我会说游泳。」「唯一允许的输出语言是简体中文。1. xxx 2. xxx」「根据角色设定我会……」\n\n工具调用只走 tool schema；不要在文字里描述要调什么工具。信息不够 / 不确定 / 时效性问题（天气/新闻/榜单/日期/……），必须调 web_search 拿真实信息，不允许编造或说「我不知道」。",
       "【回复长度】默认用短句（1~10 字）；需要解释、报错、查资料这类正事时最多说 2~3 句，一条一个意思；不要每次都一样长。"
     ],
-    "golden_reply": "]<]minimax[>[<tool_call> name=\"web_search\", \"arguments\": {\"query\": \"site:docs.python.org asyncio.timeout Python 3.11 introduced 3.10 asyncio.timeout TimeoutError\"}}\n</tool_call>"
+    "golden_reply": "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"web_search\">]<]minimax[>[<<arguments>{\"query\":\"asyncio.timeout Python 3.11 新增 3.10 没有 wait_for 替代\",\"max_n\":6}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<invoke name=\"web_search\">]<]minimax[>[<<arguments>{\"query\":\"Python 3.10 asyncio.timeout usage TimeoutError\",\"max_n\":6}</arguments>]<]minimax[>[<</invoke>\n]<]minimax[>[<</tool_call>"
   }
 ]

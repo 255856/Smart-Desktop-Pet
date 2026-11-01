@@ -351,7 +351,7 @@ pytest tests/test_langchain_agent.py -v
 
 测试结果：
 
-- **2393 passed** / 22 skipped
+- **2400 passed** / 15 skipped
 - 验证：82 项功能检查
 - 19 个 AST 守卫 + 量化 / 钩子 / 决策一致性 / post-LLM 拦截器测试
 
@@ -711,7 +711,7 @@ pytest tests/test_langchain_agent.py -v
 
 Test results:
 
-- **2393 passed** / 22 skipped
+- **2400 passed** / 15 skipped
 - Verification: 82 feature checks
 - Innovation #2: 19 AST guards + quantize / hook / decision-consistency / post-LLM interceptor tests
 

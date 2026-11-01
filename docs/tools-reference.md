@@ -703,4 +703,4 @@ app/engine/tools/
 - **75 个工具**（不含语音唤醒） = 65 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
 - **6 个弹窗 confirm** + 19 个只 log 不弹窗 = 25 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
-- **2393 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）
+- **2400 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

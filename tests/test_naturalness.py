@@ -179,7 +179,7 @@ def _persona_head(persona: str) -> str:
 _CHARACTER = _current_character()
 
 #: 拼 prompt 用的人设片段 = **当前角色**人设的第一行
-PERSONA_SNIPPET = _persona_head(_CHARACTER.persona) or "你是桌宠"
+PERSONA_SNIPPET = _persona_head(_CHARACTER.persona) or "你是一个住在主人身边的人"
 
 
 # --------------------------------------------------------------------------
@@ -439,6 +439,43 @@ class TestCharacterization:
 # L2：golden 评测集（对着**当前加载的角色**）
 # --------------------------------------------------------------------------
 
+#: 工具调用的两种文本格式：Qwen 系的 invoke name 与 MiniMax 的 tool_call；
+#: 录制时 MiniMax 的标记会把 XML 搅乱（name=x / name>x 都出现过）→ 宽松一点认。
+_TOOL_NAME_RE = re.compile(
+    r'(?:<invoke\s+name|name)[^\w]{0,2}[:=>][^\w]{0,2}([A-Za-z_][A-Za-z0-9_]*)',
+    re.IGNORECASE,
+)
+
+
+def _tool_calls_in(raw: str) -> list:
+    '原文里调了哪些工具（空 = 这一轮没调工具）。'
+    out: list = []
+    for m in _TOOL_NAME_RE.finditer(raw or ''):
+        name = m.group(1)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _known_tool_names() -> set:
+    '已注册的工具名（门禁要能判断「叫得出名字」才算合规）。'
+    try:
+        from app.engine.tools import build_default_tools
+
+        class _StubState:
+            def get(self, *a, **k):
+                return None
+
+            def stats_summary(self) -> str:
+                return 'stub'
+
+        reg = build_default_tools(state=_StubState(), reminders=None,
+                                   memory=None, items=None)
+        return set(reg.names())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _violations(case: dict) -> list:
     """这一条 case 的违规项（空 = 达标）。
 
@@ -451,6 +488,16 @@ def _violations(case: dict) -> list:
     raw = golden
     cleaned = sanitize_text(raw)
     if not cleaned:
+        calls = _tool_calls_in(raw)
+        if calls:
+            # 这一轮模型**调了工具**（工具独白被剥光是合理的）——
+            # 改成检查「叫得出真工具的名字」，别整条跳过：
+            # 否则 20 条里有一半是工具场景，门禁实际只评了一半。
+            known = _known_tool_names()
+            for name in calls:
+                if known and name not in known:
+                    return ['调了不存在的工具 %s' % name]
+            return []
         # 剥光了 —— 跟门禁一样，这一轮没东西可评（跳过，不算违规）
         return []
     violations = []
@@ -554,6 +601,16 @@ def test_golden_reply_structure(case):
     assert len(cleaned) <= len(raw), "清洗不该把回复变长"
     assert len(_ai_flavor_hits(cleaned)) <= len(_ai_flavor_hits(raw))
     if not cleaned:
+        _calls = _tool_calls_in(raw)
+        if _calls:
+            # 工具调用场景：模型这一轮的正确表现就是调工具（不是回话）。
+            # 改成评「工具名是真的」—— 原来这里直接 skip，等于没评。
+            _known = _known_tool_names()
+            for _name in _calls:
+                assert (not _known) or _name in _known, (
+                    '调了不存在的工具：%s（已注册 %d 个）'
+                    % (_name, len(_known)))
+            return
         # 模型这一轮**什么都没产出**（只剩 <think> 思维链）—— 没东西可评，跳过。
         # 这跟「清洗把一段正常回复剥光了」是两回事：后者才是 Stage 1.3 的回归。
         # （实测：长技术问题会让 MiniMax 的英文思维链吃光 max_tokens=1024，
