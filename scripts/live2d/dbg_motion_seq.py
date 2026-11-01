@@ -10,7 +10,10 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+_here = Path(__file__).resolve()
+ROOT = next((p for p in (_here.parent, _here.parent.parent,
+                         _here.parent.parent.parent)
+             if (p / "app" / "animation").is_dir()), _here.parent.parent)
 sys.path.insert(0, str(ROOT))
 
 JS_READY = "(function(){var l=window.live2d;if(!l||!l.ready)return 0;return 1;})()"

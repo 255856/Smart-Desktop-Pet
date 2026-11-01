@@ -20,7 +20,10 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+_here = Path(__file__).resolve()
+ROOT = next((p for p in (_here.parent, _here.parent.parent,
+                         _here.parent.parent.parent)
+             if (p / "app" / "animation").is_dir()), _here.parent.parent)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
