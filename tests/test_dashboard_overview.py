@@ -779,11 +779,11 @@ class TestNoStaleArchitectureText:
 class TestToolsTab:
     def test_tool_inventory_counts(self, panel):
         t = _get_json(panel["app"], "/api/tools")
-        assert t["count"] == 76, t["count"]
-        assert t["builtin_count"] == 66, t["builtin_count"]
+        assert t["count"] == 77, t["count"]
+        assert t["builtin_count"] == 67, t["builtin_count"]
         assert t["mcp_count"] == 10, t["mcp_count"]
         assert t["count"] == t["builtin_count"] + t["mcp_count"]
-        assert len(t["tools"]) == 76
+        assert len(t["tools"]) == 77
 
     def test_mcp_split_is_activitywatch_filesystem_and_voice(self, panel):
         t = _get_json(panel["app"], "/api/tools")
@@ -806,7 +806,7 @@ class TestToolsTab:
     def test_reconciliation_reads_check_tool_docs(self, panel):
         rec = _get_json(panel["app"], "/api/reconciliation")
         assert rec["available"] is True
-        assert rec["live_count"] == 76
+        assert rec["live_count"] == 77
         assert "sources" in rec and rec["sources"]
 
 

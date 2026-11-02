@@ -103,6 +103,7 @@ TOOL_RISK_LEVEL: dict[str, int] = {
     "submit_slang":              MEDIUM, # 写本地词库文件 (data/slang.json)
     "update_self":                MEDIUM, # 改自己的身份/价值/程序性（长期记忆）
     "use_skill":                  LOW,    # 只读 skills/*.md（行为覆盖包），不改任何东西
+    "browser":                   MEDIUM, # 浏览器网关（playwright 动作；危险动作已在网关里拒了）
     "forget_memory":             MEDIUM,
     "set_volume":                MEDIUM,
     "set_brightness":            MEDIUM,

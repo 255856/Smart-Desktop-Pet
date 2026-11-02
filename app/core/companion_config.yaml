@@ -191,9 +191,10 @@ tool_unlock:
       - send_sticker
     8:  # 高级生成 + MCP 工具 (1 个内建 + 全部 MCP 外部)
       - generate_video
-    9:  # HIGH 危险工具 (2 个)
+    9:  # HIGH 危险工具 + 浏览器网关 (3 个)
       - send_notification
       - run_script
+      - browser                 # 浏览器网关（playwright 的动作经它调用）
     10: # IRREVERSIBLE 终极能力 (4 个)
       - kill_process
       - lock_screen
@@ -241,6 +242,7 @@ tool_unlock:
 tool_allowlist:
   exact:
     - Task
+    - browser                 # 浏览器网关（playwright 的动作经它调用）
     - add_reminder
     - calculate
     - cancel_countdown

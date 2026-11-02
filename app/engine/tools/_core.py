@@ -584,6 +584,9 @@ class Tool:
     parameters: dict            # JSON Schema
     fn: Callable[..., str]
     group: str = ""             # Stage 3.4：能力分组（按 tool_unlock 解锁层级对齐）
+    # 只经**网关**调用的工具（不原生下发给模型）。
+    # playwright 那 25 个工具 schema ≈ 9.5k token → 走 browser 网关按需取。
+    gateway_only: bool = False
 
 
 class ToolRegistry:
@@ -735,7 +738,8 @@ class ToolRegistry:
         from . import _unlock
         configured, mcp_names = _unlock.split_configured_and_mcp(list(self._tools))
         unlocked = _unlock.compute_unlocked(level, mcp_names=mcp_names)
-        return [n for n in self._tools if n in unlocked]
+        return [n for n in self._tools if n in unlocked
+                and not getattr(self._tools[n], "gateway_only", False)]
 
     def tools_for_level(self, level: int | None = None) -> list["Tool"]:
         """返 Tool 对象列表(供 LLM tool_spec 拼接),过滤逻辑同 names(level)。

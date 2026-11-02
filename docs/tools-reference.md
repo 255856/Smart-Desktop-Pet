@@ -1,4 +1,4 @@
-# Tools Reference · 桌宠 76 个工具全集
+# Tools Reference · 桌宠 77 个工具全集
 
 > 模型通过 **Function Calling** 协议（OpenAI 格式）调用这些工具。  
 > 用户口语 → 模型选工具 → `ToolRegistry.execute(name, args_json)` → 字符串结果回给模型 → 模型组织自然语言回复。
@@ -18,7 +18,7 @@
 | 七、系统控制 | 20 | 5 |
 | 八、MCP 外部工具（ActivityWatch 4 + 文件系统 3 + 语音 3） | 10 | — |
 | 九、生成 / 委派 | 4 | 0 |
-| **合计** | **76** | **5** |
+| **合计** | **77** | **5** |
 
 > 十、语音唤醒（非工具）独立章节。
 
@@ -113,6 +113,15 @@
 - **参数**：`content: str`（必填）、`meaning: str` / `usage: str` / `example: str` / `risk: str` / `evidence: str`（均可选）
 - **风险**：MEDIUM（写本地文件 `data/slang.json`）
 
+### `browser`
+
+浏览器自动化的**网关工具**（playwright 那 25 个工具不原生下发，只经它按需调用）。
+
+- 风险等级：**MEDIUM**（危险动作 `browser_run_code_unsafe` 已在网关里直接拒绝 ✓）
+- 用法：`browser(action="browser_navigate", args={"url": "https://…"})`
+- `action` 取 playwright 的动作名（`browser_navigate` / `browser_click` / `browser_type` / `browser_snapshot` / `browser_take_screenshot` / `browser_evaluate` / `browser_press_key` …）
+- 为什么走网关：那 25 个工具的 schema ≈ **9.5k token**（占全部工具的 41%）→ 原生下发会让每段对话的首轮多付 9.5k，工具集一变缓存就失效 ✓
+- 解锁等级：**Lv9**（跟 `mcp_levels.playwright` 一致）
 ### MCP 外部工具（playwright / fetch）
 
 | 工具 | 说明 |
@@ -543,7 +552,7 @@ ActivityWatch 与文件系统那 7 个工具**不在** `_RISKY_TOOLS` 里（只�
 ### `generate_image`
 - **触发**：画一张猫的图
 - **作用**：按 prompt 生成图片，返回 http(s) URL（落盘后给本地 file:// 路径）
-- **参数**：`prompt: str`，`size: str`（如 764x764）
+- **参数**：`prompt: str`，`size: str`（如 774x774）
 - **后端**：config.yaml 的 `multimodal` 段（base_url / api_key / image_model）
 
 ### `generate_video`
@@ -744,7 +753,7 @@ app/engine/tools/
 
 ## 统计
 
-- **76 个工具**（不含语音唤醒） = 66 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
+- **77 个工具**（不含语音唤醒） = 67 个内置 + 10 个 MCP（4 个 ActivityWatch + 3 个 filesystem + 3 个语音）+ 1 个语音模块
 - **6 个弹窗 confirm** + 19 个只 log 不弹窗 = 25 个 `_RISKY_TOOLS` 成员
 - **9 个新工具模块**（`_tts_mute` / `_audio` / `_weather` / `_timer` / `_power` / `_filesearch` / `_webfetch` / `_ocr` / `_runner`）
 - **2400 个测试**（含 19+ 个创新点 2 决策 / 注入 / post-LLM 拦截器守卫）

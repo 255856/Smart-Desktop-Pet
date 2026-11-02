@@ -36,6 +36,9 @@ class MCPServerConfig:
     #: 需要跑模型推理的 server（比如本项目的 voice server 要跑 RVC 转换，
     #: 单次 ~30 秒）要调大，否则客户端先超时、工具其实还在跑。
     call_timeout: float = 30.0
+    #: False → 这个 server 的工具**不原生下发给模型**，只经网关调用
+    #:（playwright 的 25 个工具 schema ≈ 9.5k token → 走 browser 网关按需取）。
+    expose: bool = True
 
 
 @dataclass
@@ -282,6 +285,7 @@ class MCPClientRegistry:
             cfg = MCPServerConfig(
                 name=s["name"],
                 command=s["command"],
+            expose=bool(s.get("expose", True)),
                 args=s.get("args", []) or [],
                 env=s.get("env", {}) or {},
                 cwd=s.get("cwd"),
@@ -405,6 +409,9 @@ class MCPClientRegistry:
                 description=f"[MCP/{mcp_tool.server}] {mcp_tool.description}",
                 parameters=mcp_tool.parameters,
                 fn=make_fn(),
+                # expose: false → 只经网关调用，不原生下发给模型
+                gateway_only=not getattr(self._configs.get(server_name),
+                                       "expose", True),
             ))
             bridged += 1
         return bridged

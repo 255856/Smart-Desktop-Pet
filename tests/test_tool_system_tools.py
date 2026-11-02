@@ -133,6 +133,7 @@ FULL_BUILTIN_TOOL_NAMES = (
     "send_sticker", "set_bluetooth", "set_brightness", "set_tts_mute_until", "set_volume",
     "set_wifi", "submit_slang", "system_info", "take_screenshot_tool",
     "understand_image", "unmute_tts", "update_self", "use_skill", "web_search",
+    "browser",
 )
 
 
