@@ -153,3 +153,6 @@ data/character_selection.yaml
 # 模型权重（RVC 权重/索引/分离模型 —— 体积大，不进版本库；
 # 目录结构见 docs/config-reference.md）
 models/
+
+# playwright MCP 的产物（截图/快照临时文件）
+.playwright-mcp/
