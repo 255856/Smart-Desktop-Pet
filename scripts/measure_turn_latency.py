@@ -36,6 +36,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("message", nargs="?", default="今天好累啊")
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--follow", default="", help="接着再问一句（看缓存续写命中）")
     args = ap.parse_args()
 
     _bootstrap()
@@ -136,6 +137,17 @@ def main() -> int:
                 _handle(kind, payload)
     except Exception as e:  # noqa: BLE001
         print("[异常] %s: %s" % (type(e).__name__, str(e)[:200]))
+
+    # --- 第二轮（同一 agent、接着上一轮说）→ 看缓存续写的命中 ---
+    if getattr(args, "follow", ""):
+        msgs2 = msgs + [{"role": "assistant", "content": "（第一轮结束）"},
+                       {"role": "user", "content": args.follow}]
+        try:
+            for kind, *payload in agent.run_sync(msgs2):
+                if kind == "meta" and isinstance(payload[0], dict) and payload[0].get("usage"):
+                    print("[第二轮 usage] %s" % payload[0]["usage"], flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("[第二轮异常] %s" % e, flush=True)
 
     total = time.time() - t0
     print()
